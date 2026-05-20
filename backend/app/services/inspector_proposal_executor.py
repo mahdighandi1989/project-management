@@ -172,12 +172,41 @@ def _resolve_repo_for_session(session_id: int) -> Optional[str]:
         db.close()
 
 
+_OVERSIZED_THRESHOLD = 30000  # بایت — بالاتر از این، whole-file خطرناک است
+
+
+# 🆕 (v2 M5) — fetch dep files (package.json, requirements.txt, …)
+async def _fetch_dep_files(http_session, repo: str, headers: Dict[str, str], branch: str) -> Dict[str, str]:
+    """فایل‌های Dependency manifest را برای dep-awareness در prompt fetch می‌کند."""
+    dep_paths = [
+        "package.json", "requirements.txt", "pyproject.toml", "Pipfile",
+        "frontend/package.json", "backend/requirements.txt",
+        "go.mod", "Cargo.toml",
+    ]
+    result: Dict[str, str] = {}
+    try:
+        from .oversight_deep_scan_service import _fetch_file_content
+    except Exception:
+        return result
+    for p in dep_paths:
+        try:
+            c = await _fetch_file_content(http_session, repo, p, headers, branch, 12000)
+            if c:
+                result[p] = c
+        except Exception:
+            continue
+    return result
+
+
 # ─── prompt builder for code generation ───────────────────────────
 def _build_codegen_prompt(
     proposal: Dict[str, Any],
     current_files: Dict[str, str],
-) -> str:
-    """prompt تولید کد بر اساس strong_prompt + محتوای فعلی فایل‌ها."""
+) -> Tuple[str, List[str]]:
+    """prompt تولید کد + لیست فایل‌های oversized (نیازمند patch mode).
+
+    Returns: (prompt_str, oversized_file_paths)
+    """
     strong = proposal.get("strong_prompt") or ""
     target_files = proposal.get("target_files") or []
     if not target_files:
@@ -187,49 +216,98 @@ def _build_codegen_prompt(
         ]
 
     files_blob_parts: List[str] = []
+    oversized_files: List[str] = []
     for path in target_files:
         content = current_files.get(path, "")
-        if content:
-            # حداکثر ۲۰KB در prompt
-            snippet = content[:20000]
+        if not content:
             files_blob_parts.append(
-                f"=== فایل فعلی: {path} ===\n```\n{snippet}\n```"
+                f"=== فایل {path} ===\n"
+                f"(فایل وجود ندارد یا قابل خواندن نیست — اگر لازم بود فایل جدید بساز)"
+            )
+            continue
+        # 🆕 (v2 M3) — فایل بزرگ: whole-file rewrite خطرناک است
+        if len(content) > _OVERSIZED_THRESHOLD:
+            oversized_files.append(path)
+            files_blob_parts.append(
+                f"=== فایل {path} (⚠️ {len(content):,} بایت — OVERSIZED) ===\n"
+                f"این فایل برای whole-file rewrite بزرگ‌تر از حد امن است.\n"
+                f"فقط `change_kind: \"patch\"` با ساختار "
+                f"`sections: [{{find: \"متن دقیق فعلی\", replace: \"متن جایگزین\"}}]` "
+                f"در changes برگردان. هرگز whole-file content برای این فایل نده.\n\n"
+                f"شروع فایل (۵۰۰۰ بایت اول):\n```\n{content[:5000]}\n```\n\n"
+                f"پایان فایل (۵۰۰۰ بایت آخر):\n```\n{content[-5000:]}\n```"
             )
         else:
-            files_blob_parts.append(
-                f"=== فایل {path} ===\n(فایل وجود ندارد یا قابل خواندن نیست — اگر لازم بود می‌توانی فایل جدید بسازی)"
-            )
+            files_blob_parts.append(f"=== فایل فعلی: {path} ===\n```\n{content}\n```")
+
     files_blob = "\n\n".join(files_blob_parts) if files_blob_parts else "(فایلی برای ویرایش مشخص نیست)"
 
-    return f"""تو یک Senior Software Engineer هستی. وظیفه‌ات اعمال **دقیق** تغییرات روی فایل‌های زیر بر اساس درخواست است.
+    # 🆕 (v2 M5) — dep file awareness
+    dep_blob = ""
+    known_dep_names = ("package.json", "requirements.txt", "pyproject.toml",
+                        "Pipfile", "go.mod", "Cargo.toml")
+    known_deps = {k: v for k, v in current_files.items()
+                  if k.split("/")[-1] in known_dep_names}
+    if known_deps:
+        dep_blob = "\n\n".join(
+            f"=== {p} (dependency manifest) ===\n```\n{c[:5000]}\n```"
+            for p, c in known_deps.items()
+        )
+
+    oversized_hint = ""
+    if oversized_files:
+        oversized_hint = (
+            "\n🚨 **بسیار مهم — فایل‌های OVERSIZED**: برای فایل‌های زیر "
+            f"({', '.join(oversized_files)}) فقط `change_kind: \"patch\"` "
+            "با ساختار `sections: [{find, replace}]` بفرست. "
+            "`find` باید رشته‌ای **یکتا** در فایل باشد (نه چندبار تکرار)."
+        )
+
+    return (f"""تو یک Senior Software Engineer هستی. وظیفه‌ات اعمال **دقیق** تغییرات روی فایل‌های زیر بر اساس درخواست است.
 
 # 📋 دستورالعمل کامل (strong prompt)
 {strong}
 
-# 📁 محتوای فعلی فایل‌ها
+# 📁 محتوای فعلی فایل‌های target
 {files_blob}
+
+# 📦 فایل‌های Dependency فعلی
+{dep_blob or '(یافت نشد)'}
 
 # 🎯 خروجی موردانتظار — فقط JSON خالص (بدون متن اضافی، بدون ```)
 {{
   "changes": [
     {{
       "path": "مسیر دقیق فایل از ریشهٔ ریپو",
-      "content": "محتوای **کامل** و **جدید** فایل پس از تغییر — کل فایل، نه فقط diff",
-      "change_kind": "modify | create | delete",
+      "change_kind": "modify | create | delete | patch",
+      "content": "محتوای کامل فایل (فقط اگر change_kind در ['modify','create'])",
+      "sections": [{{"find": "متن دقیق فعلی", "replace": "متن جایگزین"}}],  // فقط اگر change_kind=='patch'
       "summary": "خلاصهٔ ۱-۲ خطی تغییری که در این فایل اعمال شد"
     }}
   ],
-  "overall_summary": "خلاصهٔ کلی تمام تغییرات — برای commit message کوتاه استفاده می‌شود",
+  "overall_summary": "خلاصهٔ کلی تمام تغییرات — برای commit message",
   "risks": "ریسک‌ها/هشدارهایی که توسعه‌دهنده باید بداند",
   "tests_or_manual_steps": ["گام‌های تست/اعتبارسنجی پس از merge"]
 }}
 
-🚨 **بسیار مهم**:
-- محتوای کامل فایل را برگردان، نه patch/diff
-- اگر فایلی نباید تغییر کند، آن را در `changes` نگذار
-- مسیرها دقیقاً مثل فایل‌های فعلی بالا باشند
+🚨 **بسیار مهم — Whole-file vs Patch**:
+- برای فایل‌های معمولی (< 30KB): `change_kind: "modify"` + `content` کامل
+- برای فایل‌های OVERSIZED بالا: `change_kind: "patch"` + `sections` با find/replace.
+  `find` رشته‌ای یکتا، بدون whitespace ابتدا/انتها
+- اگر فایلی نباید تغییر کند، در `changes` نگذار
+- مسیرها دقیقاً مثل فایل‌های فعلی بالا
 - فقط JSON برگردان، هیچ متن اضافه‌ای قبل/بعد JSON نباشد
-"""
+
+🚨 **Dependency Awareness — حیاتی**:
+- اگر `import X` یا `from X import` جدیدی اضافه می‌کنی، بررسی کن X در
+  dependency manifest هست
+- اگر نه: یک change برای dep manifest هم در changes بگذار (با version
+  مناسب)
+- import داخلی (از فایل دیگر در همین repo) نیاز به dep update ندارد
+- اضافه کردن import بدون update dep file = deploy failure
+{oversized_hint}
+""",
+        oversized_files)
 
 
 # ─── extract JSON from AI response (resilient) ────────────────────
@@ -322,18 +400,28 @@ async def run_proposal(
                 if not path:
                     continue
                 try:
-                    content = await _fetch_file_content(http_session, repo, path, headers, branch, 30000)
+                    # 🆕 (v2 M3) — حداکثر ۱۲۰KB تا مدل بتواند کل فایل را
+                    # ببیند حتی اگر oversized باشد (در prompt هنوز با
+                    # 5KB+5KB نشانه‌گذاری می‌شود ولی patch detection
+                    # روی محتوای کامل کار می‌کند).
+                    content = await _fetch_file_content(http_session, repo, path, headers, branch, 120000)
                     if content:
                         current_files[path] = content
                 except Exception as fe:
                     logger.debug(f"fetch {path} failed: {fe}")
                     continue
+            # 🆕 (v2 M5) — fetch dep files
+            try:
+                dep_files = await _fetch_dep_files(http_session, repo, headers, branch)
+                current_files.update(dep_files)
+            except Exception as dfe:
+                logger.debug(f"fetch dep files failed: {dfe}")
     except Exception as e:
         logger.warning(f"run_proposal: fetching files failed: {e}")
         # ادامه بده با current_files خالی — مدل ممکن است فایل از اول بسازد
 
     # build prompt
-    prompt = _build_codegen_prompt(proposal, current_files)
+    prompt, _oversized_files = _build_codegen_prompt(proposal, current_files)
 
     # generate code
     try:
@@ -382,13 +470,109 @@ async def run_proposal(
         )
         return {"success": False, "error": err_msg}
 
-    # success — store staging
+    # success — process changes
     changes = result_json.get("changes") or []
-    valid_changes = [
-        c for c in changes
-        if isinstance(c, dict) and c.get("path") and ("content" in c or c.get("change_kind") == "delete")
-    ]
+    # accept patch | modify | create | delete
+    valid_changes: List[Dict[str, Any]] = []
+    for c in changes:
+        if not isinstance(c, dict) or not c.get("path"):
+            continue
+        kind = c.get("change_kind", "modify")
+        if kind == "patch":
+            if isinstance(c.get("sections"), list) and c.get("sections"):
+                valid_changes.append(c)
+        elif kind == "delete":
+            valid_changes.append(c)
+        elif kind in ("modify", "create"):
+            if "content" in c:
+                valid_changes.append(c)
     diff_summary = result_json.get("overall_summary", "")[:1000]
+
+    # 🆕 (v2 M3) — رد whole-file برای oversized files
+    _oversized_set = set(_oversized_files or [])
+    if _oversized_set:
+        new_valid: List[Dict[str, Any]] = []
+        rejected_oversized: List[str] = []
+        for ch in valid_changes:
+            if ch.get("path") in _oversized_set and ch.get("change_kind") != "patch":
+                rejected_oversized.append(ch.get("path", ""))
+                continue
+            new_valid.append(ch)
+        if rejected_oversized:
+            logger.warning(
+                f"run_proposal: rejected whole-file for oversized: {rejected_oversized}"
+            )
+        valid_changes = new_valid
+
+    # 🆕 (v2 M4) — syntax validation pre-stage
+    syntax_errors: List[Dict[str, str]] = []
+    for ch in valid_changes:
+        if ch.get("change_kind") in ("delete", "patch"):
+            continue  # patch با apply-all چک می‌شود؛ delete content ندارد
+        path = ch.get("path", "")
+        content = ch.get("content", "")
+        if not content:
+            continue
+        low = path.lower()
+        try:
+            if low.endswith(".py"):
+                import ast
+                ast.parse(content)
+            elif low.endswith(".json"):
+                json.loads(content)
+            elif low.endswith((".yaml", ".yml")):
+                try:
+                    import yaml
+                    yaml.safe_load(content)
+                except ImportError:
+                    pass
+            elif low.endswith((".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")):
+                # heuristic balance check (نه کامل ولی catches gross errors)
+                if content.count("{") != content.count("}"):
+                    raise SyntaxError(f"unbalanced braces in {path}")
+                if content.count("(") != content.count(")"):
+                    raise SyntaxError(f"unbalanced parens in {path}")
+                if content.count("[") != content.count("]"):
+                    raise SyntaxError(f"unbalanced brackets in {path}")
+        except SyntaxError as se:
+            syntax_errors.append({"path": path, "error": str(se)[:300]})
+        except (json.JSONDecodeError, ValueError) as ve:
+            syntax_errors.append({"path": path, "error": str(ve)[:300]})
+        except Exception as ve:
+            # هر خطای دیگر را در validation سختگیر نگیر
+            logger.debug(f"syntax check unexpected error for {path}: {ve}")
+
+    if syntax_errors:
+        _update_proposal_in_message(message_id, proposal_id, {
+            "execution_status": "failed_syntax",
+            "execution_error": "syntax تولید شده توسط مدل نامعتبر است",
+            "syntax_errors": syntax_errors,
+            "executed_at": _now_iso(),
+            "raw_response": (response.content or "")[:2000],
+        })
+        log_scan_message(
+            session_id=session_id,
+            role="assistant",
+            content=(
+                f"❌ پیشنهاد «{proposal.get('title', '')[:80]}» syntax errors دارد:\n\n"
+                + "\n".join(f"- `{e['path']}`: {e['error']}" for e in syntax_errors)
+                + "\n\nلطفاً دکمهٔ «↻ بازاجرا» را بزنید یا با scan جدید تکرار کنید."
+            ),
+            action_type="proposal_failed",
+            model_id=response.model_id if 'response' in locals() else model_id,
+            extra_data={
+                "kind": "proposal_executed",
+                "proposal_id": proposal_id,
+                "status": "failed_syntax",
+                "syntax_errors": syntax_errors,
+            },
+        )
+        return {
+            "success": False,
+            "error": "syntax_validation_failed",
+            "syntax_errors": syntax_errors,
+            "code": "failed_syntax",
+        }
 
     _update_proposal_in_message(message_id, proposal_id, {
         "execution_status": "applied_locally",
@@ -516,6 +700,74 @@ async def apply_all_staged(
     if not owner or not repo_name:
         return {"success": False, "error": "repo_full_name نامعتبر"}
 
+    # 🆕 (v2 M3) — patch resolution: تبدیل change_kind=patch به محتوای کامل
+    try:
+        from .oversight_service import get_github_token as _ggt
+        _token_for_patch = _ggt()
+    except Exception:
+        _token_for_patch = ""
+    _patch_resolution = await _resolve_patches_in_files_map(
+        files_map=files_map,
+        repo=repo,
+        token=_token_for_patch,
+    )
+    if not _patch_resolution.get("success"):
+        log_scan_message(
+            session_id=session_id,
+            role="assistant",
+            content=(
+                f"❌ خطا در patch resolution:\n```\n"
+                f"{_patch_resolution.get('error', '')}\n```\n\n"
+                f"دلیل احتمالی: متن `find` در patch چندبار match می‌کند یا "
+                f"یافت نمی‌شود. لطفاً proposal مربوطه را با «↻ بازاجرا» تکرار کنید."
+            ),
+            action_type="apply_all_failed",
+            extra_data={
+                "kind": "apply_all_result",
+                "status": "patch_resolution_failed",
+                "error": _patch_resolution.get("error"),
+                "code": _patch_resolution.get("code"),
+            },
+        )
+        return _patch_resolution
+
+    # 🆕 (v2 M6) — Cross-proposal consistency check قبل از commit
+    consistency = await _validate_cross_proposal_consistency(
+        staged_files=files_map,
+        proposals=[s[0] for s in staged],
+        model_id=model_id,
+    )
+    if consistency.get("blocking_issues"):
+        issues_text = "\n".join(
+            f"- ❌ **{iss.get('severity', 'error').upper()}** "
+            f"({iss.get('kind', '')}): {iss.get('description', '')[:300]}\n"
+            f"  فایل‌ها: {', '.join(iss.get('affected_files', []) or [])}"
+            for iss in consistency["blocking_issues"]
+        )
+        log_scan_message(
+            session_id=session_id,
+            role="assistant",
+            content=(
+                f"⛔ **اعمال تغییرات block شد — تغییرات روی هم سازگار نیستند**\n\n"
+                f"{issues_text}\n\n"
+                f"لطفاً پیشنهاد‌های ناسازگار را با دکمهٔ «↻ بازاجرا» تکرار کنید "
+                f"یا با پیام جدید scan را مجدد بزنید."
+            ),
+            action_type="apply_all_blocked",
+            extra_data={
+                "kind": "apply_all_result",
+                "status": "blocked_consistency",
+                "blocking_issues": consistency["blocking_issues"],
+                "warnings": consistency.get("warnings", []),
+            },
+        )
+        return {
+            "success": False,
+            "code": "consistency_check_failed",
+            "blocking_issues": consistency["blocking_issues"],
+        }
+    consistency_warnings = consistency.get("warnings", [])
+
     # 5) commit_message اگر داده نشده، AI generate
     if not commit_message:
         commit_message = _auto_commit_message(staged)
@@ -542,7 +794,7 @@ async def apply_all_staged(
             github_path=repo,
             branch_name=branch_name,
             title=commit_message[:100],
-            description=_build_pr_description(staged, commit_message),
+            description=_build_pr_description(staged, commit_message, warnings=consistency_warnings),
             files=files_list,
             token=token,
         )
@@ -622,6 +874,7 @@ def _auto_commit_message(staged: List[Tuple[Dict[str, Any], Dict[str, Any], int]
 def _build_pr_description(
     staged: List[Tuple[Dict[str, Any], Dict[str, Any], int]],
     commit_message: str,
+    warnings: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     parts: List[str] = [
         "## اعمال تغییرات از اسکن موردی Inspector\n",
@@ -637,5 +890,189 @@ def _build_pr_description(
         parts.append(f"- **{prop.get('title', '')[:120]}**")
         if prop.get("diff_summary"):
             parts.append(f"  - {prop.get('diff_summary', '')[:200]}")
+
+    # 🆕 (v2 M6) — warnings از consistency check
+    if warnings:
+        parts.append("\n### ⚠️ Warnings از consistency check")
+        for w in warnings[:10]:
+            kind = w.get("kind", "")
+            desc = (w.get("description") or "")[:300]
+            files = w.get("affected_files") or []
+            parts.append(f"- **{kind}**: {desc}")
+            if files:
+                parts.append(f"  فایل‌ها: {', '.join(files[:5])}")
+
+    # 🆕 (v2 N4) — multi-proposal path collisions
+    path_to_titles: Dict[str, List[str]] = {}
+    for prop, ch, _mid in staged:
+        p = ch.get("path")
+        if p:
+            t = prop.get("title", "")
+            if t and t not in path_to_titles.get(p, []):
+                path_to_titles.setdefault(p, []).append(t)
+    collisions = {p: titles for p, titles in path_to_titles.items() if len(titles) > 1}
+    if collisions:
+        parts.append("\n### ⚠️ Multi-proposal collisions (last-wins)")
+        for p, titles in list(collisions.items())[:5]:
+            parts.append(f"- `{p}` توسط چند proposal تغییر داده شد:")
+            for t in titles:
+                parts.append(f"  - {t[:120]}")
+
     parts.append("\n*این PR توسط بازرس ویژه (Inspector) و اسکن موردی AI ساخته شده است.*")
     return "\n".join(parts)
+
+
+# ─── (v2 M3) Patch resolution ─────────────────────────────────────
+async def _resolve_patches_in_files_map(
+    *,
+    files_map: Dict[str, Dict[str, Any]],
+    repo: str,
+    token: str,
+) -> Dict[str, Any]:
+    """change_kind=patch را با fetch محتوای فعلی و find/replace تبدیل به modify.
+
+    Returns: {success: bool, error?: str, code?: str}
+    """
+    patch_paths = [p for p, ch in files_map.items() if ch.get("change_kind") == "patch"]
+    if not patch_paths:
+        return {"success": True}
+
+    try:
+        import aiohttp
+        from .oversight_deep_scan_service import _fetch_file_content, _gh_get_json, GITHUB_API
+        headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"} if token else {}
+        async with aiohttp.ClientSession() as http_session:
+            info = await _gh_get_json(http_session, f"{GITHUB_API}/repos/{repo}", headers)
+            branch = (info or {}).get("default_branch") or "main"
+            for path in patch_paths:
+                ch = files_map[path]
+                sections = ch.get("sections") or []
+                if not sections:
+                    return {
+                        "success": False,
+                        "error": f"patch برای {path} sections خالی دارد",
+                        "code": "patch_no_sections",
+                    }
+                current = await _fetch_file_content(http_session, repo, path, headers, branch, 200000)
+                if current is None:
+                    return {
+                        "success": False,
+                        "error": f"محتوای فعلی {path} برای patch قابل دریافت نیست",
+                        "code": "patch_fetch_failed",
+                    }
+                new_content = current
+                for sec in sections:
+                    if not isinstance(sec, dict):
+                        continue
+                    find_str = sec.get("find", "")
+                    repl_str = sec.get("replace", "")
+                    if not find_str:
+                        return {
+                            "success": False,
+                            "error": f"patch برای {path}: find خالی است",
+                            "code": "patch_empty_find",
+                        }
+                    if find_str not in new_content:
+                        return {
+                            "success": False,
+                            "error": f"patch برای {path}: '{find_str[:80]}...' در فایل پیدا نشد",
+                            "code": "patch_find_failed",
+                        }
+                    if new_content.count(find_str) > 1:
+                        return {
+                            "success": False,
+                            "error": f"patch برای {path}: '{find_str[:80]}...' چندبار match می‌شود (ambiguous)",
+                            "code": "patch_ambiguous",
+                        }
+                    new_content = new_content.replace(find_str, repl_str, 1)
+                # تبدیل به modify
+                files_map[path] = {
+                    **ch,
+                    "content": new_content,
+                    "change_kind": "modify",
+                    "_resolved_from_patch": True,
+                }
+        return {"success": True}
+    except Exception as e:
+        logger.exception(f"patch resolution failed: {e}")
+        return {"success": False, "error": str(e)[:300], "code": "patch_resolver_error"}
+
+
+# ─── (v2 M6) Cross-proposal consistency check ──────────────────────
+async def _validate_cross_proposal_consistency(
+    *,
+    staged_files: Dict[str, Dict[str, Any]],
+    proposals: List[Dict[str, Any]],
+    model_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """LLM check برای rename inconsistency, API break, duplicate logic.
+
+    fail-open: اگر AI خراب شد، یا timeout/parse fail → اجازه apply می‌دهد.
+    """
+    import asyncio as _asyncio
+    if len(staged_files) <= 1:
+        return {"blocking_issues": [], "warnings": []}
+
+    changes_blob_parts: List[str] = []
+    for path, ch in list(staged_files.items())[:15]:
+        content = (ch.get("content") or "")[:8000]
+        kind = ch.get("change_kind", "modify")
+        summary = ch.get("summary", "")
+        changes_blob_parts.append(
+            f"=== {path} ({kind}) ===\n"
+            f"خلاصه: {summary[:200]}\n\n```\n{content}\n```"
+        )
+
+    proposal_titles = "\n".join(
+        f"- {p.get('title', '')[:120]}" for p in proposals[:10]
+    )
+
+    prompt = (
+        "تو یک Senior Code Reviewer هستی. این مجموعه تغییرات قرار است "
+        "**با هم** در یک PR commit شوند. بررسی کن آیا روی هم سازگار هستند.\n\n"
+        f"# پیشنهاد‌ها\n{proposal_titles}\n\n"
+        f"# تغییرات\n{chr(10).join(changes_blob_parts)}\n\n"
+        "# بررسی کن:\n"
+        "1. Rename inconsistency (تابعی rename شده ولی فایل دیگر از نام قدیم استفاده می‌کند)\n"
+        "2. API contract break (signature عوض شده ولی caller به‌روز نیست)\n"
+        "3. Duplicate logic (دو فایل قابلیت مشابه به دو روش)\n"
+        "4. Import mismatch (importی که در مقصد ندیده می‌شود)\n"
+        "5. Type/schema mismatch\n"
+        "6. Dead code\n\n"
+        "# خروجی — فقط JSON خالص\n"
+        '{"blocking_issues": [{"severity": "error", "kind": "...", "description": "...", "affected_files": ["..."]}],\n'
+        ' "warnings": [{"severity": "warning", "kind": "...", "description": "...", "affected_files": ["..."]}],\n'
+        ' "is_safe_to_apply": true,\n'
+        ' "summary": "..."}\n'
+        "اگر مشکلی نیست، آرایه‌ها خالی + is_safe_to_apply=true."
+    )
+
+    try:
+        from .ai_manager import get_ai_manager
+        from .ai_base import Message
+        ai_manager = get_ai_manager()
+        response = await _asyncio.wait_for(
+            ai_manager.generate(
+                model_id=model_id or "claude-sonnet-4-6",
+                messages=[Message(role="user", content=prompt)],
+                max_tokens=4000,
+                temperature=0.1,
+            ),
+            timeout=90.0,
+        )
+        result = _extract_json_from_ai(response.content or "")
+        if not result:
+            logger.warning("consistency check: AI response not parseable; fail-open")
+            return {"blocking_issues": [], "warnings": [], "parse_failed": True}
+        return {
+            "blocking_issues": result.get("blocking_issues") or [],
+            "warnings": result.get("warnings") or [],
+            "is_safe_to_apply": result.get("is_safe_to_apply", True),
+            "summary": result.get("summary", ""),
+        }
+    except _asyncio.TimeoutError:
+        logger.warning("consistency check timeout; fail-open")
+        return {"blocking_issues": [], "warnings": [], "timeout": True}
+    except Exception as e:
+        logger.warning(f"consistency check failed: {e}; fail-open")
+        return {"blocking_issues": [], "warnings": [], "check_error": str(e)[:200]}

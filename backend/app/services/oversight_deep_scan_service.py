@@ -1443,10 +1443,12 @@ async def run_deep_scan(
     include_dependencies: bool = True,
     focus_notes: Optional[str] = None,
     # 🆕 (inspector-scan) — وقتی این پارامتر `inspector_session:{id}` باشد،
-    # خروجی scan هرگز به OversightTask DB نوشته نمی‌شود. به‌جایش proposals
-    # ساخته‌شده مستقیماً به همان session chat به‌عنوان InspectorMessage لاگ
-    # می‌شوند. None == رفتار قدیمی (مرکز نظارت).
+    # خروجی scan هرگز به OversightTask DB نوشته نمی‌شود.
     output_target: Optional[str] = None,
+    # 🆕 (v2 M2) — semantic search روی tree برای vague-intent. اگر این
+    # غیرخالی است و selected_sections/custom_paths هر دو خالی‌اند، scope
+    # به top 30 فایل match-ترین به این keywordها محدود می‌شود.
+    semantic_keywords: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """اجرای کامل deep scan روی یک watched.
 
@@ -1707,6 +1709,85 @@ async def run_deep_scan(
         )
 
         # ----- فاز ۲ -----
+        # 🆕 (v2 M2) — semantic search روی tree برای vague-intent
+        # اگر `semantic_keywords` داریم و scope صریح نداریم (selected_sections
+        # و custom_paths خالی‌اند)، scope را به top 30 فایل match محدود می‌کنیم.
+        # این منطبق با درخواست کاربر است: «جاهایی که به درخواست من شبیه‌تر هست».
+        if semantic_keywords and not selected_sections and not custom_paths:
+            try:
+                # سرچ سطح ۱: نام و مسیر فایل (وزن ۲)
+                name_score: Dict[str, int] = {}
+                kws_low = [k.lower() for k in semantic_keywords if k]
+                for f in all_files:
+                    f_low = f.lower()
+                    s = sum(2 for kw in kws_low if kw in f_low)
+                    if s > 0:
+                        name_score[f] = s
+                # سرچ سطح ۲: محتوای dep files (وزن ۱)
+                content_score: Dict[str, int] = {}
+                for fname, ctnt in (dep_contents or {}).items():
+                    c_low = (ctnt or "").lower()
+                    s = sum(c_low.count(kw) for kw in kws_low)
+                    if s > 0:
+                        for path in all_files:
+                            if path.split("/")[-1] == fname:
+                                content_score[path] = content_score.get(path, 0) + s
+                # ترکیب
+                combined: Dict[str, int] = {}
+                for path, s in name_score.items():
+                    combined[path] = combined.get(path, 0) + s
+                for path, s in content_score.items():
+                    combined[path] = combined.get(path, 0) + s
+                # یک sweep ranked-baseline برای fallback
+                _baseline_ranked = _score_files(all_files, sizes, recent_changed, {})
+                if combined:
+                    ranked_sem = sorted(combined.items(), key=lambda x: -x[1])[:30]
+                    semantic_scope = [p for p, _ in ranked_sem]
+                    all_files = semantic_scope
+                    sizes = {p: sizes.get(p, 0) for p in all_files}
+                    if scan_scope_meta is None:
+                        scan_scope_meta = {}
+                    scan_scope_meta.update({
+                        "mode": "semantic_search",
+                        "semantic_keywords": semantic_keywords,
+                        "matches_found": len(combined),
+                        "scope_capped_at": len(all_files),
+                        "focus_notes_preview": (focus_notes or "")[:300],
+                    })
+                    write_progress(
+                        watched_id,
+                        phase="phase1_semantic_filter",
+                        message=(
+                            f"🔍 جستجوی معنایی: {len(all_files)} فایل شبیه‌ترین "
+                            f"به پیام انتخاب شد (از {len(combined)} match کل)"
+                        ),
+                    )
+                else:
+                    # هیچ match نبود — fallback به top 30 hub
+                    all_files = [p for p, _ in _baseline_ranked[:30]]
+                    sizes = {p: sizes.get(p, 0) for p in all_files}
+                    if scan_scope_meta is None:
+                        scan_scope_meta = {}
+                    scan_scope_meta.update({
+                        "mode": "semantic_search_no_match",
+                        "semantic_keywords": semantic_keywords,
+                        "fallback": "top_30_hub_files",
+                    })
+                    write_progress(
+                        watched_id,
+                        phase="phase1_semantic_no_match",
+                        message=(
+                            f"⚠️ هیچ semantic match با keywords {semantic_keywords[:3]} "
+                            f"پیدا نشد — به top 30 فایل hub fallback شد"
+                        ),
+                    )
+            except Exception as _sem_e:
+                write_progress(
+                    watched_id,
+                    phase="phase1_semantic_error",
+                    message=f"⚠️ خطا در جستجوی معنایی: {str(_sem_e)[:120]}",
+                )
+
         # ابتدا یک sweep سبک: top-N اولیه را با نوع/حجم/critical path رتبه‌بندی کن
         ranked0 = _score_files(all_files, sizes, recent_changed, {})
         # 🆕 (bug A6b) — در ultra، فیلتر s>0 برداشته می‌شود تا همهٔ فایل‌ها

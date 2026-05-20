@@ -33,12 +33,67 @@ _TRIGGER_KEYWORDS_FA = (
     "این رو حل", "حل کن", "این رو بهبود", "بهبود بده", "این مشکل",
     "چه مشکلی", "چی مشکلی", "این صفحه چه", "این صفحه چی",
     "ایراد داره", "ایراد دار", "بهینه کن", "بازنویسی کن",
+    # 🆕 (v2 M1) — vague + feature/upgrade keywords
+    "شکست خورد", "بالا نیومد", "بالا نیامد", "دیپلوی نشد", "بیلد خراب",
+    "بیلد نشد", "ارور داد", "ارور میده", "ارور می‌دهد", "down شده",
+    "اضافه کن", "اضافه‌ش کن", "اضافه میکنی", "قابلیت", "ویژگی",
+    "امکان", "بتونم", "بتوانم", "بتونه", "بتواند",
+    "این رو بساز", "بسازش", "merge کن", "integrate", "این رو ادغام",
+    "ارتقا بده", "ارتقا بدم",
 )
 _TRIGGER_KEYWORDS_EN = (
     "fix", "bug", "broken", "not working", "doesn't work", "doesnt work",
     "investigate", "refactor", "improve", "apply", "implement",
     "solve", "diagnose", "debug this", "this issue", "why does",
+    # 🆕 (v2 M1)
+    "add feature", "add support", "implement support", "add ability",
+    "introduce", "deploy failed", "build failed", "ci failed",
+    "deployment broken", "build broken", "feature add",
 )
+
+# 🆕 (v2 M1) — کلیدواژه‌های قوی برای vague-intent fallback. اگر یکی از
+# این‌ها match کرد و هیچ anchor (URL/log/file) نداشتیم، به‌جای
+# `no_anchor`، scan با semantic_search_only=True را trigger می‌کنیم.
+_STRONG_KEYWORDS = {
+    "شکست خورد", "بالا نیومد", "دیپلوی نشد", "بیلد خراب", "بیلد نشد",
+    "ارور داد", "اضافه کن", "قابلیت", "امکان", "ارتقا بده",
+    "deploy failed", "build failed", "ci failed", "add feature",
+    "add support", "introduce",
+}
+
+
+def _is_strong_keyword(k: str) -> bool:
+    return k.strip().lower() in {s.lower() for s in _STRONG_KEYWORDS}
+
+
+# 🆕 (v2 M1) — stopwords برای استخراج keyword
+_STOPWORDS_FA = {
+    "این", "که", "از", "به", "در", "می", "ها", "را", "اون", "من", "ما",
+    "تو", "شما", "است", "هست", "بود", "اگر", "حتی", "ولی", "چون", "چه",
+    "چی", "کجا", "کنه", "کنم", "بکن", "کنیم", "کنه",
+}
+_STOPWORDS_EN = {
+    "the", "and", "for", "with", "this", "that", "from", "but", "are",
+    "was", "will", "what", "where", "when", "how", "have", "has", "had",
+    "you", "your", "they", "their", "there", "here",
+}
+
+
+def _extract_focus_keywords(text: str) -> List[str]:
+    """استخراج اسم‌های مهم برای semantic search — برای vague-intent fallback."""
+    if not text:
+        return []
+    tokens = re.findall(r"[\w\-؀-ۿ]{3,}", text.lower())
+    stops = _STOPWORDS_FA | _STOPWORDS_EN
+    out: List[str] = []
+    seen = set()
+    for t in tokens:
+        if t in stops or t.isdigit():
+            continue
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out[:12]
 
 # ─── الگوهای استخراج فایل از stack trace / متن ─────────────────────
 # Python tracebacks
@@ -71,7 +126,7 @@ class ResolvedScanIntent:
     """نتیجهٔ intent resolution."""
 
     should_scan: bool
-    reason: str = ""  # "explicit_keyword" | "stack_trace_present" | "no_trigger" | "no_anchor"
+    reason: str = ""  # "explicit_keyword" | "stack_trace_present" | "no_trigger" | "no_anchor" | "semantic_only_vague"
     focus_notes: str = ""
     custom_paths: List[str] = field(default_factory=list)
     selected_sections: Optional[List[str]] = None
@@ -80,6 +135,12 @@ class ResolvedScanIntent:
     confidence: float = 0.0
     matched_keywords: List[str] = field(default_factory=list)
     extracted_files_from_logs: List[str] = field(default_factory=list)
+    # 🆕 (v2 M1) — وقتی کاربر intent قوی دارد ولی هیچ anchor واضحی نیست،
+    # scan با semantic search روی tree + محتوای dep files محدود می‌شود
+    # به top 30 فایل match. مطابق درخواست کاربر: «جاهایی که به درخواست
+    # من شبیه‌تر هست».
+    semantic_search_only: bool = False
+    semantic_keywords: List[str] = field(default_factory=list)
 
 
 def _has_trigger_keyword(text: str) -> List[str]:
@@ -233,6 +294,19 @@ def resolve_intent_from_chat_context(
     if not user_message:
         return ResolvedScanIntent(should_scan=False, reason="empty_message")
 
+    # 🆕 (v2 M1) — focus_notes را زودتر بسازیم تا در مسیر vague-fallback
+    # هم در دسترس باشد. قبلاً تنها در بخش پایانی ساخته می‌شد.
+    _focus_parts: List[str] = [user_message]
+    _early_log_summary = _summarize_logs(backend_logs or [], limit=3)
+    if _early_log_summary:
+        _focus_parts.append(f"\n[خلاصهٔ backend logs اخیر:]\n{_early_log_summary}")
+    _early_console = _summarize_logs(console_logs or [], limit=3)
+    if _early_console:
+        _focus_parts.append(f"\n[خلاصهٔ console logs اخیر:]\n{_early_console}")
+    if api_paths:
+        _focus_parts.append(f"\n[endpoint های مرتبط:] {', '.join(str(p) for p in api_paths[:8])}")
+    focus_notes = "\n".join(_focus_parts)
+
     # 1) تشخیص trigger
     matched = _has_trigger_keyword(user_message)
     has_stack_in_logs = bool(_extract_files_from_logs(backend_logs or []) or _extract_files_from_logs(console_logs or []))
@@ -296,6 +370,36 @@ def resolve_intent_from_chat_context(
             secs.add("frontend")
         if secs:
             selected_sections = sorted(secs)
+        elif matched and any(_is_strong_keyword(k) for k in matched):
+            # 🆕 (v2 M1) — کاربر کلیدواژهٔ قوی استفاده کرده ولی هیچ
+            # URL/log/فایل صریحی نداده. به جای no_anchor، با semantic
+            # search روی tree فایل‌های شبیه‌ترین را پیدا می‌کنیم. این
+            # دقیقاً پاسخ به درخواست «در جاهایی که شبیه‌تره» است.
+            _focus_combined = ((user_message or "") + " " + focus_notes).strip()
+            _sem_kws = _extract_focus_keywords(_focus_combined)
+            if not _sem_kws:
+                # حتی keyword استخراج نشد — fallback به no_anchor
+                return ResolvedScanIntent(
+                    should_scan=False,
+                    reason="no_anchor",
+                    matched_keywords=matched,
+                )
+            # build focus_notes اگر هنوز ساخته نشده
+            _final_focus = focus_notes if focus_notes else (user_message or "")
+            return ResolvedScanIntent(
+                should_scan=True,
+                reason="semantic_only_vague",
+                focus_notes=_final_focus,
+                custom_paths=[],
+                selected_sections=None,  # عمداً None — تصمیم با scan layer
+                include_dependencies=True,
+                visual_debug=has_screenshots,
+                confidence=0.55 + (0.1 if has_screenshots else 0.0),
+                matched_keywords=matched,
+                extracted_files_from_logs=[],
+                semantic_search_only=True,
+                semantic_keywords=_sem_kws,
+            )
         else:
             # هیچ سرنخی برای scope وجود ندارد — should_scan را خاموش کن
             return ResolvedScanIntent(
@@ -304,17 +408,7 @@ def resolve_intent_from_chat_context(
                 matched_keywords=matched,
             )
 
-    # 4) focus_notes: پیام + خلاصهٔ logs
-    parts: List[str] = [user_message]
-    log_summary = _summarize_logs(backend_logs or [], limit=3)
-    if log_summary:
-        parts.append(f"\n[خلاصهٔ backend logs اخیر:]\n{log_summary}")
-    console_summary = _summarize_logs(console_logs or [], limit=3)
-    if console_summary:
-        parts.append(f"\n[خلاصهٔ console logs اخیر:]\n{console_summary}")
-    if api_paths:
-        parts.append(f"\n[endpoint های مرتبط:] {', '.join(str(p) for p in api_paths[:8])}")
-    focus_notes = "\n".join(parts)
+    # 4) focus_notes — قبلاً ساخته شد (v2 M1 — موقع پیش‌سازی برای vague fallback)
 
     # 5) reason
     reason = "explicit_keyword" if matched else "stack_trace_present"

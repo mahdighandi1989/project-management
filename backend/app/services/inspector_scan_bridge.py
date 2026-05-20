@@ -275,6 +275,9 @@ async def trigger_inspector_selective_scan(
                 include_dependencies=intent.include_dependencies,
                 focus_notes=intent.focus_notes,
                 output_target=f"inspector_session:{session_id}",
+                # 🆕 (v2 M2) — semantic search برای vague-intent
+                semantic_keywords=(intent.semantic_keywords or None)
+                                  if getattr(intent, "semantic_search_only", False) else None,
             )
             _ACTIVE_SCANS[session_id]["status"] = "completed"
             _ACTIVE_SCANS[session_id]["result"] = result
