@@ -2832,6 +2832,19 @@ async def inspector_chat(
                     is_scan_active_for_session,
                 )
 
+                # 🆕 (v3 chat-history) — forward chat_history برای
+                # continuation detection
+                _hist_v3: List[Dict[str, Any]] = []
+                if request.chat_history:
+                    try:
+                        _hist_v3 = [
+                            {"role": m.role, "content": m.content}
+                            for m in request.chat_history
+                            if hasattr(m, "role") and hasattr(m, "content")
+                        ]
+                    except Exception:
+                        _hist_v3 = []
+
                 intent = resolve_intent_from_chat_context(
                     user_message=request.message,
                     backend_logs=request.backend_logs,
@@ -2842,6 +2855,7 @@ async def inspector_chat(
                     linked_task=request.linked_task,
                     screenshots=request.screenshots,
                     mode=request.mode or "chat",
+                    chat_history=_hist_v3 or None,
                 )
 
                 if intent.should_scan:
@@ -13724,6 +13738,20 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
             is_scan_active_for_session,
         )
 
+        # 🆕 (v3 chat-history) — chat_history را به resolver پاس بده تا
+        # continuation detection ممکن شود. در حالت smart-chat تنها
+        # request.chat_history در دسترس است (که از frontend می‌آید).
+        _hist_for_intent: List[Dict[str, Any]] = []
+        if request.chat_history:
+            try:
+                _hist_for_intent = [
+                    {"role": m.role, "content": m.content}
+                    for m in request.chat_history
+                    if hasattr(m, "role") and hasattr(m, "content")
+                ]
+            except Exception:
+                _hist_for_intent = []
+
         intent = resolve_intent_from_chat_context(
             user_message=request.message,
             backend_logs=request.backend_logs,
@@ -13734,6 +13762,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
             linked_task=request.linked_task,
             screenshots=request.screenshots,
             mode=request.inspector_mode or "chat",
+            chat_history=_hist_for_intent or None,
         )
 
         if intent.should_scan:
