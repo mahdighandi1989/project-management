@@ -1347,27 +1347,32 @@ export default function ProjectDetailPage() {
       const data = await res.json();
       if (data.success && Array.isArray(data.messages)) {
         const restored = data.messages.map((m: any) => {
-          // extract network_meta + scan-related fields from extra_data
-          let networkMeta: any = null;
-          let scanProposals: any[] | null = null;
-          let scanScope: any = null;
-          let scanSummary: any = null;
-          let scanKind: string | null = null;
-          let proposalExecuted: any = null;
-          let applyAllResult: any = null;
-          try {
-            const ed = typeof m.extra_data === 'string' ? JSON.parse(m.extra_data) : m.extra_data;
-            if (ed) {
-              if (ed.network_meta) networkMeta = ed.network_meta;
-              // 🆕 (inspector-scan)
-              scanKind = ed.kind || null;
-              if (Array.isArray(ed.scan_proposals)) scanProposals = ed.scan_proposals;
-              if (ed.scope) scanScope = ed.scope;
-              if (ed.summary) scanSummary = ed.summary;
-              if (ed.kind === 'proposal_executed') proposalExecuted = ed;
-              if (ed.kind === 'apply_all_result') applyAllResult = ed;
-            }
-          } catch (e) { /* parse failed - non-critical */ }
+          // 🔴 (v3 CRITICAL fix) — backend در InspectorMessage.to_dict()،
+          // extra_data را با `**_extra` spread می‌کند به top-level keys،
+          // نه به عنوان `m.extra_data`. پس scan_proposals، kind، scope،
+          // network_meta, ... همگی top-level keys هستند روی پیام.
+          // قبلاً به اشتباه از `m.extra_data` می‌خواندم → همیشه null →
+          // proposals هرگز render نمی‌شد. این bug ریشه‌ای بود.
+          let networkMeta: any = m.network_meta || null;
+          let scanProposals: any[] | null = Array.isArray(m.scan_proposals) ? m.scan_proposals : null;
+          let scanScope: any = m.scope || null;
+          let scanSummary: any = m.summary || null;
+          let scanKind: string | null = m.kind || null;
+          let proposalExecuted: any = (m.kind === 'proposal_executed') ? m : null;
+          let applyAllResult: any = (m.kind === 'apply_all_result') ? m : null;
+          // fallback: اگر backend در آینده تغییر کرد و extra_data string برگشت
+          if (!scanProposals && m.extra_data) {
+            try {
+              const ed = typeof m.extra_data === 'string' ? JSON.parse(m.extra_data) : m.extra_data;
+              if (ed) {
+                if (ed.network_meta && !networkMeta) networkMeta = ed.network_meta;
+                if (Array.isArray(ed.scan_proposals)) scanProposals = ed.scan_proposals;
+                if (ed.scope && !scanScope) scanScope = ed.scope;
+                if (ed.summary && !scanSummary) scanSummary = ed.summary;
+                if (ed.kind && !scanKind) scanKind = ed.kind;
+              }
+            } catch { /* parse fail - non-critical, top-level already populated */ }
+          }
           return {
             id: `restored_${m.id}`,
             db_id: m.id,
