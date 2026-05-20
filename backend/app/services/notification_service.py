@@ -2934,11 +2934,13 @@ class NotificationService:
             )
             return {"ok": True, "handled": "compose_project_empty"}
 
-        if buf.submitting:
-            return {"ok": True, "handled": "compose_project_already_running"}
-
-        # 🛡 (audit fix M3) — قبل از حتی validate state، lock بزن
-        await compose_svc.mark_submitting(chat_id_str, True)
+        # 🐛 (CRITICAL BUG FIX) — این check قبلاً silently return می‌کرد و کل
+        # علت اصلی stuck شدن صدا/فایل در ساخت پروژه بود!
+        # _compose_submit در خط ۲۸۱۳ پیش از routing به _compose_submit_project،
+        # خودش mark_submitting(True) را صدا زده. وقتی اینجا می‌رسیم
+        # buf.submitting همیشه True است. این چک silent-return می‌کرد و کاربر
+        # هیچ پیامی نمی‌دید — درست همان رفتاری که کاربر گزارش کرد.
+        # حذف کامل این چک (و mark_submitting تکراری زیرش) — lock از قبل ست شده.
 
         await tg.remove_reply_keyboard("⏳ شروع پردازش...")
 
