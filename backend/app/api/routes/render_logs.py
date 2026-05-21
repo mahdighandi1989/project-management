@@ -3101,6 +3101,18 @@ async def inspector_chat(
                             intent=intent,
                             model_id=request.model_id,
                         )
+                        # 🆕 (clarify-first) — deep scan قبل از start سوال logged
+                        if scan_result.get("status") == "needs_clarification":
+                            return {
+                                "success": True,
+                                "model_id": request.model_id,
+                                "kind": "scan_clarification_needed",
+                                "session_id": session_id,
+                                "content": (
+                                    "🤔 قبل از شروع اسکن عمیق، یک سوال کوتاه دارم — "
+                                    "لطفاً به سوال در چت پاسخ بده."
+                                ),
+                            }
                         if scan_result.get("success"):
                             return {
                                 "success": True,
@@ -14356,6 +14368,21 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     intent=intent,
                     model_id=request.model_ids[0] if request.model_ids else None,
                 )
+                # 🆕 (clarify-first) — اگر deep scan قبل از شروع، scope را
+                # مبهم تشخیص داد و ask_user log کرد، یک پیام scan_clarify
+                # به فرانت می‌فرستیم تا UI پیام جدید را از DB load کند.
+                if _scan_res.get("status") == "needs_clarification":
+                    async def _scan_clarify_stream():
+                        payload = {
+                            "kind": "scan_clarification_needed",
+                            "session_id": sess_id,
+                            "content": (
+                                "🤔 قبل از شروع اسکن عمیق، یک سوال کوتاه دارم — "
+                                "لطفاً به سوال در چت پاسخ بده."
+                            ),
+                        }
+                        yield f"event: scan_clarification_needed\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    return StreamingResponse(_scan_clarify_stream(), media_type="text/event-stream")
                 if _scan_res.get("success"):
                     async def _scan_init_stream():
                         payload = {

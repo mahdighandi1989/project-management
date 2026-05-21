@@ -167,6 +167,69 @@ def get_active_scan_info(session_id: int) -> Optional[Dict[str, Any]]:
     return _ACTIVE_SCANS.get(session_id)
 
 
+def _build_scope_clarification(intent: Any, user_message: str) -> Optional[Dict[str, Any]]:
+    """🆕 (clarify-first) — اگر scope برای deep scan خیلی مبهم است،
+    یک ask_user قبل از شروع scan تولید کن.
+
+    شرایط ambiguity:
+    - custom_paths خالی AND semantic_keywords خالی AND selected_sections > 2
+    - یا selected_sections اصلاً None و انتخاب نشده
+    - AND پیام کاربر کوتاه (<60 char) — یعنی hint کافی برای AI نداده
+
+    خروجی: ask_user dict یا None اگر scope روشن است.
+    """
+    custom_paths = list(getattr(intent, "custom_paths", []) or [])
+    semantic_keywords = list(getattr(intent, "semantic_keywords", []) or [])
+    selected_sections = list(getattr(intent, "selected_sections", []) or [])
+    confidence = float(getattr(intent, "confidence", 0.0) or 0.0)
+    has_anchor = bool(custom_paths) or bool(semantic_keywords) or bool(
+        getattr(intent, "extracted_files_from_logs", [])
+    )
+    msg_len = len((user_message or "").strip())
+
+    if has_anchor and confidence >= 0.5:
+        return None
+    if msg_len >= 80 and (semantic_keywords or custom_paths):
+        return None
+    if len(selected_sections) == 1 and selected_sections[0] not in ("all", "auto"):
+        if msg_len >= 40:
+            return None
+
+    suggested_section = selected_sections[0] if selected_sections else None
+    options = [
+        {
+            "id": "scope_frontend",
+            "label": "فقط frontend",
+            "description": "اسکن frontend (React/Next.js) — UI، components، صفحات",
+        },
+        {
+            "id": "scope_backend",
+            "label": "فقط backend",
+            "description": "اسکن backend (FastAPI/services/models) — API ها، DB، logic",
+        },
+        {
+            "id": "scope_both",
+            "label": "frontend + backend",
+            "description": "اسکن کامل هر دو طرف — برای feature های end-to-end یا بررسی جامع",
+        },
+        {
+            "id": "scope_tests",
+            "label": "تست‌ها و infra",
+            "description": "tests، CI، Dockerfile، requirements — مناسب برای deploy/build issues",
+        },
+    ]
+    return {
+        "question": f"می‌خوام اسکن عمیق روی پروژه شروع کنم اما دقیقاً نمی‌دونم کجا تمرکز کنم. کدام بخش رو اسکن کنم؟",
+        "type": "single",
+        "context": (
+            f"درخواست شما: «{(user_message or '').strip()[:120]}»\n"
+            f"اسکن کامل ۱۲-pass زمان‌بر است؛ با مشخص کردن scope، نتیجه دقیق‌تر و سریع‌تر می‌شود."
+        ),
+        "options": options,
+        "default": f"scope_{suggested_section}" if suggested_section in ("frontend", "backend") else "scope_both",
+    }
+
+
 async def trigger_inspector_selective_scan(
     *,
     session_id: int,
@@ -190,6 +253,43 @@ async def trigger_inspector_selective_scan(
         }
     """
     from .scan_v5.scan_inspector_session import log_scan_message
+
+    # 🆕 (clarify-first) — قبل از claim کردن scan، بررسی کن scope روشن است
+    # یا مبهم. اگر مبهم بود، به‌جای شروع scan، یک پیام ask_user log کن
+    # و کاربر را به انتخاب scope هدایت کن. وقتی کاربر پاسخ داد (در
+    # smart-chat بعدی)، intent_resolver دیگر scan را trigger نمی‌کند چون
+    # تگ [user_clarification] را می‌بیند — کاربر باید پیام صریح‌تری بفرستد.
+    _clarify_q = _build_scope_clarification(intent, user_message)
+    if _clarify_q is not None:
+        try:
+            log_scan_message(
+                session_id=session_id,
+                role="assistant",
+                content=(
+                    "🤔 **scope برای اسکن عمیق مبهم است**\n\n"
+                    "قبل از شروع ۱۲-pass scan (که زمان‌بر است)، لطفاً مشخص کن کدام بخش رو اسکن کنم."
+                ),
+                action_type="smart_action",
+                model_id=model_id or (model_ids[0] if model_ids else None),
+                extra_data={
+                    "action_plan": {
+                        "ask_user": _clarify_q,
+                        "commit_message": "",
+                    },
+                    "kind": "scan_scope_clarification",
+                },
+            )
+        except Exception as e:
+            logger.warning(f"log scope_clarification failed: {e}")
+        return {
+            "success": True,
+            "status": "needs_clarification",
+            "session_id": session_id,
+            "watched_id": None,
+            "scan_id": None,
+            "started_message_id": None,
+            "ask_user_logged": True,
+        }
 
     # (audit fix I4) — claim atomic: check + insert ضمن یک قفل تا دو
     # request هم‌زمان نتوانند هر دو scan را شروع کنند.
