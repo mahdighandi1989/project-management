@@ -750,13 +750,18 @@ async def apply_all_staged(
     session_id: int,
     commit_message: Optional[str] = None,
     include_unexecuted: bool = False,
-    branch_strategy: str = "new_pr",  # "new_pr" | "default_branch_commit"
+    branch_strategy: str = "new_pr",
     model_id: Optional[str] = None,
+    force_apply: bool = False,
+    selected_proposal_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """همهٔ proposalهای staged session را با یک PR/commit به GitHub می‌فرستد.
 
-    اگر include_unexecuted=True، proposalهای pending را ابتدا با run_proposal
-    اجرا می‌کنیم (با همان model_id).
+    🆕 (v3)
+    - `force_apply=True`: consistency check blocking issues را به warnings
+      تبدیل می‌کند تا apply انجام شود (با تأیید کاربر)
+    - `selected_proposal_ids`: اگر داده شد، فقط همان proposals apply
+      می‌شوند، نه همه staged
     """
     from .scan_v5.scan_inspector_session import log_scan_message
 
@@ -878,6 +883,19 @@ async def apply_all_staged(
     # 🆕 (v2 audit D1 fix) — صریح هم به blocking_issues و هم is_safe_to_apply نگاه کن
     _has_blockers = bool(consistency.get("blocking_issues"))
     _safe_flag = consistency.get("is_safe_to_apply")
+    # 🆕 (v3) — اگر force_apply=True، blocking_issues را به warnings
+    # تبدیل کن تا apply ادامه یابد
+    if force_apply and (_has_blockers or _safe_flag is False):
+        _forced_warnings = (consistency.get("warnings") or []) + (consistency.get("blocking_issues") or [])
+        consistency = {
+            **consistency,
+            "blocking_issues": [],
+            "warnings": _forced_warnings,
+            "force_apply_override": True,
+        }
+        _has_blockers = False
+        _safe_flag = True
+        logger.warning(f"apply_all: force_apply override — {len(_forced_warnings)} consistency issue ignored")
     if _has_blockers or _safe_flag is False:
         # 🆕 (v2 audit D3 fix) — affected_files ممکن است string باشد
         def _normalize_files(v: Any) -> List[str]:
@@ -908,8 +926,11 @@ async def apply_all_staged(
             content=(
                 f"⛔ **اعمال تغییرات block شد — تغییرات روی هم سازگار نیستند**\n\n"
                 f"{issues_text}\n\n"
-                f"لطفاً پیشنهاد‌های ناسازگار را با دکمهٔ «↻ بازاجرا» تکرار کنید "
-                f"یا با پیام جدید scan را مجدد بزنید."
+                f"### ⚙️ گزینه‌ها:\n"
+                f"1. **بهتر**: یک پیام جدید با درخواست کوچک‌تر بفرستید (مثلاً «فقط فایل runtime.txt بساز»)\n"
+                f"2. **پیشنهاد‌های مرتبط را بازاجرا**: روی «↻ بازاجرا» در proposal خاص کلیک کنید\n"
+                f"3. **Override**: اگر می‌دانید مشکلی نیست، با گزینهٔ «⚠️ اعمال علی‌رغم warnings» (force_apply) "
+                f"   دوباره تلاش کنید — این warnings را نادیده می‌گیرد و apply می‌کند"
             ),
             action_type="apply_all_blocked",
             extra_data={
