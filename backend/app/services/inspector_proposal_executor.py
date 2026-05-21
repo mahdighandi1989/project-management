@@ -706,10 +706,12 @@ async def run_proposal(
         session_id=session_id,
         role="assistant",
         content=(
-            f"✅ پیشنهاد «{proposal.get('title', '')[:100]}» اجرا شد (staged):\n\n"
+            f"📝 پیشنهاد «{proposal.get('title', '')[:100]}» staged شد:\n\n"
             f"{changes_lines}\n\n"
             f"**خلاصه:** {diff_summary}\n\n"
-            f"این تغییرات هنوز commit نشده‌اند. برای اعمال نهایی، روی «✨ اعمال همهٔ تغییرات» کلیک کنید."
+            f"⚠️ **مهم**: این تغییرات فقط در staging هستند. **هنوز در GitHub نیستند**.\n"
+            f"برای commit واقعی به repo شما، روی دکمهٔ بزرگ زرد «✨ اعمال همهٔ تغییرات» در پایان لیست proposals کلیک کنید.\n\n"
+            f"بدون آن کلیک، هیچ تغییری در پروژه شما اعمال نمی‌شود."
         ),
         action_type="proposal_executed",
         model_id=response.model_id if 'response' in locals() else model_id,
