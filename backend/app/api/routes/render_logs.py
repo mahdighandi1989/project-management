@@ -329,6 +329,25 @@ def _build_general_instructions_list(
 - مثال درست: «در پیام کاربر pydantic-core ذکر شده ولی log جدید tiktoken
   را نشان می‌دهد — مشکل واقعی tiktoken است.»
 
+### 🚨 قانون حیاتی: قبل از create، چک کن فایل از قبل موجود است
+هرگز قبل از چک کردن، `operation: "create"` نگذار:
+- **اگر فایل در repo از قبل موجود است**: عملیات باید `modify` باشد.
+  حتی اگر کاربر گفت «بساز» — منظورش معمولاً «به‌روزرسانی کن» است
+- **مثال غلط 1**: کاربر می‌گوید «runtime.txt بساز با python-3.12.7»،
+  AI با `operation=create` فایل را overwrite می‌کند، **محتوای فعلی
+  (python-3.11.10) گم می‌شود**. اگر در دفعهٔ قبلی کاربر این فایل را
+  ساخته بود، این نسخه‌برگشت محسوب می‌شود.
+- **مثال درست**: قبل از تولید content، چک کن آیا فایل در repo هست:
+  - بله → operation=modify، content جدید را با حفظ ساختار قبلی بساز
+  - خیر → operation=create
+- **همینطور برای requirements.txt، Dockerfile و …**: همیشه نسخه‌ای که
+  در repo هست را در نظر بگیر. اگر در فایل‌های `previously_read_files`
+  هست، محتوای آن را در content جدید شامل کن (حفظ + تغییر هدف، نه
+  بازنویسی از صفر)
+- اگر مطمئن نیستی فایل موجود است یا نه، **در analysis ذکر کن**:
+  «در action_plan فرض می‌کنم runtime.txt موجود نیست — اگر موجود است،
+  لطفاً به جای create از modify استفاده شود.»
+
 ### 🚨 قانون حیاتی: Python wheel/cp31X compile errors در Render
 اگر log شامل `Read-only file system` در `/usr/local/cargo/` یا
 `Failed to build wheel for ...` در deploy Python:
@@ -13019,6 +13038,43 @@ def _validate_action_plan_syntax(
     # جایگزینی لیست فایل‌ها با فایل‌های سالم
     action_plan["files"] = safe_files
 
+    # 🆕 (v3 operation auto-correct) — اگر AI گفت `create` ولی فایل در
+    # repo موجود است، به `modify` تبدیل کن (و برعکس). این AI ضعیف را
+    # که فایل‌های موجود را re-create می‌کند (و overwrite می‌زند) مهار
+    # می‌کند.
+    if repo_file_paths:
+        _repo_set = set(repo_file_paths)
+        _op_corrections: List[str] = []
+        for ch in action_plan.get("files", []):
+            if not isinstance(ch, dict):
+                continue
+            path = ch.get("path", "")
+            op = (ch.get("operation") or "modify").lower()
+            if op == "create" and path in _repo_set:
+                ch["operation"] = "modify"
+                ch["_op_auto_corrected"] = True
+                ch["_op_correction_note"] = (
+                    f"AI گفت 'create' ولی `{path}` در repo از قبل موجود است → 'modify' شد"
+                )
+                _op_corrections.append(
+                    f"✏️ `{path}`: create → modify (فایل از قبل موجود)"
+                )
+            elif op == "modify" and path not in _repo_set:
+                ch["operation"] = "create"
+                ch["_op_auto_corrected"] = True
+                ch["_op_correction_note"] = (
+                    f"AI گفت 'modify' ولی `{path}` در repo نیست → 'create' شد"
+                )
+                _op_corrections.append(
+                    f"✏️ `{path}`: modify → create (فایل قبلاً موجود نیست)"
+                )
+        if _op_corrections:
+            action_plan["_op_corrections"] = _op_corrections
+            slog.info(f"[action_plan] operation auto-corrections: {_op_corrections}")
+            warnings.append(
+                f"📝 {len(_op_corrections)} عملیات auto-correct شد: " + " | ".join(_op_corrections[:3])
+            )
+
     if rejected_files:
         action_plan["_rejected_files"] = [
             {"path": f.get("path", ""), "reasons": f.get("_warnings", [])}
@@ -13814,6 +13870,15 @@ async def enhance_prompt_endpoint(request: EnhancePromptRequest, db: Session = D
    - قابلیت‌های موجود فایل (state, handlers, UI sections) حذف نشوند
    - قبل از ایجاد فایل جدید، بررسی شود آیا کامپوننت مشابه وجود دارد
    - هرگز عملکرد واقعی (iframe, chart, API call) با placeholder خالی جایگزین نشود
+   - 🚨 **قانون اساسی state-awareness**: قبل از پیشنهاد ساختن فایل
+     جدید، **حتماً** چک کن آیا آن فایل از قبل در repo موجود است:
+     * اگر بله → operation باید `modify` باشد، content جدید را با
+       حفظ ساختار قبلی بنویس (مثلاً اگر runtime.txt با
+       python-3.11.10 موجود است و کاربر می‌خواهد به python-3.12.7
+       تغییر دهد، operation=modify نه create)
+     * اگر کاربر گفت «بساز» و فایل موجود است، منظورش «به‌روزرسانی کن» است
+     * تاکید: «قبل از create، list فایل‌های موجود و previously_read_files
+       را چک کن»
 13. **فهم دقیق درخواست کاربر**: در پرامپت تاکید کن:
    - کلمات کاربر تحت‌اللفظی خوانده شوند: «فقط» = ONLY، «نباید» = ممنوع
    - معنی درخواست هرگز برعکس تفسیر نشود
