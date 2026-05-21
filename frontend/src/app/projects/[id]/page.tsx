@@ -1426,10 +1426,28 @@ export default function ProjectDetailPage() {
           // افزودن پیام‌های جدید (که در prev نبودند)
           const newOnes = Array.from(restoredByDbId.values());
           const finalArr = [...merged, ...newOnes];
+          // 🆕 (v3 sort fix) — sort بر اساس hybrid معیار:
+          // 1. اگر هر دو پیام db_id دارند → db_id (monotonic از DB)
+          // 2. در غیر این صورت → timestamp با parse UTC-aware
+          // (قبلاً timestamp تنها استفاده می‌شد که با تفاوت timezone
+          // پیام‌ها در میانهٔ chat ظاهر می‌شدند)
+          const parseTs = (ts: any): number => {
+            if (ts instanceof Date) return ts.getTime();
+            if (typeof ts === 'string') {
+              const hasTz = /[Z]|[+-]\d{2}:\d{2}$/.test(ts);
+              return new Date(hasTz ? ts : ts + 'Z').getTime();
+            }
+            if (typeof ts === 'number') return ts;
+            return Date.now();
+          };
           finalArr.sort((a: any, b: any) => {
-            const ta = a.timestamp instanceof Date ? a.timestamp.getTime() : new Date(a.timestamp).getTime();
-            const tb = b.timestamp instanceof Date ? b.timestamp.getTime() : new Date(b.timestamp).getTime();
-            return ta - tb;
+            if (a.db_id != null && b.db_id != null) {
+              return a.db_id - b.db_id;
+            }
+            // local-only پیام‌ها بعد از DB پیام‌ها (آن‌ها معمولاً جدیدند)
+            if (a.db_id != null) return -1;
+            if (b.db_id != null) return 1;
+            return parseTs(a.timestamp) - parseTs(b.timestamp);
           });
           return finalArr;
         });
@@ -14339,12 +14357,23 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                               <div className="flex items-center gap-2 text-[11px] text-gray-600 dark:text-gray-400 flex-wrap">
                                 <span className="font-bold">📋 پیشنهاد‌ها:</span>
                                 <span className="bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded">جمعاً {proposals.length}</span>
-                                {totalCommitted > 0 && <span className="bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 px-2 py-0.5 rounded">✓ {totalCommitted} commit شد</span>}
-                                {totalStaged > 0 && <span className="bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 px-2 py-0.5 rounded">📝 {totalStaged} staged</span>}
+                                {totalCommitted > 0 && <span className="bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 px-2 py-0.5 rounded">✅ {totalCommitted} در GitHub</span>}
+                                {totalStaged > 0 && <span className="bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 px-2 py-0.5 rounded">📝 {totalStaged} staged (محلی)</span>}
                                 {totalPending > 0 && <span className="bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-300 px-2 py-0.5 rounded">⏳ {totalPending} منتظر</span>}
                                 {scope.scoped_files != null && <span>scope: {scope.scoped_files} فایل</span>}
                                 {scope.deps_added > 0 && <span>+ {scope.deps_added} وابسته</span>}
                               </div>
+
+                              {/* 🆕 (v3 UX) — Warning واضح اگر staged داریم ولی هیچ commit نشده */}
+                              {totalStaged > 0 && totalCommitted === 0 && (
+                                <div className="bg-amber-100 dark:bg-amber-900/30 border-2 border-amber-400 dark:border-amber-700 rounded p-2 text-[11px] text-amber-900 dark:text-amber-100">
+                                  <div className="font-bold mb-1">⚠️ {totalStaged} پیشنهاد فقط در staging هست — **در GitHub نیست**</div>
+                                  <div>
+                                    «اجرا با AI» کد را تولید می‌کند ولی <b>به repo شما push نمی‌کند</b>.
+                                    برای commit واقعی، روی دکمهٔ بزرگ زرد «✨ اعمال همهٔ تغییرات» در پایان لیست کلیک کنید.
+                                  </div>
+                                </div>
+                              )}
 
                               {(() => {
                                 /* 🆕 (v3 perf) — pagination + collapse برای جلوگیری
@@ -14373,6 +14402,14 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                   failed: '❌',
                                   failed_syntax: '⚠️',
                                 };
+                                // 🆕 (v3 UX) — label واضح‌تر برای کاربر فارسی
+                                const statusLabel: Record<string, string> = {
+                                  pending: 'منتظر اجرا',
+                                  applied_locally: 'staged (هنوز در GitHub نیست)',
+                                  committed_and_pushed: 'در GitHub commit شده',
+                                  failed: 'خطا',
+                                  failed_syntax: 'syntax غلط',
+                                };
                                 const syntaxErrors = (p as any).syntax_errors as Array<{path: string; error: string}> | undefined;
                                 return (
                                   <div key={pid} className={`rounded border ${statusColors[status] || 'border-gray-200'} p-2`}>
@@ -14395,7 +14432,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                       <div className="flex-1 min-w-0">
                                         <div className="flex items-center gap-2 flex-wrap">
                                           <span className="text-[10px] bg-gray-200 dark:bg-gray-700 px-1.5 rounded">
-                                            {statusEmoji[status]} {status}
+                                            {statusEmoji[status]} {statusLabel[status] || status}
                                           </span>
                                           <span className="text-[10px] bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 px-1.5 rounded">
                                             {p.type || 'other'}
