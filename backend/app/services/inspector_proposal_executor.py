@@ -179,6 +179,51 @@ def _resolve_repo_for_session(session_id: int) -> Optional[str]:
 _OVERSIZED_THRESHOLD = 30000  # بایت — بالاتر از این، whole-file خطرناک است
 
 
+# 🆕 (v3 model fix) — resolve model_id با fallback به مدل‌های موجود
+# جای استفاده از hardcoded "claude-sonnet-4-6" که ممکن است در registry
+# کاربر نباشد.
+def _resolve_model_with_fallback(preferred: Optional[str]) -> Optional[str]:
+    """مدل قابل استفاده پیدا می‌کند.
+
+    1. اگر preferred داده شده و در registry است، آن را برمی‌گرداند
+    2. وگرنه یک fallback از registry پیدا می‌کند (اول Claude Sonnet ها،
+       سپس GPT, سپس هر مدل دیگری)
+    3. اگر هیچ‌کدام نیست، None
+    """
+    try:
+        from ..core.models_registry import MODEL_REGISTRY, get_model
+    except Exception:
+        return preferred  # نمی‌توانیم validate کنیم، خود preferred را برگردان
+
+    # اگر preferred داده شده، آن را چک کن
+    if preferred:
+        if get_model(preferred):
+            return preferred
+        # شاید match جزئی (مثل claude-sonnet در registry با key claude-sonnet-3.5)
+        pref_low = preferred.lower()
+        for mid in MODEL_REGISTRY.keys():
+            if pref_low in mid.lower() or mid.lower() in pref_low:
+                logger.info(f"model fallback: {preferred} → {mid}")
+                return mid
+
+    # هیچ preferred یا match نشد — یک مدل sensible default پیدا کن
+    # اولویت: claude-sonnet > claude-opus > gpt-4 > هرچیزی
+    priorities = ["claude-sonnet", "claude-opus", "claude-haiku", "gpt-4o", "gpt-4", "gpt"]
+    for prio in priorities:
+        for mid in MODEL_REGISTRY.keys():
+            if prio in mid.lower():
+                logger.info(f"model fallback: no preferred, using {mid}")
+                return mid
+
+    # هر مدلی موجود است
+    if MODEL_REGISTRY:
+        first = next(iter(MODEL_REGISTRY.keys()))
+        logger.info(f"model fallback: last resort, using {first}")
+        return first
+
+    return None
+
+
 # 🆕 (v2 M5) — fetch dep files (package.json, requirements.txt, …)
 async def _fetch_dep_files(http_session, repo: str, headers: Dict[str, str], branch: str) -> Dict[str, str]:
     """فایل‌های Dependency manifest را برای dep-awareness در prompt fetch می‌کند."""
@@ -432,8 +477,15 @@ async def run_proposal(
         from .ai_manager import get_ai_manager
         from .ai_base import Message
         ai_manager = get_ai_manager()
+        # 🆕 (v3 model fix) — resolve مدل با fallback
+        resolved_model = _resolve_model_with_fallback(model_id)
+        if not resolved_model:
+            raise RuntimeError(
+                "هیچ مدل قابل استفاده‌ای پیدا نشد. لطفاً در inspector settings "
+                "یک مدل انتخاب کنید یا API keys را در settings تنظیم کنید."
+            )
         response = await ai_manager.generate(
-            model_id=model_id or "claude-sonnet-4-6",
+            model_id=resolved_model,
             messages=[Message(role="user", content=prompt)],
             max_tokens=16000,
             temperature=0.2,
@@ -1221,9 +1273,16 @@ async def _validate_cross_proposal_consistency(
         from .ai_manager import get_ai_manager
         from .ai_base import Message
         ai_manager = get_ai_manager()
+        # 🆕 (v3 model fix) — اگر model_id داده نشد یا در registry نیست،
+        # یک fallback پیدا کن. claude-sonnet-4-6 ممکن است در deployment
+        # کاربر نباشد. _resolve_model_with_fallback از registry می‌خواند.
+        resolved_model = _resolve_model_with_fallback(model_id)
+        if not resolved_model:
+            logger.warning("consistency check: no usable model found; fail-open")
+            return {"blocking_issues": [], "warnings": [], "no_model": True}
         response = await _asyncio.wait_for(
             ai_manager.generate(
-                model_id=model_id or "claude-sonnet-4-6",
+                model_id=resolved_model,
                 messages=[Message(role="user", content=prompt)],
                 max_tokens=4000,
                 temperature=0.1,
