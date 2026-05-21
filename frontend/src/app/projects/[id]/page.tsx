@@ -4603,7 +4603,32 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         }
         stepPrompt += `\n⚠️ **قانون حیاتی**: اگر فایلی در لیست بالا هست و در مرحله فعلی هم باید تغییر کنه → تمام محتوای بالا حفظ شود و فقط تغییرات جدید اضافه شود. هرگز از صفر بازنویسی نکن!\n`;
       }
-      stepPrompt += `\n## ⚠️ دستور: فقط مرحله ${step.step_number} رو انجام بده. تحلیل مختصر (حداکثر ۵ خط) + action_plan کامل.`;
+      stepPrompt += `\n## 🚨 دستور قطعی — حتماً action_plan تولید کن
+
+این مرحله **بدون action_plan شکست خورده** تلقی می‌شود. صرف تحلیل کافی نیست!
+
+**خروجی موردانتظار**:
+1. حداکثر ۵ خط تحلیل (کوتاه)
+2. **حتماً** یک بلوک JSON با ساختار زیر:
+\`\`\`json
+{
+  "files": [
+    {
+      "path": "مسیر دقیق فایل از ریشه",
+      "operation": "create" | "modify",
+      "content": "محتوای کامل فایل پس از تغییر"
+    }
+  ],
+  "commit_message": "پیام مختصر commit"
+}
+\`\`\`
+
+🚫 **ممنوع‌ها**:
+- پاسخ فقط با تحلیل (بدون JSON files block) → fail
+- توضیح اینکه "این فایل باید ساخته شود" بدون اینکه آن را در files بگذاری → fail
+- پاسخ خالی یا "نمی‌توانم" → fail
+
+✅ مرحله ${step.step_number} از ${steps.length}: ${step.description}`;
 
       try {
         // تاریخچه چت برای context
@@ -4737,6 +4762,20 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     if (collectedActionFiles.length > 0) {
       finalContent += collectedActionFiles.map(f => `- \`${f.path}\` (${f.operation || 'modify'})`).join('\n');
       finalContent += '\n\n';
+    }
+    // 🆕 (v3) — هشدار صریح اگر AI فقط تحلیل کرد و action_plan تولید نکرد
+    if (totalFiles === 0) {
+      finalContent += `\n## 🚨 خطای جدی — AI اقدام نکرد!\n\n`;
+      finalContent += `مدل **${lastModelUsed || 'فعلی'}** فقط تحلیل کرد ولی هیچ action_plan تولید نکرد.\n`;
+      finalContent += `این یعنی **هیچ فایلی commit یا اعمال نشد**.\n\n`;
+      finalContent += `### دلایل احتمالی:\n`;
+      finalContent += `- مدل ضعیف است (deepseek-chat برخی request ها را غلط می‌فهمد) — **مدل قوی‌تر** انتخاب کن (Claude Sonnet/Opus، GPT-4o)\n`;
+      finalContent += `- پیام شما خیلی کلی بود — درخواست را **دقیق‌تر** و **مشخص‌تر** بنویس (مثال: «فایل runtime.txt در ریشه با محتوای python-3.12.7 بساز»)\n`;
+      finalContent += `- مرحله‌بندی مبهم بود — به جای تجزیه به مراحل، یک پیام مستقیم بنویس\n\n`;
+      finalContent += `### چه کار کن:\n`;
+      finalContent += `1. **مدل را عوض کن** در inspector settings (⚙️) — مدل قوی‌تر انتخاب کن\n`;
+      finalContent += `2. **دوباره تلاش کن** با همان پیام — بسیاری وقت‌ها مدل دفعهٔ دوم خروجی action_plan می‌دهد\n`;
+      finalContent += `3. **اگر همچنان نشد**، پیام خیلی ساده بنویس: «فایل X بساز با محتوای Y»\n\n`;
     }
     // 🆕 (v3 safety-net) — هشدار بزرگ اگر AI فایل‌های stack-traced را skip کرده
     const ctfNotInActionPlan = collectedStackTraceWarnings.filter(
@@ -6165,7 +6204,32 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
               }
               stepPrompt += `\n⚠️ **قانون حیاتی**: اگر فایلی در لیست بالا هست و در مرحله فعلی هم باید تغییر کنه → تمام محتوای بالا حفظ شود و فقط تغییرات جدید اضافه شود. هرگز از صفر بازنویسی نکن!\n`;
             }
-            stepPrompt += `\n## ⚠️ دستور: فقط مرحله ${step.step_number} رو انجام بده. تحلیل مختصر (حداکثر ۵ خط) + action_plan کامل.`;
+            stepPrompt += `\n## 🚨 دستور قطعی — حتماً action_plan تولید کن
+
+این مرحله **بدون action_plan شکست خورده** تلقی می‌شود. صرف تحلیل کافی نیست!
+
+**خروجی موردانتظار**:
+1. حداکثر ۵ خط تحلیل (کوتاه)
+2. **حتماً** یک بلوک JSON با ساختار زیر:
+\`\`\`json
+{
+  "files": [
+    {
+      "path": "مسیر دقیق فایل از ریشه",
+      "operation": "create" | "modify",
+      "content": "محتوای کامل فایل پس از تغییر"
+    }
+  ],
+  "commit_message": "پیام مختصر commit"
+}
+\`\`\`
+
+🚫 **ممنوع‌ها**:
+- پاسخ فقط با تحلیل (بدون JSON files block) → fail
+- توضیح اینکه "این فایل باید ساخته شود" بدون اینکه آن را در files بگذاری → fail
+- پاسخ خالی یا "نمی‌توانم" → fail
+
+✅ مرحله ${step.step_number} از ${vdSteps.length}: ${step.description}`;
 
             try {
               const chatHistory = inspectorChatMessages
