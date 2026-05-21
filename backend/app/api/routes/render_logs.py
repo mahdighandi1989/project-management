@@ -329,6 +329,38 @@ def _build_general_instructions_list(
 - مثال درست: «در پیام کاربر pydantic-core ذکر شده ولی log جدید tiktoken
   را نشان می‌دهد — مشکل واقعی tiktoken است.»
 
+### 🚨 قانون حیاتی: Render env var ها (DATABASE_URL، API_KEY و …)
+اگر مشکل از **متغیر محیطی** در Render است (نه از کد):
+- مثال: `ConnectionRefusedError` به دلیل `DATABASE_URL` تنظیم‌نشده
+- مثال: `KeyError: 'API_KEY'` به دلیل API_KEY missing
+- در این موارد، **علاوه بر تغییرات کد** (اگر لازم است fallback اضافه شود)،
+  می‌توانی در action_plan فیلد `render_actions` اضافه کنی:
+
+```json
+{
+  "files": [...],
+  "render_actions": [
+    {
+      "type": "set_env_var",
+      "service_name": "نام_دقیق_سرویس_در_Render",
+      "key": "DATABASE_URL",
+      "value": "postgresql+asyncpg://..."
+    },
+    {"type": "restart_service", "service_name": "..."},
+    {"type": "trigger_deploy", "service_name": "...", "clear_cache": false}
+  ]
+}
+```
+
+- `set_env_var`: تنظیم یا به‌روزرسانی یک env var
+- `set_env_vars_bulk`: چندتایی با `{"vars": {"K1": "v1", "K2": "v2"}}`
+- `restart_service`: restart سرویس بدون deploy جدید
+- `trigger_deploy`: deploy جدید
+- `service_name`: نام دقیق سرویس در Render (مثلاً `lifemanager`)
+- این operations **بعد از file commits** اجرا می‌شوند
+- اگر مقدار `value` را نمی‌دانی، از کاربر بپرس یا یک placeholder بگذار
+- ⛔ هرگز در `value` راز/credentials واقعی نگذار اگر در پیام کاربر نیست
+
 ### 🚨 قانون حیاتی: قبل از create، چک کن فایل از قبل موجود است
 هرگز قبل از چک کردن، `operation: "create"` نگذار:
 - **اگر فایل در repo از قبل موجود است**: عملیات باید `modify` باشد.
@@ -11381,6 +11413,16 @@ class ApplyActionRequest(BaseModel):
     #   - اگر verify=done، task.verification_status به done می‌رود
     #   - event "task.applied_via_inspector" emit می‌شود
     task_id: Optional[str] = None
+    # 🆕 (v3 render-ops) — operations مدیریتی Render که AI می‌تواند پیشنهاد دهد
+    # وقتی RENDER_API_KEY تنظیم است. این operations بعد از file commits
+    # اجرا می‌شوند.
+    # نمونه:
+    # [
+    #   {"type": "set_env_var", "service_name": "lifemanager", "key": "DATABASE_URL", "value": "..."},
+    #   {"type": "restart_service", "service_name": "lifemanager"},
+    #   {"type": "trigger_deploy", "service_name": "lifemanager"},
+    # ]
+    render_actions: Optional[List[dict]] = None
 
 
 class ScreenshotRequest(BaseModel):
@@ -13895,7 +13937,15 @@ async def enhance_prompt_endpoint(request: EnhancePromptRequest, db: Session = D
    - اگر فایل config تغییر میکنه، تمام configهای مرتبط هم بررسی بشن
    - قبل از نوشتن فایل .js config، حتماً package.json فیلد "type" رو بررسی کن (ESM vs CJS)
    - مشکل رو نیمه‌کاره حل نکن — تمام فایل‌های تحت تأثیر در action_plan باشن
-12. **ممنوعیت بازنویسی مخرب**: در پرامپت تاکید کن:
+12. **🆕 Render operations (env vars, restart, deploy)**: اگر مشکل از
+   متغیرهای محیطی Render یا نیاز به restart/redeploy است (نه فقط کد):
+   - در پرامپت تاکید کن که AI می‌تواند `render_actions` در action_plan
+     شامل کند (نه فقط `files`)
+   - مثال‌ها: تنظیم DATABASE_URL، تنظیم API_KEY، restart service، trigger deploy
+   - format: `{"type": "set_env_var", "service_name": "...", "key": "...", "value": "..."}`
+   - این برای موارد deploy fail که از env var missing است (مثل
+     `ConnectionRefusedError`) ضروری است
+13. **ممنوعیت بازنویسی مخرب**: در پرامپت تاکید کن:
    - هرگز فایل موجود رو از صفر بازننویس — فقط بخش‌های مربوط به درخواست تغییر کنند
    - قابلیت‌های موجود فایل (state, handlers, UI sections) حذف نشوند
    - قبل از ایجاد فایل جدید، بررسی شود آیا کامپوننت مشابه وجود دارد
@@ -15965,6 +16015,92 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
     )
 
 
+# 🆕 (v3 render-ops) — helper برای اجرای render_actions
+async def _execute_render_actions(render_actions: List[dict]) -> Dict[str, Any]:
+    """اجرای دستورات مدیریتی Render (set_env_var, restart, trigger_deploy).
+
+    Returns: {success: bool, results: [...], errors: [...]}
+    """
+    if not render_actions:
+        return {"success": True, "results": [], "errors": []}
+    try:
+        from ...services.render_service import get_render_service
+        from ...services.oversight_service import get_render_token
+    except Exception as e:
+        return {"success": False, "results": [], "errors": [f"render_service import failed: {e}"]}
+
+    if not get_render_token():
+        return {
+            "success": False,
+            "results": [],
+            "errors": ["RENDER_API_KEY در تنظیمات یافت نشد. لطفاً در settings تنظیم کنید."],
+        }
+
+    rs = get_render_service()
+    # ابتدا list services بگیر برای lookup name → service_id
+    services_resp = await rs.get_services()
+    services = services_resp.get("services", []) if services_resp.get("success") else []
+    name_to_id = {s.get("name", "").lower(): s.get("id") for s in services if s.get("id")}
+
+    results: List[Dict[str, Any]] = []
+    errors: List[str] = []
+
+    for action in render_actions:
+        if not isinstance(action, dict):
+            continue
+        atype = action.get("type", "").strip().lower()
+        service_name = (action.get("service_name") or "").strip().lower()
+        service_id = name_to_id.get(service_name)
+        if not service_id:
+            # تلاش برای fuzzy match (substring)
+            for nm, sid in name_to_id.items():
+                if service_name in nm or nm in service_name:
+                    service_id = sid
+                    break
+        if not service_id:
+            errors.append(
+                f"سرویس '{service_name}' در Render پیدا نشد. "
+                f"سرویس‌های موجود: {list(name_to_id.keys())[:5]}"
+            )
+            results.append({"action": atype, "service_name": service_name, "success": False, "error": "service_not_found"})
+            continue
+
+        try:
+            if atype == "set_env_var":
+                key = action.get("key", "")
+                value = action.get("value", "")
+                if not key:
+                    errors.append(f"set_env_var: key خالی است")
+                    continue
+                r = await rs.set_env_var(service_id, key, str(value))
+                results.append({"action": "set_env_var", "service": service_name, "key": key, **r})
+                if not r.get("success"):
+                    errors.append(f"set_env_var {key}: {r.get('error')}")
+            elif atype == "set_env_vars_bulk":
+                vars_dict = action.get("vars", {}) or {}
+                if not vars_dict:
+                    errors.append(f"set_env_vars_bulk: vars خالی است")
+                    continue
+                r = await rs.set_env_vars_bulk(service_id, vars_dict)
+                results.append({"action": "set_env_vars_bulk", "service": service_name, **r})
+            elif atype == "restart_service":
+                r = await rs.restart_service(service_id)
+                results.append({"action": "restart_service", "service": service_name, **r})
+            elif atype == "trigger_deploy":
+                clear_cache = bool(action.get("clear_cache", False))
+                r = await rs.trigger_deploy(service_id, clear_cache=clear_cache)
+                results.append({"action": "trigger_deploy", "service": service_name, **r})
+            else:
+                errors.append(f"action type ناشناخته: {atype}")
+                results.append({"action": atype, "success": False, "error": "unknown_action_type"})
+        except Exception as e:
+            errors.append(f"{atype} failed: {str(e)[:200]}")
+            results.append({"action": atype, "success": False, "error": str(e)[:300]})
+
+    overall_success = all(r.get("success", False) for r in results) if results else False
+    return {"success": overall_success, "results": results, "errors": errors}
+
+
 @router.post("/inspector/apply-action")
 async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db)):
     """
@@ -16824,6 +16960,45 @@ _ساخته شده توسط بازرس ویژه (Inspector)_"""
                 "branch": branch_name,
                 "files_committed": committed_files,
             })
+
+        # 🆕 (v3 render-ops) — اجرای render_actions اگر داده شده
+        # (مثلاً set DATABASE_URL، restart_service، trigger_deploy)
+        if request.render_actions:
+            yield sse("progress", {
+                "step": "render_actions",
+                "message": f"⚙️ در حال اجرای {len(request.render_actions)} عملیات Render...",
+            })
+            try:
+                ra_result = await _execute_render_actions(request.render_actions)
+                _ra_summary_lines: List[str] = []
+                for r in ra_result.get("results", []):
+                    icon = "✅" if r.get("success") else "❌"
+                    desc = r.get("action", "?")
+                    if r.get("key"):
+                        desc += f" {r.get('key')}"
+                    if r.get("service"):
+                        desc += f" @ {r.get('service')}"
+                    _ra_summary_lines.append(f"{icon} {desc}")
+                msg_text = (
+                    "⚙️ نتیجه عملیات Render:\n" + "\n".join(_ra_summary_lines)
+                    if _ra_summary_lines else "⚙️ هیچ عملیات Render اجرا نشد"
+                )
+                if ra_result.get("errors"):
+                    msg_text += "\n\n⚠️ خطاها:\n" + "\n".join(
+                        f"- {e}" for e in ra_result["errors"][:5]
+                    )
+                yield sse("render_actions_complete", {
+                    "success": ra_result.get("success", False),
+                    "message": msg_text,
+                    "results": ra_result.get("results", []),
+                    "errors": ra_result.get("errors", []),
+                })
+            except Exception as ra_e:
+                yield sse("render_actions_complete", {
+                    "success": False,
+                    "message": f"❌ خطا در اجرای عملیات Render: {str(ra_e)[:200]}",
+                    "errors": [str(ra_e)[:300]],
+                })
 
         # 🔗 (Bug C7 Bridge Phase 1 + 3) — اگر task_id داده شده، write-back و
         # verify v6 اجرا کن. این مسیر فقط با task_id فعال است و backward

@@ -3619,8 +3619,10 @@ export default function ProjectDetailPage() {
           action_files: msg.action_plan.files,
           commit_message: msg.action_plan.commit_message || 'Inspector smart fix',
           original_message: msg.original_message || '',
-          // 🔗 (C7 Bridge Phase 1+3) — task_id برای write-back + verify v6
           task_id: linkedTaskId || undefined,
+          // 🆕 (v3 render-ops) — forward render_actions اگر AI آن را در
+          // action_plan شامل کرد (مثلاً set DATABASE_URL، restart service)
+          render_actions: msg.action_plan.render_actions || undefined,
         }),
         signal: inspectorOpAbortRef.current?.signal,
       });
