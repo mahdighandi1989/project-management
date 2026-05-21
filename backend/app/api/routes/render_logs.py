@@ -18522,6 +18522,13 @@ class ApplyAllRequest(BaseModel):
     include_unexecuted: bool = False
     branch_strategy: str = "new_pr"  # "new_pr" | "default_branch_commit"
     model_id: Optional[str] = None
+    # 🆕 (v3) — override consistency check اگر کاربر بخواهد علی‌رغم
+    # warnings ادامه دهد (مثلاً warnings جزئی هستند یا کاربر می‌داند
+    # چه می‌کند)
+    force_apply: bool = False
+    # 🆕 (v3) — selected_proposal_ids: اگر داده شد، فقط همان proposals
+    # apply می‌شوند نه همه staged
+    selected_proposal_ids: Optional[List[str]] = None
 
 
 @router.post("/inspector/session/{session_id}/apply-all")
@@ -18532,6 +18539,8 @@ async def inspector_apply_all(
     """همهٔ proposalهای staged این session را در یک PR/commit به GitHub می‌فرستد.
 
     اگر include_unexecuted=True، ابتدا proposalهای pending را اجرا می‌کند.
+    اگر force_apply=True، consistency check warnings را override می‌کند.
+    اگر selected_proposal_ids داده شد، فقط همان‌ها apply می‌شوند.
     """
     from ...services.inspector_proposal_executor import apply_all_staged
     payload = payload or ApplyAllRequest()
@@ -18542,6 +18551,8 @@ async def inspector_apply_all(
             include_unexecuted=payload.include_unexecuted,
             branch_strategy=payload.branch_strategy,
             model_id=payload.model_id,
+            force_apply=payload.force_apply,
+            selected_proposal_ids=payload.selected_proposal_ids,
         )
         return result
     except Exception as e:

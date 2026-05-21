@@ -1571,7 +1571,13 @@ export default function ProjectDetailPage() {
   // 🆕 (inspector-scan) — helper برای اعمال همه تغییرات
   const applyAllInspectorProposals = useCallback(async (
     sessionId: number,
-    options?: { commit_message?: string; include_unexecuted?: boolean; model_id?: string },
+    options?: {
+      commit_message?: string;
+      include_unexecuted?: boolean;
+      model_id?: string;
+      force_apply?: boolean;
+      selected_proposal_ids?: string[];
+    },
   ) => {
     setApplyAllInFlight(true);
     try {
@@ -1584,6 +1590,8 @@ export default function ProjectDetailPage() {
             commit_message: options?.commit_message || null,
             include_unexecuted: options?.include_unexecuted ?? false,
             model_id: options?.model_id || null,
+            force_apply: options?.force_apply ?? false,
+            selected_proposal_ids: options?.selected_proposal_ids || null,
           }),
         },
       );
@@ -14503,11 +14511,20 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                       const includeUnexecuted = totalPending > 0
                                         ? window.confirm(`${totalPending} پیشنهاد هنوز اجرا نشده است. آیا قبل از commit آنها را هم اجرا کنم؟`)
                                         : false;
+                                      // 🆕 (v3) — پرسش force_apply اگر تعداد proposals زیاد است
+                                      let forceApply = false;
+                                      if ((totalStaged + totalPending) >= 5) {
+                                        forceApply = window.confirm(
+                                          `${totalStaged + totalPending} پیشنهاد دارید. consistency check ممکن است blocking issues پیدا کند.\n\n` +
+                                          'آیا می‌خواهید با force_apply ادامه دهید (warnings نادیده گرفته شوند)؟\n\n' +
+                                          'OK = force apply (override warnings)\nCancel = حالت معمول (consistency check اعمال شود)',
+                                        );
+                                      }
                                       applyAllInspectorProposals(sessionId, {
                                         commit_message: msgInput.trim() || undefined,
                                         include_unexecuted: includeUnexecuted,
-                                        // 🆕 (v3) — مدل انتخاب‌شدهٔ کاربر
                                         model_id: inspectorSelectedModels[0] || undefined,
+                                        force_apply: forceApply,
                                       });
                                     }}
                                     disabled={applyAllInFlight || totalStaged === 0 && totalPending === 0}
