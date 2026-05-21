@@ -4557,6 +4557,8 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
 
     const collectedActionFiles: any[] = [];
     const collectedAnalysis: string[] = [];
+    // 🆕 (v3 render-ops) — جمع‌آوری render_actions از هر مرحله
+    const collectedRenderActions: any[] = [];
     // 🆕 (v3 safety-net) — فایل‌هایی که در stack trace ذکر شده‌اند ولی AI
     // در action_plan قرار نداده — این یعنی فکس احتمالاً ناقص است
     const collectedStackTraceWarnings: string[] = [];
@@ -4723,6 +4725,25 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           if (stepActionPlan.commit_message) commitMessage = stepActionPlan.commit_message;
         }
 
+        // 🆕 (v3 render-ops) — جمع‌آوری render_actions
+        if (stepActionPlan?.render_actions?.length) {
+          for (const ra of stepActionPlan.render_actions) {
+            // dedup by (type, service_name, key)
+            const key = `${ra?.type}:${ra?.service_name}:${ra?.key || ''}`;
+            const existingIdx = collectedRenderActions.findIndex(
+              (r: any) => `${r?.type}:${r?.service_name}:${r?.key || ''}` === key,
+            );
+            if (existingIdx >= 0) {
+              collectedRenderActions[existingIdx] = ra;
+            } else {
+              collectedRenderActions.push(ra);
+            }
+          }
+          if (stepActionPlan.commit_message && !commitMessage) {
+            commitMessage = stepActionPlan.commit_message;
+          }
+        }
+
         // 🆕 (v3 safety-net) — جمع‌آوری stack-trace warning ها از هر مرحله
         const stepStackWarning = (stepActionPlan as any)?._stack_trace_warning;
         if (stepStackWarning?.missing_from_action_plan?.length) {
@@ -4759,14 +4780,44 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     // 📊 گزارش نهایی ترکیبی
     const finalReportId = `ms_final_${Date.now()}`;
     const totalFiles = collectedActionFiles.length;
+    // 🆕 (v3 render-ops)
+    const totalRenderActions = collectedRenderActions.length;
     let finalContent = `## 📊 گزارش نهایی — ${steps.length} مرحله کامل شد\n\n`;
     finalContent += `**فایل‌های تغییر یافته: ${totalFiles}**\n`;
+    if (totalRenderActions > 0) {
+      finalContent += `**عملیات Render: ${totalRenderActions}** (در apply ، Render API صدا زده می‌شود)\n`;
+    }
     if (collectedActionFiles.length > 0) {
       finalContent += collectedActionFiles.map(f => `- \`${f.path}\` (${f.operation || 'modify'})`).join('\n');
       finalContent += '\n\n';
     }
-    // 🆕 (v3) — هشدار صریح اگر AI فقط تحلیل کرد و action_plan تولید نکرد
-    if (totalFiles === 0) {
+    if (totalRenderActions > 0) {
+      finalContent += `### ⚙️ عملیات Render پیشنهادی\n`;
+      finalContent += collectedRenderActions.map((r: any) => {
+        const t = r?.type || '?';
+        const svc = r?.service_name || '?';
+        const detail = r?.key
+          ? `${r.key}${r.value && !String(r.value).includes('<') ? ' (مقدار آماده)' : ' (نیاز به مقدار)'}`
+          : '';
+        return `- \`${t}\` @ \`${svc}\`${detail ? ': ' + detail : ''}`;
+      }).join('\n');
+      finalContent += '\n\n';
+      // اگر هر render_action شامل placeholder است، warning
+      const hasPlaceholder = collectedRenderActions.some((r: any) =>
+        r?.value && /<[A-Z_]+>|placeholder|YOUR_/i.test(String(r.value)),
+      );
+      if (hasPlaceholder) {
+        finalContent += `⚠️ **یک یا چند مقدار placeholder است** (مثل \`<USER>:<PASSWORD>@<HOST>\`). `;
+        finalContent += `AI نمی‌تواند این مقادیر را خودش پیدا کند.\n`;
+        finalContent += `**شما باید**:\n`;
+        finalContent += `1. در Render dashboard → سرویس PostgreSQL → "Connect" → "Internal Database URL" کپی کنید\n`;
+        finalContent += `2. به جای \`postgresql://\` بنویسید \`postgresql+asyncpg://\`\n`;
+        finalContent += `3. در یک پیام جدید بنویسید: «DATABASE_URL را به این مقدار تنظیم کن: <URL کامل>»\n`;
+        finalContent += `4. سپس apply کنید\n\n`;
+      }
+    }
+    // 🆕 (v3) — هشدار صریح فقط اگر **هیچ‌چیز** تولید نشد (نه فایل نه render_action)
+    if (totalFiles === 0 && totalRenderActions === 0) {
       finalContent += `\n## 🚨 خطای جدی — AI اقدام نکرد!\n\n`;
       finalContent += `مدل **${lastModelUsed || 'فعلی'}** فقط تحلیل کرد ولی هیچ action_plan تولید نکرد.\n`;
       finalContent += `این یعنی **هیچ فایلی commit یا اعمال نشد**.\n\n`;
@@ -4794,8 +4845,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     finalContent += collectedAnalysis.map((a, idx) => `**مرحله ${idx + 1}:** ${a.slice(0, 200)}`).join('\n\n');
 
     // پیام نهایی با action_plan ترکیبی
-    const combinedActionPlan = totalFiles > 0 ? {
+    // 🆕 (v3 render-ops) — combinedActionPlan الان شامل render_actions هم است
+    const combinedActionPlan = (totalFiles > 0 || totalRenderActions > 0) ? {
       files: collectedActionFiles,
+      render_actions: totalRenderActions > 0 ? collectedRenderActions : undefined,
       commit_message: commitMessage || `Multi-step fix: ${steps.map(s => s.description).join(', ')}`,
     } : null;
 
