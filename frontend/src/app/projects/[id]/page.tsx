@@ -14437,7 +14437,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                         <button
                                           onClick={(e) => {
                                             e.stopPropagation();
-                                            runInspectorProposal(pid, sessionId);
+                                            // 🆕 (v3) — مدل انتخاب‌شدهٔ کاربر را پاس بده
+                                            // نه اینکه backend default را استفاده کند
+                                            const selectedModel = inspectorSelectedModels[0] || undefined;
+                                            runInspectorProposal(pid, sessionId, selectedModel);
                                           }}
                                           disabled={running || applyAllInFlight}
                                           className="text-[11px] bg-indigo-500 hover:bg-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed text-white px-2 py-1 rounded whitespace-nowrap flex-shrink-0"
@@ -14491,6 +14494,8 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                       applyAllInspectorProposals(sessionId, {
                                         commit_message: msgInput.trim() || undefined,
                                         include_unexecuted: includeUnexecuted,
+                                        // 🆕 (v3) — مدل انتخاب‌شدهٔ کاربر
+                                        model_id: inspectorSelectedModels[0] || undefined,
                                       });
                                     }}
                                     disabled={applyAllInFlight || totalStaged === 0 && totalPending === 0}
