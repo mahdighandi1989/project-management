@@ -12535,28 +12535,58 @@ def _validate_python_imports(
         return m
 
     def _extract_defs(content: str) -> set:
-        """نام‌های top-level که در یک فایل تعریف شده‌اند (func/class/var)."""
+        """نام‌های top-level که در یک فایل تعریف شده‌اند (func/class/var).
+
+        🆕 (v3 fix) — قبلاً فقط `tree.body` (top-level مستقیم) را اسکن
+        می‌کرد و assignments داخل `try/except`/`if`/`with` را نمی‌دید.
+        مثال: `engine = create_async_engine(...)` در try block. این
+        باعث false-positive «engine hallucinated» می‌شد.
+        الان helper recursive نام‌های تعریف‌شده در همه containers را
+        جمع می‌کند.
+        """
         defs = set()
         try:
             tree = _ast.parse(content)
         except Exception:
             return defs
-        for node in tree.body:
-            if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
-                defs.add(node.name)
-            elif isinstance(node, _ast.Assign):
-                for target in node.targets:
-                    if isinstance(target, _ast.Name):
-                        defs.add(target.id)
-                    elif isinstance(target, _ast.Tuple):
-                        for elt in target.elts:
-                            if isinstance(elt, _ast.Name):
-                                defs.add(elt.id)
-            elif isinstance(node, _ast.AnnAssign) and isinstance(node.target, _ast.Name):
-                defs.add(node.target.id)
-            elif isinstance(node, (_ast.Import, _ast.ImportFrom)):
-                for alias in node.names:
-                    defs.add(alias.asname or alias.name.split(".")[0])
+
+        def _collect_names_from_target(target, into: set) -> None:
+            if isinstance(target, _ast.Name):
+                into.add(target.id)
+            elif isinstance(target, (_ast.Tuple, _ast.List)):
+                for elt in target.elts:
+                    _collect_names_from_target(elt, into)
+
+        def _walk_module_body(stmts) -> None:
+            """recursive walk که containers مثل Try/If/With را هم می‌گردد."""
+            for node in stmts:
+                if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+                    defs.add(node.name)
+                elif isinstance(node, _ast.Assign):
+                    for target in node.targets:
+                        _collect_names_from_target(target, defs)
+                elif isinstance(node, _ast.AnnAssign) and isinstance(node.target, _ast.Name):
+                    defs.add(node.target.id)
+                elif isinstance(node, (_ast.Import, _ast.ImportFrom)):
+                    for alias in node.names:
+                        defs.add(alias.asname or alias.name.split(".")[0])
+                # 🆕 containers — assignments داخل این‌ها هم top-level محسوب می‌شوند
+                elif isinstance(node, _ast.Try):
+                    _walk_module_body(node.body)
+                    for handler in node.handlers:
+                        _walk_module_body(handler.body)
+                    _walk_module_body(node.orelse)
+                    _walk_module_body(node.finalbody)
+                elif isinstance(node, _ast.If):
+                    _walk_module_body(node.body)
+                    _walk_module_body(node.orelse)
+                elif isinstance(node, (_ast.With, _ast.AsyncWith)):
+                    _walk_module_body(node.body)
+                elif isinstance(node, (_ast.For, _ast.AsyncFor, _ast.While)):
+                    _walk_module_body(node.body)
+                    _walk_module_body(node.orelse)
+
+        _walk_module_body(tree.body)
         return defs
 
     # 1. ساخت map ماژول‌های شناخته‌شده
