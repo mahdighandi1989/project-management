@@ -493,6 +493,18 @@ def resolve_intent_from_chat_context(
     if not user_message:
         return ResolvedScanIntent(should_scan=False, reason="empty_message")
 
+    # 🆕 (clarify-first) — اگر این پیام پاسخ کاربر به یک سوال ask_user قبلی
+    # است (با تگ [user_clarification ...])، scan را trigger نکن. این یک
+    # continuation است و باید مستقیم به smart-chat برود تا با context قبلی
+    # تصمیم نهایی گرفته شود.
+    if user_message.startswith("[user_clarification"):
+        return ResolvedScanIntent(
+            should_scan=False,
+            reason="user_clarification_reply",
+            focus_notes=user_message,
+            is_continuation=True,
+        )
+
     # 🆕 (v3 simple-op gate) — اولویت اول: اگر درخواست یک عملیات ساده
     # روی فایل مشخص است (مثل «runtime.txt بساز»)، scan ۱۲-pass overkill
     # است و نتایج بی‌ربط می‌دهد. مستقیماً به smart-chat می‌رود.

@@ -396,6 +396,135 @@ def _build_general_instructions_list(
   هم Rust compile نیاز دارد و در همان محیط fail می‌کند""",
         },
         {
+            "id": "sys_clarify_first",
+            "title": "قانون ابهام — اول سوال، بعد عمل",
+            "content": "اگر درخواست کاربر مبهم است یا چند راه‌حل معقول وجود دارد، به‌جای حدس زدن یا اجرای random، یک سوال شفاف از کاربر بپرس. برای این کار به جای `files` در JSON خروجی، از فرمت `ask_user` استفاده کن.",
+            "icon": "❓",
+            "prompt_detail": """## ❓ قانون حیاتی: ابهام را با سوال حل کن، نه با حدس
+
+### کِی باید سوال بپرسی؟
+به جای تولید `action_plan` با `files`، یک JSON با فیلد `ask_user` برگردان وقتی:
+
+1. **چند راه‌حل معقول وجود دارد و trade-off دارند** — مثلاً «دیپلوی شکست خورد چون DATABASE_URL نیست»:
+   - راه ۱: کد را graceful degradation کنیم (DB optional)
+   - راه ۲: DATABASE_URL واقعی در Render تنظیم کنیم
+   - راه ۳: کلاً وابستگی به DB را حذف کنیم
+   → باید بپرسی کدام را می‌خواهد، نه اینکه یکی را انتخاب کنی
+
+2. **اطلاعات حیاتی کم است** — مثلاً «خطای auth fix کن» ولی نمی‌دانی کدام endpoint:
+   - بپرس کدام بخش (login/signup/refresh) را می‌گوید
+
+3. **scope مبهم است** — مثلاً «اضافه کن notification»:
+   - بپرس notification چه نوعی (toast/email/push) و کجا (header/dashboard/همه‌جا)
+
+4. **مقدار credentials/URL/secret نیاز دارد** — مثلاً DATABASE_URL value:
+   - بپرس از کاربر مقدار را وارد کند یا تأیید کند placeholder قابل قبول است
+
+5. **اعتمادت < 70% است** برای تشخیص فایل/خط مشکل‌دار
+
+### چه وقتی **نباید** سوال بپرسی؟
+- ❌ اگر در پیام کاربر یا history جواب صریح هست (فقط حواست را جمع کن)
+- ❌ برای جزئیات formatting/styling/whitespace (تصمیم خودت بگیر)
+- ❌ اگر فقط یک راه‌حل منطقی هست
+- ❌ اگر کاربر صریحاً گفت «هر چی صلاح می‌دانی»
+
+### فرمت دقیق `ask_user`:
+به جای `{"files": [...]}` این را برگردان:
+
+```json
+{
+  "ask_user": {
+    "question": "متن سوال — کوتاه، مشخص، با context کافی",
+    "type": "single" | "multi" | "text",
+    "context": "چرا این سوال — توضیح ۱-۲ خطی از وضعیتی که کاربر باید تصمیم بگیرد",
+    "options": [
+      {"id": "opt_bypass", "label": "گزینهٔ ۱ — کوتاه", "description": "توضیح آن گزینه و trade-off"},
+      {"id": "opt_setup", "label": "گزینهٔ ۲ — کوتاه", "description": "..."}
+    ],
+    "default": "opt_bypass"
+  },
+  "commit_message": ""
+}
+```
+
+- `type: "single"` → یک گزینه — `options` لازم است
+- `type: "multi"` → چند گزینه با تیک — `options` لازم است
+- `type: "text"` → پاسخ متنی آزاد — `options` نگذار
+- `id` هر option باید snake_case، unique و معنی‌دار باشد
+- `default` (اختیاری) → گزینهٔ پیشنهادی
+
+### مثال‌های دقیق:
+
+**مثال ۱ (single — trade-off دیپلوی):**
+```json
+{
+  "ask_user": {
+    "question": "دیپلوی به خاطر DATABASE_URL تنظیم‌نشده شکست می‌خورد. چه کار کنم؟",
+    "type": "single",
+    "context": "لاگ نشان می‌دهد ConnectionRefusedError برای localhost:5432. سه راه معقول وجود دارد و هرکدام trade-off دارد.",
+    "options": [
+      {"id": "bypass_db", "label": "DB را optional کن", "description": "کد را طوری تغییر می‌دهم که اگر DATABASE_URL نباشد، اپ بدون DB بالا بیاید. سریع‌ترین راه و بدون نیاز به credentials."},
+      {"id": "setup_db", "label": "DATABASE_URL را در Render ست کن", "description": "نیاز دارم مقدار واقعی DATABASE_URL را بدهی. اپ با DB کار خواهد کرد."},
+      {"id": "remove_db", "label": "DB را کاملاً حذف کن", "description": "اگر اصلاً DB لازم نداری، تمام کد مرتبط با DB را حذف می‌کنم."}
+    ],
+    "default": "bypass_db"
+  }
+}
+```
+
+**مثال ۲ (text — مقدار credential):**
+```json
+{
+  "ask_user": {
+    "question": "مقدار DATABASE_URL را وارد کن (یا 'placeholder' اگر بعداً ست می‌کنی):",
+    "type": "text",
+    "context": "می‌خواهم env var واقعی در Render تنظیم کنم اما secret نباید حدس بزنم."
+  }
+}
+```
+
+**مثال ۳ (multi — چند ویژگی):**
+```json
+{
+  "ask_user": {
+    "question": "کدام بخش‌های notification را اضافه کنم؟",
+    "type": "multi",
+    "context": "گفتی «notification اضافه کن» — می‌توانم چند نوع پیاده کنم.",
+    "options": [
+      {"id": "toast", "label": "Toast پاپ‌آپ", "description": "پیام موقت در گوشهٔ صفحه"},
+      {"id": "header_bell", "label": "زنگ در header", "description": "آیکن زنگ + لیست notification"},
+      {"id": "email", "label": "Email", "description": "ایمیل برای رویدادهای مهم"}
+    ]
+  }
+}
+```
+
+### قانون مسیریابی (route_to):
+اگر تشخیص دادی که برای جواب درست نیاز به **اسکن عمیق چند فایل** داری (مثلاً تغییر روی >۵ فایل یا چند ماژول)، به‌جای `files`، این را برگردان:
+
+```json
+{
+  "route_to": "deep_scan",
+  "reason": "این تغییر روی frontend+backend+tests اثر دارد و نیاز به اسکن سراسری دارم.",
+  "scan_config": {
+    "sections": ["frontend", "backend"],
+    "focus_notes": "تمرکز روی auth flow",
+    "custom_paths": []
+  }
+}
+```
+
+⛔ از `route_to` فقط وقتی استفاده کن که scope **واقعاً** بزرگ است. برای تغییرات ۱-۳ فایلی، خودت کار را تمام کن.
+
+### قانون پاسخ کاربر:
+اگر در پیام کاربر تگ `[user_clarification ref=... qtype=...]` دیدی:
+- این پاسخ کاربر به سوال قبلی **خودت** است
+- **هرگز** دوباره همان سوال را نپرس
+- مستقیماً بر اساس تصمیم کاربر `action_plan` با `files` (و در صورت نیاز `render_actions`) تولید کن
+- اگر کاربر `id=opt_xxx` انتخاب کرده، در history قبلی گزینهٔ متناظر را پیدا کن و طبق توضیح آن عمل کن
+- اگر کاربر متن آزاد داد، مقدار را مستقیم در تنظیمات (مثلاً `render_actions[].value`) قرار بده""",
+        },
+        {
             "id": "sys_exact_intent",
             "title": "فهم دقیق کلمه‌به‌کلمه درخواست کاربر",
             "content": "کلمات کاربر را دقیق و تحت‌اللفظی بخوان. «فقط» یعنی فقط. «نباید» یعنی ممنوع. هرگز معنی درخواست را برعکس تفسیر نکن. اگر مبهم است، محتاطانه‌ترین تفسیر را انتخاب کن.",
@@ -11982,14 +12111,95 @@ def _detect_reasoning_contamination(content: str, file_path: str) -> str | None:
     return _central_detect(content, file_path)
 
 
+def _normalize_ask_user(raw: dict) -> dict | None:
+    """نرمال‌سازی بلوک ask_user — برمی‌گرداند dict تمیز یا None اگر نامعتبر."""
+    if not raw or not isinstance(raw, dict):
+        return None
+    question = (raw.get("question") or "").strip()
+    qtype = (raw.get("type") or "single").strip().lower()
+    if qtype not in ("single", "multi", "text"):
+        qtype = "single"
+    if not question:
+        return None
+    options_raw = raw.get("options") or []
+    options = []
+    if qtype in ("single", "multi"):
+        if not isinstance(options_raw, list) or len(options_raw) < 2:
+            return None
+        seen_ids = set()
+        for idx, opt in enumerate(options_raw):
+            if not isinstance(opt, dict):
+                continue
+            opt_id = (opt.get("id") or f"opt_{idx}").strip()
+            if not opt_id or opt_id in seen_ids:
+                opt_id = f"opt_{idx}_{len(seen_ids)}"
+            seen_ids.add(opt_id)
+            label = (opt.get("label") or opt.get("title") or "").strip()
+            if not label:
+                continue
+            options.append({
+                "id": opt_id,
+                "label": label,
+                "description": (opt.get("description") or "").strip(),
+            })
+        if len(options) < 2:
+            return None
+    out = {
+        "question": question,
+        "type": qtype,
+        "context": (raw.get("context") or "").strip(),
+    }
+    if options:
+        out["options"] = options
+    default_id = (raw.get("default") or "").strip()
+    if default_id and qtype in ("single", "multi"):
+        if any(o["id"] == default_id for o in options):
+            out["default"] = default_id
+    return out
+
+
+def _normalize_route_to(parsed: dict) -> dict | None:
+    """نرمال‌سازی بلوک route_to."""
+    target = (parsed.get("route_to") or "").strip().lower()
+    if target not in ("deep_scan",):
+        return None
+    return {
+        "target": target,
+        "reason": (parsed.get("reason") or "").strip(),
+        "scan_config": parsed.get("scan_config") if isinstance(parsed.get("scan_config"), dict) else {},
+    }
+
+
 def _normalize_action_plan_json(parsed: dict) -> dict | None:
     """
     نرمال‌سازی فرمت‌های مختلف action_plan JSON.
     مدل‌ها گاهی فرمت‌های متفاوتی برمی‌گردونن — اینجا همه رو به فرمت استاندارد تبدیل می‌کنیم.
     فرمت استاندارد: {"files": [{"path": ..., "content": ..., "operation": ...}], "commit_message": ...}
+
+    🆕 پشتیبانی از ask_user و route_to:
+    - اگر parsed["ask_user"] معتبر باشد → برگردان {"ask_user": {...}, "commit_message": ""}
+    - اگر parsed["route_to"] معتبر باشد → برگردان {"route_to": {...}, "commit_message": ""}
     """
     if not parsed or not isinstance(parsed, dict):
         return None
+
+    # 🆕 ask_user — اولویت بالاتر از files (اگر هر دو بود، ask_user جلوست)
+    if parsed.get("ask_user"):
+        norm_q = _normalize_ask_user(parsed["ask_user"])
+        if norm_q:
+            return {
+                "ask_user": norm_q,
+                "commit_message": "",
+            }
+
+    # 🆕 route_to — مسیریابی به deep_scan
+    if parsed.get("route_to"):
+        norm_r = _normalize_route_to(parsed)
+        if norm_r:
+            return {
+                "route_to": norm_r,
+                "commit_message": "",
+            }
 
     files = None
 
@@ -12175,6 +12385,15 @@ def _extract_all_action_plans_from_response(content: str, is_truncated: bool = F
 
     # پیدا کردن تمام بلوک‌های ```json...``` کامل
     json_blocks = re.findall(r'```json\s*\n(.*?)\n```', content, re.DOTALL)
+    # 🆕 short-circuit: اگر بلوکی شامل ask_user یا route_to معتبر بود، همان را برگردان
+    for block in json_blocks:
+        try:
+            parsed = json.loads(block)
+            normalized = _normalize_action_plan_json(parsed)
+            if normalized and (normalized.get("ask_user") or normalized.get("route_to")):
+                return normalized
+        except (json.JSONDecodeError, Exception):
+            pass
     for block in json_blocks:
         try:
             parsed = json.loads(block)
@@ -14690,7 +14909,10 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     pass
 
                 # لایه ۲: اگر فایل‌ها خوانده نشدن، action_plan حذف شود
-                if not has_q_code and q_action_plan is not None:
+                # 🆕 (clarify-first) — استثنا: اگر action_plan فقط ask_user/route_to
+                # است (هیچ فایل تولیدی ندارد)، نباید strip شود — این طبیعی است.
+                _q_is_clarify = bool(q_action_plan and (q_action_plan.get("ask_user") or q_action_plan.get("route_to")))
+                if not has_q_code and q_action_plan is not None and not _q_is_clarify:
                     slog.warning(f"[smart-chat QUESTION] AI generated action_plan without reading files — stripped")
                     q_action_plan = None
 
@@ -15146,7 +15368,9 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     action_plan = _extract_all_action_plans_from_response(_err_content, is_truncated=_err_is_truncated)
 
                     # لایه ۲: اگر فایل‌ها خوانده نشدن، action_plan حذف شود
-                    if not has_err_code_files and action_plan is not None:
+                    # 🆕 (clarify-first) — ask_user/route_to استثنا است
+                    _err_is_clarify = bool(action_plan and (action_plan.get("ask_user") or action_plan.get("route_to")))
+                    if not has_err_code_files and action_plan is not None and not _err_is_clarify:
                         slog.warning(f"[smart-chat ERROR_LOG] AI generated action_plan without reading files — stripped")
                         action_plan = None
 
@@ -15928,12 +16152,14 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     action_plan = _extract_all_action_plans_from_response(content, is_truncated=_act_is_truncated)
 
                     # لایه ۲: اگر فایل‌ها خوانده نشدن، action_plan حذف شود (جلوگیری از محتوای ساختگی)
-                    if not has_code_files and action_plan is not None:
+                    # 🆕 (clarify-first) — ask_user/route_to استثنا
+                    _act_is_clarify = bool(action_plan and (action_plan.get("ask_user") or action_plan.get("route_to")))
+                    if not has_code_files and action_plan is not None and not _act_is_clarify:
                         slog.warning(f"[smart-chat ACTION] AI generated action_plan without reading files — stripped. Files in plan: {[f.get('path') for f in (action_plan.get('files') or [])]}")
                         action_plan = None
 
                     # لایه ۳: فایل‌هایی که واقعاً خوانده نشدن ولی AI محتوا حدس زده — حذف
-                    if action_plan and has_code_files and selected:
+                    if action_plan and not _act_is_clarify and has_code_files and selected:
                         _read_set = set(selected)
                         _plan_files = action_plan.get("files", [])
                         _verified = [f for f in _plan_files if f.get("path") in _read_set or f.get("operation") == "create"]

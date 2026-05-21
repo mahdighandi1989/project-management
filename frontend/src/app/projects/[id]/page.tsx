@@ -382,6 +382,11 @@ export default function ProjectDetailPage() {
   // و detail های اضافی نمایش داده می‌شوند). by default همه collapsed.
   const [expandedProposalIds, setExpandedProposalIds] = useState<Set<string>>(new Set());
   const [applyAllInFlight, setApplyAllInFlight] = useState<boolean>(false);
+  // 🆕 (clarify-first) — پاسخ‌های در حال تایپ کاربر به سوالات ask_user.
+  // key = msgId، value = { single_id?: string, multi_ids?: Set<string>, text?: string }
+  const [clarifyDrafts, setClarifyDrafts] = useState<Record<string, { single?: string; multi?: string[]; text?: string }>>({});
+  // پیام‌هایی که کاربر روی آن‌ها پاسخ ask_user داده — برای hide دکمه ارسال
+  const [clarifyAnswered, setClarifyAnswered] = useState<Set<string>>(new Set());
   const scanPollRef = useRef<NodeJS.Timeout | null>(null);
   // 🔧 فیلتر انواع اکشن‌ها - همه فعال بجز scroll و network-request پرسر و صدا
   const [inspectorActionFilters, setInspectorActionFilters] = useState<Record<string, boolean>>({
@@ -4712,6 +4717,29 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         collectedAnalysis.push(stepResponseContent.slice(0, 500));
         if (!stepFilesWereRead) allFilesWereRead = false;
 
+        // 🆕 (clarify-first) — اگر AI در میانهٔ stepwise سوال پرسید،
+        // اجرا را متوقف کن و فقط پیام با ask_user نمایش بده. ادامه بعد از
+        // پاسخ کاربر دستی شروع می‌شود (کاربر باید پیام جدید بفرستد).
+        if (stepActionPlan?.ask_user || stepActionPlan?.route_to) {
+          setInspectorChatMessages(prev => [...prev, {
+            id: `ms_clarify_${i}_${Date.now()}`,
+            role: 'assistant' as const,
+            content: `**مرحله ${step.step_number}/${steps.length}** — AI نیاز به پاسخ شما دارد قبل از ادامه:\n\n${stepResponseContent}`,
+            model_id: lastModelUsed,
+            timestamp: new Date(),
+            action_type: 'smart_action' as any,
+            action_plan: stepActionPlan,
+            files_were_read: stepFilesWereRead,
+          } as any]);
+          setInspectorChatMessages(prev => [...prev, {
+            id: `ms_pause_${Date.now()}`,
+            role: 'system' as const,
+            content: `⏸️ اجرای مرحله‌ای متوقف شد — لطفاً به سوال بالا پاسخ بده تا AI با تصمیم تو ادامه دهد.`,
+            timestamp: new Date(),
+          }]);
+          return;
+        }
+
         if (stepActionPlan?.files?.length) {
           for (const file of stepActionPlan.files) {
             // اگه فایل قبلاً تغییر داده شده، جایگزین کن
@@ -5043,6 +5071,52 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       setSendToOversightLoading(false);
       return false;
     }
+  };
+
+  // 🆕 (clarify-first) — ارسال پاسخ کاربر به سوال ask_user به‌عنوان پیام بعدی
+  // به smart-chat با تگ مشخص [user_clarification]. backend این پیشوند را
+  // می‌بیند و می‌فهمد که این continuation است نه درخواست جدید.
+  const submitClarificationAnswer = (msgId: string, askUser: any) => {
+    const draft = clarifyDrafts[msgId] || {};
+    let answerText = '';
+    let answerLabel = '';
+    const qtype = askUser?.type || 'single';
+    if (qtype === 'text') {
+      const t = (draft.text || '').trim();
+      if (!t) return;
+      answerText = t;
+      answerLabel = t;
+    } else if (qtype === 'single') {
+      const id = draft.single;
+      if (!id) return;
+      const opt = (askUser.options || []).find((o: any) => o.id === id);
+      if (!opt) return;
+      answerText = `id=${id}`;
+      answerLabel = opt.label;
+    } else if (qtype === 'multi') {
+      const ids = draft.multi || [];
+      if (ids.length === 0) return;
+      const labels = ids
+        .map((id: string) => (askUser.options || []).find((o: any) => o.id === id))
+        .filter(Boolean)
+        .map((o: any) => o.label);
+      answerText = `ids=${ids.join(',')}`;
+      answerLabel = labels.join('، ');
+    }
+    setClarifyAnswered(prev => new Set([...Array.from(prev), msgId]));
+    // محلی نمایش پاسخ کاربر در چت — backend هم همین پیام را ذخیره می‌کند
+    const userVisibleMsg = `📝 پاسخ به سوال:\n«${askUser.question}»\n\n✅ ${answerLabel}`;
+    const tagged = `[user_clarification ref=${msgId} qtype=${qtype}] پاسخ من به سوال «${askUser.question}»: ${answerText} (${answerLabel}). حالا بر اساس این تصمیم action_plan کامل با files و render_actions تولید کن.`;
+    // برای جلوی همشدت ارسال دو پیام، یک پیام ترکیبی می‌فرستیم
+    setInspectorChatInput('');
+    sendInspectorChat(tagged);
+    // محلی بلافاصله نمایش بده تا کاربر بفهمد ثبت شد
+    setInspectorChatMessages(prev => [...prev, {
+      id: `clarify_user_${Date.now()}`,
+      role: 'system' as const,
+      content: userVisibleMsg,
+      timestamp: new Date(),
+    } as any]);
   };
 
   const sendInspectorChat = async (
@@ -5470,12 +5544,14 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   // ≥۲مین تلاش پشت سر هم است، علامت‌گذاری stuck تا UI به
                   // کاربر گزینهٔ تغییر مدل/فرموله‌بندی را پیشنهاد دهد.
                   const _hasRealPlan = data.action_plan && Array.isArray(data.action_plan.files) && data.action_plan.files.length > 0;
+                  // 🆕 (clarify-first) — ask_user و route_to هم پاسخ معتبر هستند
+                  const _hasClarify = !!(data.action_plan?.ask_user || data.action_plan?.route_to);
                   const _wasActionMode = (data.type === 'action' || data.has_action);
-                  if (_wasActionMode && !_hasRealPlan) {
+                  if (_wasActionMode && !_hasRealPlan && !_hasClarify) {
                     if (inspectorRetryAttemptRef.current >= 2) {
                       setInspectorRetryStuck(true);
                     }
-                  } else if (_hasRealPlan) {
+                  } else if (_hasRealPlan || _hasClarify) {
                     // پاسخ موفق — counter ریست
                     inspectorRetryAttemptRef.current = 0;
                     setInspectorRetryStuck(false);
@@ -6386,6 +6462,26 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                 description: step.description,
                 content: stepResponseContent.slice(0, 500),
               });
+              // 🆕 (clarify-first) — همان رفتار توقف stepwise در visual-debug
+              if (stepActionPlan?.ask_user || stepActionPlan?.route_to) {
+                setInspectorChatMessages(prev => [...prev, {
+                  id: `vd_ms_clarify_${i}_${Date.now()}`,
+                  role: 'assistant' as const,
+                  content: `**مرحله ${step.step_number}/${vdSteps.length}** — AI نیاز به پاسخ شما دارد:\n\n${stepResponseContent}`,
+                  model_id: lastModelUsed,
+                  timestamp: new Date(),
+                  action_type: 'smart_action' as any,
+                  action_plan: stepActionPlan,
+                  files_were_read: stepFilesWereRead,
+                } as any]);
+                setInspectorChatMessages(prev => [...prev, {
+                  id: `vd_ms_pause_${Date.now()}`,
+                  role: 'system' as const,
+                  content: `⏸️ اجرای مرحله‌ای visual-debug متوقف شد — لطفاً به سوال بالا پاسخ بده.`,
+                  timestamp: new Date(),
+                }]);
+                return;
+              }
               if (stepActionPlan?.files?.length) {
                 for (const file of stepActionPlan.files) {
                   const existingIdx = collectedActionFiles.findIndex((f: any) => f.path === file.path);
@@ -14888,6 +14984,117 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                               {fixLoading ? '...' : '🔧 اصلاح'}
                             </button>
                           )}
+                          {/* 🆕 (clarify-first) — کارت سوال از کاربر */}
+                          {(msg as any).action_plan?.ask_user && (() => {
+                            const askUser = (msg as any).action_plan.ask_user;
+                            const answered = clarifyAnswered.has(msg.id);
+                            const draft = clarifyDrafts[msg.id] || {};
+                            const qtype = askUser.type || 'single';
+                            return (
+                              <div className="w-full mt-2 p-3 bg-blue-50 dark:bg-blue-900/20 border-2 border-blue-300 dark:border-blue-700 rounded-lg text-[12px]">
+                                <div className="font-bold text-blue-800 dark:text-blue-200 mb-1">❓ {askUser.question}</div>
+                                {askUser.context && (
+                                  <div className="text-[11px] text-blue-700 dark:text-blue-300 mb-2 opacity-80">{askUser.context}</div>
+                                )}
+                                {answered ? (
+                                  <div className="text-[11px] text-green-700 dark:text-green-400 italic">✅ پاسخ ارسال شد — منتظر تحلیل بعدی...</div>
+                                ) : qtype === 'text' ? (
+                                  <div className="flex flex-col gap-2">
+                                    <textarea
+                                      value={draft.text || ''}
+                                      onChange={(e) => setClarifyDrafts(prev => ({ ...prev, [msg.id]: { ...prev[msg.id], text: e.target.value } }))}
+                                      placeholder="پاسخ خود را بنویس..."
+                                      className="w-full p-2 border border-blue-300 dark:border-blue-600 rounded text-[11px] bg-white dark:bg-gray-800 min-h-[60px]"
+                                      onClick={(e) => e.stopPropagation()}
+                                    />
+                                    <button
+                                      onClick={(e) => { e.stopPropagation(); submitClarificationAnswer(msg.id, askUser); }}
+                                      disabled={!(draft.text || '').trim() || inspectorChatLoading}
+                                      className="self-start text-[11px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 disabled:opacity-50"
+                                    >
+                                      📤 ارسال پاسخ
+                                    </button>
+                                  </div>
+                                ) : qtype === 'single' ? (
+                                  <div className="flex flex-col gap-1.5">
+                                    {(askUser.options || []).map((opt: any) => (
+                                      <label key={opt.id} className="flex items-start gap-2 p-2 border border-blue-200 dark:border-blue-700 rounded cursor-pointer hover:bg-blue-100 dark:hover:bg-blue-800/30" onClick={(e) => e.stopPropagation()}>
+                                        <input
+                                          type="radio"
+                                          name={`clarify_${msg.id}`}
+                                          checked={draft.single === opt.id}
+                                          onChange={() => setClarifyDrafts(prev => ({ ...prev, [msg.id]: { ...prev[msg.id], single: opt.id } }))}
+                                          className="mt-0.5"
+                                        />
+                                        <div className="flex-1">
+                                          <div className="font-medium text-blue-900 dark:text-blue-100">{opt.label}</div>
+                                          {opt.description && <div className="text-[10px] text-blue-700 dark:text-blue-300 opacity-80 mt-0.5">{opt.description}</div>}
+                                        </div>
+                                      </label>
+                                    ))}
+                                    <button
+                                      onClick={(e) => { e.stopPropagation(); submitClarificationAnswer(msg.id, askUser); }}
+                                      disabled={!draft.single || inspectorChatLoading}
+                                      className="self-start text-[11px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 disabled:opacity-50 mt-1"
+                                    >
+                                      📤 ارسال پاسخ
+                                    </button>
+                                  </div>
+                                ) : qtype === 'multi' ? (
+                                  <div className="flex flex-col gap-1.5">
+                                    {(askUser.options || []).map((opt: any) => {
+                                      const isChecked = (draft.multi || []).includes(opt.id);
+                                      return (
+                                        <label key={opt.id} className="flex items-start gap-2 p-2 border border-blue-200 dark:border-blue-700 rounded cursor-pointer hover:bg-blue-100 dark:hover:bg-blue-800/30" onClick={(e) => e.stopPropagation()}>
+                                          <input
+                                            type="checkbox"
+                                            checked={isChecked}
+                                            onChange={() => setClarifyDrafts(prev => {
+                                              const curr = prev[msg.id]?.multi || [];
+                                              const next = isChecked ? curr.filter((x: string) => x !== opt.id) : [...curr, opt.id];
+                                              return { ...prev, [msg.id]: { ...prev[msg.id], multi: next } };
+                                            })}
+                                            className="mt-0.5"
+                                          />
+                                          <div className="flex-1">
+                                            <div className="font-medium text-blue-900 dark:text-blue-100">{opt.label}</div>
+                                            {opt.description && <div className="text-[10px] text-blue-700 dark:text-blue-300 opacity-80 mt-0.5">{opt.description}</div>}
+                                          </div>
+                                        </label>
+                                      );
+                                    })}
+                                    <button
+                                      onClick={(e) => { e.stopPropagation(); submitClarificationAnswer(msg.id, askUser); }}
+                                      disabled={(draft.multi || []).length === 0 || inspectorChatLoading}
+                                      className="self-start text-[11px] bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 disabled:opacity-50 mt-1"
+                                    >
+                                      📤 ارسال پاسخ ({(draft.multi || []).length} انتخاب)
+                                    </button>
+                                  </div>
+                                ) : null}
+                              </div>
+                            );
+                          })()}
+                          {/* 🆕 (clarify-first) — کارت مسیریابی به deep_scan */}
+                          {(msg as any).action_plan?.route_to?.target === 'deep_scan' && !clarifyAnswered.has(msg.id) && (
+                            <div className="w-full mt-2 p-3 bg-purple-50 dark:bg-purple-900/20 border-2 border-purple-300 dark:border-purple-700 rounded-lg text-[12px]">
+                              <div className="font-bold text-purple-800 dark:text-purple-200 mb-1">🔬 نیاز به اسکن عمیق</div>
+                              <div className="text-[11px] text-purple-700 dark:text-purple-300 mb-2">{(msg as any).action_plan.route_to.reason || 'این تغییر روی چند ماژول اثر دارد.'}</div>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const cfg = (msg as any).action_plan.route_to.scan_config || {};
+                                  const sections = (cfg.sections || []).join('، ') || 'کل پروژه';
+                                  const focusNotes = cfg.focus_notes || (msg as any).original_message || '';
+                                  setClarifyAnswered(prev => new Set([...Array.from(prev), msg.id]));
+                                  sendInspectorChat(`[user_clarification ref=${msg.id} qtype=route] اسکن عمیق را روی sections=${sections} با focus="${focusNotes}" اجرا کن.`);
+                                }}
+                                className="text-[11px] bg-purple-600 text-white px-3 py-1 rounded hover:bg-purple-700"
+                              >
+                                🚀 شروع اسکن عمیق
+                              </button>
+                            </div>
+                          )}
                           {/* 🧠 دکمه اعمال تغییرات روی پاسخ‌های smart-chat */}
                           {(msg as any).action_type === 'smart_action' && (msg as any).action_plan?.files?.length > 0 && !(msg as any)._is_multi_step_part && (
                             (msg as any).is_multi_step_report ? (
@@ -14964,7 +15171,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             </div>
                           )}
                           {/* نشانگر has_action بدون action_plan معتبر - دکمه درخواست مجدد اصلاح (مستقیم — بدون ساختارمند مجدد) */}
-                          {(msg as any).action_type === 'smart_action' && (!(msg as any).action_plan || !(msg as any).action_plan?.files?.length) && (
+                          {(msg as any).action_type === 'smart_action' && (!(msg as any).action_plan || !(msg as any).action_plan?.files?.length) && !(msg as any).action_plan?.ask_user && !(msg as any).action_plan?.route_to && (
                             inspectorRetryStuck ? (
                               // 🆕 (anti-stuck-loop) — بعد از ۲ retry ناموفق پشت سر هم،
                               // دکمه retry به یک پیام راهنما تبدیل می‌شود تا کاربر در
