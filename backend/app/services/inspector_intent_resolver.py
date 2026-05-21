@@ -99,6 +99,81 @@ def _extract_focus_keywords(text: str) -> List[str]:
     return out[:12]
 
 
+# 🆕 (v3 simple-op detection) — اگر درخواست کاربر یک عملیات ساده روی
+# یک فایل مشخص است (مثل «runtime.txt بساز»، «این خط را به requirements
+# اضافه کن»)، **scan نباید trigger شود** — directly به smart-chat برود.
+# scan ۱۲-pass به‌صورت ذاتی scope broad می‌گیرد و برای fix دقیق و کوچک
+# اشتباه است.
+# Verb های file-creation
+_CREATE_VERBS_FA = ("بساز", "ایجاد کن", "ساختن", "ایجاد", "بسازش")
+_CREATE_VERBS_EN = ("create", "make", "generate", "build")
+
+# Pattern برای filename — هر چیزی شامل دات و extension، یا نام‌های شناخته‌شده
+# بدون extension (Dockerfile، Makefile، …)
+_FILENAME_RE = re.compile(
+    r"(?:^|[\s`'\"(/])("
+    r"(?:[\w-]+/)*[\w.-]+\.[a-z]{1,5}"  # با extension
+    r"|Dockerfile|Makefile|Procfile|Caddyfile|Vagrantfile|Rakefile"  # بدون extension
+    r"|\.env(?:\.\w+)?|\.gitignore|\.dockerignore|\.npmrc"  # dotfiles
+    r")(?:[\s`'\";.,)]|$)",
+    re.IGNORECASE,
+)
+
+
+def _is_simple_file_op(message: str) -> bool:
+    """آیا پیام کاربر یک عملیات file-level ساده است که scan لازم ندارد؟
+
+    تشخیص ساده:
+    1. پیام شامل filename صریح (با extension یا نام شناخته‌شده مثل Dockerfile)
+    2. پیام شامل verb file-creation (بساز/ایجاد کن/create/make/...)
+    3. پیام کوتاه‌تر از ۵۰۰۰ کاراکتر (در حالت structured prompt)
+    4. **و** پیام شامل کلیدواژه‌های scope-broad نیست (auth، bug، investigate)
+
+    مثال‌های مثبت:
+    - «فایل runtime.txt بساز با محتوای python-3.11.10»
+    - «create Dockerfile with these contents»
+    - «بساز فایل .env.example»
+
+    مثال‌های منفی:
+    - «این صفحه باگ دارد، بررسی کن» (هیچ filename یا create verb)
+    - «امکان dark-mode اضافه کن» (feature، broad scope)
+    - «deploy fail شد» (vague)
+    """
+    if not message or len(message) > 5000:
+        return False
+
+    msg_low = message.lower()
+
+    # کلیدواژه‌های scope-broad — اگر این‌ها هستند، simple نیست
+    broad_markers = (
+        "بررسی کن", "investigate", "audit", "review",
+        "این صفحه", "این فایل", "این feature", "اضافه کن قابلیت",
+        "amer شد", "fail شد", "نمی‌کنه", "ارور",
+    )
+    if any(bm in msg_low for bm in broad_markers):
+        return False
+
+    # filename صریح موجود؟
+    has_filename = bool(_FILENAME_RE.search(message))
+    if not has_filename:
+        return False
+
+    # verb file-creation موجود؟
+    has_create_verb = any(v in message for v in _CREATE_VERBS_FA) or \
+                      any(v in msg_low for v in _CREATE_VERBS_EN)
+    if has_create_verb:
+        return True
+
+    # patterns add-line-to-file
+    if re.search(
+        r"(?:خط|line|محتوای).{0,80}(?:به|to)\s+",
+        message, re.IGNORECASE,
+    ):
+        return True
+
+    return False
+
+
 # 🆕 (v3 chat-history) — تشخیص اینکه آیا پیام جدید ادامهٔ context قبلی
 # است یا یک سؤال/درخواست مستقل. اگر continuation، خلاصه‌ای از context
 # قبلی به focus_notes می‌رود تا scan با اشراف به history کار کند.
@@ -417,6 +492,16 @@ def resolve_intent_from_chat_context(
     user_message = (user_message or "").strip()
     if not user_message:
         return ResolvedScanIntent(should_scan=False, reason="empty_message")
+
+    # 🆕 (v3 simple-op gate) — اولویت اول: اگر درخواست یک عملیات ساده
+    # روی فایل مشخص است (مثل «runtime.txt بساز»)، scan ۱۲-pass overkill
+    # است و نتایج بی‌ربط می‌دهد. مستقیماً به smart-chat می‌رود.
+    if _is_simple_file_op(user_message):
+        return ResolvedScanIntent(
+            should_scan=False,
+            reason="simple_file_op",
+            focus_notes=user_message,
+        )
 
     # 🆕 (v2 M1) — focus_notes را زودتر بسازیم تا در مسیر vague-fallback
     # هم در دسترس باشد. قبلاً تنها در بخش پایانی ساخته می‌شد.

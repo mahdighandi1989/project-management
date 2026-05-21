@@ -1413,7 +1413,13 @@ export default function ProjectDetailPage() {
             if (p.db_id != null && restoredByDbId.has(p.db_id)) {
               const updated = restoredByDbId.get(p.db_id);
               restoredByDbId.delete(p.db_id);  // mark as consumed
-              return updated;
+              // 🆕 (v3 timestamp preservation) — اگر این پیام قبلاً در
+              // state بود، timestamp اصلی حفظ شود تا با هر refresh ساعت
+              // پیام جابجا نشود (به دلیل تفاوت لحظهٔ DB write vs client)
+              return {
+                ...updated,
+                timestamp: p.timestamp || updated.timestamp,
+              };
             }
             return p;
           });
@@ -1496,19 +1502,19 @@ export default function ProjectDetailPage() {
             clearInterval(scanPollRef.current);
             scanPollRef.current = null;
           }
-          // 🆕 (v2 audit B2) — restore را قبل از null-out state انجام بده
-          // تا اگر restore fail کرد، state polling حفظ شود و retry بشه
+          // 🆕 (v3 reliability) — restore را با تلاش‌های متعدد انجام بده
+          // تا قطعاً کاربر پیام scan_complete را ببیند بدون نیاز به
+          // refresh دستی.
           let restoreOk = false;
           try {
             await restoreInspectorChatFromDb(true);
             restoreOk = true;
           } catch (re) {
-            // restore شکست خورد — یک پیام خطا اضافه کن ولی state را reset
-            // نکن تا اگر کاربر retry کرد دوباره تلاش شود
+            // پیام خطا
             setInspectorChatMessages(prev => [...prev, {
               id: `restore_err_${Date.now()}`,
               role: 'assistant' as const,
-              content: '⚠️ scan کامل شد ولی reload پیام‌ها ناموفق بود. لطفاً refresh کنید.',
+              content: '⚠️ scan کامل شد ولی reload پیام‌ها ناموفق بود. تلاش مجدد در ۲ ثانیه...',
               timestamp: new Date(),
             }]);
           }
@@ -1518,9 +1524,15 @@ export default function ProjectDetailPage() {
             setActiveScanSessionId(null);
             setScanProgress(null);
           }
+          // 🆕 (v3 reliability) — backup retry پس از ۲ ثانیه برای اطمینان
+          // از اینکه پیام scan_complete حتماً visible شود. این از stale
+          // closure یا race condition جلوگیری می‌کند.
+          setTimeout(() => {
+            restoreInspectorChatFromDb(true).catch(() => {});
+          }, 2000);
         }
       } catch {
-        consecutiveErrors++;  // ignore network blips؛ پایش error count
+        consecutiveErrors++;
       }
     }, 3000);
     return () => {
