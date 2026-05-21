@@ -478,6 +478,25 @@ export default function ProjectDetailPage() {
   const inspectorRetryAttemptRef = useRef<number>(0);
   const [inspectorRetryStuck, setInspectorRetryStuck] = useState<boolean>(false);
   const [inspectorOpType, setInspectorOpType] = useState<'investigate' | 'fix' | null>(null);
+  // 🆕 (clarify-first auto-resume) — وقتی executeMultiStep در مرحله‌ای متوقف
+  // می‌شود به دلیل ask_user، state کاملش (steps باقی‌مانده + collected files
+  // + ...) اینجا ذخیره می‌شود. وقتی کاربر پاسخ ask_user را داد و smart-chat
+  // پاسخ با action_plan.files برگرداند، خودکار از همان جا ادامه می‌یابد.
+  const pendingStepwiseRef = useRef<{
+    rawMessage: string;
+    basePrompt: string;
+    steps: { step_number: number; description: string }[];
+    completedIndex: number;
+    collectedActionFiles: any[];
+    collectedRenderActions: any[];
+    collectedAnalysis: string[];
+    collectedStackTraceWarnings: string[];
+    commitMessage: string;
+    allFilesWereRead: boolean;
+    lastModelUsed: string | null;
+    pausedAtMsgId: string;
+    awaitingResume: boolean;
+  } | null>(null);
 
   // 🆕 انتخاب خودکار مدل و همکاری
   const [inspectorAutoSelect, setInspectorAutoSelect] = useState(true); // پیش‌فرض فعال
@@ -3024,6 +3043,21 @@ export default function ProjectDetailPage() {
             ...(m.reply_to_id ? { reply_to_id: m.reply_to_id, reply_to_content: m.reply_to_content } : {}),
           }));
           setInspectorChatMessages(loadedMessages);
+          // 🆕 (clarify-first persistence) — answered set از history
+          const _answered = new Set<string>();
+          for (let _i = 0; _i < loadedMessages.length; _i++) {
+            const _lm: any = loadedMessages[_i];
+            if (_lm.action_plan?.ask_user || _lm.action_plan?.route_to) {
+              for (let _j = _i + 1; _j < loadedMessages.length; _j++) {
+                const _nm: any = loadedMessages[_j];
+                if (_nm.role === 'user' && typeof _nm.content === 'string' && _nm.content.includes('[user_clarification')) {
+                  _answered.add(_lm.id);
+                  break;
+                }
+              }
+            }
+          }
+          if (_answered.size > 0) setClarifyAnswered(_answered);
         }
 
         console.log('📋 Inspector session:', data.existing ? 'loaded' : 'created', data.session.id);
@@ -3103,6 +3137,24 @@ export default function ProjectDetailPage() {
           ...(m.reply_to_id ? { reply_to_id: m.reply_to_id, reply_to_content: m.reply_to_content } : {}),
         }));
         setInspectorChatMessages(loadedMessages);
+        // 🆕 (clarify-first persistence) — پیام‌هایی که ask_user داشتند
+        // و کاربر بعداً پاسخ داده، باید در answered set باشند تا کارت
+        // مجدداً ظاهر نشود.
+        const _answered = new Set<string>();
+        for (let _i = 0; _i < loadedMessages.length; _i++) {
+          const _lm = loadedMessages[_i];
+          if (_lm.action_plan?.ask_user || _lm.action_plan?.route_to) {
+            // اگر پیام بعدی (هر چه قدر بعد) از کاربر است و با [user_clarification شروع می‌شود، answered
+            for (let _j = _i + 1; _j < loadedMessages.length; _j++) {
+              if (loadedMessages[_j].role === 'user' && typeof loadedMessages[_j].content === 'string'
+                  && loadedMessages[_j].content.includes('[user_clarification')) {
+                _answered.add(_lm.id);
+                break;
+              }
+            }
+          }
+        }
+        if (_answered.size > 0) setClarifyAnswered(_answered);
       }
     } catch (err) {
       console.error('Error loading archived session:', err);
@@ -4518,61 +4570,83 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
   };
 
   // 🔄 اجرای مرحله‌ای: هر مرحله جداگانه اجرا میشه و نتایج جمع میشه
+  // 🆕 (clarify-first) — اگر _resumeState داده شود، از همان نقطه (بعد از پاسخ
+  // کاربر به ask_user) ادامه می‌دهد بدون نمایش پیام کاربر/نقشه مراحل دوباره.
   const executeMultiStep = async (
     rawMessage: string,
     basePrompt: string,
     steps: { step_number: number; description: string }[],
+    _resumeState?: {
+      startIndex: number;
+      collectedActionFiles: any[];
+      collectedRenderActions: any[];
+      collectedAnalysis: string[];
+      collectedStackTraceWarnings: string[];
+      commitMessage: string;
+      allFilesWereRead: boolean;
+      lastModelUsed: string;
+    },
   ) => {
     setInspectorChatLoading(true);
     setInspectorOpLock(true);
     setInspectorOpType('investigate');
 
-    // نمایش پیام کاربر اصلی
-    const userMsgId = `user_ms_${Date.now()}`;
-    setInspectorChatMessages(prev => [...prev, {
-      id: userMsgId,
-      role: 'user' as const,
-      content: basePrompt,
-      timestamp: new Date(),
-      original_prompt: rawMessage,
-      enhanced_prompt: basePrompt,
-    } as any]);
+    if (!_resumeState) {
+      // نمایش پیام کاربر اصلی
+      const userMsgId = `user_ms_${Date.now()}`;
+      setInspectorChatMessages(prev => [...prev, {
+        id: userMsgId,
+        role: 'user' as const,
+        content: basePrompt,
+        timestamp: new Date(),
+        original_prompt: rawMessage,
+        enhanced_prompt: basePrompt,
+      } as any]);
 
-    // ذخیره پیام کاربر
-    if (inspectorSessionIdRef.current) {
-      fetch(`${API_BASE}/api/render/inspector/session/message`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          session_id: inspectorSessionIdRef.current,
-          role: 'user',
-          content: basePrompt,
-          extra_data: { original_prompt: rawMessage, enhanced_prompt: basePrompt },
-        })
-      }).catch(() => {});
+      // ذخیره پیام کاربر
+      if (inspectorSessionIdRef.current) {
+        fetch(`${API_BASE}/api/render/inspector/session/message`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: inspectorSessionIdRef.current,
+            role: 'user',
+            content: basePrompt,
+            extra_data: { original_prompt: rawMessage, enhanced_prompt: basePrompt },
+          })
+        }).catch(() => {});
+      }
+
+      // نمایش نقشه مراحل
+      setInspectorChatMessages(prev => [...prev, {
+        id: `ms_plan_${Date.now()}`,
+        role: 'system' as const,
+        content: `📋 درخواست به ${steps.length} مرحله تجزیه شد:\n${steps.map(s => `  ${s.step_number}. ${s.description}`).join('\n')}\n\n▶️ شروع اجرای مرحله‌ای...`,
+        timestamp: new Date(),
+      }]);
+    } else {
+      setInspectorChatMessages(prev => [...prev, {
+        id: `ms_resume_${Date.now()}`,
+        role: 'system' as const,
+        content: `▶️ ادامهٔ اجرای مرحله‌ای از مرحلهٔ ${_resumeState.startIndex + 1}/${steps.length}...`,
+        timestamp: new Date(),
+      }]);
     }
 
-    // نمایش نقشه مراحل
-    setInspectorChatMessages(prev => [...prev, {
-      id: `ms_plan_${Date.now()}`,
-      role: 'system' as const,
-      content: `📋 درخواست به ${steps.length} مرحله تجزیه شد:\n${steps.map(s => `  ${s.step_number}. ${s.description}`).join('\n')}\n\n▶️ شروع اجرای مرحله‌ای...`,
-      timestamp: new Date(),
-    }]);
-
-    const collectedActionFiles: any[] = [];
-    const collectedAnalysis: string[] = [];
+    const collectedActionFiles: any[] = _resumeState ? [..._resumeState.collectedActionFiles] : [];
+    const collectedAnalysis: string[] = _resumeState ? [..._resumeState.collectedAnalysis] : [];
     // 🆕 (v3 render-ops) — جمع‌آوری render_actions از هر مرحله
-    const collectedRenderActions: any[] = [];
+    const collectedRenderActions: any[] = _resumeState ? [..._resumeState.collectedRenderActions] : [];
     // 🆕 (v3 safety-net) — فایل‌هایی که در stack trace ذکر شده‌اند ولی AI
     // در action_plan قرار نداده — این یعنی فکس احتمالاً ناقص است
-    const collectedStackTraceWarnings: string[] = [];
-    let commitMessage = '';
-    let allFilesWereRead = true;
-    let lastModelUsed = '';
+    const collectedStackTraceWarnings: string[] = _resumeState ? [..._resumeState.collectedStackTraceWarnings] : [];
+    let commitMessage = _resumeState?.commitMessage || '';
+    let allFilesWereRead = _resumeState?.allFilesWereRead ?? true;
+    let lastModelUsed = _resumeState?.lastModelUsed || '';
     const modelIds = inspectorAutoSelect ? [] : inspectorSelectedModels;
 
-    for (let i = 0; i < steps.length; i++) {
+    const _startIndex = _resumeState?.startIndex ?? 0;
+    for (let i = _startIndex; i < steps.length; i++) {
       const step = steps[i];
       const stepId = `ms_step_${i}_${Date.now()}`;
 
@@ -4718,11 +4792,12 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         if (!stepFilesWereRead) allFilesWereRead = false;
 
         // 🆕 (clarify-first) — اگر AI در میانهٔ stepwise سوال پرسید،
-        // اجرا را متوقف کن و فقط پیام با ask_user نمایش بده. ادامه بعد از
-        // پاسخ کاربر دستی شروع می‌شود (کاربر باید پیام جدید بفرستد).
+        // اجرا را متوقف کن. state در pendingStepwiseRef ذخیره می‌شود تا
+        // بعد از پاسخ کاربر، خودکار از همان نقطه ادامه یابد.
         if (stepActionPlan?.ask_user || stepActionPlan?.route_to) {
+          const pausedMsgId = `ms_clarify_${i}_${Date.now()}`;
           setInspectorChatMessages(prev => [...prev, {
-            id: `ms_clarify_${i}_${Date.now()}`,
+            id: pausedMsgId,
             role: 'assistant' as const,
             content: `**مرحله ${step.step_number}/${steps.length}** — AI نیاز به پاسخ شما دارد قبل از ادامه:\n\n${stepResponseContent}`,
             model_id: lastModelUsed,
@@ -4734,9 +4809,28 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           setInspectorChatMessages(prev => [...prev, {
             id: `ms_pause_${Date.now()}`,
             role: 'system' as const,
-            content: `⏸️ اجرای مرحله‌ای متوقف شد — لطفاً به سوال بالا پاسخ بده تا AI با تصمیم تو ادامه دهد.`,
+            content: `⏸️ اجرای مرحله‌ای متوقف شد — لطفاً به سوال بالا پاسخ بده. بعد از پاسخ، ${steps.length - i - 1} مرحلهٔ باقی‌مانده خودکار ادامه پیدا می‌کند.`,
             timestamp: new Date(),
           }]);
+          // ذخیره state برای auto-resume
+          pendingStepwiseRef.current = {
+            rawMessage,
+            basePrompt,
+            steps,
+            completedIndex: i,  // i کامل نشد (به‌جای آن ask_user آمد)
+            collectedActionFiles: [...collectedActionFiles],
+            collectedRenderActions: [...collectedRenderActions],
+            collectedAnalysis: [...collectedAnalysis],
+            collectedStackTraceWarnings: [...collectedStackTraceWarnings],
+            commitMessage,
+            allFilesWereRead,
+            lastModelUsed,
+            pausedAtMsgId: pausedMsgId,
+            awaitingResume: false,
+          };
+          setInspectorChatLoading(false);
+          setInspectorOpLock(false);
+          setInspectorOpType(null);
           return;
         }
 
@@ -5104,6 +5198,12 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       answerLabel = labels.join('، ');
     }
     setClarifyAnswered(prev => new Set([...Array.from(prev), msgId]));
+    // 🆕 (clarify-first auto-resume) — اگر این پاسخ به یک ask_user است که در
+    // میانهٔ stepwise pause رخ داده، علامت بزن تا response handler خودکار
+    // بقیهٔ مراحل را resume کند.
+    if (pendingStepwiseRef.current && pendingStepwiseRef.current.pausedAtMsgId === msgId) {
+      pendingStepwiseRef.current.awaitingResume = true;
+    }
     // محلی نمایش پاسخ کاربر در چت — backend هم همین پیام را ذخیره می‌کند
     const userVisibleMsg = `📝 پاسخ به سوال:\n«${askUser.question}»\n\n✅ ${answerLabel}`;
     const tagged = `[user_clarification ref=${msgId} qtype=${qtype}] پاسخ من به سوال «${askUser.question}»: ${answerText} (${answerLabel}). حالا بر اساس این تصمیم action_plan کامل با files و render_actions تولید کن.`;
@@ -5502,6 +5602,50 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     setActiveScanId(data.scan_id);
                     setActiveScanSessionId(_effSession);
                   }
+                } else if (eventType === 'scan_clarification_needed') {
+                  // 🆕 (clarify-first) — deep scan قبل از شروع، scope را مبهم
+                  // تشخیص داد و یک پیام assistant با ask_user در DB log کرد.
+                  // ما باید پیام‌های session را refresh کنیم تا کاربر کارت
+                  // ClarificationCard را ببیند.
+                  responseReceived = true;
+                  inspectorBatchTaskKeyRef.current = null;
+                  try { sessionStorage.removeItem('inspector_batch_task'); } catch {}
+                  setInspectorChatMessages(prev => [...prev, {
+                    id: `scan_clarify_init_${Date.now()}`,
+                    role: 'system' as const,
+                    content: data.content || '🤔 قبل از شروع اسکن، یک سوال در چت اضافه شد. لطفاً پاسخ بده.',
+                    timestamp: new Date(),
+                  } as any]);
+                  // refresh messages تا ask_user log شده visible شود
+                  const _sid = data.session_id || inspectorSessionId;
+                  if (_sid) {
+                    setTimeout(async () => {
+                      try {
+                        const r = await fetch(`${API_BASE}/api/render/inspector/session/${_sid}/messages`);
+                        const j = await r.json();
+                        if (j.success && Array.isArray(j.messages)) {
+                          const existing = new Set(inspectorChatMessages.map(m => (m as any).db_id).filter(Boolean));
+                          const newOnes = j.messages.filter((m: any) => m.id && !existing.has(m.id));
+                          if (newOnes.length > 0) {
+                            const mapped = newOnes.map((m: any) => ({
+                              id: `db_${m.id}`,
+                              db_id: m.id,
+                              role: m.role,
+                              content: m.content,
+                              model_id: m.model_id,
+                              tokens_used: m.tokens_used,
+                              timestamp: new Date(m.created_at || Date.now()),
+                              action_type: m.action_type,
+                              ...(m.action_plan ? { action_plan: m.action_plan } : {}),
+                            } as any));
+                            setInspectorChatMessages(prev => [...prev, ...mapped]);
+                          }
+                        }
+                      } catch (e) {
+                        console.warn('refresh after scan_clarification failed:', e);
+                      }
+                    }, 500);
+                  }
                 } else if (eventType === 'scan_already_running') {
                   setInspectorChatMessages(prev => [...prev, {
                     id: `scan_busy_${Date.now()}`,
@@ -5555,6 +5699,60 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     // پاسخ موفق — counter ریست
                     inspectorRetryAttemptRef.current = 0;
                     setInspectorRetryStuck(false);
+                  }
+
+                  // 🆕 (clarify-first auto-resume) — اگر در حال wait بودیم
+                  // برای پاسخ به ask_user که در stepwise اتفاق افتاده، حالا
+                  // که پاسخ آمد، بقیهٔ مراحل را ادامه بده.
+                  if (pendingStepwiseRef.current?.awaitingResume) {
+                    const ps = pendingStepwiseRef.current;
+                    // اضافه کردن نتایج این پاسخ به collected (به‌عنوان نتیجهٔ مرحلهٔ pause شده)
+                    if (data.action_plan?.files?.length) {
+                      for (const f of data.action_plan.files) {
+                        const ei = ps.collectedActionFiles.findIndex((cf: any) => cf.path === f.path);
+                        if (ei >= 0) ps.collectedActionFiles[ei] = f;
+                        else ps.collectedActionFiles.push(f);
+                      }
+                      if (data.action_plan.commit_message) ps.commitMessage = data.action_plan.commit_message;
+                    }
+                    if (data.action_plan?.render_actions?.length) {
+                      for (const ra of data.action_plan.render_actions) {
+                        const key = `${ra?.type}:${ra?.service_name}:${ra?.key || ''}`;
+                        const ei = ps.collectedRenderActions.findIndex(
+                          (r: any) => `${r?.type}:${r?.service_name}:${r?.key || ''}` === key,
+                        );
+                        if (ei >= 0) ps.collectedRenderActions[ei] = ra;
+                        else ps.collectedRenderActions.push(ra);
+                      }
+                    }
+                    const _resumeFromIdx = ps.completedIndex + 1;
+                    const _resumeState = {
+                      startIndex: _resumeFromIdx,
+                      collectedActionFiles: ps.collectedActionFiles,
+                      collectedRenderActions: ps.collectedRenderActions,
+                      collectedAnalysis: ps.collectedAnalysis,
+                      collectedStackTraceWarnings: ps.collectedStackTraceWarnings,
+                      commitMessage: ps.commitMessage,
+                      allFilesWereRead: ps.allFilesWereRead,
+                      lastModelUsed: data.model_used || ps.lastModelUsed,
+                    };
+                    const rawMsg = ps.rawMessage;
+                    const basePrompt = ps.basePrompt;
+                    const allSteps = ps.steps;
+                    pendingStepwiseRef.current = null;
+                    if (_resumeFromIdx < allSteps.length) {
+                      setTimeout(() => {
+                        executeMultiStep(rawMsg, basePrompt, allSteps, _resumeState);
+                      }, 500);
+                    } else {
+                      // مراحل تمام شد — فقط یک پیام confirmation
+                      setInspectorChatMessages(prev => [...prev, {
+                        id: `ms_resume_done_${Date.now()}`,
+                        role: 'system' as const,
+                        content: `✅ همهٔ ${allSteps.length} مرحله کامل شد.`,
+                        timestamp: new Date(),
+                      } as any]);
+                    }
                   }
 
                   // 🔓 آزاد کردن قفل
@@ -14556,7 +14754,19 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           msg.role === 'action' ? 'text-emerald-800 dark:text-emerald-200' :
                           'text-gray-700 dark:text-gray-300'
                         }`}>
-                          {msg.content}
+                          {(() => {
+                            // 🆕 (clarify-first) — اگر پیام شامل ask_user است،
+                            // ```json ... ``` بلوک‌ها را از content پنهان کن چون
+                            // ClarificationCard جداگانه آن را به‌صورت structured نمایش می‌دهد.
+                            const _ap = (msg as any).action_plan;
+                            if (_ap && (_ap.ask_user || _ap.route_to) && typeof msg.content === 'string') {
+                              let cleaned = msg.content.replace(/```json\s*[\s\S]*?```/g, '').trim();
+                              // اگر بعد از پاکسازی چیزی باقی نمانده، یک پلیس‌هلدر کوتاه بگذار
+                              if (!cleaned) cleaned = '💬 منتظر پاسخ شما در کارت زیر هستم...';
+                              return cleaned;
+                            }
+                            return msg.content;
+                          })()}
                         </p>
 
                         {/* 🆕 (inspector-scan) — رندر proposalها در پیام scan_complete */}
