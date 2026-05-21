@@ -781,12 +781,19 @@ async def apply_all_staged(
                     logger.warning(f"apply_all: run_proposal {prop.get('proposal_id')} failed: {e}")
 
     # 2) جمع‌آوری همهٔ staged changes
+    # 🆕 (v3) — اگر selected_proposal_ids داده شد، فقط همان proposals
+    # شامل شوند
+    _selected_set = set(selected_proposal_ids) if selected_proposal_ids else None
     all_proposals = _find_session_proposals(session_id)
     staged: List[Tuple[Dict[str, Any], Dict[str, Any], int]] = []
     # هر مدخل: (proposal, change, message_id)
     for prop, mid in all_proposals:
         if prop.get("execution_status") != "applied_locally":
             continue
+        # filter by selected_proposal_ids
+        if _selected_set is not None:
+            if str(prop.get("proposal_id")) not in _selected_set:
+                continue
         for ch in (prop.get("staged_changes") or []):
             if isinstance(ch, dict) and ch.get("path"):
                 staged.append((prop, ch, mid))

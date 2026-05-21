@@ -14491,23 +14491,46 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                                         )}
                                       </div>
                                       {sessionId && status !== 'committed_and_pushed' && status !== 'failed' && (
-                                        <button
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            // 🆕 (v3) — مدل انتخاب‌شدهٔ کاربر را پاس بده
-                                            // نه اینکه backend default را استفاده کند
-                                            const selectedModel = inspectorSelectedModels[0] || undefined;
-                                            runInspectorProposal(pid, sessionId, selectedModel);
-                                          }}
-                                          disabled={running || applyAllInFlight}
-                                          className="text-[11px] bg-indigo-500 hover:bg-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed text-white px-2 py-1 rounded whitespace-nowrap flex-shrink-0"
-                                        >
-                                          {running
-                                            ? '⏳ در حال اجرا...'
-                                            : (status === 'applied_locally' || status === 'failed_syntax'
-                                                ? '↻ بازاجرا'
-                                                : '▶️ اجرا با AI')}
-                                        </button>
+                                        <div className="flex flex-col gap-1 flex-shrink-0">
+                                          <button
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              const selectedModel = inspectorSelectedModels[0] || undefined;
+                                              runInspectorProposal(pid, sessionId, selectedModel);
+                                            }}
+                                            disabled={running || applyAllInFlight}
+                                            className="text-[11px] bg-indigo-500 hover:bg-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed text-white px-2 py-1 rounded whitespace-nowrap"
+                                          >
+                                            {running
+                                              ? '⏳ در حال اجرا...'
+                                              : (status === 'applied_locally' || status === 'failed_syntax'
+                                                  ? '↻ بازاجرا'
+                                                  : '▶️ اجرا با AI')}
+                                          </button>
+                                          {/* 🆕 (v3) — دکمه commit فقط این یکی (وقتی staged است) */}
+                                          {status === 'applied_locally' && (
+                                            <button
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                if (!window.confirm(
+                                                  `این یک پیشنهاد را commit کنید؟\n\nعنوان: ${p.title}\n\nیک PR جداگانه در GitHub ساخته می‌شود.`,
+                                                )) return;
+                                                applyAllInspectorProposals(sessionId, {
+                                                  commit_message: `Inspector: ${p.title}`,
+                                                  include_unexecuted: false,
+                                                  model_id: inspectorSelectedModels[0] || undefined,
+                                                  selected_proposal_ids: [pid],
+                                                  force_apply: true,  // skip cross-proposal consistency برای single
+                                                });
+                                              }}
+                                              disabled={applyAllInFlight}
+                                              className="text-[10px] bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white px-2 py-1 rounded whitespace-nowrap"
+                                              title="فقط همین یک پیشنهاد را commit و push کن (PR جداگانه)"
+                                            >
+                                              📤 commit این
+                                            </button>
+                                          )}
+                                        </div>
                                       )}
                                     </div>
                                   </div>
