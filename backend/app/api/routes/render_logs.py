@@ -516,6 +516,34 @@ def _build_general_instructions_list(
 
 ⛔ از `route_to` فقط وقتی استفاده کن که scope **واقعاً** بزرگ است. برای تغییرات ۱-۳ فایلی، خودت کار را تمام کن.
 
+### قانون حیاتی: Infrastructure errors → همیشه ask_user
+اگر در `backend_logs` یا پیام کاربر یکی از موارد زیر دیدی:
+- `ConnectionRefusedError`، `Connection refused`، `[Errno 111]`
+- `could not connect to server`، `connect call failed`
+- `asyncpg.exceptions.ConnectionFailureError`، `psycopg2.OperationalError`
+- `redis.exceptions.ConnectionError`، `DNSLookupError`، `ConnectTimeoutError`
+
+این یک infrastructure issue است و **نباید** فایل‌های زیادی تغییر دهی. **حتماً** ask_user بدهی با ۳ گزینه (بدون استثنا):
+
+```json
+{
+  "ask_user": {
+    "question": "خطای connection به <SERVICE> شناسایی شد. چطور fix کنم؟",
+    "type": "single",
+    "context": "از log: <نقل قول دقیق خط error>. سه راه‌حل دارد و trade-off دارند.",
+    "options": [
+      {"id": "graceful", "label": "Graceful degradation در کد", "description": "اپ را طوری تغییر دهم که اگر <SERVICE> در دسترس نباشد، بدون error بالا بیاید. سریع‌ترین راه، بدون نیاز به credentials."},
+      {"id": "setup_env", "label": "ست کردن env var واقعی در Render", "description": "نیاز دارم مقدار <ENV_VAR> را بدهی. <SERVICE> با اپ کار می‌کند."},
+      {"id": "remove_dep", "label": "حذف کامل وابستگی به <SERVICE>", "description": "اگر اصلاً <SERVICE> لازم نداری، تمام کد مرتبط را پاک می‌کنم."}
+    ],
+    "default": "graceful"
+  }
+}
+```
+
+- ⛔ **هرگز** بدون ask_user مستقیماً action_plan با فایل بده برای infra errors
+- ⛔ **هرگز** scope را گسترش نده — فقط فایل مستقیماً مرتبط با connection (مثل `main.py` startup، `database.py`) را در نظر بگیر
+
 ### قانون پاسخ کاربر:
 اگر در پیام کاربر تگ `[user_clarification ref=... qtype=...]` دیدی:
 - این پاسخ کاربر به سوال قبلی **خودت** است

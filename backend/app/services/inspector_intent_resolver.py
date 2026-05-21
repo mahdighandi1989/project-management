@@ -99,6 +99,48 @@ def _extract_focus_keywords(text: str) -> List[str]:
     return out[:12]
 
 
+# 🆕 (clarify-first) — pattern های error های infrastructure که scan **نباید**
+# trigger شود برایشان. این error ها معمولاً یک fix هدفمند دارند (set env var،
+# graceful degradation، یا restart) و scan ۱۲-pass فقط overhead است.
+# مستقیم به smart-chat می‌روند که می‌تواند ask_user با گزینه‌های trade-off
+# نمایش دهد.
+_INFRA_ERROR_PATTERNS = (
+    "ConnectionRefusedError",
+    "connect call failed",
+    "could not connect to server",
+    "Connection refused",
+    "[Errno 111]",
+    "asyncpg.exceptions.ConnectionFailureError",
+    "psycopg2.OperationalError",
+    "redis.exceptions.ConnectionError",
+    "Errno 110",  # Connection timed out
+    "ConnectTimeoutError",
+    "DNSLookupError",
+    "Name or service not known",
+    "Temporary failure in name resolution",
+)
+
+
+def _has_infra_connection_error(backend_logs: Optional[List[Dict[str, Any]]]) -> Optional[str]:
+    """اگر backend_logs شامل یکی از infrastructure connection errors است،
+    pattern matched را برگردان. در غیر این صورت None.
+    """
+    if not backend_logs:
+        return None
+    for entry in backend_logs[-30:]:  # فقط ۳۰ تای آخر بررسی شوند
+        msg = ""
+        if isinstance(entry, dict):
+            msg = str(entry.get("message", "") or entry.get("content", "") or "")
+        elif isinstance(entry, str):
+            msg = entry
+        if not msg:
+            continue
+        for pat in _INFRA_ERROR_PATTERNS:
+            if pat in msg:
+                return pat
+    return None
+
+
 # 🆕 (v3 simple-op detection) — اگر درخواست کاربر یک عملیات ساده روی
 # یک فایل مشخص است (مثل «runtime.txt بساز»، «این خط را به requirements
 # اضافه کن»)، **scan نباید trigger شود** — directly به smart-chat برود.
@@ -503,6 +545,26 @@ def resolve_intent_from_chat_context(
             reason="user_clarification_reply",
             focus_notes=user_message,
             is_continuation=True,
+        )
+
+    # 🆕 (clarify-first v3) — Infrastructure connection errors (DB, Redis,
+    # external services) NEVER deserve a 12-pass scan. They almost always
+    # need a targeted fix (env var, graceful degradation, retry/timeout).
+    # Route directly to smart-chat which can ask user trade-off via ask_user.
+    _infra_pattern = _has_infra_connection_error(backend_logs)
+    if _infra_pattern:
+        return ResolvedScanIntent(
+            should_scan=False,
+            reason=f"infra_connection_error:{_infra_pattern}",
+            focus_notes=(
+                f"خطای connection شناسایی شد: '{_infra_pattern}'. این یک infrastructure issue است "
+                f"(env var ست نشده، سرویس بالا نیست، یا timeout). نیاز به scan کل پروژه نیست — "
+                f"یک fix هدفمند کافی است. در پاسخ به کاربر باید با ask_user سه گزینه پیشنهاد دهی: "
+                f"(۱) graceful degradation در کد (سرویس را optional کن)، "
+                f"(۲) ست کردن env var واقعی در Render، "
+                f"(۳) حذف کامل وابستگی به این سرویس اگر لازم نیست. "
+                f"کاربر باید انتخاب کند، نه که حدس بزنی."
+            ),
         )
 
     # 🆕 (v3 simple-op gate) — اولویت اول: اگر درخواست یک عملیات ساده
