@@ -92,6 +92,36 @@ class SmartModelSelector:
 
     # تخصص مدل‌ها برای هر نوع وظیفه (0-100)
     MODEL_SPECIALTIES = {
+        "claude-opus-4-7": {
+            TaskCategory.CODE_GENERATION: 98,
+            TaskCategory.CODE_REVIEW: 98,
+            TaskCategory.ARCHITECTURE: 98,
+            TaskCategory.ANALYSIS: 97,
+            TaskCategory.CREATIVE: 93,
+            TaskCategory.RESEARCH: 93,
+            TaskCategory.DEBUGGING: 96,
+            TaskCategory.DOCUMENTATION: 90,
+            TaskCategory.IMAGE_ANALYSIS: 92,
+        },
+        "claude-sonnet-4-6": {
+            TaskCategory.CODE_GENERATION: 97,
+            TaskCategory.CODE_REVIEW: 97,
+            TaskCategory.ARCHITECTURE: 96,
+            TaskCategory.ANALYSIS: 96,
+            TaskCategory.CREATIVE: 91,
+            TaskCategory.RESEARCH: 91,
+            TaskCategory.DEBUGGING: 94,
+            TaskCategory.DOCUMENTATION: 88,
+            TaskCategory.IMAGE_ANALYSIS: 90,
+        },
+        "claude-haiku-4-5-20251001": {
+            TaskCategory.CODE_GENERATION: 88,
+            TaskCategory.CODE_REVIEW: 86,
+            TaskCategory.ANALYSIS: 85,
+            TaskCategory.DEBUGGING: 85,
+            TaskCategory.DOCUMENTATION: 82,
+            TaskCategory.IMAGE_ANALYSIS: 84,
+        },
         "claude-sonnet-4-20250514": {
             TaskCategory.CODE_GENERATION: 95,
             TaskCategory.CODE_REVIEW: 95,

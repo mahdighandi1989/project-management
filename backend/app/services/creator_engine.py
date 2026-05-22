@@ -709,12 +709,12 @@ class AIOrchestrator:
     def _select_model_for_role(self, role: AgentRole) -> str:
         """انتخاب بهترین مدل برای هر نقش"""
         role_model_preferences = {
-            AgentRole.ARCHITECT: ["claude-sonnet-4-20250514", "gpt-4-turbo", "gemini-2.5-pro"],
-            AgentRole.CODER: ["deepseek-coder", "claude-sonnet-4-20250514", "gpt-4-turbo"],
-            AgentRole.REVIEWER: ["gpt-4-turbo", "claude-3-5-sonnet-20241022"],
-            AgentRole.TESTER: ["deepseek-chat", "gpt-4o-mini"],
-            AgentRole.ANALYZER: ["gemini-2.5-pro", "claude-sonnet-4-20250514"],
-            AgentRole.ORCHESTRATOR: ["claude-sonnet-4-20250514", "gpt-4o"]
+            AgentRole.ARCHITECT: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-sonnet-4-20250514", "gpt-4-turbo", "gemini-2.5-pro"],
+            AgentRole.CODER: ["claude-sonnet-4-6", "deepseek-coder", "claude-sonnet-4-20250514", "gpt-4-turbo"],
+            AgentRole.REVIEWER: ["claude-sonnet-4-6", "gpt-4-turbo", "claude-3-5-sonnet-20241022"],
+            AgentRole.TESTER: ["claude-haiku-4-5-20251001", "deepseek-chat", "gpt-4o-mini"],
+            AgentRole.ANALYZER: ["claude-sonnet-4-6", "gemini-2.5-pro", "claude-sonnet-4-20250514"],
+            AgentRole.ORCHESTRATOR: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-sonnet-4-20250514", "gpt-4o"]
         }
 
         preferences = role_model_preferences.get(role, ["gpt-4-turbo"])
