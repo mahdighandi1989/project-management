@@ -380,6 +380,23 @@ def _build_general_instructions_list(
   «در action_plan فرض می‌کنم runtime.txt موجود نیست — اگر موجود است،
   لطفاً به جای create از modify استفاده شود.»
 
+### 🚨🚨 قانون حیاتی: هرگز محتوای فایلی که نخوانده‌ای را حدس نزن
+- **هرگز** نگو «فایل X خالی است» مگر اینکه محتوای واقعی آن را **دیده** باشی
+  و واقعاً خالی باشد. اگر فایل را ندیده‌ای، یعنی نمی‌دانی خالی است یا نه.
+- **مثال غلط (که اتفاق افتاده)**: مدل گفت «requirements.txt خالی است،
+  package.json خالی است، index.html خالی است» و آن‌ها را با محتوای **حدسی**
+  پر کرد — در حالی که این فایل‌ها محتوای واقعی داشتند و overwrite شدند.
+- **قانون**: اگر باید فایلی را `modify` کنی که محتوایش را در این تحلیل
+  نخوانده‌ای:
+  - **گزینهٔ درست**: در analysis بنویس «برای اصلاح X نیاز دارم محتوای فعلی
+    آن را ببینم» — و آن فایل را در action_plan **نگذار** (سیستم آن را به‌خاطر
+    overwrite کور reject می‌کند).
+  - یا اگر فقط یک تغییر کوچک لازم است، از `modify_sections` با find/replace
+    دقیق استفاده کن (نه content کامل).
+- ⛔ سیستم به‌صورت خودکار هر فایلی را که `operation=modify` با content کامل
+  دارد ولی خوانده نشده و در repo موجود است، **reject می‌کند** — پس content
+  حدسی بی‌فایده است. اول فایل را بخوان.
+
 ### 🚨 قانون حیاتی: Python wheel/cp31X compile errors در Render
 اگر log شامل `Read-only file system` در `/usr/local/cargo/` یا
 `Failed to build wheel for ...` در deploy Python:
@@ -13353,6 +13370,27 @@ def _validate_action_plan_syntax(
         # تا فایل‌هایی با import های جعلی reject شوند.
         if path in _import_errors_by_file:
             file_critical.extend(_import_errors_by_file[path])
+
+        # 🆕 (anti-blind-overwrite) — اگر مدل فایلی را با operation=modify و
+        # محتوای کامل می‌نویسد ولی آن را نخوانده (در original_files نیست) و فایل
+        # در repo موجود است → محتوا حدسی است و overwrite می‌تواند کد واقعی را
+        # پاک کند. این دقیقاً همان اشتباهی است که مدل با گفتن «فایل خالی است»
+        # و پر کردن آن با محتوای حدسی مرتکب می‌شود. reject با پیام واضح.
+        # توجه: modify_sections (find/replace) و create از این چک معاف‌اند.
+        if (
+            operation in ("modify", "update", "")
+            and content
+            and operation != "modify_sections"
+        ):
+            _read_paths = set((original_files or {}).keys())
+            _repo_set = set(repo_file_paths or [])
+            if path not in _read_paths and path in _repo_set:
+                file_critical.append(
+                    "❌ overwrite کور: این فایل در repo موجود است ولی در این تحلیل "
+                    "خوانده نشده — محتوای ارائه‌شده حدسی است و می‌تواند کد واقعی را "
+                    "پاک کند. باید ابتدا فایل خوانده شود، سپس فقط بخش لازم با "
+                    "modify_sections تغییر کند."
+                )
 
         # تصمیم‌گیری: حذف یا نگه‌داشتن
         if file_critical:

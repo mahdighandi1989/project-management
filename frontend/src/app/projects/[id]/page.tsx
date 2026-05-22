@@ -229,6 +229,35 @@ interface ReportTriggerSettings {
   next_run?: string;
 }
 
+// 🆕 (deploy single-shot) — تشخیص خطای deploy/build در پیام یا لاگ. این نوع
+// مشکل یک علت واحد دارد و باید single-shot تحلیل شود نه multi-step — چون
+// تجزیه به مراحل باعث تناقض (مثل runtime: image vs docker در مراحل مختلف) و
+// حدس‌زدن مستقل فایل در هر مرحله می‌شود.
+const _DEPLOY_BUILD_ERROR_PATTERNS = [
+  'ConnectionRefusedError', 'Connection refused', '[Errno 111]', 'Errno 110',
+  'could not connect', 'connect call failed',
+  'maturin failed', 'Read-only file system', 'cargo metadata', 'Cargo',
+  'Failed to build wheel', 'pydantic-core', 'tiktoken',
+  'metadata-generation-failed', 'Build failed', 'Preparing metadata',
+  'AttributeError', 'has no attribute', 'ImportError', 'ModuleNotFoundError',
+  'cannot import name', 'No module named', 'SyntaxError', 'IndentationError',
+  'exit status 1', 'exit code: 1', 'non-zero exit status',
+  'Not Found', 'Frontend not built', 'cp314', 'cp313', 'python3.14', 'python3.13',
+];
+
+function _looksLikeDeployBuildError(rawMessage: string, backendLogs?: any[]): boolean {
+  const hay: string[] = [rawMessage || ''];
+  if (Array.isArray(backendLogs)) {
+    for (const l of backendLogs.slice(-30)) {
+      if (typeof l === 'string') hay.push(l);
+      else if (l && typeof l === 'object') hay.push(String(l.message || l.content || ''));
+    }
+  }
+  const joined = hay.join('\n');
+  return _DEPLOY_BUILD_ERROR_PATTERNS.some(p => joined.includes(p));
+}
+
+
 export default function ProjectDetailPage() {
   const params = useParams();
   const projectId = params.id as string;
@@ -5327,10 +5356,24 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       wasEnhanced = enhResult.wasEnhanced;
 
       // 🔄 اگه مراحل تشخیص داده شده → اجرای مرحله‌ای
-      if (wasEnhanced && enhResult.steps && enhResult.steps.length > 1) {
+      // 🆕 (deploy single-shot) — استثنا: اگر این یک خطای deploy/build است،
+      // multi-step را رد کن و single-shot برو. تجزیه به مراحل برای یک علت
+      // واحد باعث تناقض (image vs docker) و حدس فایل در هر مرحله می‌شود.
+      const _isDeployErr = _looksLikeDeployBuildError(rawMessage, inspectorBackendLogs);
+      if (wasEnhanced && enhResult.steps && enhResult.steps.length > 1 && !_isDeployErr) {
         setInspectorChatLoading(false);
         await executeMultiStep(rawMessage, enhResult.basePrompt || userMessage, enhResult.steps);
         return;
+      }
+      if (_isDeployErr && wasEnhanced && enhResult.steps && enhResult.steps.length > 1) {
+        // single-shot: از basePrompt استفاده کن (نه مراحل تجزیه‌شده)
+        userMessage = enhResult.basePrompt || enhResult.text || userMessage;
+        setInspectorChatMessages(prev => [...prev, {
+          id: `deploy_single_${Date.now()}`,
+          role: 'system' as const,
+          content: '🎯 خطای deploy/build تشخیص داده شد — به‌جای تجزیه به مراحل، یک تحلیل واحد و متمرکز انجام می‌شود (برای جلوگیری از تناقض و حدس‌زدن فایل).',
+          timestamp: new Date(),
+        } as any]);
       }
 
       if (!wasEnhanced && enhResult.error) {
