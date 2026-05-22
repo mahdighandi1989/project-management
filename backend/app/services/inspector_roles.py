@@ -73,14 +73,45 @@ def resolve_best_model(ai_manager, role: str = "analyst", exclude: Optional[List
 _WEAK_SCAN_HINTS = ("deepseek", "haiku", "mini", "gpt-3.5", "flash")
 
 
+def resolve_strongest_keyed(ai_manager, role: str = "analyst", exclude: Optional[List[str]] = None):
+    """اولین مدلِ **کلیددار** در زنجیرهٔ نقش را برمی‌گرداند (صرف‌نظر از enabled).
+
+    برخلاف resolve_role_assignments که «اولین مدلِ فعال» را ترجیح می‌دهد، این
+    تابع «قوی‌ترین مدلِ کلیددار» را می‌گیرد و اگر خاموش بود needs_temp_enable
+    می‌زند. برای اسکن‌ها لازم است تا یک مدلِ ضعیفِ فعال (مثلاً deepseek) بر یک
+    مدلِ قویِ خاموش (Claude) ترجیح داده نشود.
+    """
+    chain = INSPECTOR_ROLE_MODELS.get(role, [])
+    _exclude = set(exclude or [])
+    for mid in chain:
+        if mid in _exclude:
+            continue
+        if not get_model(mid):
+            continue
+        if not _provider_has_key(ai_manager, mid):
+            continue
+        try:
+            enabled = ai_manager.get_enabled_status(mid)
+        except Exception:
+            enabled = False
+        return RoleAssignment(
+            role=role,
+            model_id=mid,
+            status=("ready" if enabled else "needs_enable"),
+            needs_temp_enable=(not enabled),
+        )
+    return RoleAssignment(role=role)
+
+
 def pick_scan_model(ai_manager, model_id=None, model_ids=None):
     """مدل مؤثر برای یک اسکن single-model را انتخاب می‌کند (+ temp-enable در صورت لزوم).
 
     منطق:
       - اگر چند مدل صریح داده شده (consensus) → دست نزن (همان را برگردان).
       - اگر مدلِ فعلی قوی است (claude/gpt-4o/gemini-pro/...) → احترام بگذار.
-      - اگر مدلی نبود یا ضعیف بود (deepseek/haiku/mini/flash) → به بهترین مدلِ
-        تحلیلی ارتقا بده و در صورت خاموش‌بودن، موقتاً فعال کن.
+      - اگر مدلی نبود یا ضعیف بود (deepseek/haiku/mini/flash) → قوی‌ترین مدلِ
+        کلیددارِ تحلیلی را بگیر و در صورت خاموش‌بودن، موقتاً فعال کن (حتی اگر یک
+        مدلِ ضعیفِ دیگر فعال باشد).
 
     خروجی: (effective_model_id, revert_info). revert_info را باید بعد از اتمام
     اسکن به revert_temp_enables داد (در try/finally).
@@ -94,7 +125,7 @@ def pick_scan_model(ai_manager, model_id=None, model_ids=None):
         # مدلِ قوی صریحاً انتخاب شده → احترام بگذار
         return current, []
 
-    asg = resolve_best_model(ai_manager, "analyst", exclude=[current] if current else None)
+    asg = resolve_strongest_keyed(ai_manager, "analyst", exclude=[current] if current else None)
     if asg and asg.model_id:
         revert = apply_temp_enables([asg.model_id]) if asg.needs_temp_enable else []
         return asg.model_id, revert
