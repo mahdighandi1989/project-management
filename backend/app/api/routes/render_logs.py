@@ -15541,6 +15541,125 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         # ساخت خلاصه ساختار پروژه
                         act_tree_summary = _build_project_tree_summary(code_files)
 
+                        # 🆕🆕 (agent-loop / فاز ۱) — اگر مدل tool-calling دارد
+                        # (Claude)، به‌جای pipeline تک‌شات (که ۲۵ فایل کورکورانه
+                        # می‌خواند و truncate می‌شود)، حلقهٔ عامل واقعی اجرا کن:
+                        # مدل خودش فایل‌ها را on-demand می‌خواند و قدم‌به‌قدم به
+                        # action_plan می‌رسد — دقیقاً مثل Claude Code.
+                        try:
+                            from ...services.inspector_agent import (
+                                run_inspector_agent,
+                                supports_tool_calling,
+                            )
+                        except Exception:
+                            run_inspector_agent = None
+                            supports_tool_calling = lambda _m: False  # noqa: E731
+
+                        if run_inspector_agent and supports_tool_calling(primary_model):
+                            yield sse("progress", {
+                                "step": "agent_start",
+                                "message": f"🧠 حالت عامل (agent) با {primary_model} — خواندن هوشمند فایل‌ها قدم‌به‌قدم تا حل مشکل...",
+                                "model": primary_model,
+                            })
+                            _agent_sys = f"""تو یک توسعه‌دهندهٔ ارشد و بازرس پروژهٔ {owner}/{repo} هستی — دقیق، کاربلد و عمل‌گرا.
+
+{general_instructions_text}
+
+## ابزارهای تو
+- `read_file(path)`: محتوای کامل یک فایل را می‌خوانی. **قبل از هر پیشنهاد تغییری، فایل‌های مرتبط را بخوان — هرگز محتوای فایل را حدس نزن.**
+- `list_files(filter)`: فهرست فایل‌های پروژه (با فیلتر اختیاری) را می‌بینی.
+- `submit_action_plan(analysis, files, commit_message)`: وقتی علت ریشه‌ای را فهمیدی و فایل‌های لازم را خواندی، راه‌حل نهایی را ثبت می‌کنی. این حلقه را تمام می‌کند.
+
+## روش کار (مثل یک مهندس واقعی)
+1. مشکل/خطا را بخوان و بفهم.
+2. با read_file فایل‌های مرتبط را **یکی‌یکی** بخوان — از فایل‌هایی که در خطا/لاگ ذکر شده‌اند شروع کن. اگر فایلی import یا config دیگری را صدا می‌زند که مهم است، آن را هم بخوان.
+3. علت ریشه‌ای را پیدا کن (نه علائم سطحی).
+4. وقتی مطمئن شدی، submit_action_plan را صدا بزن.
+
+## قوانین حیاتی
+- 🔴 فقط فایل‌هایی را در action_plan بگذار که با read_file **واقعاً خوانده‌ای** — محتوای حدسی ممنوع.
+- 🔴 فایل‌های بزرگ (>۲۰۰ خط): از operation=modify_sections با find/replace دقیق (COPY از متن واقعی) استفاده کن — نه بازنویسی کامل.
+- فایل‌های کوچک: operation=modify با content کامل. فایل جدید: operation=create.
+- مشکل را با کمترین تغییر و هدفمند حل کن — scope را بی‌دلیل گسترش نده.
+- اگر بعد از بررسی واقعاً نمی‌توانی fix قطعی بدهی، submit_action_plan را با files=[] صدا بزن و در analysis دقیق توضیح بده چرا و کاربر چه اطلاعاتی باید بدهد — هرگز بی‌نتیجه متوقف نشو.
+
+## خلاصهٔ ساختار پروژه (برای جهت‌گیری — برای دیدن محتوا باید read_file بزنی)
+{act_tree_summary}"""
+
+                            _agent_user_parts = [f"## درخواست کاربر:\n{request.message}"]
+                            if reply_context_text:
+                                _agent_user_parts.append(reply_context_text)
+                            if history_text and history_text.strip():
+                                _agent_user_parts.append(f"## تاریخچهٔ مکالمه (برای context):\n{history_text[-6000:]}")
+                            if logs_text and logs_text.strip():
+                                _agent_user_parts.append(f"## لاگ‌های اخیر:\n{logs_text[-4000:]}")
+                            _agent_user_parts.append("حالا شروع کن: فایل‌های لازم را بخوان، علت را پیدا کن، و submit_action_plan بزن.")
+                            _agent_user = "\n\n".join(_agent_user_parts)
+
+                            _agent_result = None
+                            try:
+                                async for _ev_type, _ev_payload in run_inspector_agent(
+                                    ai_manager=ai_manager,
+                                    github_svc=github_svc,
+                                    model_id=primary_model,
+                                    owner=owner,
+                                    repo=repo,
+                                    token=token,
+                                    branch=None,
+                                    system_prompt=_agent_sys,
+                                    user_prompt=_agent_user,
+                                    file_list=code_files,
+                                ):
+                                    if _ev_type == "agent_result":
+                                        _agent_result = _ev_payload
+                                    else:
+                                        yield sse(_ev_type, _ev_payload)
+                            except Exception as _ae:
+                                slog.error(f"[smart-chat agent] failed: {_ae}")
+                                yield sse("progress", {
+                                    "step": "agent_fallback",
+                                    "message": "⚠️ حالت عامل خطا داد — برگشت به روش معمول",
+                                })
+                                _agent_result = None
+
+                            # فقط وقتی نتیجهٔ agent را قبول کن که واقعاً کار
+                            # مفیدی کرده باشد — وگرنه به pipeline معمول fallback کن.
+                            _ap = _agent_result.get("action_plan") if _agent_result else None
+                            _agent_ok = bool(
+                                _agent_result is not None
+                                and _agent_result.get("stop_reason") != "error"
+                                and (
+                                    (_ap and _ap.get("files"))
+                                    or (_agent_result.get("content") and len(_agent_result["content"].strip()) > 30)
+                                )
+                            )
+                            if _agent_ok:
+                                _files_read = _agent_result.get("files_read") or {}
+                                _content = _agent_result.get("content") or "تحلیل انجام شد."
+                                _has_files = bool(_ap and _ap.get("files"))
+                                yield sse("response", {
+                                    "type": "action",
+                                    "content": _content,
+                                    "model_used": _agent_result.get("model_used"),
+                                    "tokens_used": _agent_result.get("tokens_used", 0),
+                                    "has_action": _has_files,
+                                    "action_plan": _validate_action_plan_syntax(
+                                        _ap,
+                                        original_files=_files_read,
+                                        repo_file_paths=_normalize_repo_paths(all_files),
+                                        user_message=request.message,
+                                        backend_logs=request.backend_logs,
+                                        code_files=code_files,
+                                    ) if _has_files else None,
+                                    "files_were_read": bool(_files_read),
+                                    "selected_file_paths": list(_files_read.keys()),
+                                    "agent_mode": True,
+                                    "agent_stop_reason": _agent_result.get("stop_reason"),
+                                })
+                                yield sse("done", {"success": True})
+                                return
+                            # اگر agent نتیجه نداد → ادامه به pipeline معمول (fallback امن)
+
                         # 🆕 استخراج فایل‌های ذکرشده در پیام/خطا/تاریخچه — حتماً باید خونده بشن
                         _msg_extracted = _extract_file_paths_from_text(
                             request.message + "\n" + history_text[-5000:], code_files
