@@ -14957,6 +14957,59 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                             f"{'✅ تأیید' if _verdict == 'approve' else '⚠️ نکات'}\n{_review.get('notes')}"
                         )
 
+            # 🆕🆕 (قدم ۳ — حلقهٔ بازنگری) اگر reviewer ایراد گرفت، orchestrator
+            # **یک‌بار** طرح را بر اساس نکات بازنویسی می‌کند (collaboration واقعی).
+            # فقط یک دور — برای جلوگیری از حلقهٔ بی‌پایان و هزینهٔ زیاد.
+            _revised = False
+            if _review and _review.get("verdict") == "concerns" and _review.get("notes"):
+                yield sse("progress", {
+                    "step": "agent_revise",
+                    "message": "🔧 [agent] اعمال بازخورد reviewer و بازنگری طرح...",
+                })
+                _rev_user = (
+                    f"## درخواست اصلی کاربر:\n{request.message}\n\n"
+                    f"## طرح فعلی تو (پیش‌نویس):\n{(_agent_result.get('content') or '')[:2000]}\n\n"
+                    f"## ایرادهای بازبین (با دقت بررسی کن):\n{_review.get('notes')}\n\n"
+                    "طرح را با توجه به این ایرادها بازنگری کن. در صورت نیاز فایل‌های "
+                    "بیشتری بخوان، سپس submit_action_plan با نسخهٔ اصلاح‌شده بزن. "
+                    "اگر ایرادهای بازبین وارد نیستند، همان طرح قبلی را با توضیح کوتاهِ دلیل دوباره submit کن — هرگز بی‌نتیجه متوقف نشو."
+                )
+                _rev_result = None
+                try:
+                    async for _ev_t, _ev_p in run_inspector_agent(
+                        ai_manager=ai_manager,
+                        github_svc=github_svc,
+                        model_id=primary_model,
+                        owner=owner,
+                        repo=repo,
+                        token=token,
+                        branch=None,
+                        system_prompt=_agent_sys,
+                        user_prompt=_rev_user,
+                        file_list=code_files,
+                        max_iterations=8,
+                    ):
+                        if _ev_t == "agent_result":
+                            _rev_result = _ev_p
+                        else:
+                            yield sse(_ev_t, _ev_p)
+                except Exception as _re3:
+                    slog.warning(f"[smart-chat revise] failed: {_re3}")
+                    _rev_result = None
+
+                _rev_ap = _rev_result.get("action_plan") if _rev_result else None
+                if _rev_ap and _rev_ap.get("files"):
+                    _ap = _rev_ap
+                    _content = (_rev_result.get("content") or _content)
+                    _files_read = {**_files_read, **(_rev_result.get("files_read") or {})}
+                    _has_files = True
+                    _agent_tokens += _rev_result.get("tokens_used", 0)
+                    _revised = True
+                    _content += f"\n\n---\n🔧 این طرح پس از بازبینی ({_review.get('reviewer_model')}) یک‌بار بازنگری شد."
+                    yield sse("progress", {"step": "agent_revise_done", "message": "✅ [agent] طرح بر اساس بازخورد بازنگری شد"})
+                else:
+                    yield sse("progress", {"step": "agent_revise_skip", "message": "ℹ️ بازنگری نتیجهٔ جدیدی نداد — طرح اولیه حفظ شد"})
+
             yield sse("response", {
                 "type": "action",
                 "content": _content,
@@ -14975,6 +15028,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 "selected_file_paths": list(_files_read.keys()),
                 "agent_mode": True,
                 "agent_stop_reason": _agent_result.get("stop_reason"),
+                "revised": _revised,
                 "review": ({
                     "model": _review.get("reviewer_model"),
                     "verdict": _review.get("verdict"),
