@@ -16244,6 +16244,59 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     # 🆕 استخراج و ادغام تمام بلوک‌های JSON (پشتیبانی از بلوک‌های متعدد + تعمیر ناقص)
                     action_plan = _extract_all_action_plans_from_response(content, is_truncated=_act_is_truncated)
 
+                    # 🆕 (force-action-plan) — اگر مدل تحلیل نوشت ولی هیچ
+                    # action_plan تولید نکرد و پاسخ truncate هم نشده (یعنی مدل
+                    # طبیعی ایستاد، نه به‌خاطر token limit) → یک ادامهٔ هدفمند
+                    # بزن که فقط JSON action_plan را بخواهد. این همان loopِ
+                    # بی‌نتیجه‌ای را می‌شکند که مدل ضعیف بعد از تحلیل می‌ایستد و
+                    # هرگز به action_plan نمی‌رسد (و retry فقط همان را تکرار می‌کند).
+                    if (
+                        action_plan is None
+                        and has_code_files
+                        and not _act_is_truncated
+                        and len(content.strip()) > 200
+                        and not use_batch_processing
+                    ):
+                        yield sse("progress", {
+                            "step": "force_action_plan",
+                            "message": "📝 تحلیل نوشته شد ولی action_plan تولید نشد — درخواست تولید فقط action_plan...",
+                        })
+                        try:
+                            _force_resp = await ai_manager.generate(
+                                model_id=primary_model,
+                                messages=[
+                                    Message(role="system", content=(
+                                        "تو در حال تکمیل یک پاسخ هستی. تحلیل قبلاً نوشته شده. "
+                                        "حالا فقط و فقط action_plan را به‌صورت JSON معتبر در یک "
+                                        "بلوک ```json تولید کن — هیچ توضیح، تحلیل، مقدمه یا متن "
+                                        "اضافه ننویس. بر اساس تحلیلی که ارائه شد، فایل‌هایی که "
+                                        "باید تغییر کنند را بنویس: operation=modify با content "
+                                        "کامل (فایل <۲۰۰ خط) یا modify_sections با find/replace "
+                                        "دقیق (فایل بزرگ). فقط فایل‌هایی که محتوایشان را دیده‌ای. "
+                                        "اگر واقعاً نمی‌توانی fix را تشخیص دهی، صراحتاً "
+                                        "{\"files\":[],\"commit_message\":\"cannot_determine_fix:<دلیل کوتاه>\"} "
+                                        "بزن — هرگز بدون action_plan متوقف نشو."
+                                    )),
+                                    Message(role="user", content=(
+                                        f"تحلیلی که نوشتی:\n{content[-4000:]}\n\n"
+                                        "حالا فقط action_plan JSON را تولید کن (بدون هیچ متن دیگر):"
+                                    )),
+                                ],
+                                max_tokens=safe_max_tokens,
+                                temperature=0.2,
+                            )
+                            _force_content = _strip_reasoning_blocks(_force_resp.content) if _force_resp.content else ""
+                            if _force_content and _force_content.strip():
+                                content = content + "\n\n" + _force_content
+                                _act_tokens = (_act_tokens or 0) + (_force_resp.tokens_used or 0)
+                                action_plan = _extract_all_action_plans_from_response(content, is_truncated=False)
+                                yield sse("progress", {
+                                    "step": "force_action_plan_done",
+                                    "message": ("✅ action_plan تولید شد" if action_plan else "⚠️ مدل نتوانست action_plan بدهد — fix قطعی تشخیص داده نشد"),
+                                })
+                        except Exception as _fe:
+                            slog.warning(f"[smart-chat] force-action-plan failed: {_fe}")
+
                     # لایه ۲: اگر فایل‌ها خوانده نشدن، action_plan حذف شود (جلوگیری از محتوای ساختگی)
                     # 🆕 (clarify-first) — ask_user/route_to استثنا
                     _act_is_clarify = bool(action_plan and (action_plan.get("ask_user") or action_plan.get("route_to")))
