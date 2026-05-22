@@ -2336,21 +2336,30 @@ async def scan_project(watched_id: str, payload: Optional[ScanRequest] = None):
         sel_sections = None
         sel_paths = None
         include_deps = True
+        _model_ids = None
         if payload:
             chosen_model = payload.model_id or (
                 payload.model_ids[0] if payload.model_ids else None
             )
+            _model_ids = payload.model_ids
             sel_sections = payload.selected_sections
             sel_paths = payload.custom_paths
             include_deps = payload.include_dependencies
-        return await service.scan_project(
-            watched_id,
-            model_id=chosen_model,
-            selected_sections=sel_sections,
-            custom_paths=sel_paths,
-            include_dependencies=include_deps,
-            focus_notes=(payload.focus_notes if payload else None),
-        )
+        # 🆕 ارتقای کیفیت: مدل ضعیف/خالی → بهترین مدلِ تحلیلی (+ temp-enable)
+        from ...services.ai_manager import get_ai_manager as _gam
+        from ...services.inspector_roles import pick_scan_model, revert_temp_enables
+        _eff_model, _scan_revert = pick_scan_model(_gam(), chosen_model, _model_ids)
+        try:
+            return await service.scan_project(
+                watched_id,
+                model_id=_eff_model,
+                selected_sections=sel_sections,
+                custom_paths=sel_paths,
+                include_dependencies=include_deps,
+                focus_notes=(payload.focus_notes if payload else None),
+            )
+        finally:
+            revert_temp_enables(_scan_revert)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except RuntimeError as e:
@@ -2381,10 +2390,14 @@ async def deep_scan_project(watched_id: str, payload: Optional[DeepScanRequest] 
     write_progress(watched_id, status="queued", phase="queued", message="در انتظار شروع")
 
     async def _bg():
+        # 🆕 ارتقای کیفیت: مدل ضعیف/خالی → بهترین مدلِ تحلیلی (+ temp-enable)
+        from ...services.ai_manager import get_ai_manager as _gam
+        from ...services.inspector_roles import pick_scan_model, revert_temp_enables
+        _eff_model, _scan_revert = pick_scan_model(_gam(), payload.model_id, None)
         try:
             await run_deep_scan(
                 watched_id,
-                model_id=payload.model_id,
+                model_id=_eff_model,
                 enabled_passes=payload.enabled_passes,
                 deep_read_count=payload.deep_read_count,
                 # 🆕 (selective-scan) — section/path filter pass-through
@@ -2396,6 +2409,8 @@ async def deep_scan_project(watched_id: str, payload: Optional[DeepScanRequest] 
         except Exception as e:
             from ...services.oversight_deep_scan_service import write_progress as _wp
             _wp(watched_id, status="error", message=str(e))
+        finally:
+            revert_temp_enables(_scan_revert)
 
     _aio.create_task(_bg())
     return {"success": True, "status": "queued", "watched_id": watched_id}
