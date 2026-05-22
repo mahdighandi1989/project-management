@@ -164,6 +164,73 @@ MODEL_REGISTRY: Dict[str, AIModel] = {
     # ===========================================
     # Claude Models (Anthropic)
     # ===========================================
+    "claude-opus-4-7": AIModel(
+        id="claude-opus-4-7",
+        provider=ModelProvider.CLAUDE,
+        name="Claude Opus 4.7",
+        endpoint="https://api.anthropic.com/v1/messages",
+        capabilities=[
+            ModelCapability.TEXT,
+            ModelCapability.CODE,
+            ModelCapability.REASONING,
+            ModelCapability.VISION,
+            ModelCapability.IMAGE_ANALYSIS,
+            ModelCapability.MULTIMODAL,
+            ModelCapability.LONG_CONTEXT,
+        ],
+        max_tokens=32000,
+        context_window=200000,
+        strengths=["reasoning", "code", "agentic", "vision", "most-capable", "latest"],
+        weaknesses=["cost"],
+        cost_per_1k_tokens=0.015,
+        priority=1,
+        supports_images=True
+    ),
+
+    "claude-sonnet-4-6": AIModel(
+        id="claude-sonnet-4-6",
+        provider=ModelProvider.CLAUDE,
+        name="Claude Sonnet 4.6",
+        endpoint="https://api.anthropic.com/v1/messages",
+        capabilities=[
+            ModelCapability.TEXT,
+            ModelCapability.CODE,
+            ModelCapability.REASONING,
+            ModelCapability.VISION,
+            ModelCapability.IMAGE_ANALYSIS,
+            ModelCapability.MULTIMODAL,
+            ModelCapability.LONG_CONTEXT,
+        ],
+        max_tokens=64000,
+        context_window=200000,
+        strengths=["reasoning", "code", "agentic", "vision", "balance", "long-context", "latest"],
+        cost_per_1k_tokens=0.003,
+        priority=1,
+        supports_images=True
+    ),
+
+    "claude-haiku-4-5-20251001": AIModel(
+        id="claude-haiku-4-5-20251001",
+        provider=ModelProvider.CLAUDE,
+        name="Claude Haiku 4.5",
+        endpoint="https://api.anthropic.com/v1/messages",
+        capabilities=[
+            ModelCapability.TEXT,
+            ModelCapability.CODE,
+            ModelCapability.REASONING,
+            ModelCapability.VISION,
+            ModelCapability.IMAGE_ANALYSIS,
+            ModelCapability.FAST_RESPONSE,
+        ],
+        max_tokens=32000,
+        context_window=200000,
+        strengths=["speed", "cost-effective", "vision", "code"],
+        weaknesses=["complex-reasoning"],
+        cost_per_1k_tokens=0.001,
+        priority=2,
+        supports_images=True
+    ),
+
     "claude-sonnet-4-20250514": AIModel(
         id="claude-sonnet-4-20250514",
         provider=ModelProvider.CLAUDE,
@@ -431,7 +498,11 @@ MODEL_ALIASES: Dict[str, str] = {
     "gpt4": "gpt-4o",
     "gpt-4": "gpt-4-turbo",
     "gpt-4-vision": "gpt-4o",
-    "claude": "claude-sonnet-4-20250514",
+    "claude": "claude-sonnet-4-6",  # 🆕 پیش‌فرض = جدیدترین Sonnet
+    "claude-opus": "claude-opus-4-7",
+    "claude-sonnet": "claude-sonnet-4-6",
+    "claude-haiku": "claude-haiku-4-5-20251001",
+    "claude-4": "claude-sonnet-4-20250514",
     "claude-3": "claude-3-5-sonnet-20241022",
     "deepseek": "deepseek-chat",
     "gemini": "gemini-2.0-flash",

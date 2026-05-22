@@ -14781,7 +14781,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
         # انتخاب صریح کاربر (model_ids) یا reply-model را هرگز override نمی‌کند.
         _user_picked_model = bool(request.model_ids) or reply_model_used
         if (not _user_picked_model) and msg_type in ("ACTION", "ERROR_LOG"):
-            _CLAUDE_AGENT_MODEL = "claude-sonnet-4-20250514"
+            _CLAUDE_AGENT_MODEL = "claude-sonnet-4-6"
             try:
                 from ...core.models_registry import ModelProvider as _MP
                 _claude_ok = bool(
