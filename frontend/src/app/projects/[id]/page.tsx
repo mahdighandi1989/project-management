@@ -388,6 +388,10 @@ export default function ProjectDetailPage() {
   // پیام‌هایی که کاربر روی آن‌ها پاسخ ask_user داده — برای hide دکمه ارسال
   const [clarifyAnswered, setClarifyAnswered] = useState<Set<string>>(new Set());
   const scanPollRef = useRef<NodeJS.Timeout | null>(null);
+  // 🆕 (auto-scroll) — sentinel در انتهای لیست پیام‌ها + container چت برای
+  // اسکرول خودکار به آخرین پیام هنگام نوشتن مدل‌ها.
+  const inspectorChatEndRef = useRef<HTMLDivElement | null>(null);
+  const inspectorChatScrollRef = useRef<HTMLDivElement | null>(null);
   // 🔧 فیلتر انواع اکشن‌ها - همه فعال بجز scroll و network-request پرسر و صدا
   const [inspectorActionFilters, setInspectorActionFilters] = useState<Record<string, boolean>>({
     'click': true,
@@ -3162,6 +3166,17 @@ export default function ProjectDetailPage() {
   };
 
   // ذخیره خودکار پیام‌های assistant در دیتابیس
+  // 🆕 (auto-scroll) — هر بار پیام جدید اضافه شد، به آخر چت اسکرول کن.
+  // فقط اگر کاربر نزدیک انتها است (تا اگر داره بالا رو می‌خونه مزاحم نشیم).
+  useEffect(() => {
+    const c = inspectorChatScrollRef.current;
+    if (!c) return;
+    const nearBottom = c.scrollHeight - c.scrollTop - c.clientHeight < 250;
+    if (nearBottom || inspectorChatLoading) {
+      inspectorChatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }
+  }, [inspectorChatMessages.length, inspectorChatLoading]);
+
   const lastSavedMsgCountRef = useRef(0);
   useEffect(() => {
     const currentSessionId = inspectorSessionIdRef.current;
@@ -4720,26 +4735,44 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           .slice(-5)
           .map(m => ({ role: m.role, content: m.content?.slice(0, 200) }));
 
-        const res = await fetch(`${API_BASE}/api/render/inspector/smart-chat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            project_id: projectId,
-            model_ids: modelIds,
-            message: stepPrompt,
-            chat_history: chatHistory,
-            backend_logs: inspectorBackendLogs,
-            frontend_url: inspectorFrontendUrl,
-            previously_read_files: previouslyReadFiles,
-            // 🔗 (C7 Bridge Phase 2) — task_id برای کانتکست تسک
-            task_id: linkedTaskId || undefined,
-            // 🆕 (v3 regression fix) — در حالت stepwise execution نباید
-            // intent-based selective scan trigger شود. هر step خودش یک
-            // پیام مستقل با action_plan انتظار است؛ scan_initiated چنین
-            // پاسخی نمی‌دهد و مرحله خالی می‌ماند.
-            enable_selective_scan: false,
-          }),
-        });
+        // 🆕 (network-retry) — تا ۳ بار تلاش با backoff. network errorهای
+        // گذرا نباید باعث skip شدن مرحله شوند.
+        let res: Response | null = null;
+        let _stepFetchErr: any = null;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            res = await fetch(`${API_BASE}/api/render/inspector/smart-chat`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                project_id: projectId,
+                model_ids: modelIds,
+                message: stepPrompt,
+                chat_history: chatHistory,
+                backend_logs: inspectorBackendLogs,
+                frontend_url: inspectorFrontendUrl,
+                previously_read_files: previouslyReadFiles,
+                task_id: linkedTaskId || undefined,
+                enable_selective_scan: false,
+              }),
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            _stepFetchErr = null;
+            break;
+          } catch (e: any) {
+            _stepFetchErr = e;
+            if (attempt < 3) {
+              setInspectorChatMessages(prev => [...prev, {
+                id: `ms_retry_${i}_${attempt}_${Date.now()}`,
+                role: 'system' as const,
+                content: `🔁 خطا در مرحله ${step.step_number} (تلاش ${attempt}/3): ${(e?.message || 'network error').slice(0, 80)} — تلاش مجدد در ${attempt * 2} ثانیه...`,
+                timestamp: new Date(),
+              }]);
+              await new Promise(r => setTimeout(r, attempt * 2000));
+            }
+          }
+        }
+        if (!res || _stepFetchErr) throw _stepFetchErr || new Error('No response after 3 retries');
 
         const reader = res.body?.getReader();
         const decoder = new TextDecoder();
@@ -5235,6 +5268,33 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     const rawMessage = (overrideMessage || inspectorChatInput).trim();
     if (!rawMessage) return;
     if (!inspectorAutoSelect && inspectorSelectedModels.length === 0) return;
+
+    // 🆕 (concurrency guard) — ریشهٔ قاتی‌شدن پیام‌ها: کاربر پیام جدید
+    // می‌فرستد در حالی که scan یا یک عملیات دیگر هنوز در حال اجراست. هر دو
+    // هم‌زمان در چت می‌نویسند و ترتیب به‌هم می‌ریزد. اینجا block می‌کنیم.
+    // استثنا: پاسخ‌های clarification (که با [user_clarification شروع می‌شوند)
+    // اجازهٔ عبور دارند چون ادامهٔ منطقی یک flow هستند.
+    const _isClarifyReply = rawMessage.startsWith('[user_clarification');
+    if (!_isClarifyReply) {
+      if (activeScanId) {
+        setInspectorChatMessages(prev => [...prev, {
+          id: `busy_scan_${Date.now()}`,
+          role: 'system' as const,
+          content: '⏳ یک اسکن در حال اجراست. لطفاً صبر کن تا نتایج کامل شود، سپس پیام جدید بفرست (برای جلوگیری از قاتی‌شدن پیام‌ها).',
+          timestamp: new Date(),
+        } as any]);
+        return;
+      }
+      if (inspectorChatLoading || inspectorOpLock) {
+        setInspectorChatMessages(prev => [...prev, {
+          id: `busy_op_${Date.now()}`,
+          role: 'system' as const,
+          content: '⏳ یک عملیات قبلی هنوز در حال اجراست. لطفاً صبر کن تا تمام شود.',
+          timestamp: new Date(),
+        } as any]);
+        return;
+      }
+    }
 
     if (!overrideMessage && !_isRetry) setInspectorChatInput('');
     setInspectorChatLoading(true);
@@ -14260,7 +14320,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                 )}
 
                 {/* محتوای چت */}
-                <div className="flex-1 p-3 overflow-auto bg-gray-50 dark:bg-gray-900 space-y-3" style={{ maxHeight: '400px' }}>
+                <div ref={inspectorChatScrollRef} className="flex-1 p-3 overflow-auto bg-gray-50 dark:bg-gray-900 space-y-3" style={{ maxHeight: '400px' }}>
                   {/* پیام خوش‌آمد */}
                   {inspectorChatMessages.length === 0 && (
                     <>
@@ -14651,7 +14711,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                          '🤖'}
                       </div>
                       <div
-                        className={`rounded-lg p-2.5 shadow-sm max-w-[85%] cursor-pointer transition-all ${
+                        className={`rounded-lg p-2.5 shadow-sm max-w-[85%] min-w-0 break-words overflow-hidden cursor-pointer transition-all ${
                           msg.role === 'user'
                             ? 'bg-blue-500 text-white rounded-tr-none'
                             : msg.role === 'action' && msg.verified_by_model === 'console-error'
@@ -14676,16 +14736,14 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             ↩️ {(msg as any).reply_to_content}...
                           </div>
                         )}
-                        {/* 🧠 نشانگر ساختارمندسازی + نمایش پیام اصلی */}
+                        {/* 🧠 نشانگر ساختارمندسازی + نمایش پیام اصلی (همیشه دیده می‌شود) */}
                         {msg.role === 'user' && (msg as any).original_prompt && (
-                          <div className="mb-1">
+                          <div className="mb-1.5">
                             <span className="inline-block text-[9px] bg-green-400/30 text-green-100 px-1.5 py-0.5 rounded-full mb-1">🧠 ساختارمند شده</span>
-                            <details className="text-[10px]">
-                              <summary className="cursor-pointer text-blue-200 hover:text-white">📝 پیام اصلی</summary>
-                              <div className="mt-1 p-1.5 bg-blue-400/20 rounded text-[10px] text-blue-100 whitespace-pre-wrap max-h-32 overflow-auto">
-                                {(msg as any).original_prompt}
-                              </div>
-                            </details>
+                            {/* پیام خام کاربر — کم‌رنگ و نقل‌قولی، تا بتوانی تطابق منظور را چک کنی */}
+                            <div className="mt-1 mb-1 pr-2 border-r-2 border-white/40 text-[11px] text-blue-100/70 italic whitespace-pre-wrap break-words max-h-24 overflow-auto">
+                              «{(msg as any).original_prompt}»
+                            </div>
                           </div>
                         )}
                         {/* 🆕 (Inspector → Oversight) badge + manual override button */}
@@ -14746,7 +14804,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             📎 بخشی از اجرای مرحله‌ای
                           </div>
                         )}
-                        <p className={`text-sm whitespace-pre-wrap ${
+                        <p className={`text-sm whitespace-pre-wrap break-words [overflow-wrap:anywhere] ${
                           msg.role === 'user' ? '' :
                           msg.role === 'action' && msg.verified_by_model === 'console-error' ? 'text-orange-800 dark:text-orange-200' :
                           msg.role === 'action' && msg.backend_verified === false ? 'text-red-800 dark:text-red-200' :
@@ -15590,6 +15648,8 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                       </div>
                     </div>
                   )}
+                  {/* 🆕 (auto-scroll) sentinel */}
+                  <div ref={inspectorChatEndRef} />
                 </div>
 
                 {/* 🔍 مودال انتخاب مدل برای بررسی خطا */}

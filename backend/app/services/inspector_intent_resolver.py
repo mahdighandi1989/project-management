@@ -121,13 +121,33 @@ _INFRA_ERROR_PATTERNS = (
 )
 
 
-def _has_infra_connection_error(backend_logs: Optional[List[Dict[str, Any]]]) -> Optional[str]:
-    """اگر backend_logs شامل یکی از infrastructure connection errors است،
-    pattern matched را برگردان. در غیر این صورت None.
-    """
+# 🆕 (clarify-first v3) — خطاهای قطعی کد که یک محل دقیق دارند (stack trace
+# به فایل:خط اشاره می‌کند). این‌ها یک fix هدفمند تک‌فایلی دارند و scan ۱۲-pass
+# روی کل پروژه فقط ۴۰+ proposal بی‌ربط تولید می‌کند. مستقیم به smart-chat.
+_DETERMINISTIC_CODE_ERRORS = (
+    "AttributeError",
+    "has no attribute",
+    "ImportError",
+    "ModuleNotFoundError",
+    "cannot import name",
+    "NameError",
+    "name '",  # بخشی از "name 'X' is not defined"
+    "SyntaxError",
+    "IndentationError",
+    "TypeError:",
+    "KeyError:",
+    "NoneType' object",
+    "object has no attribute",
+    "ImproperlyConfigured",
+    "No module named",
+)
+
+
+def _scan_text_in_logs(backend_logs: Optional[List[Dict[str, Any]]], patterns) -> Optional[str]:
+    """جستجوی patterns در ۳۰ پیام آخر backend_logs. اولین match را برمی‌گرداند."""
     if not backend_logs:
         return None
-    for entry in backend_logs[-30:]:  # فقط ۳۰ تای آخر بررسی شوند
+    for entry in backend_logs[-30:]:
         msg = ""
         if isinstance(entry, dict):
             msg = str(entry.get("message", "") or entry.get("content", "") or "")
@@ -135,9 +155,31 @@ def _has_infra_connection_error(backend_logs: Optional[List[Dict[str, Any]]]) ->
             msg = entry
         if not msg:
             continue
-        for pat in _INFRA_ERROR_PATTERNS:
+        for pat in patterns:
             if pat in msg:
                 return pat
+    return None
+
+
+def _has_infra_connection_error(backend_logs: Optional[List[Dict[str, Any]]]) -> Optional[str]:
+    """اگر backend_logs شامل یکی از infrastructure connection errors است،
+    pattern matched را برگردان. در غیر این صورت None.
+    """
+    return _scan_text_in_logs(backend_logs, _INFRA_ERROR_PATTERNS)
+
+
+def _has_deterministic_code_error(
+    backend_logs: Optional[List[Dict[str, Any]]],
+    user_message: str = "",
+) -> Optional[str]:
+    """خطای قطعی کد (AttributeError و...) در logs یا پیام کاربر؟"""
+    p = _scan_text_in_logs(backend_logs, _DETERMINISTIC_CODE_ERRORS)
+    if p:
+        return p
+    # همچنین در متن پیام کاربر چک کن (کاربر ممکن است error را paste کند)
+    for pat in _DETERMINISTIC_CODE_ERRORS:
+        if pat in (user_message or ""):
+            return pat
     return None
 
 
@@ -564,6 +606,24 @@ def resolve_intent_from_chat_context(
                 f"(۲) ست کردن env var واقعی در Render، "
                 f"(۳) حذف کامل وابستگی به این سرویس اگر لازم نیست. "
                 f"کاربر باید انتخاب کند، نه که حدس بزنی."
+            ),
+        )
+
+    # 🆕 (clarify-first v3) — خطای قطعی کد (AttributeError، ImportError،
+    # ModuleNotFoundError، SyntaxError، ...) یک محل دقیق دارد. scan کل پروژه
+    # ۴۰+ proposal بی‌ربط می‌سازد. مستقیم smart-chat که فایل دقیق را می‌خواند
+    # و fix هدفمند می‌سازد.
+    _code_err = _has_deterministic_code_error(backend_logs, user_message)
+    if _code_err:
+        return ResolvedScanIntent(
+            should_scan=False,
+            reason=f"deterministic_code_error:{_code_err}",
+            focus_notes=(
+                f"خطای قطعی کد شناسایی شد: '{_code_err}'. این خطا یک محل دقیق در stack trace دارد "
+                f"و یک fix هدفمند تک‌فایلی نیاز دارد — نه scan کل پروژه. "
+                f"فایل ذکرشده در stack trace (و importهای مرتبط) را بخوان، علت دقیق را پیدا کن "
+                f"و فقط همان را fix کن. هرگز scope را به کل پروژه گسترش نده. "
+                f"اگر چند راه‌حل معقول دارد، با ask_user بپرس."
             ),
         )
 
