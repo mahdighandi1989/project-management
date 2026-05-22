@@ -24,6 +24,8 @@
 
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
+import json as _json
+
 from .ai_base import Message
 from ..core.logging_utils import StructuredLogger
 
@@ -299,3 +301,140 @@ async def run_inspector_agent(
         "iterations": _iter,
         "stop_reason": stop_reason,
     })
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# قدم ۲ (multi-agent) — نقش بازبین (reviewer)
+# ────────────────────────────────────────────────────────────────────────────
+
+def is_complex_plan(action_plan: Optional[Dict[str, Any]]) -> bool:
+    """آیا این action_plan آن‌قدر پیچیده هست که بازبینی دومدلی ارزش داشته باشد؟
+
+    معیار: ≥۲ فایل، یا هر تغییر روی فایلی که محتوای کاملش بازنویسی می‌شود
+    (operation=modify با content بزرگ → ریسک بازنویسی مخرب).
+    """
+    if not action_plan:
+        return False
+    files = action_plan.get("files") or []
+    if len(files) >= 2:
+        return True
+    for f in files:
+        if f.get("operation") == "modify" and len((f.get("content") or "")) > 4000:
+            return True
+    return False
+
+
+def _summarize_plan_for_review(action_plan: Dict[str, Any], files_read: Dict[str, str]) -> str:
+    """خلاصهٔ تغییرات پیشنهادی برای بازبین (بدون فرستادن کل محتوای فایل‌ها)."""
+    lines = []
+    for f in (action_plan.get("files") or []):
+        path = f.get("path", "?")
+        op = f.get("operation", "?")
+        if op == "modify_sections":
+            secs = f.get("sections") or []
+            lines.append(f"### {path} — modify_sections ({len(secs)} بخش)")
+            for i, s in enumerate(secs[:6]):
+                _find = (s.get("find") or "")[:300]
+                _rep = (s.get("replace") or "")[:300]
+                lines.append(f"  [بخش {i+1}] FIND:\n{_find}\n  REPLACE:\n{_rep}")
+        elif op in ("modify", "create"):
+            content = (f.get("content") or "")
+            _preview = content[:1500]
+            lines.append(f"### {path} — {op} ({content.count(chr(10))+1} خط)\n{_preview}")
+        else:
+            lines.append(f"### {path} — {op}")
+    return "\n\n".join(lines) or "(بدون فایل)"
+
+
+async def run_reviewer_pass(
+    *,
+    ai_manager,
+    user_message: str,
+    analysis: str,
+    action_plan: Dict[str, Any],
+    files_read: Dict[str, str],
+    exclude_model: Optional[str] = None,
+    max_tokens: int = 1800,
+) -> Optional[Dict[str, Any]]:
+    """نقش «بازبین»: یک مدل (ترجیحاً متفاوت از orchestrator) تغییرات پیشنهادی را
+    از نظر صحت/کامل‌بودن/ریسک بازنویسی مخرب بررسی می‌کند.
+
+    مدل reviewer را خودش resolve و در صورت لزوم موقتاً فعال/revert می‌کند.
+    خروجی: {reviewer_model, verdict ("approve"|"concerns"), notes} یا None
+    اگر بازبینی ممکن/لازم نبود.
+    """
+    try:
+        from .inspector_roles import (
+            resolve_role_assignments,
+            apply_temp_enables,
+            revert_temp_enables,
+        )
+    except Exception:
+        return None
+
+    try:
+        asg = resolve_role_assignments(ai_manager, roles=["reviewer"]).get("reviewer")
+    except Exception as e:
+        slog.warning(f"[reviewer] resolve failed: {e}")
+        return None
+    if not asg or not asg.model_id:
+        return None
+
+    reviewer_model = asg.model_id
+    # اگر تنها مدل موجود همان orchestrator است، بازبینی دومدلی واقعی نیست — ولی
+    # باز هم یک self-review ارزش دارد (مدل با دمای پایین‌تر دوباره چک می‌کند).
+
+    _revert = apply_temp_enables([reviewer_model]) if asg.needs_temp_enable else []
+    try:
+        sys_prompt = (
+            "تو یک بازبین کد ارشد و سخت‌گیر هستی. وظیفه‌ات بررسی یک راه‌حل پیشنهادی "
+            "(action_plan) نسبت به مشکل کاربر است. این موارد را چک کن:\n"
+            "1) آیا تغییرات واقعاً مشکل را حل می‌کنند؟\n"
+            "2) آیا قابلیت موجودی را می‌شکنند یا حذف می‌کنند (بازنویسی مخرب)؟\n"
+            "3) آیا چیزی جا افتاده (edge case، فایل وابسته، import)؟\n"
+            "فقط یک JSON معتبر برگردان (بدون متن اضافه):\n"
+            '{"verdict":"approve" یا "concerns","notes":"توضیح کوتاه فارسی، حداکثر ۸ خط"}'
+        )
+        user_prompt = (
+            f"## مشکل/درخواست کاربر:\n{user_message[:2000]}\n\n"
+            f"## تحلیل و راه‌حل پیشنهادی (orchestrator):\n{(analysis or '')[:2500]}\n\n"
+            f"## تغییرات پیشنهادی روی فایل‌ها:\n{_summarize_plan_for_review(action_plan, files_read)}\n\n"
+            "حالا بازبینی کن و فقط JSON را برگردان."
+        )
+        resp = await ai_manager.generate(
+            model_id=reviewer_model,
+            messages=[Message(role="system", content=sys_prompt), Message(role="user", content=user_prompt)],
+            max_tokens=max_tokens,
+            temperature=0.1,
+            allow_fallback=False,
+        )
+        raw = (resp.content or "").strip()
+        verdict, notes = "approve", ""
+        try:
+            _s = raw.find("{")
+            _e = raw.rfind("}")
+            if _s != -1 and _e != -1 and _e > _s:
+                parsed = _json.loads(raw[_s:_e + 1])
+                verdict = (parsed.get("verdict") or "approve").strip().lower()
+                if verdict not in ("approve", "concerns"):
+                    verdict = "concerns" if "concern" in verdict else "approve"
+                notes = (parsed.get("notes") or "").strip()
+        except Exception:
+            # JSON نبود — متن خام را به‌عنوان notes نگه دار
+            notes = raw[:800]
+            verdict = "concerns" if any(w in raw.lower() for w in ("مشکل", "نمی", "concern", "break", "خراب", "حذف")) else "approve"
+        return {
+            "reviewer_model": reviewer_model,
+            "verdict": verdict,
+            "notes": notes,
+            "tokens_used": resp.tokens_used or 0,
+        }
+    except Exception as e:
+        slog.warning(f"[reviewer] pass failed: {e}")
+        return None
+    finally:
+        if _revert:
+            try:
+                revert_temp_enables(_revert)
+            except Exception:
+                pass

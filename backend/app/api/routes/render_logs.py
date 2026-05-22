@@ -14825,6 +14825,8 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 from ...services.inspector_agent import (
                     run_inspector_agent,
                     supports_tool_calling,
+                    is_complex_plan,
+                    run_reviewer_pass,
                 )
             except Exception:
                 yield ("__handled__", False)
@@ -14918,11 +14920,48 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
             _files_read = _agent_result.get("files_read") or {}
             _content = _agent_result.get("content") or "تحلیل انجام شد."
             _has_files = bool(_ap and _ap.get("files"))
+            _agent_tokens = _agent_result.get("tokens_used", 0)
+
+            # 🆕🆕 (قدم ۲ — multi-agent) نقش بازبین: برای کارهای پیچیده، یک مدلِ
+            # نقشِ reviewer تغییرات را بازبینی می‌کند و نظرش به پاسخ ضمیمه می‌شود.
+            # هر خطا = skip امن (پاسخ orchestrator بدون تغییر برمی‌گردد).
+            _review = None
+            if _has_files and is_complex_plan(_ap):
+                yield sse("progress", {
+                    "step": "agent_review",
+                    "message": "🔎 [agent] بازبینی تغییرات توسط نقش reviewer...",
+                })
+                try:
+                    _review = await run_reviewer_pass(
+                        ai_manager=ai_manager,
+                        user_message=request.message,
+                        analysis=_content,
+                        action_plan=_ap,
+                        files_read=_files_read,
+                        exclude_model=primary_model,
+                    )
+                except Exception as _rev_e:
+                    slog.warning(f"[smart-chat reviewer] failed: {_rev_e}")
+                    _review = None
+                if _review:
+                    _agent_tokens += _review.get("tokens_used", 0)
+                    _verdict = _review.get("verdict", "approve")
+                    _icon = "✅" if _verdict == "approve" else "⚠️"
+                    yield sse("progress", {
+                        "step": "agent_review_done",
+                        "message": f"{_icon} [reviewer: {_review.get('reviewer_model')}] {'تأیید شد' if _verdict == 'approve' else 'نکاتی دارد'}",
+                    })
+                    if _review.get("notes"):
+                        _content += (
+                            f"\n\n---\n🔎 **بازبینی ({_review.get('reviewer_model')}):** "
+                            f"{'✅ تأیید' if _verdict == 'approve' else '⚠️ نکات'}\n{_review.get('notes')}"
+                        )
+
             yield sse("response", {
                 "type": "action",
                 "content": _content,
                 "model_used": _agent_result.get("model_used"),
-                "tokens_used": _agent_result.get("tokens_used", 0),
+                "tokens_used": _agent_tokens,
                 "has_action": _has_files,
                 "action_plan": _validate_action_plan_syntax(
                     _ap,
@@ -14936,6 +14975,11 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 "selected_file_paths": list(_files_read.keys()),
                 "agent_mode": True,
                 "agent_stop_reason": _agent_result.get("stop_reason"),
+                "review": ({
+                    "model": _review.get("reviewer_model"),
+                    "verdict": _review.get("verdict"),
+                    "notes": _review.get("notes"),
+                } if _review else None),
             })
             yield sse("done", {"success": True})
             yield ("__handled__", True)
