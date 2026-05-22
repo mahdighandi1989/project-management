@@ -55,7 +55,7 @@ ROLES_REGISTRY: Dict[RoleType, AIRole] = {
 - ارائه تحلیل ساختارمند و جامع
 - توجه به جزئیات فنی
 پاسخ‌های شما باید ساختارمند، دقیق و کاربردی باشد.""",
-        best_models=["claude-sonnet-4-20250514", "gpt-4-turbo", "gpt-4o"],
+        best_models=["claude-sonnet-4-6", "gpt-4-turbo", "gpt-4o"],
         capabilities=["reasoning", "text"]
     ),
 
@@ -87,7 +87,7 @@ ROLES_REGISTRY: Dict[RoleType, AIRole] = {
 - مستندسازی کامل کد
 - رسیدگی به edge cases
 کد کامل و قابل اجرا بدهید! از نوشتن placeholder اجتناب کنید.""",
-        best_models=["deepseek-coder", "claude-sonnet-4-20250514", "gpt-4-turbo"],
+        best_models=["deepseek-coder", "claude-sonnet-4-6", "gpt-4-turbo"],
         capabilities=["code"]
     ),
 
@@ -103,7 +103,7 @@ ROLES_REGISTRY: Dict[RoleType, AIRole] = {
 - تفکر خارج از چارچوب
 - ترکیب مفاهیم به شکل جدید
 از محدودیت‌های ذهنی رها شوید و آزادانه ایده بدهید.""",
-        best_models=["gpt-4o", "claude-sonnet-4-20250514", "gemini-2.0-flash"],
+        best_models=["gpt-4o", "claude-sonnet-4-6", "gemini-2.0-flash"],
         capabilities=["text"]
     ),
 
@@ -119,7 +119,7 @@ ROLES_REGISTRY: Dict[RoleType, AIRole] = {
 - کنترل کیفیت نهایی
 - جمع‌بندی و نتیجه‌گیری
 دقت کنید هیچ نکته‌ای جا نماند.""",
-        best_models=["claude-sonnet-4-20250514", "gpt-4-turbo"],
+        best_models=["claude-sonnet-4-6", "gpt-4-turbo"],
         capabilities=["reasoning"]
     ),
 
@@ -135,7 +135,7 @@ ROLES_REGISTRY: Dict[RoleType, AIRole] = {
 - تحلیل داده‌ها
 - ارائه گزارش ساختارمند
 تحقیق شما باید عمیق و قابل استناد باشد.""",
-        best_models=["gemini-2.5-pro", "claude-sonnet-4-20250514", "gpt-4-turbo"],
+        best_models=["gemini-2.5-pro", "claude-sonnet-4-6", "gpt-4-turbo"],
         capabilities=["text", "long-context"]
     ),
 
@@ -151,7 +151,7 @@ ROLES_REGISTRY: Dict[RoleType, AIRole] = {
 - پاسخ به انتقادات طرف مقابل
 - استدلال منطقی و محکم
 با اطمینان از موضع خود دفاع کنید.""",
-        best_models=["claude-sonnet-4-20250514", "gpt-4-turbo"],
+        best_models=["claude-sonnet-4-6", "gpt-4-turbo"],
         capabilities=["reasoning"]
     ),
 
@@ -183,7 +183,7 @@ ROLES_REGISTRY: Dict[RoleType, AIRole] = {
 - ایجاد راه‌حل جامع
 - ارائه نتیجه‌گیری نهایی
 از همه نظرات بهترین‌ها را استخراج کنید.""",
-        best_models=["claude-sonnet-4-20250514", "gpt-4o"],
+        best_models=["claude-sonnet-4-6", "gpt-4o"],
         capabilities=["reasoning", "text"]
     ),
 
@@ -199,7 +199,7 @@ ROLES_REGISTRY: Dict[RoleType, AIRole] = {
 - پولیش نهایی
 - اطمینان از کمال کار
 نتیجه نهایی باید بی‌نقص باشد.""",
-        best_models=["claude-sonnet-4-20250514", "gpt-4-turbo"],
+        best_models=["claude-sonnet-4-6", "gpt-4-turbo"],
         capabilities=["text"]
     ),
 
@@ -230,7 +230,7 @@ ROLES_REGISTRY: Dict[RoleType, AIRole] = {
 - ارائه بینش‌های کاربردی
 - تصویرسازی داده‌ها
 از داده‌ها insight های ارزشمند استخراج کنید.""",
-        best_models=["gpt-4-turbo", "claude-sonnet-4-20250514"],
+        best_models=["gpt-4-turbo", "claude-sonnet-4-6"],
         capabilities=["reasoning", "code"]
     ),
 
@@ -246,7 +246,7 @@ ROLES_REGISTRY: Dict[RoleType, AIRole] = {
 - تعیین برنده با دلایل روشن
 - ارائه بازخورد سازنده به همه
 کاملاً بی‌طرف و منصفانه قضاوت کنید.""",
-        best_models=["claude-sonnet-4-20250514", "gpt-4o"],
+        best_models=["claude-sonnet-4-6", "gpt-4o"],
         capabilities=["reasoning"]
     ),
 
@@ -262,7 +262,7 @@ ROLES_REGISTRY: Dict[RoleType, AIRole] = {
 - ساختاردهی منطقی
 - ارائه خلاصه قابل فهم
 خلاصه شما باید جامع و مختصر باشد.""",
-        best_models=["claude-sonnet-4-20250514", "gpt-4o"],
+        best_models=["claude-sonnet-4-6", "gpt-4o"],
         capabilities=["text"]
     ),
 }

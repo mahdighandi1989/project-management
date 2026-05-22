@@ -466,19 +466,19 @@ class DynamicConfigService:
         """
         task_model_preferences = {
             "code_generation": [
-                "claude-sonnet-4-20250514", "deepseek-coder", "gpt-4-turbo"
+                "claude-sonnet-4-6", "claude-opus-4-7", "claude-sonnet-4-20250514", "deepseek-coder", "gpt-4-turbo"
             ],
             "analysis": [
-                "gemini-2.5-pro", "claude-sonnet-4-20250514", "gpt-4o"
+                "claude-sonnet-4-6", "gemini-2.5-pro", "claude-sonnet-4-20250514", "gpt-4o"
             ],
             "debate": [
-                "claude-sonnet-4-20250514", "gpt-4-turbo", "gemini-2.5-pro"
+                "claude-opus-4-7", "claude-sonnet-4-6", "claude-sonnet-4-20250514", "gpt-4-turbo", "gemini-2.5-pro"
             ],
             "creative": [
-                "claude-sonnet-4-20250514", "gpt-4-turbo", "gemini-2.5-pro"
+                "claude-sonnet-4-6", "claude-sonnet-4-20250514", "gpt-4-turbo", "gemini-2.5-pro"
             ],
             "research": [
-                "gemini-2.5-pro", "gpt-4-turbo", "claude-sonnet-4-20250514"
+                "claude-sonnet-4-6", "gemini-2.5-pro", "gpt-4-turbo", "claude-sonnet-4-20250514"
             ]
         }
 
