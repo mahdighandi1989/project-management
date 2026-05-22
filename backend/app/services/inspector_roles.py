@@ -62,75 +62,45 @@ INSPECTOR_ROLE_MODELS: Dict[str, List[str]] = {
 
 
 def resolve_best_model(ai_manager, role: str = "analyst", exclude: Optional[List[str]] = None):
-    """میان‌بُر: RoleAssignment بهترین مدل برای یک نقش را برمی‌گرداند (یا None)."""
+    """میان‌بُر: RoleAssignment بهترین مدل برای یک نقش را برمی‌گرداند (یا None).
+
+    «بهترین» = اولین مدلِ کلیددارِ **فعال** در زنجیرهٔ نقش (احترام به مدل‌هایی
+    که کاربر فعال کرده). اگر هیچ‌کدام فعال نبود، اولین مدلِ کلیددارِ خاموش برای
+    فعال‌سازی موقت کاندید می‌شود.
+    """
     try:
         return resolve_role_assignments(ai_manager, roles=[role], exclude=exclude).get(role)
     except Exception:
         return None
 
 
-# مدل‌هایی که برای اسکن/تحلیل عمیق «ضعیف» محسوب می‌شوند و بهتر است ارتقا یابند.
-_WEAK_SCAN_HINTS = ("deepseek", "haiku", "mini", "gpt-3.5", "flash")
-
-
-def resolve_strongest_keyed(ai_manager, role: str = "analyst", exclude: Optional[List[str]] = None):
-    """اولین مدلِ **کلیددار** در زنجیرهٔ نقش را برمی‌گرداند (صرف‌نظر از enabled).
-
-    برخلاف resolve_role_assignments که «اولین مدلِ فعال» را ترجیح می‌دهد، این
-    تابع «قوی‌ترین مدلِ کلیددار» را می‌گیرد و اگر خاموش بود needs_temp_enable
-    می‌زند. برای اسکن‌ها لازم است تا یک مدلِ ضعیفِ فعال (مثلاً deepseek) بر یک
-    مدلِ قویِ خاموش (Claude) ترجیح داده نشود.
-    """
-    chain = INSPECTOR_ROLE_MODELS.get(role, [])
-    _exclude = set(exclude or [])
-    for mid in chain:
-        if mid in _exclude:
-            continue
-        if not get_model(mid):
-            continue
-        if not _provider_has_key(ai_manager, mid):
-            continue
-        try:
-            enabled = ai_manager.get_enabled_status(mid)
-        except Exception:
-            enabled = False
-        return RoleAssignment(
-            role=role,
-            model_id=mid,
-            status=("ready" if enabled else "needs_enable"),
-            needs_temp_enable=(not enabled),
-        )
-    return RoleAssignment(role=role)
-
-
 def pick_scan_model(ai_manager, model_id=None, model_ids=None):
-    """مدل مؤثر برای یک اسکن single-model را انتخاب می‌کند (+ temp-enable در صورت لزوم).
+    """مدل مؤثر برای یک اسکن single-model را انتخاب می‌کند (+ temp-enable فقط در
+    صورت لزوم).
 
-    منطق:
-      - اگر چند مدل صریح داده شده (consensus) → دست نزن (همان را برگردان).
-      - اگر مدلِ فعلی قوی است (claude/gpt-4o/gemini-pro/...) → احترام بگذار.
-      - اگر مدلی نبود یا ضعیف بود (deepseek/haiku/mini/flash) → قوی‌ترین مدلِ
-        کلیددارِ تحلیلی را بگیر و در صورت خاموش‌بودن، موقتاً فعال کن (حتی اگر یک
-        مدلِ ضعیفِ دیگر فعال باشد).
+    اصل طراحی (داده‌محور، احترام به مدل‌های فعال — نه طبقه‌بندی «قوی/ضعیف»):
+      - اگر caller مدلی صریحاً داده (single یا consensus) → همان را برگردان.
+        انتخاب کاربر محترم است؛ هیچ قضاوتی دربارهٔ «ضعیف‌بودن» نمی‌کنیم.
+      - اگر مدلی نداده → بهترین مدلِ **فعالِ** نقش analyst را بگیر (resolve بر
+        اساس زنجیرهٔ نقش، فعال‌ها را ترجیح می‌دهد). اگر هیچ مدلِ مناسبی فعال
+        نبود (ولی کلیددار بود) → به‌عنوان آخرین چاره موقتاً فعالش کن.
 
     خروجی: (effective_model_id, revert_info). revert_info را باید بعد از اتمام
     اسکن به revert_temp_enables داد (در try/finally).
     """
-    # consensus صریح چندمدلی → احترام
-    if model_ids and len([m for m in model_ids if m]) > 1:
-        return (model_id or model_ids[0]), []
+    # انتخاب صریح caller (single یا consensus) → احترام
+    if model_id:
+        return model_id, []
+    if model_ids and any(model_ids):
+        return model_ids[0], []
 
-    current = model_id or (model_ids[0] if model_ids else None)
-    if current and not any(w in current.lower() for w in _WEAK_SCAN_HINTS):
-        # مدلِ قوی صریحاً انتخاب شده → احترام بگذار
-        return current, []
-
-    asg = resolve_strongest_keyed(ai_manager, "analyst", exclude=[current] if current else None)
+    # مدلی داده نشده → بهترین مدلِ فعالِ نقش analyst (temp-enable فقط اگر هیچ
+    # مدلِ مناسبی فعال نباشد).
+    asg = resolve_best_model(ai_manager, "analyst")
     if asg and asg.model_id:
         revert = apply_temp_enables([asg.model_id]) if asg.needs_temp_enable else []
         return asg.model_id, revert
-    # چیز بهتری پیدا نشد → همان فعلی
-    return current, []
+    return None, []
 
 
 @dataclass
