@@ -679,7 +679,14 @@ def resolve_intent_from_chat_context(
                 f"نه scan کل پروژه. اگر log شامل maturin/Rust/Read-only filesystem یا cp313/cp314 "
                 f"است، علت Python 3.13+ است و wheel ندارد؛ runtime.txt را به python-3.12.7 ست کن. "
                 f"اول چک کن runtime.txt موجود است یا نه (اگر هست modify، اگر نیست create). "
-                f"هرگز maturin/setuptools-rust به requirements اضافه نکن. scope را گسترش نده."
+                f"🔴 مهم: اگر runtime.txt و Dockerfile از قبل python-3.12.x را مشخص کرده‌اند ولی "
+                f"build همچنان از python3.14 در مسیر `.venv/bin/python3.14` استفاده می‌کند، یعنی "
+                f"Render یک build بومی (native pip/venv) انجام می‌دهد و Dockerfile را نادیده می‌گیرد — "
+                f"در این حالت render.yaml یا تنظیم env اعمال نشده. fix: یا env var `PYTHON_VERSION=3.12.7` "
+                f"را در render.yaml/Dockerfile اضافه کن، یا مطمئن شو runtime.txt دقیقاً در root directory "
+                f"سرویس قرار دارد و render.yaml به‌درستی linked است. اگر مطمئن نیستی کدام راه درست است، "
+                f"با ask_user گزینه‌ها را با trade-off ارائه بده. هرگز maturin/setuptools-rust به "
+                f"requirements اضافه نکن. scope را به کل پروژه گسترش نده."
             ),
         )
 
