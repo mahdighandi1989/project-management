@@ -373,7 +373,15 @@ async def run_reviewer_pass(
         return None
 
     try:
-        asg = resolve_role_assignments(ai_manager, roles=["reviewer"]).get("reviewer")
+        # اول یک مدلِ متفاوت از orchestrator (cross-model review). اگر نبود،
+        # به self-review با همان مدل برمی‌گردیم.
+        asg = None
+        if exclude_model:
+            asg = resolve_role_assignments(
+                ai_manager, roles=["reviewer"], exclude=[exclude_model]
+            ).get("reviewer")
+        if not asg or not asg.model_id:
+            asg = resolve_role_assignments(ai_manager, roles=["reviewer"]).get("reviewer")
     except Exception as e:
         slog.warning(f"[reviewer] resolve failed: {e}")
         return None
@@ -381,8 +389,7 @@ async def run_reviewer_pass(
         return None
 
     reviewer_model = asg.model_id
-    # اگر تنها مدل موجود همان orchestrator است، بازبینی دومدلی واقعی نیست — ولی
-    # باز هم یک self-review ارزش دارد (مدل با دمای پایین‌تر دوباره چک می‌کند).
+    _is_self_review = bool(exclude_model and reviewer_model == exclude_model)
 
     _revert = apply_temp_enables([reviewer_model]) if asg.needs_temp_enable else []
     try:
@@ -428,6 +435,7 @@ async def run_reviewer_pass(
             "verdict": verdict,
             "notes": notes,
             "tokens_used": resp.tokens_used or 0,
+            "self_review": _is_self_review,
         }
     except Exception as e:
         slog.warning(f"[reviewer] pass failed: {e}")

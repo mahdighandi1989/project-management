@@ -89,6 +89,7 @@ def _provider_has_key(ai_manager, model_id: str) -> bool:
 def resolve_role_assignments(
     ai_manager,
     roles: Optional[List[str]] = None,
+    exclude: Optional[List[str]] = None,
 ) -> Dict[str, RoleAssignment]:
     """برای هر نقش، بهترین مدل را تعیین می‌کند.
 
@@ -98,8 +99,12 @@ def resolve_role_assignments(
       2. اگر چنین مدلی نبود، اولین مدلی که در رجیستری است و provider کلید دارد
          ولی در DB غیرفعال است → status="needs_enable", needs_temp_enable=True.
       3. اگر هیچ‌کدام → status="unavailable".
+
+    exclude: مدل‌هایی که نباید انتخاب شوند (مثلاً مدلِ orchestrator، تا reviewer
+    یک مدل متفاوت باشد — cross-model review).
     """
     roles = roles or list(INSPECTOR_ROLE_MODELS.keys())
+    _exclude = set(exclude or [])
     out: Dict[str, RoleAssignment] = {}
 
     for role in roles:
@@ -108,6 +113,8 @@ def resolve_role_assignments(
         first_disabled_with_key: Optional[str] = None
 
         for mid in chain:
+            if mid in _exclude:
+                continue
             if not get_model(mid):
                 continue
             if not _provider_has_key(ai_manager, mid):
@@ -155,6 +162,12 @@ def apply_temp_enables(model_ids: List[str]) -> List[Dict]:
         for mid in dict.fromkeys(model_ids):  # حذف تکراری با حفظ ترتیب
             row = db.query(ModelSettings).filter(ModelSettings.model_id == mid).first()
             if row:
+                # 🛡 (anti-race) اگر مدل از قبل temporary_enabled است، یعنی درخواست
+                # همزمانِ دیگری مالکِ فعال‌سازی موقت است → دست نزن و revert هم نکن
+                # (تا حالت نهایی توسط همان مالک اصلی بازگردانده شود).
+                if int(getattr(row, "temporary_enabled", 0) or 0) == 1:
+                    revert.append({"model_id": mid, "existed": True, "skip_revert": True})
+                    continue
                 revert.append({
                     "model_id": mid,
                     "existed": True,
@@ -192,6 +205,9 @@ def revert_temp_enables(revert_info: List[Dict]) -> None:
         for info in revert_info:
             mid = info.get("model_id")
             if not mid:
+                continue
+            # 🛡 (anti-race) مالکیتِ فعال‌سازی موقت با درخواست دیگری بود → revert نکن
+            if info.get("skip_revert"):
                 continue
             row = db.query(ModelSettings).filter(ModelSettings.model_id == mid).first()
             if not info.get("existed"):
