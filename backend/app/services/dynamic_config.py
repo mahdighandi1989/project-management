@@ -80,6 +80,33 @@ class SystemConfig:
 
 DEFAULT_MODEL_CONFIGS = {
     # Claude
+    "claude-opus-4-7": ModelConfig(
+        model_id="claude-opus-4-7",
+        max_tokens=32000,
+        max_context=200000,
+        timeout=240,
+        priority=1,
+        cost_per_1k_input=0.005,
+        cost_per_1k_output=0.025
+    ),
+    "claude-sonnet-4-6": ModelConfig(
+        model_id="claude-sonnet-4-6",
+        max_tokens=64000,
+        max_context=200000,
+        timeout=180,
+        priority=1,
+        cost_per_1k_input=0.003,
+        cost_per_1k_output=0.015
+    ),
+    "claude-haiku-4-5-20251001": ModelConfig(
+        model_id="claude-haiku-4-5-20251001",
+        max_tokens=32000,
+        max_context=200000,
+        timeout=120,
+        priority=2,
+        cost_per_1k_input=0.001,
+        cost_per_1k_output=0.005
+    ),
     "claude-sonnet-4-20250514": ModelConfig(
         model_id="claude-sonnet-4-20250514",
         max_tokens=8192,
