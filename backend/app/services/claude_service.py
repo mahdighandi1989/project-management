@@ -40,7 +40,11 @@ class ClaudeService(AIServiceBase):
             if msg.role == "system":
                 system_prompt = msg.content
             else:
-                if msg.images:
+                # 🆕 (tool-calling) — اگر محتوای ساختاریافتهٔ خام داریم
+                # (assistant tool_use یا user tool_result) مستقیماً استفاده کن
+                if getattr(msg, "raw_content", None) is not None:
+                    formatted.append({"role": msg.role, "content": msg.raw_content})
+                elif msg.images:
                     # پیام با تصویر
                     content = [{"type": "text", "text": msg.content}]
                     for img in msg.images:
@@ -95,6 +99,12 @@ class ClaudeService(AIServiceBase):
             if kwargs.get("stop_sequences"):
                 payload["stop_sequences"] = kwargs["stop_sequences"]
 
+            # 🆕 (tool-calling/agent-loop) — افزودن tools و tool_choice
+            if kwargs.get("tools"):
+                payload["tools"] = kwargs["tools"]
+                if kwargs.get("tool_choice"):
+                    payload["tool_choice"] = kwargs["tool_choice"]
+
             response = await self.client.post(
                 f"{self.BASE_URL}/messages",
                 headers=self._build_headers(),
@@ -115,11 +125,20 @@ class ClaudeService(AIServiceBase):
 
             latency = int((datetime.now() - start_time).total_seconds() * 1000)
 
-            # استخراج محتوا
+            # استخراج محتوا + بلوک‌های tool_use
             content = ""
-            for block in data.get("content", []):
-                if block.get("type") == "text":
+            _raw_blocks = data.get("content", []) or []
+            _tool_calls = []
+            for block in _raw_blocks:
+                _bt = block.get("type")
+                if _bt == "text":
                     content += block.get("text", "")
+                elif _bt == "tool_use":
+                    _tool_calls.append({
+                        "id": block.get("id", ""),
+                        "name": block.get("name", ""),
+                        "input": block.get("input", {}) or {},
+                    })
 
             return AIResponse(
                 model_id=model_id,
@@ -130,7 +149,9 @@ class ClaudeService(AIServiceBase):
                 metadata={
                     "input_tokens": data.get("usage", {}).get("input_tokens", 0),
                     "output_tokens": data.get("usage", {}).get("output_tokens", 0),
-                }
+                },
+                tool_calls=_tool_calls or None,
+                raw_assistant_content=_raw_blocks if _tool_calls else None,
             )
 
         except AIServiceError:

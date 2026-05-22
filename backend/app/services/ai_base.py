@@ -23,6 +23,11 @@ class Message(BaseModel):
     # که نمی‌توان MIME را از prefix base64 حدس زد. اگر provider از این
     # رسانه پشتیبانی نمی‌کند، باید AIServiceError بدهد (بدون سنیف غلط).
     inline_files: Optional[List[tuple]] = None  # List[Tuple[mime: str, b64: str]]
+    # 🆕 (tool-calling/agent-loop) — محتوای ساختاریافتهٔ خام برای پیام‌هایی که
+    # نمی‌توان با یک str نمایش داد: پیام assistant که tool_use دارد (echo برگشتی)
+    # و پیام user که tool_result دارد. اگر set شود، provider باید آن را
+    # مستقیماً به‌عنوان content blocks استفاده کند (نه msg.content).
+    raw_content: Optional[Any] = None  # List[Dict] — Anthropic content blocks
 
 
 class AIResponse(BaseModel):
@@ -38,6 +43,12 @@ class AIResponse(BaseModel):
     # 🆕 اطلاعات fallback
     fallback_used: bool = False  # آیا از fallback استفاده شده
     original_model_id: Optional[str] = None  # مدل اصلی که غیرفعال بود
+    # 🆕 (tool-calling/agent-loop) — بلوک‌های tool_use که مدل درخواست کرده.
+    # هر مورد: {"id": str, "name": str, "input": dict}. وقتی finish_reason
+    # == "tool_use" پر می‌شود.
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    # محتوای کامل assistant (آرایهٔ content blocks) برای echo برگشتی در حلقه
+    raw_assistant_content: Optional[List[Dict[str, Any]]] = None
 
 
 class AIServiceBase(ABC):
