@@ -51,7 +51,55 @@ INSPECTOR_ROLE_MODELS: Dict[str, List[str]] = {
         "claude-sonnet-4-6", "gpt-4o", "claude-opus-4-7",
         "claude-sonnet-4-20250514",
     ],
+    # تحلیل‌گر اسکن — single-shot (tool-calling لازم نیست)، پس بهترین مدلِ هر
+    # provider مجاز است؛ ترجیح با قوی‌ترین‌ها. برای اسکن عمیق/موردی/کوییک و
+    # وقتی caller مدلی صریحاً نداده.
+    "analyst": [
+        "claude-sonnet-4-6", "claude-opus-4-7", "gpt-4o", "gemini-2.5-pro",
+        "claude-sonnet-4-20250514", "gpt-4-turbo", "deepseek-chat",
+    ],
 }
+
+
+def resolve_best_model(ai_manager, role: str = "analyst", exclude: Optional[List[str]] = None):
+    """میان‌بُر: RoleAssignment بهترین مدل برای یک نقش را برمی‌گرداند (یا None)."""
+    try:
+        return resolve_role_assignments(ai_manager, roles=[role], exclude=exclude).get(role)
+    except Exception:
+        return None
+
+
+# مدل‌هایی که برای اسکن/تحلیل عمیق «ضعیف» محسوب می‌شوند و بهتر است ارتقا یابند.
+_WEAK_SCAN_HINTS = ("deepseek", "haiku", "mini", "gpt-3.5", "flash")
+
+
+def pick_scan_model(ai_manager, model_id=None, model_ids=None):
+    """مدل مؤثر برای یک اسکن single-model را انتخاب می‌کند (+ temp-enable در صورت لزوم).
+
+    منطق:
+      - اگر چند مدل صریح داده شده (consensus) → دست نزن (همان را برگردان).
+      - اگر مدلِ فعلی قوی است (claude/gpt-4o/gemini-pro/...) → احترام بگذار.
+      - اگر مدلی نبود یا ضعیف بود (deepseek/haiku/mini/flash) → به بهترین مدلِ
+        تحلیلی ارتقا بده و در صورت خاموش‌بودن، موقتاً فعال کن.
+
+    خروجی: (effective_model_id, revert_info). revert_info را باید بعد از اتمام
+    اسکن به revert_temp_enables داد (در try/finally).
+    """
+    # consensus صریح چندمدلی → احترام
+    if model_ids and len([m for m in model_ids if m]) > 1:
+        return (model_id or model_ids[0]), []
+
+    current = model_id or (model_ids[0] if model_ids else None)
+    if current and not any(w in current.lower() for w in _WEAK_SCAN_HINTS):
+        # مدلِ قوی صریحاً انتخاب شده → احترام بگذار
+        return current, []
+
+    asg = resolve_best_model(ai_manager, "analyst", exclude=[current] if current else None)
+    if asg and asg.model_id:
+        revert = apply_temp_enables([asg.model_id]) if asg.needs_temp_enable else []
+        return asg.model_id, revert
+    # چیز بهتری پیدا نشد → همان فعلی
+    return current, []
 
 
 @dataclass

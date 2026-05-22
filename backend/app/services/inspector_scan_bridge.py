@@ -368,18 +368,26 @@ async def trigger_inspector_selective_scan(
         try:
             _ACTIVE_SCANS[session_id]["status"] = "running"
             from .oversight_deep_scan_service import run_deep_scan
-            result = await run_deep_scan(
-                watched_id,
-                model_id=model_id,
-                model_ids=model_ids,
-                selected_sections=intent.selected_sections,
-                custom_paths=intent.custom_paths,
-                include_dependencies=intent.include_dependencies,
-                focus_notes=intent.focus_notes,
-                output_target=f"inspector_session:{session_id}",
-                semantic_keywords=(intent.semantic_keywords or None)
-                                  if getattr(intent, "semantic_search_only", False) else None,
-            )
+            # 🆕 ارتقای کیفیت: اگر مدل ضعیف/خالی بود، به بهترین مدلِ تحلیلی
+            # (ترجیح Claude) ارتقا بده و در صورت لزوم موقتاً فعال کن.
+            from .ai_manager import get_ai_manager as _gam
+            from .inspector_roles import pick_scan_model, revert_temp_enables
+            _eff_model, _scan_revert = pick_scan_model(_gam(), model_id, model_ids)
+            try:
+                result = await run_deep_scan(
+                    watched_id,
+                    model_id=_eff_model,
+                    model_ids=model_ids,
+                    selected_sections=intent.selected_sections,
+                    custom_paths=intent.custom_paths,
+                    include_dependencies=intent.include_dependencies,
+                    focus_notes=intent.focus_notes,
+                    output_target=f"inspector_session:{session_id}",
+                    semantic_keywords=(intent.semantic_keywords or None)
+                                      if getattr(intent, "semantic_search_only", False) else None,
+                )
+            finally:
+                revert_temp_enables(_scan_revert)
             _ACTIVE_SCANS[session_id]["status"] = "completed"
             _ACTIVE_SCANS[session_id]["result"] = result
 
