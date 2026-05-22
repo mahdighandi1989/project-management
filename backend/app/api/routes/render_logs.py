@@ -14779,28 +14779,41 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
         # وقتی کاربر مدل خاصی انتخاب نکرده و درخواست از نوع ACTION/ERROR_LOG
         # است، خودکار به Claude سوئیچ کن تا حلقهٔ عامل tool-calling فعال شود.
         # انتخاب صریح کاربر (model_ids) یا reply-model را هرگز override نمی‌کند.
+        # مدلی که باید برای این کار موقتاً فعال شود (و بعد revert گردد). None یعنی
+        # نیازی نیست. در consumerهای agent (ACTION/ERROR_LOG) اعمال/revert می‌شود.
+        _inspector_temp_model = None
         _user_picked_model = bool(request.model_ids) or reply_model_used
         if (not _user_picked_model) and msg_type in ("ACTION", "ERROR_LOG"):
-            _CLAUDE_AGENT_MODEL = "claude-sonnet-4-6"
+            # نقش orchestrator (عاملِ tool-calling) را resolve کن: بهترین Claude
+            # که کلید دارد. اگر فعال است → ready؛ اگر خاموش است → needs_enable
+            # (در consumer موقتاً فعال و بعد revert می‌شود).
             try:
-                from ...core.models_registry import ModelProvider as _MP
-                _claude_ok = bool(
-                    ai_manager.get_enabled_status(_CLAUDE_AGENT_MODEL)
-                    and _MP.CLAUDE in ai_manager._services
-                )
-            except Exception:
-                _claude_ok = False
-            if _claude_ok and primary_model != _CLAUDE_AGENT_MODEL:
-                slog.info(
-                    f"[smart-chat phase2] auto-routing {msg_type} to Claude agent: "
-                    f"{primary_model} → {_CLAUDE_AGENT_MODEL}"
-                )
-                primary_model = _CLAUDE_AGENT_MODEL
-                yield sse("progress", {
-                    "step": "agent_model_selected",
-                    "message": "🧠 برای این کار از Claude (حالت عامل) استفاده می‌شود — تحلیل دقیق‌تر و خواندن هوشمند فایل‌ها",
-                    "model": primary_model,
-                })
+                from ...services.inspector_roles import resolve_role_assignments
+                from ...services.inspector_agent import supports_tool_calling as _stc
+                _orch = resolve_role_assignments(ai_manager, roles=["orchestrator"]).get("orchestrator")
+            except Exception as _re:
+                slog.warning(f"[smart-chat phase2] role resolve failed: {_re}")
+                _orch = None
+            if _orch and _orch.model_id and _stc(_orch.model_id):
+                if primary_model != _orch.model_id:
+                    slog.info(
+                        f"[smart-chat phase2] auto-routing {msg_type} to {_orch.model_id} "
+                        f"(status={_orch.status})"
+                    )
+                    primary_model = _orch.model_id
+                if _orch.status == "needs_enable":
+                    _inspector_temp_model = _orch.model_id
+                    yield sse("progress", {
+                        "step": "agent_model_selected",
+                        "message": f"🧠 برای این کار از {primary_model} (حالت عامل) استفاده می‌شود — موقتاً فعال می‌شود و بعد به حالت قبل برمی‌گردد",
+                        "model": primary_model,
+                    })
+                else:
+                    yield sse("progress", {
+                        "step": "agent_model_selected",
+                        "message": "🧠 برای این کار از Claude (حالت عامل) استفاده می‌شود — تحلیل دقیق‌تر و خواندن هوشمند فایل‌ها",
+                        "model": primary_model,
+                    })
 
         # 🆕🆕 (agent-loop) — helper مشترک ACTION و ERROR_LOG.
         # اگر مدل tool-calling دارد (Claude)، به‌جای pipeline تک‌شات حلقهٔ عامل
@@ -14926,6 +14939,33 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
             })
             yield sse("done", {"success": True})
             yield ("__handled__", True)
+
+        async def _run_agent_section(code_files, all_files):
+            """مدل لازم را (اگر خاموش بود) موقتاً فعال می‌کند، حلقهٔ عامل را اجرا
+            می‌کند، و در پایان (حتی روی exception) دقیقاً به حالت قبل برمی‌گرداند."""
+            _revert_info = []
+            if _inspector_temp_model:
+                try:
+                    from ...services.inspector_roles import apply_temp_enables
+                    _revert_info = apply_temp_enables([_inspector_temp_model])
+                    if _revert_info:
+                        yield sse("progress", {
+                            "step": "agent_temp_enable",
+                            "message": f"🔌 {_inspector_temp_model} موقتاً فعال شد (بعد از کار به حالت قبل برمی‌گردد)",
+                        })
+                except Exception as _te:
+                    slog.warning(f"[smart-chat] temp-enable failed: {_te}")
+                    _revert_info = []
+            try:
+                async for _chunk in _try_agent_loop(code_files, all_files):
+                    yield _chunk
+            finally:
+                if _revert_info:
+                    try:
+                        from ...services.inspector_roles import revert_temp_enables
+                        revert_temp_enables(_revert_info)
+                    except Exception as _re2:
+                        slog.warning(f"[smart-chat] revert temp-enable failed: {_re2}")
 
         # --- مرحله ۳: پاسخ بر اساس نوع پیام ---
 
@@ -15206,7 +15246,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         # (Claude)، حلقهٔ عامل واقعی اجرا کن؛ وگرنه fallback به
                         # pipeline تک‌شات پایین.
                         _agent_handled = False
-                        async for _chunk in _try_agent_loop(code_files, all_files):
+                        async for _chunk in _run_agent_section(code_files, all_files):
                             if isinstance(_chunk, tuple) and _chunk and _chunk[0] == "__handled__":
                                 _agent_handled = _chunk[1]
                             else:
@@ -15711,7 +15751,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         # (Claude)، حلقهٔ عامل واقعی اجرا کن؛ وگرنه fallback به
                         # pipeline تک‌شات پایین.
                         _agent_handled = False
-                        async for _chunk in _try_agent_loop(code_files, all_files):
+                        async for _chunk in _run_agent_section(code_files, all_files):
                             if isinstance(_chunk, tuple) and _chunk and _chunk[0] == "__handled__":
                                 _agent_handled = _chunk[1]
                             else:
