@@ -131,7 +131,7 @@ _DETERMINISTIC_CODE_ERRORS = (
     "ModuleNotFoundError",
     "cannot import name",
     "NameError",
-    "name '",  # بخشی از "name 'X' is not defined"
+    "is not defined",  # NameError signature (دقیق‌تر از "name '")
     "SyntaxError",
     "IndentationError",
     "TypeError:",
