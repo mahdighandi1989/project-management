@@ -229,6 +229,35 @@ interface ReportTriggerSettings {
   next_run?: string;
 }
 
+// 🆕 (deploy single-shot) — تشخیص خطای deploy/build در پیام یا لاگ. این نوع
+// مشکل یک علت واحد دارد و باید single-shot تحلیل شود نه multi-step — چون
+// تجزیه به مراحل باعث تناقض (مثل runtime: image vs docker در مراحل مختلف) و
+// حدس‌زدن مستقل فایل در هر مرحله می‌شود.
+const _DEPLOY_BUILD_ERROR_PATTERNS = [
+  'ConnectionRefusedError', 'Connection refused', '[Errno 111]', 'Errno 110',
+  'could not connect', 'connect call failed',
+  'maturin failed', 'Read-only file system', 'cargo metadata', 'Cargo',
+  'Failed to build wheel', 'pydantic-core', 'tiktoken',
+  'metadata-generation-failed', 'Build failed', 'Preparing metadata',
+  'AttributeError', 'has no attribute', 'ImportError', 'ModuleNotFoundError',
+  'cannot import name', 'No module named', 'SyntaxError', 'IndentationError',
+  'exit status 1', 'exit code: 1', 'non-zero exit status',
+  'Not Found', 'Frontend not built', 'cp314', 'cp313', 'python3.14', 'python3.13',
+];
+
+function _looksLikeDeployBuildError(rawMessage: string, backendLogs?: any[]): boolean {
+  const hay: string[] = [rawMessage || ''];
+  if (Array.isArray(backendLogs)) {
+    for (const l of backendLogs.slice(-30)) {
+      if (typeof l === 'string') hay.push(l);
+      else if (l && typeof l === 'object') hay.push(String(l.message || l.content || ''));
+    }
+  }
+  const joined = hay.join('\n');
+  return _DEPLOY_BUILD_ERROR_PATTERNS.some(p => joined.includes(p));
+}
+
+
 export default function ProjectDetailPage() {
   const params = useParams();
   const projectId = params.id as string;
@@ -3166,14 +3195,19 @@ export default function ProjectDetailPage() {
   };
 
   // ذخیره خودکار پیام‌های assistant در دیتابیس
-  // 🆕 (auto-scroll) — هر بار پیام جدید اضافه شد، به آخر چت اسکرول کن.
-  // فقط اگر کاربر نزدیک انتها است (تا اگر داره بالا رو می‌خونه مزاحم نشیم).
+  // 🆕 (auto-scroll v2) — هر بار پیام جدید اضافه شد، فقط container چت را به
+  // پایین اسکرول کن (نه کل صفحه). قبلاً scrollIntoView استفاده می‌شد که کل
+  // صفحه و ancestorها را هم می‌لغزاند. حالا مستقیم scrollTop کانتینر را ست
+  // می‌کنیم تا فقط داخل چت اسکرول شود.
   useEffect(() => {
     const c = inspectorChatScrollRef.current;
     if (!c) return;
     const nearBottom = c.scrollHeight - c.scrollTop - c.clientHeight < 250;
     if (nearBottom || inspectorChatLoading) {
-      inspectorChatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+      // smooth scroll فقط داخل خود کانتینر چت
+      requestAnimationFrame(() => {
+        c.scrollTo({ top: c.scrollHeight, behavior: 'smooth' });
+      });
     }
   }, [inspectorChatMessages.length, inspectorChatLoading]);
 
@@ -4735,13 +4769,19 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           .slice(-5)
           .map(m => ({ role: m.role, content: m.content?.slice(0, 200) }));
 
-        // 🆕 (network-retry) — تا ۳ بار تلاش با backoff. network errorهای
-        // گذرا نباید باعث skip شدن مرحله شوند.
-        let res: Response | null = null;
-        let _stepFetchErr: any = null;
+        // 🆕 (network-retry v2) — کل مرحله (fetch + خواندن stream) در retry
+        // پیچیده می‌شود. قبلاً فقط fetch retry می‌شد، ولی "network error"
+        // معمولاً وسط خواندن SSE stream (reader.read()) رخ می‌دهد نه در fetch.
+        // حالا تا ۳ بار کل عملیات تکرار می‌شود قبل از skip.
+        let stepResponseContent = '';
+        let stepActionPlan: any = null;
+        let stepFilesWereRead = false;
+        let _stepOk = false;
+        let _lastStepErr: any = null;
+
         for (let attempt = 1; attempt <= 3; attempt++) {
           try {
-            res = await fetch(`${API_BASE}/api/render/inspector/smart-chat`, {
+            const res = await fetch(`${API_BASE}/api/render/inspector/smart-chat`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -4757,10 +4797,55 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
               }),
             });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            _stepFetchErr = null;
+            const reader = res.body?.getReader();
+            if (!reader) throw new Error('No reader');
+            const decoder = new TextDecoder();
+            let sseBuffer = '';
+            let eventType = '';
+            // reset accumulators در صورت تلاش مجدد
+            stepResponseContent = '';
+            stepActionPlan = null;
+            stepFilesWereRead = false;
+
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+
+              sseBuffer += decoder.decode(value, { stream: true });
+              const lines = sseBuffer.split('\n');
+              sseBuffer = lines.pop() || '';
+
+              for (const line of lines) {
+                if (line.startsWith('event: ')) {
+                  eventType = line.slice(7).trim();
+                } else if (line.startsWith('data: ') && eventType) {
+                  try {
+                    const data = JSON.parse(line.slice(6));
+                    if (eventType === 'response') {
+                      stepResponseContent = data.content || '';
+                      stepActionPlan = data.action_plan || null;
+                      stepFilesWereRead = data.files_were_read ?? false;
+                      lastModelUsed = data.model_used || '';
+
+                      if (data.selected_file_paths?.length) {
+                        setPreviouslyReadFiles(prev => {
+                          const newF = data.selected_file_paths.filter((f: string) => !prev.includes(f));
+                          return [...prev, ...newF];
+                        });
+                      }
+                    } else if (eventType === 'error') {
+                      stepResponseContent = `❌ ${data.message}`;
+                    }
+                  } catch {}
+                  eventType = '';
+                }
+              }
+            }
+            _stepOk = true;
+            _lastStepErr = null;
             break;
           } catch (e: any) {
-            _stepFetchErr = e;
+            _lastStepErr = e;
             if (attempt < 3) {
               setInspectorChatMessages(prev => [...prev, {
                 id: `ms_retry_${i}_${attempt}_${Date.now()}`,
@@ -4772,53 +4857,7 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
             }
           }
         }
-        if (!res || _stepFetchErr) throw _stepFetchErr || new Error('No response after 3 retries');
-
-        const reader = res.body?.getReader();
-        const decoder = new TextDecoder();
-        let sseBuffer = '';
-        let eventType = '';
-        let stepResponseContent = '';
-        let stepActionPlan: any = null;
-        let stepFilesWereRead = false;
-
-        if (!reader) throw new Error('No reader');
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          sseBuffer += decoder.decode(value, { stream: true });
-          const lines = sseBuffer.split('\n');
-          sseBuffer = lines.pop() || '';
-
-          for (const line of lines) {
-            if (line.startsWith('event: ')) {
-              eventType = line.slice(7).trim();
-            } else if (line.startsWith('data: ') && eventType) {
-              try {
-                const data = JSON.parse(line.slice(6));
-                if (eventType === 'response') {
-                  stepResponseContent = data.content || '';
-                  stepActionPlan = data.action_plan || null;
-                  stepFilesWereRead = data.files_were_read ?? false;
-                  lastModelUsed = data.model_used || '';
-
-                  // ذخیره فایل‌های خوانده‌شده
-                  if (data.selected_file_paths?.length) {
-                    setPreviouslyReadFiles(prev => {
-                      const newF = data.selected_file_paths.filter((f: string) => !prev.includes(f));
-                      return [...prev, ...newF];
-                    });
-                  }
-                } else if (eventType === 'error') {
-                  stepResponseContent = `❌ ${data.message}`;
-                }
-              } catch {}
-              eventType = '';
-            }
-          }
-        }
+        if (!_stepOk) throw _lastStepErr || new Error('No response after 3 retries');
 
         // جمع‌آوری نتایج مرحله
         collectedAnalysis.push(stepResponseContent.slice(0, 500));
@@ -5317,10 +5356,24 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       wasEnhanced = enhResult.wasEnhanced;
 
       // 🔄 اگه مراحل تشخیص داده شده → اجرای مرحله‌ای
-      if (wasEnhanced && enhResult.steps && enhResult.steps.length > 1) {
+      // 🆕 (deploy single-shot) — استثنا: اگر این یک خطای deploy/build است،
+      // multi-step را رد کن و single-shot برو. تجزیه به مراحل برای یک علت
+      // واحد باعث تناقض (image vs docker) و حدس فایل در هر مرحله می‌شود.
+      const _isDeployErr = _looksLikeDeployBuildError(rawMessage, inspectorBackendLogs);
+      if (wasEnhanced && enhResult.steps && enhResult.steps.length > 1 && !_isDeployErr) {
         setInspectorChatLoading(false);
         await executeMultiStep(rawMessage, enhResult.basePrompt || userMessage, enhResult.steps);
         return;
+      }
+      if (_isDeployErr && wasEnhanced && enhResult.steps && enhResult.steps.length > 1) {
+        // single-shot: از basePrompt استفاده کن (نه مراحل تجزیه‌شده)
+        userMessage = enhResult.basePrompt || enhResult.text || userMessage;
+        setInspectorChatMessages(prev => [...prev, {
+          id: `deploy_single_${Date.now()}`,
+          role: 'system' as const,
+          content: '🎯 خطای deploy/build تشخیص داده شد — به‌جای تجزیه به مراحل، یک تحلیل واحد و متمرکز انجام می‌شود (برای جلوگیری از تناقض و حدس‌زدن فایل).',
+          timestamp: new Date(),
+        } as any]);
       }
 
       if (!wasEnhanced && enhResult.error) {
@@ -6626,16 +6679,19 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                 .slice(-5)
                 .map(m => ({ role: m.role, content: m.content?.slice(0, 200) }));
 
-              // 🆕 (multi-step robustness) — retry روی خطاهای transient
-              // (network/timeout). تا ۲ تلاش با backoff کوتاه. این الگو در
-              // لاگ کاربر مشاهده شد که step 2 با "network error" قطع شد در
-              // حالی که retry یک‌بار آن را حل می‌کرد.
-              let stepRes: Response | null = null;
-              let attemptErr: any = null;
-              for (let attempt = 1; attempt <= 2; attempt++) {
+              // 🆕 (network-retry v2) — کل مرحله (fetch + خواندن stream) در
+              // retry پیچیده می‌شود. "network error" معمولاً وسط خواندن SSE
+              // رخ می‌دهد نه در fetch. تا ۳ تلاش با backoff.
+              let stepResponseContent = '';
+              let stepActionPlan: any = null;
+              let stepFilesWereRead = false;
+              let _stepOk = false;
+              let _lastStepErr: any = null;
+
+              for (let attempt = 1; attempt <= 3; attempt++) {
                 if (inspectorOpAbortRef.current?.signal.aborted) throw new Error('aborted');
                 try {
-                  stepRes = await fetch(`${API_BASE}/api/render/inspector/smart-chat`, {
+                  const stepRes = await fetch(`${API_BASE}/api/render/inspector/smart-chat`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -6646,73 +6702,69 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                       backend_logs: inspectorBackendLogs,
                       frontend_url: inspectorFrontendUrl,
                       previously_read_files: previouslyReadFiles,
-                      // 🆕 (v3 regression fix) — disable scan موردی در
-                      // stepwise execution. این flow هر step را با
-                      // action_plan صریح انتظار دارد، نه scan_initiated.
                       enable_selective_scan: false,
                     }),
                     signal: inspectorOpAbortRef.current?.signal,
                   });
                   if (!stepRes.ok) throw new Error(`HTTP ${stepRes.status}`);
-                  attemptErr = null;
+                  const stepReader = stepRes.body?.getReader();
+                  if (!stepReader) throw new Error('No reader');
+                  const stepDecoder = new TextDecoder();
+                  let stepSseBuffer = '';
+                  let stepEventType = '';
+                  stepResponseContent = '';
+                  stepActionPlan = null;
+                  stepFilesWereRead = false;
+
+                  while (true) {
+                    const { done, value } = await stepReader.read();
+                    if (done) break;
+                    stepSseBuffer += stepDecoder.decode(value, { stream: true });
+                    const stepLines = stepSseBuffer.split('\n');
+                    stepSseBuffer = stepLines.pop() || '';
+                    for (const sLine of stepLines) {
+                      if (sLine.startsWith('event: ')) {
+                        stepEventType = sLine.slice(7).trim();
+                      } else if (sLine.startsWith('data: ') && stepEventType) {
+                        try {
+                          const sData = JSON.parse(sLine.slice(6));
+                          if (stepEventType === 'response') {
+                            stepResponseContent = sData.content || '';
+                            stepActionPlan = sData.action_plan || null;
+                            stepFilesWereRead = sData.files_were_read ?? false;
+                            lastModelUsed = sData.model_used || lastModelUsed;
+                            if (sData.selected_file_paths?.length) {
+                              setPreviouslyReadFiles(prev => {
+                                const newF = sData.selected_file_paths.filter((f: string) => !prev.includes(f));
+                                return [...prev, ...newF];
+                              });
+                            }
+                          } else if (stepEventType === 'error') {
+                            stepResponseContent = `❌ ${sData.message}`;
+                          }
+                        } catch {}
+                        stepEventType = '';
+                      }
+                    }
+                  }
+                  _stepOk = true;
+                  _lastStepErr = null;
                   break;
                 } catch (e: any) {
-                  attemptErr = e;
-                  if (e?.name === 'AbortError') throw e;
-                  if (attempt < 2) {
+                  if (e?.name === 'AbortError' || e?.message === 'aborted') throw e;
+                  _lastStepErr = e;
+                  if (attempt < 3) {
                     setInspectorChatMessages(prev => [...prev, {
                       id: `vd_ms_retry_${i}_${attempt}_${Date.now()}`,
                       role: 'system' as const,
-                      content: `🔁 خطا در مرحله ${step.step_number} (تلاش ${attempt}/2): ${(e?.message || 'unknown').slice(0, 80)} — تلاش مجدد در ۲ ثانیه...`,
+                      content: `🔁 خطا در مرحله ${step.step_number} (تلاش ${attempt}/3): ${(e?.message || 'network error').slice(0, 80)} — تلاش مجدد در ${attempt * 2} ثانیه...`,
                       timestamp: new Date(),
                     }]);
-                    await new Promise(r => setTimeout(r, 2000));
+                    await new Promise(r => setTimeout(r, attempt * 2000));
                   }
                 }
               }
-              if (!stepRes || attemptErr) throw attemptErr || new Error('No response after retries');
-
-              const stepReader = stepRes.body?.getReader();
-              const stepDecoder = new TextDecoder();
-              let stepSseBuffer = '';
-              let stepEventType = '';
-              let stepResponseContent = '';
-              let stepActionPlan: any = null;
-              let stepFilesWereRead = false;
-
-              if (!stepReader) throw new Error('No reader');
-
-              while (true) {
-                const { done, value } = await stepReader.read();
-                if (done) break;
-                stepSseBuffer += stepDecoder.decode(value, { stream: true });
-                const stepLines = stepSseBuffer.split('\n');
-                stepSseBuffer = stepLines.pop() || '';
-                for (const sLine of stepLines) {
-                  if (sLine.startsWith('event: ')) {
-                    stepEventType = sLine.slice(7).trim();
-                  } else if (sLine.startsWith('data: ') && stepEventType) {
-                    try {
-                      const sData = JSON.parse(sLine.slice(6));
-                      if (stepEventType === 'response') {
-                        stepResponseContent = sData.content || '';
-                        stepActionPlan = sData.action_plan || null;
-                        stepFilesWereRead = sData.files_were_read ?? false;
-                        lastModelUsed = sData.model_used || lastModelUsed;
-                        if (sData.selected_file_paths?.length) {
-                          setPreviouslyReadFiles(prev => {
-                            const newF = sData.selected_file_paths.filter((f: string) => !prev.includes(f));
-                            return [...prev, ...newF];
-                          });
-                        }
-                      } else if (stepEventType === 'error') {
-                        stepResponseContent = `❌ ${sData.message}`;
-                      }
-                    } catch {}
-                    stepEventType = '';
-                  }
-                }
-              }
+              if (!_stepOk) throw _lastStepErr || new Error('No response after 3 retries');
 
               // جمع‌آوری نتایج مرحله — با step_number واقعی برای جلوگیری از shift
               collectedAnalysis.push({
@@ -15400,12 +15452,12 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           )}
                           {/* نشانگر modify_sections — فایل‌هایی که بصورت بخشی تغییر میکنن */}
                           {(msg as any).action_plan?.files?.some((f: any) => f.operation === 'modify_sections') && (
-                            <div className="w-full mt-1 p-1.5 bg-blue-50 dark:bg-blue-900/20 border border-blue-300 dark:border-blue-700 rounded text-[10px]">
+                            <div className="w-full max-w-full min-w-0 mt-1 p-1.5 bg-blue-50 dark:bg-blue-900/20 border border-blue-300 dark:border-blue-700 rounded text-[10px] overflow-hidden">
                               <span className="font-bold text-blue-700 dark:text-blue-300">🔧 تغییرات بخشی (modify_sections):</span>
                               <ul className="mt-0.5 space-y-0.5 text-blue-600 dark:text-blue-400">
                                 {(msg as any).action_plan.files.filter((f: any) => f.operation === 'modify_sections').map((f: any, i: number) => (
-                                  <li key={i} className="pr-2">
-                                    <code className="text-[9px]">{f.path}</code>: {f.sections?.length || 0} بخش تغییر
+                                  <li key={i} className="pr-2 break-words [overflow-wrap:anywhere]">
+                                    <code className="text-[9px] break-all">{f.path}</code>: {f.sections?.length || 0} بخش تغییر
                                   </li>
                                 ))}
                               </ul>
@@ -15413,12 +15465,12 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           )}
                           {/* فایل‌های حذف‌شده به خاطر خطای بحرانی سینتکس */}
                           {(msg as any).action_plan?._rejected_files?.length > 0 && (
-                            <div className="w-full mt-1 p-1.5 bg-red-50 dark:bg-red-900/20 border border-red-400 dark:border-red-700 rounded text-[10px]">
-                              <span className="font-bold text-red-700 dark:text-red-300">🚫 {(msg as any).action_plan._rejected_files.length} فایل به خاطر خطای سینتکس بحرانی حذف شدند:</span>
+                            <div className="w-full max-w-full min-w-0 mt-1 p-1.5 bg-red-50 dark:bg-red-900/20 border border-red-400 dark:border-red-700 rounded text-[10px] overflow-hidden">
+                              <span className="font-bold text-red-700 dark:text-red-300 break-words [overflow-wrap:anywhere]">🚫 {(msg as any).action_plan._rejected_files.length} فایل به خاطر خطای سینتکس بحرانی حذف شدند:</span>
                               <ul className="mt-0.5 space-y-0.5 text-red-600 dark:text-red-400">
                                 {(msg as any).action_plan._rejected_files.map((rf: any, i: number) => (
-                                  <li key={i} className="pr-2">
-                                    <code className="text-[9px]">{rf.path}</code>: {rf.reasons?.[0] || 'خطای سینتکس'}
+                                  <li key={i} className="pr-2 break-words [overflow-wrap:anywhere]">
+                                    <code className="text-[9px] break-all">{rf.path}</code>: {rf.reasons?.[0] || 'خطای سینتکس'}
                                   </li>
                                 ))}
                               </ul>
@@ -15426,11 +15478,11 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                           )}
                           {/* هشدارهای سینتکس action_plan */}
                           {(msg as any).action_plan?._syntax_warnings?.length > 0 && (
-                            <div className="w-full mt-1 p-1.5 bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 rounded text-[10px]">
-                              <span className="font-bold text-amber-700 dark:text-amber-300">⚠️ هشدار سینتکس ({(msg as any).action_plan._syntax_warnings.length}):</span>
+                            <div className="w-full max-w-full min-w-0 mt-1 p-1.5 bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 rounded text-[10px] overflow-hidden">
+                              <span className="font-bold text-amber-700 dark:text-amber-300 break-words [overflow-wrap:anywhere]">⚠️ هشدار سینتکس ({(msg as any).action_plan._syntax_warnings.length}):</span>
                               <ul className="mt-0.5 space-y-0.5 text-amber-600 dark:text-amber-400">
                                 {(msg as any).action_plan._syntax_warnings.slice(0, 5).map((w: string, i: number) => (
-                                  <li key={i} className="pr-2">{w}</li>
+                                  <li key={i} className="pr-2 break-words [overflow-wrap:anywhere]">{w}</li>
                                 ))}
                                 {(msg as any).action_plan._syntax_warnings.length > 5 && (
                                   <li className="text-amber-500">و {(msg as any).action_plan._syntax_warnings.length - 5} هشدار دیگر...</li>

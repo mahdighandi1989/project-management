@@ -121,6 +121,30 @@ _INFRA_ERROR_PATTERNS = (
 )
 
 
+# 🆕 (clarify-first v3) — خطاهای build/packaging روی Render/Docker. این‌ها
+# تقریباً همیشه یک fix هدفمند دارند (runtime.txt برای نسخهٔ Python، یا pin
+# کردن یک package)، نه scan کل پروژه. مستقیم به smart-chat.
+_BUILD_ERROR_PATTERNS = (
+    "maturin failed",
+    "Read-only file system",
+    "Failed to build wheel",
+    "metadata-generation-failed",
+    "Cargo metadata failed",
+    "cargo metadata",
+    "Getting requirements to build wheel",
+    "Preparing metadata (pyproject.toml) did not run successfully",
+    "error: subprocess-exited-with-error",
+    "Failed to build tiktoken",
+    "pydantic-core",  # معمولاً با خطای Rust compile در Python 3.13/3.14
+    "cp314",
+    "cp313",
+    "python3.14",
+    "python3.13",
+    "Build failed 😞",
+    "==> Build failed",
+)
+
+
 # 🆕 (clarify-first v3) — خطاهای قطعی کد که یک محل دقیق دارند (stack trace
 # به فایل:خط اشاره می‌کند). این‌ها یک fix هدفمند تک‌فایلی دارند و scan ۱۲-pass
 # روی کل پروژه فقط ۴۰+ proposal بی‌ربط تولید می‌کند. مستقیم به smart-chat.
@@ -178,6 +202,20 @@ def _has_deterministic_code_error(
         return p
     # همچنین در متن پیام کاربر چک کن (کاربر ممکن است error را paste کند)
     for pat in _DETERMINISTIC_CODE_ERRORS:
+        if pat in (user_message or ""):
+            return pat
+    return None
+
+
+def _has_build_error(
+    backend_logs: Optional[List[Dict[str, Any]]],
+    user_message: str = "",
+) -> Optional[str]:
+    """خطای build/packaging (maturin، pydantic-core، Read-only fs و...)؟"""
+    p = _scan_text_in_logs(backend_logs, _BUILD_ERROR_PATTERNS)
+    if p:
+        return p
+    for pat in _BUILD_ERROR_PATTERNS:
         if pat in (user_message or ""):
             return pat
     return None
@@ -624,6 +662,24 @@ def resolve_intent_from_chat_context(
                 f"فایل ذکرشده در stack trace (و importهای مرتبط) را بخوان، علت دقیق را پیدا کن "
                 f"و فقط همان را fix کن. هرگز scope را به کل پروژه گسترش نده. "
                 f"اگر چند راه‌حل معقول دارد، با ask_user بپرس."
+            ),
+        )
+
+    # 🆕 (clarify-first v3) — خطای build/packaging (maturin، pydantic-core،
+    # Read-only filesystem، Python 3.13/3.14 wheel). راه‌حل تقریباً همیشه
+    # runtime.txt است. scan کل پروژه بی‌فایده است. مستقیم smart-chat هدفمند.
+    _build_err = _has_build_error(backend_logs, user_message)
+    if _build_err:
+        return ResolvedScanIntent(
+            should_scan=False,
+            reason=f"build_error:{_build_err}",
+            focus_notes=(
+                f"خطای build/packaging شناسایی شد: '{_build_err}'. این یک مشکل ساخت است که "
+                f"معمولاً با تنظیم نسخهٔ Python در runtime.txt (مثلاً python-3.12.7) حل می‌شود — "
+                f"نه scan کل پروژه. اگر log شامل maturin/Rust/Read-only filesystem یا cp313/cp314 "
+                f"است، علت Python 3.13+ است و wheel ندارد؛ runtime.txt را به python-3.12.7 ست کن. "
+                f"اول چک کن runtime.txt موجود است یا نه (اگر هست modify، اگر نیست create). "
+                f"هرگز maturin/setuptools-rust به requirements اضافه نکن. scope را گسترش نده."
             ),
         )
 
