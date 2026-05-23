@@ -32,16 +32,30 @@ from ..core.logging_utils import StructuredLogger
 slog = StructuredLogger(__name__, "INSPECTOR-AGENT")
 
 
-# مدل‌هایی که tool-calling پشتیبانی می‌کنند (فعلاً فقط Claude پیاده‌سازی دارد).
-_TOOL_CALLING_MODEL_PREFIXES = ("claude",)
+# providerهایی که سرویس‌شان tool-calling پیاده شده است (claude/openai/deepseek/gemini).
+_TOOL_CALLING_PROVIDER_PREFIXES = ("claude-", "gpt-", "deepseek-", "gemini-")
+
+# مدل‌هایی که قطعاً tool-calling ندارند (image-generators یا مدل‌هایی که provider
+# صریحاً اعلام کرده tools را نمی‌پذیرند، مثل deepseek-reasoner و sonar).
+_NO_TOOL_CALLING_HINTS = (
+    "dall-e", "imagen",            # image generators
+    "deepseek-reasoner",           # طبق مستندات DeepSeek از tools پشتیبانی نمی‌کند
+    "sonar",                       # Perplexity (سرویس‌اش هم tool-calling پیاده نشده)
+)
 
 
 def supports_tool_calling(model_id: str) -> bool:
-    """آیا این مدل tool-calling دارد؟ (برای gate کردن استفاده از agent loop)"""
+    """آیا این مدل tool-calling دارد؟ (برای gate کردن استفاده از agent loop)
+
+    بر اساس prefix provider (که سرویس‌اش پیاده شده) با استثناهای صریح برای مدل‌هایی
+    که قطعاً پشتیبانی نمی‌کنند.
+    """
     if not model_id:
         return False
     m = model_id.lower()
-    return any(m.startswith(p) or p in m for p in _TOOL_CALLING_MODEL_PREFIXES)
+    if any(h in m for h in _NO_TOOL_CALLING_HINTS):
+        return False
+    return any(m.startswith(p) for p in _TOOL_CALLING_PROVIDER_PREFIXES)
 
 
 # ── تعریف ابزارها (Anthropic tools schema) ──────────────────────────────────
