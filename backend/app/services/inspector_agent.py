@@ -111,6 +111,10 @@ def _build_tools() -> List[Dict[str, Any]]:
                 "وقتی علت ریشه‌ای را فهمیدی و فایل‌های لازم را خوانده‌ای، این "
                 "ابزار را صدا بزن تا تحلیل و راه‌حل نهایی را ثبت کنی. این آخرین "
                 "قدم است و حلقه را تمام می‌کند.\n\n"
+                "🔴🔴 **قبل از این ابزار، حتماً `preflight_check` را با همان "
+                "files صدا بزن**. اگر preflight هر مشکلی پیدا کرد، در همان "
+                "action_plan رفع کن و دوباره preflight. بدون preflight موفق، "
+                "submit نکن — این تنها راه جلوگیری از whack-a-mole deploy fail است.\n\n"
                 "🔴 قبل از فراخوانی این ابزار، **حتماً** این چک‌لیست را در ذهن انجام بده:\n"
                 "1. یک‌بار دیگر متن خطا/لاگ اصلی که کاربر داد را بخوان.\n"
                 "2. فیکس پیشنهادی‌ات دقیقاً همان چیزی را که در error log آمده هدف می‌گیرد؟ "
@@ -279,6 +283,47 @@ def _build_tools() -> List[Dict[str, Any]]:
                 "required": ["service_id"],
             },
         },
+        {
+            "name": "preflight_check",
+            "description": (
+                "🔴 **قبل از submit_action_plan حتماً این را صدا بزن** — این ابزار "
+                "تغییرات پیشنهادی‌ات را با وضعیت فعلی repo شبیه‌سازی می‌کند و "
+                "سه دسته مشکل که در گذشته whack-a-mole deploy failure تولید "
+                "کرده را تشخیص می‌دهد:\n"
+                "  1. **import از فایل خالی**: اگر کدت `from X import Y` دارد ولی "
+                "فایل X خالی/بدون تعریف Y است (مثل notification_schema.py خالی)\n"
+                "  2. **تعارض ماژول vs پوشه**: اگر هم `app/foo.py` و هم "
+                "`app/foo/__init__.py` در repo وجود دارد → Python سرگردان می‌شود "
+                "و `from app.foo.bar import ...` شکست می‌خورد\n"
+                "  3. **پکیج خارجی بدون requirements**: مثلاً اگر کدت از `EmailStr` "
+                "(نیاز email-validator) یا پکیج دیگری استفاده می‌کند که در "
+                "requirements.txt نیست\n\n"
+                "اگر مشکل پیدا شد، آن را در همان action_plan رفع کن (مثلاً تعاریف "
+                "لازم را به فایل خالی اضافه کن، یا پکیج را به requirements.txt "
+                "بیافزای) سپس دوباره preflight بزن. اگر بدون preflight موفق "
+                "submit کنی، deploy احتمالاً شکست خواهد خورد و کاربر مجبور "
+                "می‌شود دوباره به تو خبر دهد."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "files": {
+                        "type": "array",
+                        "description": "همان لیست files که قصد داری در action_plan بفرستی",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"},
+                                "operation": {"type": "string"},
+                                "content": {"type": "string"},
+                            },
+                            "required": ["path"],
+                        },
+                    }
+                },
+                "required": ["files"],
+            },
+        },
     ]
 
 
@@ -435,6 +480,30 @@ async def run_inspector_agent(
             # ابزارهای Render (پلتفرم) — اگر RENDER_API_KEY در env باشد، agent
             # می‌تواند خودش env vars را بخواند/تنظیم کند و deploy بزند.
             # ────────────────────────────────────────────────────────────────
+            elif name == "preflight_check":
+                _files_arg = args.get("files") or []
+                if not isinstance(_files_arg, list) or not _files_arg:
+                    tool_results.append(_tr("files (لیست) لازم است", is_error=True))
+                else:
+                    yield ("progress", {"step": "agent_preflight", "message": f"🛡️ {_tag} اجرای preflight روی {len(_files_arg)} فایل..."})
+                    _issues = _run_preflight_check(
+                        proposed_files=_files_arg,
+                        files_read=files_read,
+                        file_set=file_set,
+                    )
+                    if not _issues:
+                        tool_results.append(_tr("✅ preflight: هیچ مشکلی پیدا نشد — می‌توانی submit_action_plan را صدا بزنی."))
+                    else:
+                        _txt = "🔴 preflight این مشکلات را پیدا کرد — قبل از submit رفع کن:\n\n"
+                        for i, iss in enumerate(_issues, 1):
+                            _txt += f"{i}. **{iss.get('severity', 'issue')}** — {iss.get('message', '')}\n"
+                            if iss.get("file"):
+                                _txt += f"   فایل: `{iss['file']}`\n"
+                            if iss.get("hint"):
+                                _txt += f"   راه‌حل: {iss['hint']}\n"
+                            _txt += "\n"
+                        tool_results.append(_tr(_txt))
+
             elif name in ("render_list_services", "render_get_service",
                           "render_get_env_vars", "render_set_env_var",
                           "render_trigger_deploy", "render_get_deploys",
@@ -789,3 +858,207 @@ async def run_reviewer_pass(
                 revert_temp_enables(_revert)
             except Exception:
                 pass
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# preflight check — جلوگیری از whack-a-mole deploy failure
+# ════════════════════════════════════════════════════════════════════════════
+
+_PY_STDLIB = {
+    "os", "sys", "re", "json", "time", "datetime", "typing", "pathlib",
+    "collections", "itertools", "functools", "asyncio", "logging",
+    "subprocess", "tempfile", "shutil", "hashlib", "hmac", "base64",
+    "uuid", "random", "math", "enum", "dataclasses", "contextlib",
+    "urllib", "http", "socket", "email", "csv", "xml", "html",
+    "io", "struct", "array", "copy", "pickle", "sqlite3",
+    "warnings", "traceback", "inspect", "importlib", "gc", "abc",
+    "threading", "multiprocessing", "concurrent", "queue", "string",
+    "unicodedata", "codecs", "locale", "argparse", "platform",
+    "errno", "signal", "secrets", "ssl", "getpass", "decimal",
+    "calendar", "zoneinfo", "statistics",
+}
+
+_PY_PACKAGE_ALIASES = {
+    "PIL": "pillow", "cv2": "opencv-python", "sklearn": "scikit-learn",
+    "jose": "python-jose", "jwt": "pyjwt", "bs4": "beautifulsoup4",
+    "yaml": "pyyaml", "dotenv": "python-dotenv", "magic": "python-magic",
+    "multipart": "python-multipart",
+}
+
+_PYDANTIC_EXTRAS_REQUIRED = {
+    "EmailStr": ("email-validator", "pydantic[email]"),
+    "NameEmail": ("email-validator", "pydantic[email]"),
+}
+
+
+def _run_preflight_check(*, proposed_files, files_read, file_set):
+    """چک‌های preflight قبل از submit:
+    1. import از فایل خالی (فایل در repo هست ولی نماد لازم را ندارد)
+    2. تعارض module.py vs module/__init__.py
+    3. پکیج خارجی import شده ولی در requirements.txt نیست
+    خروجی: list of {severity, message, file?, hint?}
+    """
+    import ast as _ast
+    issues = []
+
+    # ساخت view مجازی بعد از اعمال action_plan
+    _virtual = {}
+    for f in (proposed_files or []):
+        if not isinstance(f, dict):
+            continue
+        p = (f.get("path") or "").strip()
+        if not p:
+            continue
+        op = (f.get("operation") or "modify").lower()
+        if op == "delete":
+            _virtual[p] = "__DELETED__"
+        else:
+            _virtual[p] = f.get("content") or ""
+
+    _all_files_after = dict(files_read or {})
+    for p, c in _virtual.items():
+        if c == "__DELETED__":
+            _all_files_after.pop(p, None)
+        else:
+            _all_files_after[p] = c
+
+    _repo_after = set(file_set or [])
+    for p, c in _virtual.items():
+        if c == "__DELETED__":
+            _repo_after.discard(p)
+        else:
+            _repo_after.add(p)
+
+    # چک ۲: تعارض module.py vs module/__init__.py
+    for p in _repo_after:
+        if not p.endswith(".py") or p.endswith("__init__.py"):
+            continue
+        _mod_path = p[:-3]
+        _pkg_init = _mod_path + "/__init__.py"
+        if _pkg_init in _repo_after:
+            issues.append({
+                "severity": "critical",
+                "message": "تعارض ماژول/پوشه: هم `" + p + "` و هم `" + _pkg_init + "` وجود دارد — Python سرگردان می‌شود.",
+                "file": p,
+                "hint": "یکی را حذف کن. معمولاً پوشه (`" + _pkg_init + "`) را نگه دار و فایل تک (`" + p + "`) را delete کن.",
+            })
+
+    # requirements.txt
+    _req_text = _all_files_after.get("requirements.txt", "")
+    _req_packages = set()
+    for line in (_req_text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith("-"):
+            continue
+        name = line.split("==")[0].split(">=")[0].split("<=")[0].split("~=")[0].split("[")[0].strip().lower()
+        if name:
+            _req_packages.add(name)
+
+    _project_roots = set()
+    for p in _repo_after:
+        if p.endswith(".py"):
+            _project_roots.add(p.split("/")[0])
+
+    _external_imports = set()
+
+    for f in (proposed_files or []):
+        if not isinstance(f, dict):
+            continue
+        p = (f.get("path") or "").strip()
+        if not p.endswith(".py"):
+            continue
+        op = (f.get("operation") or "modify").lower()
+        if op == "delete":
+            continue
+        content = f.get("content") or ""
+        if not content.strip():
+            continue
+        try:
+            tree = _ast.parse(content)
+        except SyntaxError as se:
+            issues.append({
+                "severity": "critical",
+                "message": "خطای syntax در `" + p + "`: " + str(se)[:150],
+                "file": p,
+                "hint": "syntax کد را اصلاح کن.",
+            })
+            continue
+
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.ImportFrom):
+                target_mod = node.module or ""
+                if not target_mod:
+                    continue
+                root = target_mod.split(".")[0]
+                if root in _project_roots:
+                    target_path = target_mod.replace(".", "/") + ".py"
+                    target_init = target_mod.replace(".", "/") + "/__init__.py"
+                    target_content = _all_files_after.get(target_path)
+                    if target_content is None:
+                        target_content = _all_files_after.get(target_init)
+                    if target_content is None:
+                        if target_path not in _repo_after and target_init not in _repo_after:
+                            issues.append({
+                                "severity": "critical",
+                                "message": "`from " + target_mod + " import ...` — ماژول در repo وجود ندارد.",
+                                "file": p,
+                                "hint": "یا path import را اصلاح کن یا فایل `" + target_path + "` را create کن.",
+                            })
+                        continue
+                    try:
+                        _t_tree = _ast.parse(target_content)
+                    except Exception:
+                        continue
+                    _defs = set()
+                    for _n in _ast.walk(_t_tree):
+                        if isinstance(_n, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+                            _defs.add(_n.name)
+                        elif isinstance(_n, _ast.Assign):
+                            for t in _n.targets:
+                                if isinstance(t, _ast.Name):
+                                    _defs.add(t.id)
+                    for alias in node.names:
+                        if alias.name == "*":
+                            continue
+                        if alias.name not in _defs:
+                            issues.append({
+                                "severity": "critical",
+                                "message": "`from " + target_mod + " import " + alias.name + "` — `" + alias.name + "` در ماژول تعریف نشده.",
+                                "file": p,
+                                "hint": "فایل `" + target_path + "` خالی یا ناقص است. کلاس/تابع `" + alias.name + "` را به آن اضافه کن، یا import را حذف کن.",
+                            })
+                else:
+                    _external_imports.add(root)
+                    if root == "pydantic":
+                        for alias in node.names:
+                            if alias.name in _PYDANTIC_EXTRAS_REQUIRED:
+                                pkg, extra = _PYDANTIC_EXTRAS_REQUIRED[alias.name]
+                                if pkg not in _req_packages and "pydantic[email]" not in _req_text.lower():
+                                    issues.append({
+                                        "severity": "critical",
+                                        "message": "`" + alias.name + "` از pydantic نیاز به `" + pkg + "` دارد ولی در requirements.txt نیست.",
+                                        "file": p,
+                                        "hint": "`" + pkg + ">=2.0.0` را به requirements.txt اضافه کن (یا `" + extra + "`).",
+                                    })
+            elif isinstance(node, _ast.Import):
+                for alias in node.names:
+                    target_mod = alias.name
+                    root = target_mod.split(".")[0]
+                    if root not in _project_roots:
+                        _external_imports.add(root)
+
+    # چک ۳: external imports vs requirements
+    for ext in _external_imports:
+        if ext in _PY_STDLIB:
+            continue
+        canonical = _PY_PACKAGE_ALIASES.get(ext, ext).lower()
+        if canonical in _req_packages or ext.lower() in _req_packages:
+            continue
+        issues.append({
+            "severity": "warning",
+            "message": "پکیج خارجی `" + ext + "` import شده ولی در requirements.txt نیست.",
+            "hint": "احتمالاً باید `" + canonical + "` را به requirements.txt اضافه کنی (یا اگر مطمئنی stdlib است، نادیده بگیر).",
+        })
+
+    return issues
+

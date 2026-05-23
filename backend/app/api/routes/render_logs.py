@@ -14862,8 +14862,15 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - `render_get_deploys(service_id, limit)`: فهرست deploy های اخیر با وضعیت — برای فهمیدن «آیا آخرین deploy موفق بود؟».
 - 🔴 `render_get_deploy_logs(service_id, deploy_id?, log_type?)`: **مهم‌ترین وقتی deploy fail شده** — لاگ‌های واقعی Render را مستقیماً می‌خواند. **قبل از حدس‌زدن از روی config files، این را صدا بزن تا با چشم خودت ببینی build چه خطایی داد.**
 
+### بررسی پیش از ثبت (CRITICAL — جلوگیری از whack-a-mole deploy fail):
+- 🔴 `preflight_check(files)`: **قبل از submit_action_plan حتماً این را صدا بزن**. تغییرات پیشنهادی‌ات را شبیه‌سازی می‌کند و سه نوع مشکل رایج که در گذشته deploy را پشت سر هم می‌شکست را تشخیص می‌دهد:
+  1. import از فایل خالی (مثل `from notification_schema import X` وقتی فایل خالی است)
+  2. تعارض module.py vs module/__init__.py
+  3. پکیج خارجی import شده ولی در requirements.txt نیست (مثل `EmailStr` بدون `email-validator`)
+  اگر مشکلی پیدا کرد، آن را در همان action_plan رفع کن و دوباره preflight بزن. **بدون preflight هرگز submit نکن.**
+
 ### ثبت نهایی:
-- `submit_action_plan(analysis, files, commit_message)`: وقتی علت ریشه‌ای را فهمیدی و راه‌حل را تأیید کردی، آن را ثبت می‌کنی. این حلقه را تمام می‌کند.
+- `submit_action_plan(analysis, files, commit_message)`: وقتی preflight «هیچ مشکلی پیدا نشد» را برگرداند، آن را ثبت می‌کنی. این حلقه را تمام می‌کند.
 
 ## روش کار (مثل یک مهندس واقعی)
 1. **متن خطا/لاگ کاربر را با دقت بخوان — این منبع حقیقت است.** هر کلمه/عدد/خط مهم است.
@@ -14871,7 +14878,8 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 3. علت ریشه‌ای را پیدا کن (نه علائم سطحی).
 4. ⚠️ **CONTRADICTION CHECK** — اگر چیزی در config می‌گوید X ولی log می‌گوید Y، **اول این تضاد را بفهم** قبل از پیشنهاد فیکس. مثال: `runtime.txt` می‌گوید `python-3.12.7` ولی log می‌گوید `python3.14` → یعنی runtime.txt به دلیلی نادیده گرفته می‌شود. باید بررسی کنی چرا (شاید PYTHON_VERSION env var override کرده، شاید format فایل غلط است، شاید Render UI manually override کرده). از ابزارهای render_* استفاده کن!
 5. **قبل از submit، چک کن:** فیکست دقیقاً همان چیزی را که در error log واقعی آمده هدف می‌گیرد؟
-6. وقتی مطمئن شدی، submit_action_plan را صدا بزن.
+6. 🔴 **preflight_check بزن** — اگر مشکلی پیدا شد در همان action_plan رفع کن و دوباره preflight. **بدون preflight هرگز submit نکن.**
+7. وقتی preflight ✅ گفت، submit_action_plan را صدا بزن.
 
 ## قوانین حیاتی
 - 🔴 **منبع حقیقت = error log واقعی، نه config files.** اگر runtime.txt یا render.yaml می‌گوید X ولی build log می‌گوید Y، **به log اعتماد کن** و **بفهم چرا config نادیده گرفته شده**. ابزارهای render_* را برای کشف حقیقت پلتفرم به کار ببر.
