@@ -456,45 +456,65 @@ class RenderDeployService:
         service_id: str,
         env_vars: Dict[str, str]
     ) -> Dict:
-        """بروزرسانی Environment Variables"""
+        """بروزرسانی Environment Variables (با merge — env varهای موجود حفظ می‌شوند).
+
+        مسیر درست Render API:
+          GET /services/{id}/env-vars → آرایه‌ای از {envVar: {key, value, ...}}
+          PUT /services/{id}/env-vars با body = آرایهٔ [{key, value}, ...]  جایگزین کل لیست می‌کند.
+
+        ما GET می‌گیریم، آن را با env var های جدید merge می‌کنیم، و کل لیست را
+        PUT می‌کنیم (بدون از دست دادن envهای موجود). status بازگشتی واقعاً چک
+        می‌شود تا success کاذب نباشد.
+        """
         if not self.is_configured():
             return {"success": False, "error": "Not configured"}
 
         session = await self._get_session()
 
         try:
-            # دریافت env vars فعلی
+            # 1) GET فعلی
             async with session.get(
                 f"{self.API_BASE}/services/{service_id}/env-vars"
             ) as response:
                 if response.status != 200:
-                    return {"success": False, "error": "Failed to get current env vars"}
+                    _txt = await response.text()
+                    return {"success": False, "error": f"GET env-vars failed ({response.status}): {_txt[:300]}"}
+                current_raw = await response.json()
 
-                current_vars = await response.json()
+            # 2) Normalize — unwrap envelope {envVar: {...}}
+            merged_map: Dict[str, str] = {}
+            for entry in (current_raw or []):
+                if not isinstance(entry, dict):
+                    continue
+                ev = entry.get("envVar") if "envVar" in entry else entry
+                if not isinstance(ev, dict):
+                    continue
+                k = ev.get("key")
+                if k:
+                    merged_map[k] = ev.get("value", "")
 
-            # بروزرسانی
-            for key, value in env_vars.items():
-                existing = next(
-                    (v for v in current_vars if v.get("key") == key),
-                    None
-                )
+            # 3) Merge — env varهای جدید override یا اضافه می‌شوند
+            for k, v in (env_vars or {}).items():
+                merged_map[k] = "" if v is None else str(v)
 
-                if existing:
-                    # بروزرسانی موجود
-                    async with session.put(
-                        f"{self.API_BASE}/services/{service_id}/env-vars/{existing['id']}",
-                        json={"value": value}
-                    ) as resp:
-                        pass
-                else:
-                    # ایجاد جدید
-                    async with session.post(
-                        f"{self.API_BASE}/services/{service_id}/env-vars",
-                        json={"key": key, "value": value}
-                    ) as resp:
-                        pass
+            # 4) PUT کل لیست (Render فرمت آرایه می‌خواهد: [{key, value}, ...])
+            payload = [{"key": k, "value": v} for k, v in merged_map.items()]
+            async with session.put(
+                f"{self.API_BASE}/services/{service_id}/env-vars",
+                json=payload
+            ) as resp:
+                if resp.status not in (200, 201):
+                    _txt = await resp.text()
+                    return {
+                        "success": False,
+                        "error": f"PUT env-vars failed ({resp.status}): {_txt[:400]}",
+                    }
 
-            return {"success": True, "message": "Environment variables updated"}
+            return {
+                "success": True,
+                "message": f"Updated {list((env_vars or {}).keys())}",
+                "total_env_vars": len(payload),
+            }
 
         except Exception as e:
             return {"success": False, "error": str(e)}
