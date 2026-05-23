@@ -20,7 +20,7 @@ import traceback
 import hashlib
 import time as _time
 from datetime import datetime, timedelta
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from fastapi import APIRouter, HTTPException, Depends, Query, BackgroundTasks, WebSocket, WebSocketDisconnect, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -18084,6 +18084,37 @@ def _build_visual_debug_prompt_list() -> list:
             "prompt_detail": "شما یک **مهندس ارشد نرم‌افزار** هستید با تسلط کامل بر فرانت‌اند و بکند. از طریق عکس‌ها، لاگ‌ها، مسیرهای API و کد فعلی، وضعیت دقیق پروژه را درک می‌کنید و هر درخواستی — از رفع باگ تا ایجاد قابلیت کاملاً جدید — را با دقت بالا پیاده‌سازی می‌کنید.",
         },
         {
+            "id": "vd_honesty",
+            "title": "🔴 صداقت تشخیصی — قاعدهٔ بنیادی",
+            "content": "Placeholder ≠ سالم. اگر صفحه فقط لوگو/متن/«در حال آماده‌سازی» دارد، صریحاً «ناقص» اعلام کن.",
+            "icon": "⚖️",
+            "prompt_detail": """⚠️ **این مهم‌ترین قاعده است**: شکست‌های قبلی ناشی از این بود که مدل وقتی build/deploy موفق بوده، اعلام «همه چیز OK است» می‌کرد — حتی وقتی صفحه عملاً خالی بود.
+
+### ✅ معیار «سالم بودن واقعی» یک صفحه
+صفحه فقط وقتی «سالم» است که **حداقل یکی** از این‌ها را داشته باشد:
+- داده/فهرست واقعی (لیست آیتم، جدول، چارت با داده)
+- فرم یا تعامل عملی (ورودی، دکمهٔ کارا، modal)
+- ناوبری عملی به صفحه‌ای که خودش دادهٔ واقعی دارد
+- محتوای پویا که از API می‌آید و نمایش داده می‌شود
+
+### ❌ نشانه‌های «ناقص بودن» (نه «سالم بودن دقیقاً همان‌طور که باید»)
+- صفحه فقط لوگو + عنوان + شعار + «در حال آماده‌سازی»/«coming soon» دارد
+- دکمه‌هایی که فقط لینک به /api/docs یا گزارش وضعیت بکند می‌دهند
+- هیچ ورودی/فرم/جدول/لیست واقعی نیست
+- "Backend در حال آماده‌سازی" نمایش داده می‌شود = اپ به فاز عملیاتی نرسیده
+
+### 🚫 ممنوعیت‌های صریح در پاسخ
+- 🚫 هرگز نگو «هیچ مشکلی نیست» وقتی صفحه عمدتاً placeholder است
+- 🚫 هرگز نگو «این دقیقاً همان چیزی است که باید باشد» وقتی کاربر گفت «خالی است»
+- 🚫 هرگز success build/deploy را با «اپ کامل است» اشتباه نگیر — build فقط می‌گوید «کامپایل شد»، نه «قابلیت‌ها پیاده شده‌اند»
+
+### ✅ روش درست تشخیص
+1. عکس را با چشم باز ببین: چه قابلیت‌های **کاربری** هست؟ (نه فقط چه چیز رنگارنگی هست)
+2. اگر کاربر گفت «خالی است» یا «هیچ امکاناتی نیست»، **حرفش را تحت‌اللفظی بگیر** — حتی اگر build موفق است
+3. کد را بخوان: آیا فقط `<div>عنوان</div>` است یا واقعاً state + handler + API call دارد؟
+4. اگر فرانت placeholder است، صریحاً اعلام کن «این صفحه placeholder است، قابلیت‌های زیر باید پیاده شود: ...» و action_plan کامل بنویس""",
+        },
+        {
             "id": "vd_inputs",
             "title": "اطلاعات دریافتی",
             "content": "عکس‌ها، لاگ‌ها، URL، API paths، کد فایل‌ها، ساختار پروژه",
@@ -19507,6 +19538,21 @@ class ApplyAllRequest(BaseModel):
     selected_proposal_ids: Optional[List[str]] = None
 
 
+# 🆕 idempotency برای apply-all — جلوگیری از ساخت چند PR یکسان وقتی کاربر
+# دوبار کلیک می‌کند یا client retry می‌کند. lock per-session + کش نتیجه.
+_APPLY_ALL_LOCKS: Dict[int, asyncio.Lock] = {}
+_APPLY_ALL_RECENT: Dict[int, Tuple[float, Dict[str, Any]]] = {}  # session_id → (timestamp, result)
+_APPLY_ALL_DEDUP_WINDOW_SECONDS = 60  # درخواست دوم در این پنجره نتیجهٔ قبل را برمی‌گرداند
+
+
+def _get_apply_all_lock(session_id: int) -> asyncio.Lock:
+    lk = _APPLY_ALL_LOCKS.get(session_id)
+    if lk is None:
+        lk = asyncio.Lock()
+        _APPLY_ALL_LOCKS[session_id] = lk
+    return lk
+
+
 @router.post("/inspector/session/{session_id}/apply-all")
 async def inspector_apply_all(
     session_id: int,
@@ -19517,20 +19563,54 @@ async def inspector_apply_all(
     اگر include_unexecuted=True، ابتدا proposalهای pending را اجرا می‌کند.
     اگر force_apply=True، consistency check warnings را override می‌کند.
     اگر selected_proposal_ids داده شد، فقط همان‌ها apply می‌شوند.
+
+    🆕 idempotency: هر session تنها یک apply-all همزمان دارد. اگر درخواست دومی
+    در پنجرهٔ ۶۰ ثانیه‌ای رسید، نتیجهٔ قبلی برگردانده می‌شود (با علامت deduped).
     """
+    import time as _time
     from ...services.inspector_proposal_executor import apply_all_staged
     payload = payload or ApplyAllRequest()
-    try:
-        result = await apply_all_staged(
-            session_id=session_id,
-            commit_message=payload.commit_message,
-            include_unexecuted=payload.include_unexecuted,
-            branch_strategy=payload.branch_strategy,
-            model_id=payload.model_id,
-            force_apply=payload.force_apply,
-            selected_proposal_ids=payload.selected_proposal_ids,
-        )
-        return result
-    except Exception as e:
-        slog.error("apply_all failed", exception=e, session_id=session_id)
-        raise HTTPException(status_code=500, detail=str(e)[:300])
+
+    # ── دزدگیر: اگر همین session در ۶۰ ثانیهٔ گذشته apply-all موفق داشته،
+    # نتیجه را دوباره برگردان (deduped) — جلوگیری از PR تکراری.
+    _recent = _APPLY_ALL_RECENT.get(session_id)
+    if _recent:
+        _ts, _res = _recent
+        if (_time.time() - _ts) < _APPLY_ALL_DEDUP_WINDOW_SECONDS:
+            slog.info(f"[apply-all] dedup hit for session {session_id} — returning cached result")
+            return {**_res, "deduped": True, "dedup_reason": "duplicate request within window"}
+
+    _lk = _get_apply_all_lock(session_id)
+    if _lk.locked():
+        slog.info(f"[apply-all] concurrent request for session {session_id} — rejecting")
+        return {
+            "success": False,
+            "deduped": True,
+            "dedup_reason": "another apply-all is in progress for this session",
+            "branch_url": None,
+        }
+
+    async with _lk:
+        try:
+            result = await apply_all_staged(
+                session_id=session_id,
+                commit_message=payload.commit_message,
+                include_unexecuted=payload.include_unexecuted,
+                branch_strategy=payload.branch_strategy,
+                model_id=payload.model_id,
+                force_apply=payload.force_apply,
+                selected_proposal_ids=payload.selected_proposal_ids,
+            )
+            # نتیجه را برای dedup در پنجرهٔ بعدی کش کن (فقط روی موفقیت)
+            if isinstance(result, dict) and result.get("success"):
+                _APPLY_ALL_RECENT[session_id] = (_time.time(), result)
+                # cleanup قدیمی‌ها — جلوگیری از رشد بی‌محدود
+                if len(_APPLY_ALL_RECENT) > 500:
+                    _now = _time.time()
+                    _APPLY_ALL_RECENT.clear()
+                    if isinstance(result, dict):
+                        _APPLY_ALL_RECENT[session_id] = (_now, result)
+            return result
+        except Exception as e:
+            slog.error("apply_all failed", exception=e, session_id=session_id)
+            raise HTTPException(status_code=500, detail=str(e)[:300])

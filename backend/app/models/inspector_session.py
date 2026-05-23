@@ -4,10 +4,29 @@
 """
 
 import json
+from datetime import timezone
 from sqlalchemy import Column, String, Text, DateTime, Integer, Boolean, ForeignKey
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from ..core.database import Base
+
+
+def _utc_iso(dt):
+    """تبدیل datetime ذخیره‌شده در DB (که naive ولی UTC است) به ISO string با
+    «Z» نهایی — برای جلوگیری از misparse در JavaScript به‌عنوان local time.
+
+    اگر datetime tz-aware باشد، آن را به UTC تبدیل و سپس «Z» می‌گذارد.
+    """
+    if dt is None:
+        return None
+    try:
+        if dt.tzinfo is None:
+            # naive — فرض می‌کنیم UTC است (سرور Render UTC اجرا می‌شود)
+            return dt.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+        # tz-aware — به UTC تبدیل کن
+        return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    except Exception:
+        return dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
 
 
 class InspectorSession(Base):
@@ -30,8 +49,11 @@ class InspectorSession(Base):
             "project_id": self.project_id,
             "status": self.status,
             "title": self.title,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "closed_at": self.closed_at.isoformat() if self.closed_at else None,
+            # 🆕 timezone-fix: created_at در DB naive ذخیره می‌شود ولی محتوایش
+            # UTC است (سرور Render UTC اجرا می‌شود). برای جلوگیری از misparse در
+            # JavaScript به‌عنوان local time، صریحاً «Z» اضافه می‌کنیم.
+            "created_at": _utc_iso(self.created_at),
+            "closed_at": _utc_iso(self.closed_at),
             "message_count": len(self.messages) if self.messages else 0,
         }
 
@@ -79,6 +101,8 @@ class InspectorMessage(Base):
             "logs_checked": self.logs_checked,
             "error_logs_count": self.error_logs_count,
             "checked_logs": json.loads(self.checked_logs_data) if self.checked_logs_data else [],
-            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            # 🆕 timezone-fix (به دلیل بالا): timestamp را به‌عنوان UTC explicit
+            # serialize می‌کنیم تا frontend (JavaScript) آن را local تفسیر نکند.
+            "timestamp": _utc_iso(self.timestamp),
             **_extra,
         }

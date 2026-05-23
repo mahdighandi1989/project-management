@@ -771,6 +771,22 @@ async def apply_all_staged(
     if include_unexecuted:
         for prop, _mid in _find_session_proposals(session_id):
             if prop.get("execution_status") in ("pending", None):
+                # 🆕 skip proposalهایی که هیچ target_file ندارند — اجرا روی
+                # این‌ها تضمیناً با خطای "no_target_files" fail می‌شود و فقط
+                # کاربر را سرگردان می‌کند. به‌جای آن، صریحاً «manual_only»
+                # علامت می‌زنیم تا در آینده هم در apply-all batch شامل نشوند.
+                _tf_check = (prop.get("target_files") or []) + [
+                    t.get("path") for t in (prop.get("target_locations") or [])
+                    if isinstance(t, dict) and t.get("path")
+                ]
+                if not [p for p in _tf_check if p]:
+                    _update_proposal_in_message(_mid, prop.get("proposal_id"), {
+                        "execution_status": "manual_only",
+                        "execution_error": "این یافته فایل هدف مشخصی ندارد و باید دستی بررسی شود (مثل audit/cleanup).",
+                        "executed_at": _now_iso(),
+                    })
+                    logger.info(f"apply_all: skip proposal {prop.get('proposal_id')} (no target_files → manual_only)")
+                    continue
                 try:
                     await run_proposal(
                         session_id=session_id,
@@ -809,7 +825,87 @@ async def apply_all_staged(
         )
         return {"success": False, "error": msg, "code": "no_staged"}
 
-    # 3) deduplicate by path (آخرین change برای هر path برنده)
+    # 🆕🆕 ریشه‌یابی deploy failure از سشن قبلی: وقتی چند proposal مختلف
+    # **همان فایل** را modify/create/delete می‌کنند، dedup ساکت زیر (آخرین
+    # change برنده) **بقیه را دور می‌ریزد** — این منجر به PR ناسازگار می‌شود
+    # که build/deploy را می‌شکند. اول تعارض‌ها را تشخیص می‌دهیم.
+    _by_path: Dict[str, List[Tuple[Dict[str, Any], Dict[str, Any]]]] = {}
+    for prop, ch, _mid in staged:
+        _p = ch.get("path")
+        if _p:
+            _by_path.setdefault(_p, []).append((prop, ch))
+
+    _conflicts: List[Dict[str, Any]] = []
+    for _p, _entries in _by_path.items():
+        if len(_entries) <= 1:
+            continue
+        _kinds = {(_e[1].get("change_kind") or _e[1].get("operation") or "modify") for _e in _entries}
+        _pids = [_e[0].get("proposal_id") for _e in _entries]
+        # تعارض شدید: delete + modify/create یا create + modify
+        _has_delete = any(k == "delete" for k in _kinds)
+        _has_create = any(k == "create" for k in _kinds)
+        _has_modify = any(k in ("modify", "patch") for k in _kinds)
+        if (_has_delete and (_has_create or _has_modify)) or (_has_create and _has_modify):
+            _conflicts.append({
+                "path": _p,
+                "severity": "critical",
+                "kinds": sorted(_kinds),
+                "proposal_ids": _pids,
+                "reason": "ترکیب delete + modify/create یا create + modify روی یک فایل",
+            })
+        elif len(_entries) > 1:
+            # چند proposal با همان نوع روی همان فایل (مثلاً ۳ modify) — احتمال
+            # از دست رفتن تغییرات. آن را به‌عنوان warning ثبت می‌کنیم.
+            _conflicts.append({
+                "path": _p,
+                "severity": "warning",
+                "kinds": sorted(_kinds),
+                "proposal_ids": _pids,
+                "reason": f"{len(_entries)} proposal روی همین فایل — فقط آخرین commit می‌شود، بقیه دور ریخته می‌شوند",
+            })
+
+    if _conflicts and not force_apply:
+        _crit = [c for c in _conflicts if c["severity"] == "critical"]
+        _warn = [c for c in _conflicts if c["severity"] == "warning"]
+        _msg_lines = [
+            "⚠️ **تعارض بین proposalها تشخیص داده شد** — اگر همه را به همین شکل apply کنید، خروجی نهایی ناسازگار خواهد بود و احتمالاً deploy fail می‌شود.",
+            "",
+        ]
+        if _crit:
+            _msg_lines.append(f"🔴 **تعارض بحرانی** ({len(_crit)} فایل):")
+            for c in _crit[:10]:
+                _msg_lines.append(f"- `{c['path']}` — {c['reason']} (kinds: {c['kinds']})")
+            _msg_lines.append("")
+        if _warn:
+            _msg_lines.append(f"🟡 **هشدار overwrite** ({len(_warn)} فایل):")
+            for c in _warn[:10]:
+                _msg_lines.append(f"- `{c['path']}` — {c['reason']}")
+            _msg_lines.append("")
+        _msg_lines.append("**راه‌حل‌ها:**")
+        _msg_lines.append("1. proposalها را تک‌تک با «اجرا با AI» اعمال کنید و بین هرکدام deploy را تست کنید")
+        _msg_lines.append("2. selected_proposal_ids بدهید و فقط proposalهای سازگار را شامل کنید")
+        _msg_lines.append("3. اگر مطمئن هستید (با درک پیامدها)، apply-all را با `force_apply=true` فراخوانی کنید")
+        _full_msg = "\n".join(_msg_lines)
+        log_scan_message(
+            session_id=session_id,
+            role="assistant",
+            content=_full_msg,
+            action_type="apply_all_blocked_conflict",
+            extra_data={
+                "kind": "apply_all_result",
+                "status": "blocked",
+                "reason": "proposal_conflict",
+                "conflicts": _conflicts,
+            },
+        )
+        return {
+            "success": False,
+            "code": "proposal_conflict",
+            "error": "تعارض بین proposalها — بدون force_apply اعمال نمی‌شود (جلوگیری از deploy failure).",
+            "conflicts": _conflicts,
+        }
+
+    # 3) deduplicate by path (آخرین change برای هر path برنده — فقط بعد از چک تعارض)
     files_map: Dict[str, Dict[str, Any]] = {}
     proposals_used: List[str] = []
     for prop, ch, _mid in staged:
