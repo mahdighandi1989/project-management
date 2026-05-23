@@ -485,16 +485,41 @@ async def run_inspector_agent(
                 if not isinstance(_files_arg, list) or not _files_arg:
                     tool_results.append(_tr("files (لیست) لازم است", is_error=True))
                 else:
-                    yield ("progress", {"step": "agent_preflight", "message": f"🛡️ {_tag} اجرای preflight روی {len(_files_arg)} فایل..."})
+                    yield ("progress", {"step": "agent_preflight", "message": f"🛡️ {_tag} اجرای preflight (شامل اسکن repo-wide)..."})
+                    # 🆕 repo-wide: قبل از چک، فایل‌های critical که agent نخوانده را
+                    # هم بکش (routes/schemas/services/dependencies/models) — تا
+                    # importهای broken در فایل‌های دست‌نخورده هم پیدا شوند.
+                    _critical_prefixes = (
+                        "app/routes/", "app/schemas/", "app/services/",
+                        "app/dependencies/", "app/models/",
+                        "backend/app/routes/", "backend/app/schemas/",
+                        "backend/app/services/", "backend/app/dependencies/",
+                        "backend/app/models/",
+                    )
+                    _to_fetch = [
+                        p for p in file_list
+                        if p.endswith(".py")
+                        and p not in files_read
+                        and any(p.startswith(pfx) for pfx in _critical_prefixes)
+                    ][:60]  # سقف ۶۰ تا تا overhead کنترل شود
+                    if _to_fetch:
+                        yield ("progress", {"step": "agent_preflight_fetch", "message": f"📥 {_tag} خواندن {len(_to_fetch)} فایل critical repo برای preflight جامع..."})
+                        for _fp in _to_fetch:
+                            try:
+                                _res = await github_svc.get_file_content(owner, repo, _fp, branch=branch, token=token)
+                                if _res.get("success"):
+                                    files_read[_fp] = _res.get("content", "") or ""
+                            except Exception:
+                                pass
                     _issues = _run_preflight_check(
                         proposed_files=_files_arg,
                         files_read=files_read,
                         file_set=file_set,
                     )
                     if not _issues:
-                        tool_results.append(_tr("✅ preflight: هیچ مشکلی پیدا نشد — می‌توانی submit_action_plan را صدا بزنی."))
+                        tool_results.append(_tr("✅ preflight جامع: هیچ مشکلی پیدا نشد — می‌توانی submit_action_plan را صدا بزنی."))
                     else:
-                        _txt = "🔴 preflight این مشکلات را پیدا کرد — قبل از submit رفع کن:\n\n"
+                        _txt = "🔴 preflight جامع (شامل اسکن repo) این مشکلات را پیدا کرد — قبل از submit همه را رفع کن:\n\n"
                         for i, iss in enumerate(_issues, 1):
                             _txt += f"{i}. **{iss.get('severity', 'issue')}** — {iss.get('message', '')}\n"
                             if iss.get("file"):
@@ -502,6 +527,7 @@ async def run_inspector_agent(
                             if iss.get("hint"):
                                 _txt += f"   راه‌حل: {iss['hint']}\n"
                             _txt += "\n"
+                        tool_results.append(_tr(_txt))
                         tool_results.append(_tr(_txt))
 
             elif name in ("render_list_services", "render_get_service",
@@ -961,6 +987,12 @@ def _run_preflight_check(*, proposed_files, files_read, file_set):
 
     _external_imports = set()
 
+    # ساخت لیست همهٔ فایل‌های Python که باید imports آن‌ها چک شود:
+    # 1) فایل‌های proposed (که agent قصد commit دارد)
+    # 2) فایل‌های read-only repo (که از قبل در repo هستند) — تا importهای broken
+    #    در فایل‌های دست‌نخورده هم پیدا شوند (whack-a-mole کشف ریشه‌ای).
+    _files_to_check = []
+    _proposed_paths = set()
     for f in (proposed_files or []):
         if not isinstance(f, dict):
             continue
@@ -970,7 +1002,16 @@ def _run_preflight_check(*, proposed_files, files_read, file_set):
         op = (f.get("operation") or "modify").lower()
         if op == "delete":
             continue
-        content = f.get("content") or ""
+        _proposed_paths.add(p)
+        _files_to_check.append({"path": p, "content": f.get("content") or "", "_source": "proposed"})
+    # فایل‌های read-only (در files_read ولی در proposed نیستند)
+    for p, c in (files_read or {}).items():
+        if p.endswith(".py") and p not in _proposed_paths and c and c.strip():
+            _files_to_check.append({"path": p, "content": c, "_source": "repo"})
+
+    for f in _files_to_check:
+        p = f["path"]
+        content = f["content"]
         if not content.strip():
             continue
         try:
