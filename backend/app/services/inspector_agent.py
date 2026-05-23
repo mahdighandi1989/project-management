@@ -222,6 +222,13 @@ async def run_inspector_agent(
             cid = call.get("id", "")
             args = call.get("input", {}) or {}
 
+            # helper برای ساخت tool_result با name (Gemini با name match می‌کند)
+            def _tr(content, is_error=False):
+                d = {"tool_use_id": cid, "name": name, "content": content}
+                if is_error:
+                    d["is_error"] = True
+                return d
+
             if name == "read_file":
                 path = (args.get("path") or "").strip().lstrip("/")
                 if path not in file_set:
@@ -230,7 +237,7 @@ async def run_inspector_agent(
                     _msg = f"فایل '{path}' در پروژه یافت نشد."
                     if _suggest:
                         _msg += " شاید منظورت یکی از این‌ها بود:\n" + "\n".join(_suggest)
-                    tool_results.append({"tool_use_id": cid, "content": _msg, "is_error": True})
+                    tool_results.append(_tr(_msg, is_error=True))
                     yield ("progress", {"step": "agent_read_miss", "message": f"⚠️ فایل ناموجود: {path}"})
                     continue
                 if path in files_read:
@@ -240,10 +247,10 @@ async def run_inspector_agent(
                     try:
                         res = await github_svc.get_file_content(owner, repo, path, branch=branch, token=token)
                     except Exception as re:
-                        tool_results.append({"tool_use_id": cid, "content": f"خطا در خواندن: {str(re)[:120]}", "is_error": True})
+                        tool_results.append(_tr(f"خطا در خواندن: {str(re)[:120]}", is_error=True))
                         continue
                     if not res.get("success"):
-                        tool_results.append({"tool_use_id": cid, "content": f"خطا: {res.get('error', 'unknown')}", "is_error": True})
+                        tool_results.append(_tr(f"خطا: {res.get('error', 'unknown')}", is_error=True))
                         continue
                     _content = res.get("content", "") or ""
                     files_read[path] = _content
@@ -251,10 +258,7 @@ async def run_inspector_agent(
                 if len(_truncated) > max_file_chars:
                     _truncated = _truncated[:max_file_chars] + "\n... [بریده شد به دلیل اندازه]"
                 _nlines = _content.count("\n") + 1
-                tool_results.append({
-                    "tool_use_id": cid,
-                    "content": f"محتوای {path} ({_nlines} خط):\n```\n{_truncated}\n```",
-                })
+                tool_results.append(_tr(f"محتوای {path} ({_nlines} خط):\n```\n{_truncated}\n```"))
 
             elif name == "list_files":
                 _filter = (args.get("filter") or "").strip()
@@ -263,7 +267,7 @@ async def run_inspector_agent(
                 _txt = "\n".join(_shown)
                 if len(_matched) > len(_shown):
                     _txt += f"\n... و {len(_matched) - len(_shown)} فایل دیگر"
-                tool_results.append({"tool_use_id": cid, "content": _txt or "موردی یافت نشد"})
+                tool_results.append(_tr(_txt or "موردی یافت نشد"))
                 yield ("progress", {"step": "agent_list", "message": f"📂 [agent] فهرست فایل‌ها (فیلتر: '{_filter or 'همه'}') — {len(_matched)} مورد"})
 
             elif name == "submit_action_plan":
@@ -276,10 +280,10 @@ async def run_inspector_agent(
                 stop_reason = "submitted"
                 _nf = len(action_plan["files"])
                 yield ("progress", {"step": "agent_submit", "message": f"✅ [agent] action_plan ثبت شد — {_nf} فایل"})
-                tool_results.append({"tool_use_id": cid, "content": "action_plan دریافت شد. تمام."})
+                tool_results.append(_tr("action_plan دریافت شد. تمام."))
 
             else:
-                tool_results.append({"tool_use_id": cid, "content": f"ابزار ناشناخته: {name}", "is_error": True})
+                tool_results.append(_tr(f"ابزار ناشناخته: {name}", is_error=True))
 
         # نتایج ابزار را با فیلد کانونیکال tool_results برمی‌گردانیم (provider-agnostic).
         messages.append(Message(role="user", content="", tool_results=tool_results))

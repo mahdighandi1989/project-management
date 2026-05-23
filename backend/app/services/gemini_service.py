@@ -31,40 +31,106 @@ class GeminiService(AIServiceBase):
         for msg in messages:
             if msg.role == "system":
                 system_instruction = msg.content
-            else:
-                role = "user" if msg.role == "user" else "model"
-                parts = [{"text": msg.content}]
+                continue
 
-                if msg.images:
-                    for img in msg.images:
-                        # تشخیص نوع تصویر از header (PNG: iVBORw0K, JPEG: /9j/)
-                        mime_type = "image/png" if img.startswith("iVBORw0K") else "image/jpeg"
-                        parts.append({
-                            "inline_data": {
-                                "mime_type": mime_type,
-                                "data": img
-                            }
-                        })
+            role = "user" if msg.role == "user" else "model"
 
-                # 🆕 رسانهٔ inline با MIME صریح (audio/video/PDF/...) — بدون سنیف
-                if getattr(msg, "inline_files", None):
-                    for entry in msg.inline_files:
-                        try:
-                            mime_type, b64 = entry[0], entry[1]
-                        except Exception:
-                            continue
-                        if not mime_type or not b64:
-                            continue
-                        parts.append({
-                            "inline_data": {
-                                "mime_type": mime_type,
-                                "data": b64,
-                            }
-                        })
+            # 🆕 (canonical tool fields → Gemini parts)
+            if getattr(msg, "tool_calls", None):
+                # assistant turn with functionCall parts (role=model)
+                parts = []
+                if msg.content:
+                    parts.append({"text": msg.content})
+                for tc in msg.tool_calls:
+                    parts.append({
+                        "functionCall": {
+                            "name": tc.get("name", ""),
+                            "args": tc.get("input", {}) or {},
+                        }
+                    })
+                contents.append({"role": "model", "parts": parts})
+                continue
+            if getattr(msg, "tool_results", None):
+                # user turn with functionResponse parts
+                # نکته: Gemini به‌جای id با name match می‌کند — name در tool_results کانونیکال هست
+                parts = []
+                for tr in msg.tool_results:
+                    parts.append({
+                        "functionResponse": {
+                            "name": tr.get("name") or "",
+                            # response باید object باشد، نه string
+                            "response": {"content": tr.get("content", ""), **({"is_error": True} if tr.get("is_error") else {})},
+                        }
+                    })
+                contents.append({"role": "user", "parts": parts})
+                continue
 
-                contents.append({"role": role, "parts": parts})
+            parts = [{"text": msg.content}]
+
+            if msg.images:
+                for img in msg.images:
+                    # تشخیص نوع تصویر از header (PNG: iVBORw0K, JPEG: /9j/)
+                    mime_type = "image/png" if img.startswith("iVBORw0K") else "image/jpeg"
+                    parts.append({
+                        "inline_data": {
+                            "mime_type": mime_type,
+                            "data": img
+                        }
+                    })
+
+            # 🆕 رسانهٔ inline با MIME صریح (audio/video/PDF/...) — بدون سنیف
+            if getattr(msg, "inline_files", None):
+                for entry in msg.inline_files:
+                    try:
+                        mime_type, b64 = entry[0], entry[1]
+                    except Exception:
+                        continue
+                    if not mime_type or not b64:
+                        continue
+                    parts.append({
+                        "inline_data": {
+                            "mime_type": mime_type,
+                            "data": b64,
+                        }
+                    })
+
+            contents.append({"role": role, "parts": parts})
 
         return system_instruction, contents
+
+    @staticmethod
+    def _canonical_tools_to_gemini(tools: List[Dict]) -> List[Dict]:
+        """ترجمهٔ tools از فرمت کانونیکال (Anthropic-style) به فرمت Gemini."""
+        return [{
+            "function_declarations": [
+                {
+                    "name": t.get("name", ""),
+                    "description": t.get("description", ""),
+                    "parameters": t.get("input_schema", {"type": "object", "properties": {}}),
+                }
+                for t in (tools or [])
+            ]
+        }] if tools else []
+
+    @staticmethod
+    def _gemini_tool_config(tool_choice: Any) -> Optional[Dict]:
+        """ترجمهٔ tool_choice کانونیکال به Gemini toolConfig."""
+        if not tool_choice:
+            return None
+        if isinstance(tool_choice, dict):
+            t = tool_choice.get("type")
+            if t == "auto":
+                return {"functionCallingConfig": {"mode": "AUTO"}}
+            if t == "any":
+                return {"functionCallingConfig": {"mode": "ANY"}}
+            if t == "tool" and tool_choice.get("name"):
+                return {
+                    "functionCallingConfig": {
+                        "mode": "ANY",
+                        "allowedFunctionNames": [tool_choice["name"]],
+                    }
+                }
+        return None
 
     async def generate(
         self,
@@ -105,6 +171,15 @@ class GeminiService(AIServiceBase):
             if kwargs.get("top_k"):
                 payload["generationConfig"]["topK"] = kwargs["top_k"]
 
+            # 🆕 (tool-calling) — افزودن tools و toolConfig
+            if kwargs.get("tools"):
+                _gtools = self._canonical_tools_to_gemini(kwargs["tools"])
+                if _gtools:
+                    payload["tools"] = _gtools
+                    _tcfg = self._gemini_tool_config(kwargs.get("tool_choice"))
+                    if _tcfg is not None:
+                        payload["toolConfig"] = _tcfg
+
             url = f"{self.BASE_URL}/models/{model_id}:generateContent?key={self.api_key}"
 
             response = await self.client.post(url, json=payload)
@@ -123,14 +198,25 @@ class GeminiService(AIServiceBase):
 
             latency = int((datetime.now() - start_time).total_seconds() * 1000)
 
-            # استخراج محتوا
+            # استخراج محتوا + functionCallها
             content = ""
+            _tool_calls = []
             candidates = data.get("candidates", [])
             if candidates:
                 parts = candidates[0].get("content", {}).get("parts", [])
+                _fc_idx = 0
                 for part in parts:
                     if "text" in part:
                         content += part["text"]
+                    elif "functionCall" in part:
+                        fc = part["functionCall"] or {}
+                        # Gemini شناسهٔ تماس ندارد → یک id مصنوعی از name+index بساز
+                        _tool_calls.append({
+                            "id": f"gemini_call_{_fc_idx}_{fc.get('name', '')}",
+                            "name": fc.get("name", ""),
+                            "input": fc.get("args", {}) or {},
+                        })
+                        _fc_idx += 1
 
             # محاسبه توکن‌ها
             usage = data.get("usageMetadata", {})
@@ -145,7 +231,8 @@ class GeminiService(AIServiceBase):
                 metadata={
                     "prompt_tokens": usage.get("promptTokenCount", 0),
                     "completion_tokens": usage.get("candidatesTokenCount", 0),
-                }
+                },
+                tool_calls=_tool_calls or None,
             )
 
         except AIServiceError:

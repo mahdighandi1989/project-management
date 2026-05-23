@@ -35,7 +35,8 @@ class Message(BaseModel):
     # هر آیتم: {"id": str, "name": str, "input": dict}
     tool_calls: Optional[List[Dict[str, Any]]] = None
     # 🆕 (canonical, provider-agnostic) — برای پیام user که نتیجهٔ ابزارها را
-    # برمی‌گرداند. هر آیتم: {"tool_use_id": str, "content": str, "is_error": bool}
+    # برمی‌گرداند. هر آیتم: {"tool_use_id": str, "name": str, "content": str, "is_error": bool}
+    # توجه: name برای Gemini لازم است (Gemini با نام match می‌کند نه id).
     tool_results: Optional[List[Dict[str, Any]]] = None
 
 
