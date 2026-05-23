@@ -642,6 +642,57 @@ class RenderDeployService:
         """تنظیم/بروزرسانی یک env var تنها (wrapper بر update_env_vars)."""
         return await self.update_env_vars(service_id, {key: value})
 
+    async def update_service_settings(
+        self,
+        service_id: str,
+        *,
+        build_command: Optional[str] = None,
+        start_command: Optional[str] = None,
+        root_dir: Optional[str] = None,
+        auto_deploy: Optional[bool] = None,
+    ) -> Dict:
+        """به‌روزرسانی تنظیمات اصلی سرویس (buildCommand, startCommand, etc.).
+
+        این فیلدها از طریق `PATCH /services/{id}` با body شامل serviceDetails
+        تنظیم می‌شوند — جدا از env vars. برای حل مشکل «frontend build نمی‌شود»
+        وقتی buildCommand خالی است، از این متد استفاده شود (نه set_env_var).
+        """
+        if not self.is_configured():
+            return {"success": False, "error": "Not configured"}
+
+        # ساخت payload فقط با فیلدهایی که داده شده
+        _details: Dict[str, Any] = {}
+        if build_command is not None:
+            _details["buildCommand"] = build_command
+        if start_command is not None:
+            _details["startCommand"] = start_command
+        if root_dir is not None:
+            _details["rootDir"] = root_dir
+        _body: Dict[str, Any] = {}
+        if _details:
+            _body["serviceDetails"] = _details
+        if auto_deploy is not None:
+            _body["autoDeploy"] = "yes" if auto_deploy else "no"
+
+        if not _body:
+            return {"success": False, "error": "هیچ فیلدی برای بروزرسانی داده نشد"}
+
+        session = await self._get_session()
+        try:
+            async with session.patch(
+                f"{self.API_BASE}/services/{service_id}",
+                json=_body,
+            ) as response:
+                if response.status not in (200, 201):
+                    _txt = await response.text()
+                    return {
+                        "success": False,
+                        "error": f"PATCH /services/{service_id} failed ({response.status}): {_txt[:400]}",
+                    }
+                return {"success": True, "updated": list(_details.keys()) + (["autoDeploy"] if auto_deploy is not None else [])}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
 
 class DeployManager:
     """

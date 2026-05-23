@@ -14857,8 +14857,9 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - `render_list_services()`: لیست سرویس‌های Render. اول این را صدا بزن تا service_id پروژهٔ {owner}/{repo} را پیدا کنی.
 - `render_get_service(service_id)`: جزئیات سرویس (runtime، buildCommand، startCommand، branch، region، etc.).
 - `render_get_env_vars(service_id)`: env vars تنظیم‌شده. 🔴 **اگر PYTHON_VERSION یا NODE_VERSION در env باشد، runtime.txt را override می‌کند!**
-- `render_set_env_var(service_id, key, value)`: یک env var را تنظیم/بروزرسانی می‌کند (مثلاً PYTHON_VERSION=3.12.7). بعد باید deploy بزنی.
-- `render_trigger_deploy(service_id, clear_cache)`: deploy جدید اجرا می‌کند. اگر env یا dependency عوض کردی clear_cache=true.
+- `render_set_env_var(service_id, key, value)`: یک env var را تنظیم/بروزرسانی می‌کند (مثلاً PYTHON_VERSION=3.12.7). بعد باید deploy بزنی. ⛔ برای buildCommand/startCommand از این استفاده نکن — آن‌ها env var نیستند.
+- 🔴 `render_update_service_settings(service_id, build_command?, start_command?, auto_deploy?)`: برای ست‌کردن `serviceDetails.buildCommand` یا `startCommand` (همان فیلدهای Render UI > Settings > Build & Deploy). **این تنها راه فعال‌سازی build فرانت** وقتی Render فقط backend را build می‌کند.
+- `render_trigger_deploy(service_id, clear_cache)`: deploy جدید اجرا می‌کند. اگر env یا dependency یا buildCommand عوض کردی clear_cache=true.
 - `render_get_deploys(service_id, limit)`: فهرست deploy های اخیر با وضعیت — برای فهمیدن «آیا آخرین deploy موفق بود؟».
 - 🔴 `render_get_deploy_logs(service_id, deploy_id?, log_type?)`: **مهم‌ترین وقتی deploy fail شده** — لاگ‌های واقعی Render را مستقیماً می‌خواند. **قبل از حدس‌زدن از روی config files، این را صدا بزن تا با چشم خودت ببینی build چه خطایی داد.**
 
@@ -14884,7 +14885,8 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 1. `render_get_service(service_id)` → فیلد `buildCommand` را چک کن
 2. اگر `buildCommand` خالی است یا فقط `pip install ...` دارد (بدون `npm run build`):
    - **این علت اصلی است** — Render فرانت را build نمی‌کند، main.py به fallback می‌رود و placeholder می‌دهد
-   - راه‌حل: `render_set_env_var(BUILD_COMMAND="cd frontend && npm install && npm run build && cd .. && pip install -r requirements.txt")` یا توصیه کن کاربر در Render UI > Settings > Build Command این را دستی ست کند
+   - راه‌حل: `render_update_service_settings(service_id, build_command="cd frontend && npm install && npm run build && cd .. && pip install -r requirements.txt")` — این `serviceDetails.buildCommand` را روی سرویس ست می‌کند (همان فیلد Render UI > Settings > Build Command)
+   - ⛔ از `render_set_env_var(BUILD_COMMAND=...)` استفاده نکن — buildCommand در serviceDetails است نه env var
    - بعد `render_trigger_deploy(clear_cache=true)`
 3. **هیچ فیکس کدی نده** برای این کلاس مشکل — اضافه‌کردن کد به main.py یا تغییر render.yaml کمکی نمی‌کند چون سرویس Render از UI ساخته شده و `buildCommand` در render.yaml را نادیده می‌گیرد
 

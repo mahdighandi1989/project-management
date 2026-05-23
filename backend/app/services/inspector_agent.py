@@ -219,7 +219,10 @@ def _build_tools() -> List[Dict[str, Any]]:
                 "مثلاً برای رفع مشکل Python version: PYTHON_VERSION=3.12.7 (مطمئن‌تر از "
                 "runtime.txt چون Render ممکن است runtime.txt را به دلایلی نادیده بگیرد). "
                 "بعد از این، باید render_trigger_deploy صدا بزنی تا تغییر اعمال شود. "
-                "⚠️ فقط روی سرویسی که به repo فعلی ({owner}/{repo}) تعلق دارد عمل کن."
+                "⚠️ فقط روی سرویسی که به repo فعلی ({owner}/{repo}) تعلق دارد عمل کن. "
+                "⛔ برای تغییر buildCommand یا startCommand از این ابزار استفاده نکن — "
+                "آن‌ها env var نیستند، در `serviceDetails` ذخیره می‌شوند. از "
+                "render_update_service_settings استفاده کن."
             ),
             "input_schema": {
                 "type": "object",
@@ -229,6 +232,30 @@ def _build_tools() -> List[Dict[str, Any]]:
                     "value": {"type": "string"},
                 },
                 "required": ["service_id", "key", "value"],
+            },
+        },
+        {
+            "name": "render_update_service_settings",
+            "description": (
+                "🔴 برای حل «frontend build نمی‌شود / placeholder نشان داده می‌شود» "
+                "وقتی `buildCommand` در render_get_service خالی یا ناقص است: این "
+                "ابزار `serviceDetails.buildCommand` (یا startCommand) را روی سرویس "
+                "ست می‌کند — این فیلد env var نیست بلکه setting اصلی سرویس است "
+                "(در Render UI > Settings > Build & Deploy). بعد از این "
+                "render_trigger_deploy با clear_cache=true بزن. مثال build_command "
+                "برای پروژه FastAPI+React: "
+                "`cd frontend && npm install && npm run build && cd .. && pip install -r requirements.txt` "
+                "⚠️ فقط روی سرویسی که به repo فعلی ({owner}/{repo}) تعلق دارد."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "service_id": {"type": "string"},
+                    "build_command": {"type": "string"},
+                    "start_command": {"type": "string"},
+                    "auto_deploy": {"type": "boolean"},
+                },
+                "required": ["service_id"],
             },
         },
         {
@@ -568,7 +595,8 @@ async def run_inspector_agent(
             elif name in ("render_list_services", "render_get_service",
                           "render_get_env_vars", "render_set_env_var",
                           "render_trigger_deploy", "render_get_deploys",
-                          "render_get_deploy_logs"):
+                          "render_get_deploy_logs",
+                          "render_update_service_settings"):
                 try:
                     from .deploy_service import RenderDeployService
                 except Exception as _ie:
@@ -717,6 +745,37 @@ async def run_inspector_agent(
                                 tool_results.append(_tr(f"خطا: {res.get('error')}", is_error=True))
                             else:
                                 tool_results.append(_tr(_json.dumps(res.get("deploys", []), ensure_ascii=False, indent=2)[:max_file_chars]))
+
+                    elif name == "render_update_service_settings":
+                        sid = (args.get("service_id") or "").strip()
+                        if not sid:
+                            tool_results.append(_tr("service_id لازم است", is_error=True))
+                        else:
+                            ok, err = await _verify_repo_match(sid)
+                            if not ok:
+                                tool_results.append(_tr(f"❌ ایمنی: {err}", is_error=True))
+                            else:
+                                _bc = args.get("build_command")
+                                _sc = args.get("start_command")
+                                _ad = args.get("auto_deploy")
+                                _summary = []
+                                if _bc is not None:
+                                    _summary.append(f"buildCommand={_bc[:80]}")
+                                if _sc is not None:
+                                    _summary.append(f"startCommand={_sc[:80]}")
+                                if _ad is not None:
+                                    _summary.append(f"autoDeploy={_ad}")
+                                yield ("progress", {"step": "agent_render_patch", "message": f"⚙️ {_tag} به‌روزرسانی تنظیمات سرویس {sid}: {', '.join(_summary) or '(empty)'}..."})
+                                res = await _rds.update_service_settings(
+                                    sid,
+                                    build_command=_bc,
+                                    start_command=_sc,
+                                    auto_deploy=_ad,
+                                )
+                                if res.get("success"):
+                                    tool_results.append(_tr(f"✅ تنظیمات سرویس به‌روز شد: {res.get('updated')}. حالا render_trigger_deploy با clear_cache=true بزن تا اعمال شود."))
+                                else:
+                                    tool_results.append(_tr(f"خطا: {res.get('error')}", is_error=True))
 
                     elif name == "render_get_deploy_logs":
                         sid = (args.get("service_id") or "").strip()
