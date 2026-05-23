@@ -339,7 +339,7 @@ async def run_inspector_agent(
     system_prompt: str,
     user_prompt: str,
     file_list: List[str],
-    max_iterations: int = 14,
+    max_iterations: int = 24,
     max_file_chars: int = 18000,
     max_tokens: int = 8000,
 ) -> AsyncIterator[Tuple[str, Dict[str, Any]]]:
@@ -527,6 +527,27 @@ async def run_inspector_agent(
                         tool_results.append(_tr("✅ preflight جامع: هیچ مشکلی پیدا نشد — می‌توانی submit_action_plan را صدا بزنی."))
                     else:
                         _txt = "🔴 preflight جامع (شامل اسکن repo) این مشکلات را پیدا کرد — قبل از submit همه را رفع کن:\n\n"
+                        # 🆕 جمع‌آوری فایل‌های مرتبط (که در issues مذکورند) تا محتوای
+                        # واقعی‌شان را همراه گزارش بفرستیم — agent دیگر لازم نیست
+                        # یکی‌یکی read_file بزند (صرفه‌جویی در iteration).
+                        _files_in_issues = []
+                        _seen = set()
+                        for iss in _issues:
+                            _f = iss.get("file")
+                            if _f and _f not in _seen and _f in files_read:
+                                _seen.add(_f)
+                                _files_in_issues.append(_f)
+                            # برای import errors، فایل target هم مهم است
+                            _msg = iss.get("message", "")
+                            import re as _re_pf
+                            _m = _re_pf.search(r"from (\S+) import", _msg)
+                            if _m:
+                                _target_mod = _m.group(1)
+                                for _candidate in (_target_mod.replace(".", "/") + ".py",
+                                                   _target_mod.replace(".", "/") + "/__init__.py"):
+                                    if _candidate in files_read and _candidate not in _seen:
+                                        _seen.add(_candidate)
+                                        _files_in_issues.append(_candidate)
                         for i, iss in enumerate(_issues, 1):
                             _txt += f"{i}. **{iss.get('severity', 'issue')}** — {iss.get('message', '')}\n"
                             if iss.get("file"):
@@ -534,6 +555,14 @@ async def run_inspector_agent(
                             if iss.get("hint"):
                                 _txt += f"   راه‌حل: {iss['hint']}\n"
                             _txt += "\n"
+                        # محتوای فایل‌های مرتبط — agent بدون read_file اضافی همه را دارد
+                        if _files_in_issues:
+                            _txt += "\n--- محتوای فعلی فایل‌های مرتبط (از قبل خوانده شده، نیازی به read_file مجدد نیست) ---\n"
+                            for _fp in _files_in_issues[:15]:  # سقف ۱۵ تا برای کنترل توکن
+                                _c = files_read.get(_fp, "") or ""
+                                _c_trunc = _c if len(_c) <= 4000 else _c[:4000] + "\n...[truncated]"
+                                _nlines = _c.count("\n") + 1
+                                _txt += f"\n### `{_fp}` ({_nlines} خط):\n```\n{_c_trunc}\n```\n"
                         tool_results.append(_tr(_txt))
 
             elif name in ("render_list_services", "render_get_service",
