@@ -166,6 +166,83 @@ def _build_tools() -> List[Dict[str, Any]]:
                 "required": ["analysis", "files"],
             },
         },
+        # ────────────────────────────────────────────────────────────────────
+        # ابزارهای Render — برای زمانی که مشکل از طرف plat پلتفرم است (نه کد):
+        # env vars، runtime version، redeploy. agent باید فقط روی سرویسی کار
+        # کند که به repo فعلی (owner/repo) متعلق است.
+        # ────────────────────────────────────────────────────────────────────
+        {
+            "name": "render_list_services",
+            "description": (
+                "فهرست تمام سرویس‌های Render که با کلید API در دسترس است را برمی‌گرداند. "
+                "ابتدا این را صدا بزن تا service_id مربوط به repo فعلی (owner/repo) را پیدا کنی. "
+                "خروجی: لیست {id, name, type, branch, repo}."
+            ),
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        },
+        {
+            "name": "render_get_service",
+            "description": (
+                "جزئیات کامل یک سرویس Render: runtime (python/docker/static_site)، "
+                "buildCommand، startCommand، branch، repo، dashboard_url. این برای "
+                "فهمیدن «این سرویس واقعاً چطور تنظیم شده» ضروری است — مخصوصاً وقتی "
+                "فایل config (مثل runtime.txt / render.yaml) با رفتار واقعی تضاد دارد."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {"service_id": {"type": "string"}},
+                "required": ["service_id"],
+            },
+        },
+        {
+            "name": "render_get_env_vars",
+            "description": (
+                "لیست environment variables تنظیم‌شده روی سرویس Render. "
+                "🔴 اگر PYTHON_VERSION یا NODE_VERSION در env vars باشد، runtime.txt را "
+                "**override می‌کند** — وقتی Python/Node version مشکل دارد و runtime.txt "
+                "نادیده گرفته می‌شود، **اول این را چک کن**."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {"service_id": {"type": "string"}},
+                "required": ["service_id"],
+            },
+        },
+        {
+            "name": "render_set_env_var",
+            "description": (
+                "یک env var روی سرویس Render set می‌کند (اگر بود update، اگر نبود create). "
+                "مثلاً برای رفع مشکل Python version: PYTHON_VERSION=3.12.7 (مطمئن‌تر از "
+                "runtime.txt چون Render ممکن است runtime.txt را به دلایلی نادیده بگیرد). "
+                "بعد از این، باید render_trigger_deploy صدا بزنی تا تغییر اعمال شود. "
+                "⚠️ فقط روی سرویسی که به repo فعلی ({owner}/{repo}) تعلق دارد عمل کن."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "service_id": {"type": "string"},
+                    "key": {"type": "string"},
+                    "value": {"type": "string"},
+                },
+                "required": ["service_id", "key", "value"],
+            },
+        },
+        {
+            "name": "render_trigger_deploy",
+            "description": (
+                "یک deploy جدید روی سرویس Render اجرا می‌کند. اگر تغییرات env var یا "
+                "dependency داشتی، clear_cache=true بگذار تا cache قدیمی استفاده نشود. "
+                "⚠️ فقط روی سرویسی که به repo فعلی ({owner}/{repo}) تعلق دارد عمل کن."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "service_id": {"type": "string"},
+                    "clear_cache": {"type": "boolean", "default": False},
+                },
+                "required": ["service_id"],
+            },
+        },
     ]
 
 
@@ -317,6 +394,154 @@ async def run_inspector_agent(
                 _nf = len(action_plan["files"])
                 yield ("progress", {"step": "agent_submit", "message": f"✅ {_tag} action_plan ثبت شد — {_nf} فایل"})
                 tool_results.append(_tr("action_plan دریافت شد. تمام."))
+
+            # ────────────────────────────────────────────────────────────────
+            # ابزارهای Render (پلتفرم) — اگر RENDER_API_KEY در env باشد، agent
+            # می‌تواند خودش env vars را بخواند/تنظیم کند و deploy بزند.
+            # ────────────────────────────────────────────────────────────────
+            elif name in ("render_list_services", "render_get_service",
+                          "render_get_env_vars", "render_set_env_var",
+                          "render_trigger_deploy"):
+                try:
+                    from .deploy_service import RenderDeployService
+                except Exception as _ie:
+                    tool_results.append(_tr(f"deploy_service در دسترس نیست: {_ie}", is_error=True))
+                    continue
+                _rds = RenderDeployService()  # کلید از env (RENDER_API_KEY)
+                if not _rds.is_configured():
+                    tool_results.append(_tr(
+                        "❌ RENDER_API_KEY در env تنظیم نشده. بازرس برای کار با Render نیاز به کلید دارد.",
+                        is_error=True,
+                    ))
+                    continue
+                try:
+                    # ── helper: ایمنی نوشتنی — service باید به repo فعلی متعلق باشد
+                    async def _verify_repo_match(sid: str):
+                        if not (owner and repo):
+                            return True, ""
+                        info = await _rds.get_service(sid)
+                        if not info.get("success"):
+                            return False, info.get("error", "service not found")
+                        _svc = info.get("service") or {}
+                        # repo ممکن است در svc یا در svc.repo یا در svc.serviceDetails باشد
+                        _repo_url = (
+                            _svc.get("repo") or _svc.get("repoUrl")
+                            or (_svc.get("serviceDetails", {}) or {}).get("repo", "")
+                            or ""
+                        )
+                        target = f"{owner}/{repo}".lower()
+                        if target not in (_repo_url or "").lower():
+                            return False, f"repo سرویس ({_repo_url}) با repo فعلی ({target}) مطابقت ندارد"
+                        return True, ""
+
+                    if name == "render_list_services":
+                        yield ("progress", {"step": "agent_render_list", "message": f"☁️ {_tag} گرفتن لیست سرویس‌های Render..."})
+                        svcs = await _rds.list_services()
+                        # خلاصه‌سازی فیلدها — فقط مهم‌ها
+                        _summary = []
+                        for entry in (svcs or []):
+                            s = entry.get("service") if isinstance(entry, dict) and "service" in entry else entry
+                            if not isinstance(s, dict):
+                                continue
+                            _summary.append({
+                                "id": s.get("id", ""),
+                                "name": s.get("name", ""),
+                                "type": s.get("type", ""),
+                                "branch": s.get("branch", ""),
+                                "repo": s.get("repo", ""),
+                                "suspended": s.get("suspended", ""),
+                            })
+                        tool_results.append(_tr(_json.dumps(_summary, ensure_ascii=False, indent=2)[:max_file_chars]))
+
+                    elif name == "render_get_service":
+                        sid = (args.get("service_id") or "").strip()
+                        if not sid:
+                            tool_results.append(_tr("service_id لازم است", is_error=True))
+                        else:
+                            yield ("progress", {"step": "agent_render_get", "message": f"☁️ {_tag} گرفتن جزئیات سرویس {sid}..."})
+                            res = await _rds.get_service(sid)
+                            if not res.get("success"):
+                                tool_results.append(_tr(f"خطا: {res.get('error')}", is_error=True))
+                            else:
+                                _svc = res.get("service") or {}
+                                _details = _svc.get("serviceDetails") or {}
+                                _info = {
+                                    "id": _svc.get("id"),
+                                    "name": _svc.get("name"),
+                                    "type": _svc.get("type"),
+                                    "branch": _svc.get("branch"),
+                                    "repo": _svc.get("repo"),
+                                    "autoDeploy": _svc.get("autoDeploy"),
+                                    "suspended": _svc.get("suspended"),
+                                    "dashboardUrl": _svc.get("dashboardUrl") or _svc.get("dashboard_url"),
+                                    "buildCommand": _details.get("buildCommand"),
+                                    "startCommand": _details.get("startCommand"),
+                                    "env": _details.get("env"),
+                                    "region": _details.get("region"),
+                                    "rootDir": _svc.get("rootDir") or _details.get("rootDir"),
+                                    "runtime": _details.get("runtime") or _svc.get("type"),
+                                }
+                                tool_results.append(_tr(_json.dumps(_info, ensure_ascii=False, indent=2)))
+
+                    elif name == "render_get_env_vars":
+                        sid = (args.get("service_id") or "").strip()
+                        if not sid:
+                            tool_results.append(_tr("service_id لازم است", is_error=True))
+                        else:
+                            yield ("progress", {"step": "agent_render_env", "message": f"☁️ {_tag} خواندن env vars سرویس {sid}..."})
+                            res = await _rds.get_env_vars(sid)
+                            if not res.get("success"):
+                                tool_results.append(_tr(f"خطا: {res.get('error')}", is_error=True))
+                            else:
+                                _secret_hints = ("key", "secret", "token", "password", "pass", "dsn", "cert")
+                                _items = []
+                                for ev in res.get("env_vars", []):
+                                    k = ev.get("key", "")
+                                    v = ev.get("value", "")
+                                    if k and any(h in k.lower() for h in _secret_hints):
+                                        v = f"<REDACTED ({len(v)} chars)>"
+                                    _items.append({"key": k, "value": v})
+                                tool_results.append(_tr(_json.dumps(_items, ensure_ascii=False, indent=2)))
+
+                    elif name == "render_set_env_var":
+                        sid = (args.get("service_id") or "").strip()
+                        k = (args.get("key") or "").strip()
+                        v = args.get("value", "")
+                        if not (sid and k):
+                            tool_results.append(_tr("service_id و key لازم‌اند", is_error=True))
+                        else:
+                            ok, err = await _verify_repo_match(sid)
+                            if not ok:
+                                tool_results.append(_tr(f"❌ ایمنی: {err}", is_error=True))
+                            else:
+                                yield ("progress", {"step": "agent_render_set_env", "message": f"☁️ {_tag} تنظیم {k} روی سرویس {sid}..."})
+                                res = await _rds.set_env_var(sid, k, v)
+                                if res.get("success"):
+                                    tool_results.append(_tr(f"✅ {k} تنظیم شد. برای اعمال، render_trigger_deploy را با clear_cache=true صدا بزن."))
+                                else:
+                                    tool_results.append(_tr(f"خطا: {res.get('error')}", is_error=True))
+
+                    elif name == "render_trigger_deploy":
+                        sid = (args.get("service_id") or "").strip()
+                        cc = bool(args.get("clear_cache", False))
+                        if not sid:
+                            tool_results.append(_tr("service_id لازم است", is_error=True))
+                        else:
+                            ok, err = await _verify_repo_match(sid)
+                            if not ok:
+                                tool_results.append(_tr(f"❌ ایمنی: {err}", is_error=True))
+                            else:
+                                yield ("progress", {"step": "agent_render_deploy", "message": f"🚀 {_tag} اجرای deploy جدید روی {sid} (clear_cache={cc})..."})
+                                res = await _rds.trigger_deploy(sid, clear_cache=cc)
+                                if res.get("success"):
+                                    tool_results.append(_tr(f"✅ deploy آغاز شد — deploy_id: {res.get('deploy_id')}, status: {res.get('status')}"))
+                                else:
+                                    tool_results.append(_tr(f"خطا: {res.get('error')}", is_error=True))
+                finally:
+                    try:
+                        await _rds.close()
+                    except Exception:
+                        pass
 
             else:
                 tool_results.append(_tr(f"ابزار ناشناخته: {name}", is_error=True))

@@ -499,6 +499,37 @@ class RenderDeployService:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    async def get_env_vars(self, service_id: str) -> Dict:
+        """خواندن فهرست environment variables یک سرویس (برای استفادهٔ agent)."""
+        if not self.is_configured():
+            return {"success": False, "error": "Not configured"}
+        session = await self._get_session()
+        try:
+            async with session.get(
+                f"{self.API_BASE}/services/{service_id}/env-vars"
+            ) as response:
+                if response.status != 200:
+                    return {"success": False, "error": f"HTTP {response.status}: {await response.text()}"}
+                data = await response.json()
+                # نرمال‌سازی: ممکن است شکل [{envVar: {key, value}}] یا [{key, value}] باشد
+                items = []
+                for v in (data or []):
+                    if isinstance(v, dict) and "envVar" in v and isinstance(v["envVar"], dict):
+                        v = v["envVar"]
+                    if isinstance(v, dict):
+                        items.append({
+                            "key": v.get("key", ""),
+                            "value": v.get("value", ""),
+                            "id": v.get("id", ""),
+                        })
+                return {"success": True, "env_vars": items}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def set_env_var(self, service_id: str, key: str, value: str) -> Dict:
+        """تنظیم/بروزرسانی یک env var تنها (wrapper بر update_env_vars)."""
+        return await self.update_env_vars(service_id, {key: value})
+
 
 class DeployManager:
     """
