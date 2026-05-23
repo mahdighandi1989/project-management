@@ -30,9 +30,37 @@ class OpenAIService(AIServiceBase):
         }
 
     def _format_messages(self, messages: List[Message]) -> List[Dict]:
-        """تبدیل پیام‌ها به فرمت OpenAI"""
+        """تبدیل پیام‌ها به فرمت OpenAI (شامل tool_calls/tool_results کانونیکال)"""
         formatted = []
         for msg in messages:
+            # 🆕 (canonical tool fields → OpenAI format)
+            if getattr(msg, "tool_calls", None):
+                # assistant turn after tool_use — OpenAI: tool_calls در فیلد جدا
+                formatted.append({
+                    "role": msg.role,
+                    "content": msg.content or None,
+                    "tool_calls": [
+                        {
+                            "id": tc.get("id", ""),
+                            "type": "function",
+                            "function": {
+                                "name": tc.get("name", ""),
+                                "arguments": json.dumps(tc.get("input", {}) or {}, ensure_ascii=False),
+                            },
+                        }
+                        for tc in msg.tool_calls
+                    ],
+                })
+                continue
+            if getattr(msg, "tool_results", None):
+                # user turn with tool results — OpenAI: هر نتیجه یک message جدا
+                for tr in msg.tool_results:
+                    formatted.append({
+                        "role": "tool",
+                        "tool_call_id": tr.get("tool_use_id", ""),
+                        "content": tr.get("content", ""),
+                    })
+                continue
             if msg.images:
                 # پیام با تصویر (vision)
                 content = [{"type": "text", "text": msg.content}]
@@ -53,6 +81,38 @@ class OpenAIService(AIServiceBase):
             else:
                 formatted.append({"role": msg.role, "content": msg.content})
         return formatted
+
+    @staticmethod
+    def _canonical_tools_to_openai(tools: List[Dict]) -> List[Dict]:
+        """ترجمهٔ tools از فرمت کانونیکال (Anthropic-style) به فرمت OpenAI."""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t.get("name", ""),
+                    "description": t.get("description", ""),
+                    "parameters": t.get("input_schema", {"type": "object", "properties": {}}),
+                },
+            }
+            for t in (tools or [])
+        ]
+
+    @staticmethod
+    def _openai_tool_choice(tool_choice: Any) -> Any:
+        """ترجمهٔ tool_choice کانونیکال به OpenAI: {type:'auto'}→'auto'، {type:'any'}→'required'."""
+        if not tool_choice:
+            return None
+        if isinstance(tool_choice, str):
+            return tool_choice
+        if isinstance(tool_choice, dict):
+            t = tool_choice.get("type")
+            if t == "auto":
+                return "auto"
+            if t == "any":
+                return "required"
+            if t == "tool" and tool_choice.get("name"):
+                return {"type": "function", "function": {"name": tool_choice["name"]}}
+        return None
 
     async def generate(
         self,
@@ -90,6 +150,13 @@ class OpenAIService(AIServiceBase):
             if kwargs.get("frequency_penalty"):
                 payload["frequency_penalty"] = kwargs["frequency_penalty"]
 
+            # 🆕 (tool-calling) — افزودن tools و tool_choice
+            if kwargs.get("tools"):
+                payload["tools"] = self._canonical_tools_to_openai(kwargs["tools"])
+                _tc = self._openai_tool_choice(kwargs.get("tool_choice"))
+                if _tc is not None:
+                    payload["tool_choice"] = _tc
+
             response = await self.client.post(
                 f"{self.BASE_URL}/chat/completions",
                 headers=self._build_headers(),
@@ -111,16 +178,34 @@ class OpenAIService(AIServiceBase):
 
             latency = int((datetime.now() - start_time).total_seconds() * 1000)
 
+            # 🆕 (tool-calling) — parse tool_calls از پاسخ به فرمت کانونیکال
+            _msg = data["choices"][0]["message"]
+            _content = _msg.get("content") or ""
+            _tool_calls = []
+            for tc in (_msg.get("tool_calls") or []):
+                _fn = tc.get("function", {})
+                _args_str = _fn.get("arguments", "")
+                try:
+                    _input = json.loads(_args_str) if _args_str else {}
+                except (json.JSONDecodeError, TypeError):
+                    _input = {"__raw_arguments__": _args_str}
+                _tool_calls.append({
+                    "id": tc.get("id", ""),
+                    "name": _fn.get("name", ""),
+                    "input": _input,
+                })
+
             return AIResponse(
                 model_id=model_id,
-                content=data["choices"][0]["message"]["content"],
+                content=_content,
                 tokens_used=data.get("usage", {}).get("total_tokens", 0),
                 finish_reason=data["choices"][0].get("finish_reason", ""),
                 latency_ms=latency,
                 metadata={
                     "prompt_tokens": data.get("usage", {}).get("prompt_tokens", 0),
                     "completion_tokens": data.get("usage", {}).get("completion_tokens", 0),
-                }
+                },
+                tool_calls=_tool_calls or None,
             )
 
         except AIServiceError:

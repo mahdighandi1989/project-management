@@ -30,11 +30,67 @@ class DeepSeekService(AIServiceBase):
         }
 
     def _format_messages(self, messages: List[Message]) -> List[Dict]:
-        """تبدیل پیام‌ها به فرمت DeepSeek (سازگار با OpenAI)"""
+        """تبدیل پیام‌ها به فرمت DeepSeek (سازگار با OpenAI) شامل tool fields کانونیکال"""
         formatted = []
         for msg in messages:
+            # 🆕 (canonical tool fields → OpenAI/DeepSeek format)
+            if getattr(msg, "tool_calls", None):
+                formatted.append({
+                    "role": msg.role,
+                    "content": msg.content or None,
+                    "tool_calls": [
+                        {
+                            "id": tc.get("id", ""),
+                            "type": "function",
+                            "function": {
+                                "name": tc.get("name", ""),
+                                "arguments": json.dumps(tc.get("input", {}) or {}, ensure_ascii=False),
+                            },
+                        }
+                        for tc in msg.tool_calls
+                    ],
+                })
+                continue
+            if getattr(msg, "tool_results", None):
+                for tr in msg.tool_results:
+                    formatted.append({
+                        "role": "tool",
+                        "tool_call_id": tr.get("tool_use_id", ""),
+                        "content": tr.get("content", ""),
+                    })
+                continue
             formatted.append({"role": msg.role, "content": msg.content})
         return formatted
+
+    @staticmethod
+    def _canonical_tools_to_openai(tools: List[Dict]) -> List[Dict]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t.get("name", ""),
+                    "description": t.get("description", ""),
+                    "parameters": t.get("input_schema", {"type": "object", "properties": {}}),
+                },
+            }
+            for t in (tools or [])
+        ]
+
+    @staticmethod
+    def _openai_tool_choice(tool_choice: Any) -> Any:
+        if not tool_choice:
+            return None
+        if isinstance(tool_choice, str):
+            return tool_choice
+        if isinstance(tool_choice, dict):
+            t = tool_choice.get("type")
+            if t == "auto":
+                return "auto"
+            if t == "any":
+                return "required"
+            if t == "tool" and tool_choice.get("name"):
+                return {"type": "function", "function": {"name": tool_choice["name"]}}
+        return None
 
     async def generate(
         self,
@@ -68,6 +124,14 @@ class DeepSeekService(AIServiceBase):
             if kwargs.get("frequency_penalty"):
                 payload["frequency_penalty"] = kwargs["frequency_penalty"]
 
+            # 🆕 (tool-calling) — DeepSeek از function calling به سبک OpenAI پشتیبانی
+            # می‌کند، به‌جز deepseek-reasoner که (طبق مستندات DeepSeek) tools ندارد.
+            if kwargs.get("tools") and "reasoner" not in (model.id or "").lower():
+                payload["tools"] = self._canonical_tools_to_openai(kwargs["tools"])
+                _tc = self._openai_tool_choice(kwargs.get("tool_choice"))
+                if _tc is not None:
+                    payload["tool_choice"] = _tc
+
             response = await self.client.post(
                 f"{self.BASE_URL}/chat/completions",
                 headers=self._build_headers(),
@@ -90,8 +154,24 @@ class DeepSeekService(AIServiceBase):
 
             # برای DeepSeek Reasoner، reasoning_content جدا از content نگهداری میشه
             # هرگز reasoning رو با content ترکیب نکن — این باعث آلوده شدن خروجی کد میشه
-            content = data["choices"][0]["message"].get("content", "")
-            reasoning = data["choices"][0]["message"].get("reasoning_content", "")
+            _msg = data["choices"][0]["message"]
+            content = _msg.get("content") or ""
+            reasoning = _msg.get("reasoning_content", "")
+
+            # 🆕 (tool-calling) — parse tool_calls از پاسخ به فرمت کانونیکال
+            _tool_calls = []
+            for tc in (_msg.get("tool_calls") or []):
+                _fn = tc.get("function", {})
+                _args_str = _fn.get("arguments", "")
+                try:
+                    _input = json.loads(_args_str) if _args_str else {}
+                except (json.JSONDecodeError, TypeError):
+                    _input = {"__raw_arguments__": _args_str}
+                _tool_calls.append({
+                    "id": tc.get("id", ""),
+                    "name": _fn.get("name", ""),
+                    "input": _input,
+                })
 
             return AIResponse(
                 model_id=model_id,
@@ -104,7 +184,8 @@ class DeepSeekService(AIServiceBase):
                     "completion_tokens": data.get("usage", {}).get("completion_tokens", 0),
                     "has_reasoning": bool(reasoning),
                     "reasoning_content": reasoning if reasoning else None,
-                }
+                },
+                tool_calls=_tool_calls or None,
             )
 
         except AIServiceError:
