@@ -243,6 +243,42 @@ def _build_tools() -> List[Dict[str, Any]]:
                 "required": ["service_id"],
             },
         },
+        {
+            "name": "render_get_deploys",
+            "description": (
+                "فهرست deploy های اخیر یک سرویس Render با وضعیت (live/build_failed/...) "
+                "و commit. برای فهمیدن «آیا آخرین deploy موفق بود؟» یا «چند deploy "
+                "اخیر همه fail شدند؟» این را صدا بزن."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "service_id": {"type": "string"},
+                    "limit": {"type": "integer", "default": 10},
+                },
+                "required": ["service_id"],
+            },
+        },
+        {
+            "name": "render_get_deploy_logs",
+            "description": (
+                "🔴 **مهم‌ترین ابزار وقتی deploy شکست خورده**: لاگ‌های واقعی یک deploy "
+                "را مستقیماً از Render می‌خواند (به‌جای اتکا به paste کاربر). "
+                "از آن استفاده کن تا علت دقیق build failure را با چشم خودت ببینی — "
+                "نه از روی فایل‌های config حدس بزنی. اگر deploy_id بدهی همان deploy، "
+                "وگرنه آخرین لاگ‌های سرویس. log_type می‌تواند 'build' یا 'app' باشد."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "service_id": {"type": "string"},
+                    "deploy_id": {"type": "string"},
+                    "limit": {"type": "integer", "default": 200},
+                    "log_type": {"type": "string", "enum": ["build", "app"]},
+                },
+                "required": ["service_id"],
+            },
+        },
     ]
 
 
@@ -401,7 +437,8 @@ async def run_inspector_agent(
             # ────────────────────────────────────────────────────────────────
             elif name in ("render_list_services", "render_get_service",
                           "render_get_env_vars", "render_set_env_var",
-                          "render_trigger_deploy"):
+                          "render_trigger_deploy", "render_get_deploys",
+                          "render_get_deploy_logs"):
                 try:
                     from .deploy_service import RenderDeployService
                 except Exception as _ie:
@@ -537,6 +574,42 @@ async def run_inspector_agent(
                                     tool_results.append(_tr(f"✅ deploy آغاز شد — deploy_id: {res.get('deploy_id')}, status: {res.get('status')}"))
                                 else:
                                     tool_results.append(_tr(f"خطا: {res.get('error')}", is_error=True))
+
+                    elif name == "render_get_deploys":
+                        sid = (args.get("service_id") or "").strip()
+                        lim = int(args.get("limit") or 10)
+                        if not sid:
+                            tool_results.append(_tr("service_id لازم است", is_error=True))
+                        else:
+                            yield ("progress", {"step": "agent_render_deploys", "message": f"☁️ {_tag} فهرست deploy های اخیر سرویس {sid}..."})
+                            res = await _rds.get_deploys(sid, limit=lim)
+                            if not res.get("success"):
+                                tool_results.append(_tr(f"خطا: {res.get('error')}", is_error=True))
+                            else:
+                                tool_results.append(_tr(_json.dumps(res.get("deploys", []), ensure_ascii=False, indent=2)[:max_file_chars]))
+
+                    elif name == "render_get_deploy_logs":
+                        sid = (args.get("service_id") or "").strip()
+                        did = (args.get("deploy_id") or "").strip() or None
+                        lim = int(args.get("limit") or 200)
+                        lt = (args.get("log_type") or "").strip() or None
+                        if not sid:
+                            tool_results.append(_tr("service_id لازم است", is_error=True))
+                        else:
+                            yield ("progress", {"step": "agent_render_logs", "message": f"📜 {_tag} خواندن لاگ‌های deploy از Render (sid={sid}, deploy={did or 'latest'})..."})
+                            res = await _rds.get_deploy_logs(sid, deploy_id=did, limit=lim, log_type=lt)
+                            if not res.get("success"):
+                                tool_results.append(_tr(f"خطا: {res.get('error')}", is_error=True))
+                            else:
+                                _lines = res.get("logs", []) or []
+                                # خلاصه‌سازی به فرمت timestamp message برای خواندن natural
+                                _txt = "\n".join(
+                                    f"{ln.get('timestamp','')} [{ln.get('level','')}] {ln.get('message','')}"
+                                    for ln in _lines
+                                )
+                                if not _txt:
+                                    _txt = "(هیچ لاگی برگشت نکرد)"
+                                tool_results.append(_tr(_txt[:max_file_chars]))
                 finally:
                     try:
                         await _rds.close()

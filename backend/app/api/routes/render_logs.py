@@ -14859,6 +14859,8 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - `render_get_env_vars(service_id)`: env vars تنظیم‌شده. 🔴 **اگر PYTHON_VERSION یا NODE_VERSION در env باشد، runtime.txt را override می‌کند!**
 - `render_set_env_var(service_id, key, value)`: یک env var را تنظیم/بروزرسانی می‌کند (مثلاً PYTHON_VERSION=3.12.7). بعد باید deploy بزنی.
 - `render_trigger_deploy(service_id, clear_cache)`: deploy جدید اجرا می‌کند. اگر env یا dependency عوض کردی clear_cache=true.
+- `render_get_deploys(service_id, limit)`: فهرست deploy های اخیر با وضعیت — برای فهمیدن «آیا آخرین deploy موفق بود؟».
+- 🔴 `render_get_deploy_logs(service_id, deploy_id?, log_type?)`: **مهم‌ترین وقتی deploy fail شده** — لاگ‌های واقعی Render را مستقیماً می‌خواند. **قبل از حدس‌زدن از روی config files، این را صدا بزن تا با چشم خودت ببینی build چه خطایی داد.**
 
 ### ثبت نهایی:
 - `submit_action_plan(analysis, files, commit_message)`: وقتی علت ریشه‌ای را فهمیدی و راه‌حل را تأیید کردی، آن را ثبت می‌کنی. این حلقه را تمام می‌کند.
