@@ -14872,6 +14872,24 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 ### ثبت نهایی:
 - `submit_action_plan(analysis, files, commit_message)`: وقتی preflight «هیچ مشکلی پیدا نشد» را برگرداند، آن را ثبت می‌کنی. این حلقه را تمام می‌کند.
 
+## 🔴🔴 قاعدهٔ صفر — تشخیص علائم پلتفرمی (قبل از هر چیز)
+**اگر علائم اینها هست، احتمالاً مشکل از Render است نه کد:**
+- صفحه فقط placeholder/loading/«در حال آماده‌سازی» نشان می‌دهد
+- backend logs پاسخ ۲۰۰ OK می‌دهد، هیچ خطایی نیست، ولی صفحه خالی است
+- HTML برگشتی بسیار کوچک است (<2KB، احتمالاً placeholder از main.py)
+- frontend/dist در repo نیست (در .gitignore هست — این طبیعی است)
+- deploy موفق است ولی app کار نمی‌کند
+
+در این حالت **اول این کارها را بکن، نه فیکس کد**:
+1. `render_get_service(service_id)` → فیلد `buildCommand` را چک کن
+2. اگر `buildCommand` خالی است یا فقط `pip install ...` دارد (بدون `npm run build`):
+   - **این علت اصلی است** — Render فرانت را build نمی‌کند، main.py به fallback می‌رود و placeholder می‌دهد
+   - راه‌حل: `render_set_env_var(BUILD_COMMAND="cd frontend && npm install && npm run build && cd .. && pip install -r requirements.txt")` یا توصیه کن کاربر در Render UI > Settings > Build Command این را دستی ست کند
+   - بعد `render_trigger_deploy(clear_cache=true)`
+3. **هیچ فیکس کدی نده** برای این کلاس مشکل — اضافه‌کردن کد به main.py یا تغییر render.yaml کمکی نمی‌کند چون سرویس Render از UI ساخته شده و `buildCommand` در render.yaml را نادیده می‌گیرد
+
+🔴 اگر این قاعده را رد کنی و بروی سراغ فیکس کد، چندین round whack-a-mole خواهی داشت و کاربر را خسته خواهی کرد.
+
 ## روش کار (مثل یک مهندس واقعی)
 1. **متن خطا/لاگ کاربر را با دقت بخوان — این منبع حقیقت است.** هر کلمه/عدد/خط مهم است.
 2. با read_file فایل‌های مرتبط را **یکی‌یکی** بخوان — از فایل‌هایی که در خطا/لاگ ذکر شده‌اند شروع کن.
