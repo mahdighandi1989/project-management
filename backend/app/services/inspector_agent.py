@@ -205,11 +205,13 @@ async def run_inspector_agent(
             stop_reason = "natural_stop"
             break
 
-        # پیام assistant را با بلوک‌های خام (شامل tool_use) echo برگردان
+        # پیام assistant را با tool_calls کانونیکال echo برگردان (provider-agnostic).
+        # هر سرویس این را به فرمت native خود (Anthropic blocks / OpenAI tool_calls /
+        # Gemini functionCall) ترجمه می‌کند.
         messages.append(Message(
             role="assistant",
             content=resp.content or "",
-            raw_content=resp.raw_assistant_content,
+            tool_calls=resp.tool_calls,
         ))
 
         tool_results: List[Dict[str, Any]] = []
@@ -228,7 +230,7 @@ async def run_inspector_agent(
                     _msg = f"فایل '{path}' در پروژه یافت نشد."
                     if _suggest:
                         _msg += " شاید منظورت یکی از این‌ها بود:\n" + "\n".join(_suggest)
-                    tool_results.append({"type": "tool_result", "tool_use_id": cid, "content": _msg, "is_error": True})
+                    tool_results.append({"tool_use_id": cid, "content": _msg, "is_error": True})
                     yield ("progress", {"step": "agent_read_miss", "message": f"⚠️ فایل ناموجود: {path}"})
                     continue
                 if path in files_read:
@@ -238,10 +240,10 @@ async def run_inspector_agent(
                     try:
                         res = await github_svc.get_file_content(owner, repo, path, branch=branch, token=token)
                     except Exception as re:
-                        tool_results.append({"type": "tool_result", "tool_use_id": cid, "content": f"خطا در خواندن: {str(re)[:120]}", "is_error": True})
+                        tool_results.append({"tool_use_id": cid, "content": f"خطا در خواندن: {str(re)[:120]}", "is_error": True})
                         continue
                     if not res.get("success"):
-                        tool_results.append({"type": "tool_result", "tool_use_id": cid, "content": f"خطا: {res.get('error', 'unknown')}", "is_error": True})
+                        tool_results.append({"tool_use_id": cid, "content": f"خطا: {res.get('error', 'unknown')}", "is_error": True})
                         continue
                     _content = res.get("content", "") or ""
                     files_read[path] = _content
@@ -250,7 +252,6 @@ async def run_inspector_agent(
                     _truncated = _truncated[:max_file_chars] + "\n... [بریده شد به دلیل اندازه]"
                 _nlines = _content.count("\n") + 1
                 tool_results.append({
-                    "type": "tool_result",
                     "tool_use_id": cid,
                     "content": f"محتوای {path} ({_nlines} خط):\n```\n{_truncated}\n```",
                 })
@@ -262,7 +263,7 @@ async def run_inspector_agent(
                 _txt = "\n".join(_shown)
                 if len(_matched) > len(_shown):
                     _txt += f"\n... و {len(_matched) - len(_shown)} فایل دیگر"
-                tool_results.append({"type": "tool_result", "tool_use_id": cid, "content": _txt or "موردی یافت نشد"})
+                tool_results.append({"tool_use_id": cid, "content": _txt or "موردی یافت نشد"})
                 yield ("progress", {"step": "agent_list", "message": f"📂 [agent] فهرست فایل‌ها (فیلتر: '{_filter or 'همه'}') — {len(_matched)} مورد"})
 
             elif name == "submit_action_plan":
@@ -275,13 +276,13 @@ async def run_inspector_agent(
                 stop_reason = "submitted"
                 _nf = len(action_plan["files"])
                 yield ("progress", {"step": "agent_submit", "message": f"✅ [agent] action_plan ثبت شد — {_nf} فایل"})
-                tool_results.append({"type": "tool_result", "tool_use_id": cid, "content": "action_plan دریافت شد. تمام."})
+                tool_results.append({"tool_use_id": cid, "content": "action_plan دریافت شد. تمام."})
 
             else:
-                tool_results.append({"type": "tool_result", "tool_use_id": cid, "content": f"ابزار ناشناخته: {name}", "is_error": True})
+                tool_results.append({"tool_use_id": cid, "content": f"ابزار ناشناخته: {name}", "is_error": True})
 
-        # نتایج ابزار را به‌عنوان یک پیام user برگردان
-        messages.append(Message(role="user", content="", raw_content=tool_results))
+        # نتایج ابزار را با فیلد کانونیکال tool_results برمی‌گردانیم (provider-agnostic).
+        messages.append(Message(role="user", content="", tool_results=tool_results))
 
         if _submitted:
             break

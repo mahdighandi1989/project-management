@@ -40,9 +40,35 @@ class ClaudeService(AIServiceBase):
             if msg.role == "system":
                 system_prompt = msg.content
             else:
-                # 🆕 (tool-calling) — اگر محتوای ساختاریافتهٔ خام داریم
-                # (assistant tool_use یا user tool_result) مستقیماً استفاده کن
-                if getattr(msg, "raw_content", None) is not None:
+                # 🆕 (canonical tool fields → Anthropic blocks)
+                if getattr(msg, "tool_calls", None):
+                    # assistant turn with tool_use blocks
+                    _blocks = []
+                    if msg.content:
+                        _blocks.append({"type": "text", "text": msg.content})
+                    for _tc in msg.tool_calls:
+                        _blocks.append({
+                            "type": "tool_use",
+                            "id": _tc.get("id", ""),
+                            "name": _tc.get("name", ""),
+                            "input": _tc.get("input", {}) or {},
+                        })
+                    formatted.append({"role": msg.role, "content": _blocks})
+                elif getattr(msg, "tool_results", None):
+                    # user turn with tool_result blocks
+                    _blocks = []
+                    for _tr in msg.tool_results:
+                        _b = {
+                            "type": "tool_result",
+                            "tool_use_id": _tr.get("tool_use_id", ""),
+                            "content": _tr.get("content", ""),
+                        }
+                        if _tr.get("is_error"):
+                            _b["is_error"] = True
+                        _blocks.append(_b)
+                    formatted.append({"role": msg.role, "content": _blocks})
+                # legacy raw_content (Anthropic blocks مستقیم)
+                elif getattr(msg, "raw_content", None) is not None:
                     formatted.append({"role": msg.role, "content": msg.raw_content})
                 elif msg.images:
                     # پیام با تصویر
