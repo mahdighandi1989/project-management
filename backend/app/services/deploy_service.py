@@ -104,8 +104,9 @@ class RenderDeployService:
         return bool(self.api_key)
 
     async def list_services(self) -> List[Dict]:
-        """لیست سرویس‌های موجود در Render"""
+        """لیست سرویس‌های موجود در Render (روی خطا [] برمی‌گردد، با لاگ واضح)."""
         if not self.is_configured():
+            logger.warning("list_services: RENDER_API_KEY not configured")
             return []
 
         session = await self._get_session()
@@ -116,6 +117,8 @@ class RenderDeployService:
                     data = await response.json()
                     return data
                 else:
+                    _txt = await response.text()
+                    logger.error(f"list_services failed ({response.status}): {_txt[:300]}")
                     return []
         except Exception as e:
             logger.error(f"Error listing services: {e}")
@@ -294,7 +297,7 @@ class RenderDeployService:
         }
 
     async def get_service(self, service_id: str) -> Dict:
-        """دریافت اطلاعات سرویس"""
+        """دریافت اطلاعات سرویس (با defensive unwrap envelope)."""
         if not self.is_configured():
             return {"success": False, "error": "Not configured"}
 
@@ -304,9 +307,98 @@ class RenderDeployService:
             async with session.get(f"{self.API_BASE}/services/{service_id}") as response:
                 if response.status == 200:
                     data = await response.json()
+                    # defensive — اگر Render پاسخ را در envelope {"service": {...}}
+                    # ارسال کند، unwrap کن تا callerها روی فیلدهای سطح بالا (repo,
+                    # serviceDetails, ...) مستقیم دسترسی داشته باشند.
+                    if isinstance(data, dict) and "service" in data and isinstance(data["service"], dict):
+                        data = data["service"]
                     return {"success": True, "service": data}
                 else:
                     return {"success": False, "error": await response.text()}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def get_deploys(self, service_id: str, limit: int = 10) -> Dict:
+        """فهرست deploy های اخیر یک سرویس با status و خطا (برای agent)."""
+        if not self.is_configured():
+            return {"success": False, "error": "Not configured"}
+        session = await self._get_session()
+        try:
+            async with session.get(
+                f"{self.API_BASE}/services/{service_id}/deploys",
+                params={"limit": str(min(max(int(limit or 10), 1), 50))},
+            ) as response:
+                if response.status != 200:
+                    return {"success": False, "error": f"HTTP {response.status}: {(await response.text())[:300]}"}
+                data = await response.json()
+                # data ممکن است list (هر آیتم {deploy: {...}}) یا dict {deploys: [...]} باشد
+                _items = data if isinstance(data, list) else data.get("deploys", [])
+                out = []
+                for entry in (_items or []):
+                    d = entry.get("deploy") if isinstance(entry, dict) and "deploy" in entry else entry
+                    if not isinstance(d, dict):
+                        continue
+                    commit = d.get("commit") or {}
+                    out.append({
+                        "id": d.get("id"),
+                        "status": d.get("status"),
+                        "trigger": d.get("trigger"),
+                        "createdAt": d.get("createdAt"),
+                        "finishedAt": d.get("finishedAt"),
+                        "commit_id": commit.get("id", "")[:8] if isinstance(commit, dict) else "",
+                        "commit_message": (commit.get("message", "") if isinstance(commit, dict) else "")[:200],
+                    })
+                return {"success": True, "deploys": out}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def get_deploy_logs(
+        self,
+        service_id: str,
+        deploy_id: Optional[str] = None,
+        limit: int = 200,
+        log_type: Optional[str] = None,
+    ) -> Dict:
+        """خواندن لاگ‌های یک deploy از Render API.
+
+        اگر deploy_id ندهی، آخرین لاگ‌های سرویس را برمی‌گرداند (که معمولاً
+        شامل آخرین deploy می‌شود). log_type می‌تواند 'build' یا 'app' باشد
+        تا نوع خاصی فیلتر شود (Render مقادیر مختلف می‌پذیرد).
+
+        خروجی: {success, logs: [{timestamp, message, level, type}], hasMore}
+        """
+        if not self.is_configured():
+            return {"success": False, "error": "Not configured"}
+        session = await self._get_session()
+        try:
+            # ابتدا از endpoint سرویس‌محور استفاده می‌کنیم (که با kwargs می‌پذیرد)
+            url = f"{self.API_BASE}/services/{service_id}/logs"
+            params: Dict[str, str] = {
+                "limit": str(min(max(int(limit or 200), 1), 1000)),
+                "direction": "backward",
+            }
+            if deploy_id:
+                params["deployId"] = deploy_id
+            if log_type:
+                params["type"] = log_type
+            async with session.get(url, params=params) as response:
+                if response.status != 200:
+                    return {"success": False, "error": f"HTTP {response.status}: {(await response.text())[:300]}"}
+                data = await response.json()
+                _items = data if isinstance(data, list) else data.get("logs", [])
+                out = []
+                for ln in (_items or []):
+                    if not isinstance(ln, dict):
+                        continue
+                    out.append({
+                        "timestamp": ln.get("timestamp", ""),
+                        "level": ln.get("level", "info"),
+                        "type": ln.get("type", ""),
+                        "message": (ln.get("message") or "")[:1000],
+                    })
+                # ترتیب صعودی زمانی (قدیمی‌تر اول) برای خواندن natural در خروجی
+                out.sort(key=lambda x: x.get("timestamp", ""))
+                return {"success": True, "logs": out, "count": len(out)}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
