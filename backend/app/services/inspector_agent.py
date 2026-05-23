@@ -503,14 +503,21 @@ async def run_inspector_agent(
                         and any(p.startswith(pfx) for pfx in _critical_prefixes)
                     ][:60]  # سقف ۶۰ تا تا overhead کنترل شود
                     if _to_fetch:
-                        yield ("progress", {"step": "agent_preflight_fetch", "message": f"📥 {_tag} خواندن {len(_to_fetch)} فایل critical repo برای preflight جامع..."})
-                        for _fp in _to_fetch:
-                            try:
-                                _res = await github_svc.get_file_content(owner, repo, _fp, branch=branch, token=token)
-                                if _res.get("success"):
-                                    files_read[_fp] = _res.get("content", "") or ""
-                            except Exception:
-                                pass
+                        yield ("progress", {"step": "agent_preflight_fetch", "message": f"📥 {_tag} خواندن {len(_to_fetch)} فایل critical repo برای preflight جامع (موازی)..."})
+                        # 🆕 fetch موازی با bounded concurrency تا overhead ۳۰s
+                        # به ~۳s کاهش یابد. semaphore=10 تا rate limit GitHub نخوریم.
+                        import asyncio as _asy_pf
+                        _sem = _asy_pf.Semaphore(10)
+                        async def _fetch_one(_fp):
+                            async with _sem:
+                                try:
+                                    return _fp, await github_svc.get_file_content(owner, repo, _fp, branch=branch, token=token)
+                                except Exception:
+                                    return _fp, {"success": False}
+                        _results = await _asy_pf.gather(*[_fetch_one(p) for p in _to_fetch])
+                        for _fp, _res in _results:
+                            if isinstance(_res, dict) and _res.get("success"):
+                                files_read[_fp] = _res.get("content", "") or ""
                     _issues = _run_preflight_check(
                         proposed_files=_files_arg,
                         files_read=files_read,
@@ -527,7 +534,6 @@ async def run_inspector_agent(
                             if iss.get("hint"):
                                 _txt += f"   راه‌حل: {iss['hint']}\n"
                             _txt += "\n"
-                        tool_results.append(_tr(_txt))
                         tool_results.append(_tr(_txt))
 
             elif name in ("render_list_services", "render_get_service",
