@@ -3195,21 +3195,26 @@ export default function ProjectDetailPage() {
   };
 
   // ذخیره خودکار پیام‌های assistant در دیتابیس
-  // 🆕 (auto-scroll v2) — هر بار پیام جدید اضافه شد، فقط container چت را به
-  // پایین اسکرول کن (نه کل صفحه). قبلاً scrollIntoView استفاده می‌شد که کل
-  // صفحه و ancestorها را هم می‌لغزاند. حالا مستقیم scrollTop کانتینر را ست
-  // می‌کنیم تا فقط داخل چت اسکرول شود.
+  // 🆕 (auto-scroll v3) — برخلاف v2 که فقط روی .length تریگر می‌شد، حالا روی
+  // محتوای آخرین پیام هم وابسته است — تا streaming updateها (که content یک
+  // پیام موجود را عوض می‌کنند بدون افزایش length) هم اسکرول را تریگر کنند.
+  // threshold هم به ۴۰۰px افزایش یافت تا کمتر «دور از پایین» محسوب شویم.
+  // وقتی پیام‌ها سریع/زیاد می‌آیند، 'auto' instant بهتر از 'smooth' است
+  // (smoothها روی هم cancel می‌شوند و باعث ناپایداری می‌شوند).
+  const _lastMsg = inspectorChatMessages[inspectorChatMessages.length - 1];
+  const _lastMsgSig = _lastMsg ? `${_lastMsg.id || ''}:${(_lastMsg.content || '').length}` : '';
   useEffect(() => {
     const c = inspectorChatScrollRef.current;
     if (!c) return;
-    const nearBottom = c.scrollHeight - c.scrollTop - c.clientHeight < 250;
+    const nearBottom = c.scrollHeight - c.scrollTop - c.clientHeight < 400;
     if (nearBottom || inspectorChatLoading) {
-      // smooth scroll فقط داخل خود کانتینر چت
       requestAnimationFrame(() => {
-        c.scrollTo({ top: c.scrollHeight, behavior: 'smooth' });
+        // instant در حالت loading/burst؛ smooth در حالت آرام
+        const _behavior: ScrollBehavior = inspectorChatLoading ? 'auto' : 'smooth';
+        c.scrollTo({ top: c.scrollHeight, behavior: _behavior });
       });
     }
-  }, [inspectorChatMessages.length, inspectorChatLoading]);
+  }, [inspectorChatMessages.length, _lastMsgSig, inspectorChatLoading]);
 
   const lastSavedMsgCountRef = useRef(0);
   useEffect(() => {
