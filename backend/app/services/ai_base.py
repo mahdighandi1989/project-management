@@ -27,7 +27,17 @@ class Message(BaseModel):
     # نمی‌توان با یک str نمایش داد: پیام assistant که tool_use دارد (echo برگشتی)
     # و پیام user که tool_result دارد. اگر set شود، provider باید آن را
     # مستقیماً به‌عنوان content blocks استفاده کند (نه msg.content).
+    # ⚠️ (legacy/Claude-specific): این فرمت Anthropic block است؛ برای کار
+    # provider-agnostic از tool_calls/tool_results کانونیکال زیر استفاده کنید.
     raw_content: Optional[Any] = None  # List[Dict] — Anthropic content blocks
+    # 🆕 (canonical, provider-agnostic) — برای echo برگرداندن assistant turn که
+    # tool_use داشت. هر provider این را به فرمت native خود ترجمه می‌کند.
+    # هر آیتم: {"id": str, "name": str, "input": dict}
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    # 🆕 (canonical, provider-agnostic) — برای پیام user که نتیجهٔ ابزارها را
+    # برمی‌گرداند. هر آیتم: {"tool_use_id": str, "name": str, "content": str, "is_error": bool}
+    # توجه: name برای Gemini لازم است (Gemini با نام match می‌کند نه id).
+    tool_results: Optional[List[Dict[str, Any]]] = None
 
 
 class AIResponse(BaseModel):

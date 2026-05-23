@@ -30,11 +30,15 @@ slog = StructuredLogger(__name__, "INSPECTOR-ROLES")
 # انتخاب می‌شود؛ اگر نبود، اولین مدلِ «در دسترس ولی غیرفعال» برای فعال‌سازی
 # موقت کاندید می‌شود.
 INSPECTOR_ROLE_MODELS: Dict[str, List[str]] = {
-    # هماهنگ‌کننده/عامل اصلی — باید tool-calling داشته باشد (فعلاً فقط Claude).
-    # اگر هیچ Claude در دسترس/قابل‌فعال‌سازی نبود، نقش unavailable می‌شود و
-    # بازرس به pipeline تک‌شات معمولی برمی‌گردد.
+    # هماهنگ‌کننده/عامل اصلی — باید tool-calling داشته باشد. حالا که سرویس‌های
+    # claude/openai/deepseek/gemini همگی tool-calling پیاده‌سازی شده‌اند، همه‌شان
+    # می‌توانند orchestrator باشند (Claude اول چون برای کارهای agentic بهترین است،
+    # ولی اگر در دسترس نبود، بقیه هم می‌توانند).
     "orchestrator": [
         "claude-sonnet-4-6", "claude-opus-4-7", "claude-sonnet-4-20250514",
+        "gpt-4o", "gpt-4-turbo",
+        "deepseek-chat", "deepseek-coder",
+        "gemini-2.5-pro", "gemini-2.5-flash",
     ],
     # کدنویس — تغییر واقعی کد
     "coder": [
