@@ -294,7 +294,7 @@ def get_scan_session_summary(session_id: Optional[int]) -> Dict[str, Any]:
         return {}
     try:
         from ...core.database import SessionLocal
-        from ...models.inspector_session import InspectorSession
+        from ...models.inspector_session import InspectorSession, _utc_iso
     except Exception:
         return {}
 
@@ -315,8 +315,9 @@ def get_scan_session_summary(session_id: Optional[int]) -> Dict[str, Any]:
             "status": session.status,
             "message_count": len(messages),
             "by_role": by_role,
-            "created_at": session.created_at.isoformat() if session.created_at else None,
-            "closed_at": session.closed_at.isoformat() if session.closed_at else None,
+            # 🆕 timezone-fix: UTC explicit با Z تا frontend به‌عنوان local تفسیر نکند
+            "created_at": _utc_iso(session.created_at),
+            "closed_at": _utc_iso(session.closed_at),
         }
     except Exception:
         return {}
