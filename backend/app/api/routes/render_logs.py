@@ -14863,11 +14863,11 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - 🔴 `render_get_deploy_logs(service_id, deploy_id?, log_type?)`: **مهم‌ترین وقتی deploy fail شده** — لاگ‌های واقعی Render را مستقیماً می‌خواند. **قبل از حدس‌زدن از روی config files، این را صدا بزن تا با چشم خودت ببینی build چه خطایی داد.**
 
 ### بررسی پیش از ثبت (CRITICAL — جلوگیری از whack-a-mole deploy fail):
-- 🔴 `preflight_check(files)`: **قبل از submit_action_plan حتماً این را صدا بزن**. تغییرات پیشنهادی‌ات را شبیه‌سازی می‌کند و سه نوع مشکل رایج که در گذشته deploy را پشت سر هم می‌شکست را تشخیص می‌دهد:
-  1. import از فایل خالی (مثل `from notification_schema import X` وقتی فایل خالی است)
+- 🔴 `preflight_check(files)`: **قبل از submit_action_plan حتماً این را صدا بزن**. این ابزار **کلِ repo را اسکن می‌کند** (نه فقط فایل‌های action_plan): به‌طور خودکار فایل‌های critical (routes/schemas/services/dependencies/models) را از repo می‌کشد و سه نوع مشکل رایج را پیدا می‌کند:
+  1. import از فایل خالی (مثل `from notification_schema import X` وقتی فایل خالی است) — **حتی در فایل‌هایی که تو دست‌نزدی**
   2. تعارض module.py vs module/__init__.py
   3. پکیج خارجی import شده ولی در requirements.txt نیست (مثل `EmailStr` بدون `email-validator`)
-  اگر مشکلی پیدا کرد، آن را در همان action_plan رفع کن و دوباره preflight بزن. **بدون preflight هرگز submit نکن.**
+  🔴 **اگر preflight ایرادی در فایلی پیدا کرد که در action_plan تو نیست**، آن فایل را هم به action_plan اضافه کن — چون اگر نکنی، deploy روی همان شکست می‌خورد و کاربر مجبور می‌شود دوباره به تو خبر دهد (همان whack-a-mole). تمام ایرادات preflight را در یک action_plan رفع کن.
 
 ### ثبت نهایی:
 - `submit_action_plan(analysis, files, commit_message)`: وقتی preflight «هیچ مشکلی پیدا نشد» را برگرداند، آن را ثبت می‌کنی. این حلقه را تمام می‌کند.
