@@ -14853,17 +14853,20 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - `submit_action_plan(analysis, files, commit_message)`: وقتی علت ریشه‌ای را فهمیدی و فایل‌های لازم را خواندی، راه‌حل نهایی را ثبت می‌کنی. این حلقه را تمام می‌کند.
 
 ## روش کار (مثل یک مهندس واقعی)
-1. مشکل/خطا را بخوان و بفهم.
-2. با read_file فایل‌های مرتبط را **یکی‌یکی** بخوان — از فایل‌هایی که در خطا/لاگ ذکر شده‌اند شروع کن. اگر فایلی import یا config دیگری را صدا می‌زند که مهم است، آن را هم بخوان.
+1. **متن خطا/لاگ کاربر را با دقت بخوان — این منبع حقیقت است.** هر کلمه/عدد/خط مهم است.
+2. با read_file فایل‌های مرتبط را **یکی‌یکی** بخوان — از فایل‌هایی که در خطا/لاگ ذکر شده‌اند شروع کن.
 3. علت ریشه‌ای را پیدا کن (نه علائم سطحی).
-4. وقتی مطمئن شدی، submit_action_plan را صدا بزن.
+4. **قبل از submit، چک کن:** فیکست دقیقاً همان چیزی را که در error log واقعی آمده هدف می‌گیرد؟ (مثال شکست: log می‌گوید "pip install ... Python 3.14" → باید روی Python version فکر کنی، نه frontend deps.)
+5. وقتی مطمئن شدی، submit_action_plan را صدا بزن.
 
 ## قوانین حیاتی
+- 🔴 **منبع حقیقت = error log واقعی، نه config files.** اگر render.yaml می‌گوید X ولی build log می‌گوید Y، به log اعتماد کن (config ممکن است override شده باشد، یا اشتباه باشد).
 - 🔴 فقط فایل‌هایی را در action_plan بگذار که با read_file **واقعاً خوانده‌ای** — محتوای حدسی ممنوع.
 - 🔴 فایل‌های بزرگ (>۲۰۰ خط): از operation=modify_sections با find/replace دقیق (COPY از متن واقعی) استفاده کن — نه بازنویسی کامل.
 - فایل‌های کوچک: operation=modify با content کامل. فایل جدید: operation=create.
 - مشکل را با کمترین تغییر و هدفمند حل کن — scope را بی‌دلیل گسترش نده.
 - اگر بعد از بررسی واقعاً نمی‌توانی fix قطعی بدهی، submit_action_plan را با files=[] صدا بزن و در analysis دقیق توضیح بده چرا و کاربر چه اطلاعاتی باید بدهد — هرگز بی‌نتیجه متوقف نشو.
+- 🔴 **اگر فیکس پیشنهادی‌ات موضوع متفاوتی از error log را حل می‌کند**، آن را در analysis صریحاً اعلام کن (مثلاً: "این frontend deps را حل می‌کند ولی خطای deploy احتمالاً ربطی به این ندارد — احتمالاً Python version باید عوض شود").
 
 ## خلاصهٔ ساختار پروژه (برای جهت‌گیری — برای دیدن محتوا باید read_file بزنی)
 {_act_tree}"""
@@ -14929,7 +14932,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
             if _has_files and is_complex_plan(_ap):
                 yield sse("progress", {
                     "step": "agent_review",
-                    "message": "🔎 [agent] بازبینی تغییرات توسط نقش reviewer...",
+                    "message": f"🔎 [{primary_model}] بازبینی تغییرات توسط نقش reviewer...",
                 })
                 try:
                     _review = await run_reviewer_pass(
@@ -14964,7 +14967,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
             if _review and _review.get("verdict") == "concerns" and _review.get("notes"):
                 yield sse("progress", {
                     "step": "agent_revise",
-                    "message": "🔧 [agent] اعمال بازخورد reviewer و بازنگری طرح...",
+                    "message": f"🔧 [{primary_model}] اعمال بازخورد reviewer و بازنگری طرح...",
                 })
                 _rev_user = (
                     f"## درخواست اصلی کاربر:\n{request.message}\n\n"
@@ -15006,7 +15009,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     _agent_tokens += _rev_result.get("tokens_used", 0)
                     _revised = True
                     _content += f"\n\n---\n🔧 این طرح پس از بازبینی ({_review.get('reviewer_model')}) یک‌بار بازنگری شد."
-                    yield sse("progress", {"step": "agent_revise_done", "message": "✅ [agent] طرح بر اساس بازخورد بازنگری شد"})
+                    yield sse("progress", {"step": "agent_revise_done", "message": f"✅ [{primary_model}] طرح بر اساس بازخورد بازنگری شد"})
                 else:
                     yield sse("progress", {"step": "agent_revise_skip", "message": "ℹ️ بازنگری نتیجهٔ جدیدی نداد — طرح اولیه حفظ شد"})
 

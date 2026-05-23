@@ -110,8 +110,18 @@ def _build_tools() -> List[Dict[str, Any]]:
             "description": (
                 "وقتی علت ریشه‌ای را فهمیدی و فایل‌های لازم را خوانده‌ای، این "
                 "ابزار را صدا بزن تا تحلیل و راه‌حل نهایی را ثبت کنی. این آخرین "
-                "قدم است و حلقه را تمام می‌کند. اگر واقعاً نمی‌توانی fix را "
-                "تشخیص دهی، files را خالی [] بگذار و در analysis دلیلش را بنویس."
+                "قدم است و حلقه را تمام می‌کند.\n\n"
+                "🔴 قبل از فراخوانی این ابزار، **حتماً** این چک‌لیست را در ذهن انجام بده:\n"
+                "1. یک‌بار دیگر متن خطا/لاگ اصلی که کاربر داد را بخوان.\n"
+                "2. فیکس پیشنهادی‌ات دقیقاً همان چیزی را که در error log آمده هدف می‌گیرد؟ "
+                "(مثلاً: اگر لاگ می‌گوید 'pip install ... Python 3.14.3' و pydantic-core fail شد، "
+                "فیکس باید مربوط به Python version یا requirements باشد — نه frontend deps.)\n"
+                "3. اگر دیدی فایل config (مثل render.yaml) می‌گوید X ولی لاگ‌های واقعی می‌گویند Y، "
+                "**به لاگ اعتماد کن، نه config** — config ممکن است override شده باشد.\n"
+                "4. اگر فیکست در واقع موضوع *دیگری* را حل می‌کند (مثلاً frontend وقتی خطا backend است)، "
+                "آن را در analysis صریحاً بگو و در commit_message علامت بزن.\n\n"
+                "اگر بعد از این چک واقعاً نمی‌توانی fix قطعی بدهی، files را خالی [] بگذار و در analysis "
+                "دلیلش را بنویس — هرگز فیکس نامرتبط را به‌جای fix واقعی ارائه نکن."
             ),
             "input_schema": {
                 "type": "object",
@@ -191,6 +201,9 @@ async def run_inspector_agent(
     file_set = set(file_list)
     files_read: Dict[str, str] = {}
     total_tokens = 0
+    # 🆕 شفافیت: نام مدل در همهٔ پیام‌های progress تا کاربر بداند کدام مدل
+    # دارد کار می‌کند (به‌جای «{_tag}» مبهم).
+    _tag = f"[{model_id}]"
 
     # تاریخچهٔ مکالمهٔ agent (فقط user/assistant — system جدا پاس می‌شود)
     messages: List[Message] = [Message(role="user", content=user_prompt)]
@@ -211,10 +224,10 @@ async def run_inspector_agent(
                 allow_fallback=False,
             )
         except Exception as e:
-            slog.warning(f"[agent] generate failed at iter {_iter}: {e}")
+            slog.warning(f"{_tag} generate failed at iter {_iter}: {e}")
             yield ("progress", {
                 "step": "agent_error",
-                "message": f"⚠️ خطا در فراخوان مدل (تلاش {_iter}): {str(e)[:120]}",
+                "message": f"⚠️ {_tag} خطا در فراخوان (تلاش {_iter}): {str(e)[:120]}",
             })
             stop_reason = "error"
             break
@@ -266,7 +279,7 @@ async def run_inspector_agent(
                 if path in files_read:
                     _content = files_read[path]
                 else:
-                    yield ("progress", {"step": "agent_read", "message": f"📖 [agent] خواندن {path}...", "file": path})
+                    yield ("progress", {"step": "agent_read", "message": f"📖 {_tag} خواندن {path}...", "file": path})
                     try:
                         res = await github_svc.get_file_content(owner, repo, path, branch=branch, token=token)
                     except Exception as re:
@@ -291,7 +304,7 @@ async def run_inspector_agent(
                 if len(_matched) > len(_shown):
                     _txt += f"\n... و {len(_matched) - len(_shown)} فایل دیگر"
                 tool_results.append(_tr(_txt or "موردی یافت نشد"))
-                yield ("progress", {"step": "agent_list", "message": f"📂 [agent] فهرست فایل‌ها (فیلتر: '{_filter or 'همه'}') — {len(_matched)} مورد"})
+                yield ("progress", {"step": "agent_list", "message": f"📂 {_tag} فهرست فایل‌ها (فیلتر: '{_filter or 'همه'}') — {len(_matched)} مورد"})
 
             elif name == "submit_action_plan":
                 final_analysis = (args.get("analysis") or final_analysis or "").strip()
@@ -302,7 +315,7 @@ async def run_inspector_agent(
                 _submitted = True
                 stop_reason = "submitted"
                 _nf = len(action_plan["files"])
-                yield ("progress", {"step": "agent_submit", "message": f"✅ [agent] action_plan ثبت شد — {_nf} فایل"})
+                yield ("progress", {"step": "agent_submit", "message": f"✅ {_tag} action_plan ثبت شد — {_nf} فایل"})
                 tool_results.append(_tr("action_plan دریافت شد. تمام."))
 
             else:
@@ -317,7 +330,7 @@ async def run_inspector_agent(
         stop_reason = "max_iterations"
         yield ("progress", {
             "step": "agent_max_iter",
-            "message": f"⚠️ [agent] به سقف {max_iterations} مرحله رسید — جمع‌بندی با آخرین یافته‌ها",
+            "message": f"⚠️ {_tag} به سقف {max_iterations} مرحله رسید — جمع‌بندی با آخرین یافته‌ها",
         })
 
     yield ("agent_result", {
@@ -423,12 +436,16 @@ async def run_reviewer_pass(
     try:
         sys_prompt = (
             "تو یک بازبین کد ارشد و سخت‌گیر هستی. وظیفه‌ات بررسی یک راه‌حل پیشنهادی "
-            "(action_plan) نسبت به مشکل کاربر است. این موارد را چک کن:\n"
-            "1) آیا تغییرات واقعاً مشکل را حل می‌کنند؟\n"
-            "2) آیا قابلیت موجودی را می‌شکنند یا حذف می‌کنند (بازنویسی مخرب)؟\n"
-            "3) آیا چیزی جا افتاده (edge case، فایل وابسته، import)؟\n"
+            "(action_plan) نسبت به مشکل کاربر است. این موارد را به ترتیب چک کن:\n"
+            "1) 🎯 **انطباق با خطای واقعی**: متن خطا/لاگ کاربر را با دقت بخوان. آیا فیکس "
+            "پیشنهادی دقیقاً همان چیزی را که در error log آمده هدف می‌گیرد؟ "
+            "اگر مثلاً log می‌گوید 'pip install pydantic-core Python 3.14 fail' ولی "
+            "فیکس روی frontend deps است → این concern جدی است (موضوع متفاوت!).\n"
+            "2) 🛡 **صحت فنی**: آیا تغییرات واقعاً درست‌اند؟ syntax/import/typeها سالم‌اند؟\n"
+            "3) 🚫 **بازنویسی مخرب**: قابلیت موجودی حذف نمی‌شود؟\n"
+            "4) 🧩 **کامل بودن**: edge case، فایل وابسته، import جا افتاده نیست؟\n"
             "فقط یک JSON معتبر برگردان (بدون متن اضافه):\n"
-            '{"verdict":"approve" یا "concerns","notes":"توضیح کوتاه فارسی، حداکثر ۸ خط"}'
+            '{"verdict":"approve" یا "concerns","notes":"توضیح کوتاه فارسی، حداکثر ۸ خط؛ اگر concern داری حتماً مشخص کن کدام مورد ۱-۴"}'
         )
         user_prompt = (
             f"## مشکل/درخواست کاربر:\n{user_message[:2000]}\n\n"
