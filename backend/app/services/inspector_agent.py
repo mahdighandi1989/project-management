@@ -48,10 +48,19 @@ def supports_tool_calling(model_id: str) -> bool:
     """آیا این مدل tool-calling دارد؟ (برای gate کردن استفاده از agent loop)
 
     بر اساس prefix provider (که سرویس‌اش پیاده شده) با استثناهای صریح برای مدل‌هایی
-    که قطعاً پشتیبانی نمی‌کنند.
+    که قطعاً پشتیبانی نمی‌کنند. alias ها هم از طریق registry حل می‌شوند تا "claude"
+    تنها هم با "claude-sonnet-4-6" یکسان رفتار شود.
     """
     if not model_id:
         return False
+    # حل alias از طریق registry (مثلاً "claude" → "claude-sonnet-4-6")
+    try:
+        from ..core.models_registry import get_model
+        _obj = get_model(model_id)
+        if _obj and _obj.id:
+            model_id = _obj.id
+    except Exception:
+        pass
     m = model_id.lower()
     if any(h in m for h in _NO_TOOL_CALLING_HINTS):
         return False
