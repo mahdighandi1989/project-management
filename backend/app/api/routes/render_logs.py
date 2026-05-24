@@ -15005,6 +15005,20 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - `render_get_deploys(service_id, limit)`: فهرست deploy های اخیر با وضعیت — برای فهمیدن «آیا آخرین deploy موفق بود؟».
 - 🔴 `render_get_deploy_logs(service_id, deploy_id?, log_type?)`: **مهم‌ترین وقتی deploy fail شده** — لاگ‌های واقعی Render را مستقیماً می‌خواند. **قبل از حدس‌زدن از روی config files، این را صدا بزن تا با چشم خودت ببینی build چه خطایی داد.**
 
+### 🆕 PostgreSQL در Render (وقتی DATABASE_URL مشکل داره یا DB موجود نیست):
+- `render_list_postgres()`: لیست همهٔ DB های Render. اول این رو صدا بزن.
+- `render_get_postgres(postgres_id)`: جزئیات یک DB.
+- 🔴 `render_get_postgres_connection(postgres_id)`: internal + external connection string.
+- 🔴 `render_create_postgres(name, plan='free', region='oregon', version='16')`: **خودت DB می‌سازی** — وقتی کاربر می‌گه «DB ندارم» یا لاگ می‌گه «Connection refused» و DB موجود نیست.
+
+**جریان معمول برای auto-fix «اتصال به پایگاه داده برقرار نیست»**:
+  1. `render_list_postgres()` → ببین DB موجوده یا نه
+  2. اگر نه → `render_create_postgres(name='myapp-db', plan='free', region=<same as web>)`
+  3. صبر کن provisioning تمام شه (با `render_get_postgres` چک کن status='available')
+  4. `render_get_postgres_connection(postgres_id)` → internal_url
+  5. `render_set_env_var(<web_service_id>, 'DATABASE_URL', internal_url)`
+  6. `render_trigger_deploy(<web_service_id>)` → app با DB stable می‌شه
+
 ### 🆕 revert/recovery — وقتی کاربر می‌گوید «برگرد به branch X» یا «این فایل را از branch قدیمی بازیابی کن»:
 - 🔴 `revert_to_branch(target_branch, file_paths?, commit_message?)`: **بهترین راه** برای revert کامل به یک branch. این ابزار خودش با GitHub compare API تفاوت‌ها رو پیدا می‌کنه، محتوا رو از target branch می‌خونه، و action_plan رو می‌سازه و submit می‌کنه. **فقط همین یک ابزار رو صدا بزن** وقتی کاربر می‌گه «منو برگردون به branch X». نیازی به list_branches یا read_file_from_branch تک‌تک نیست.
 - `list_branches()`: لیست branchها (فقط برای discovery، اگر اسم branch مطمئن نیستی).

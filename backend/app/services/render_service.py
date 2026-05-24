@@ -766,6 +766,174 @@ class RenderAPIService:
             slog.error("Exception triggering deploy", exception=e)
             return {"success": False, "error": str(e)}
 
+    # ════════════════════════════════════════════════════════════════════
+    # 🆕 (postgres-ops) — PostgreSQL database operations
+    # transcript کاربر نشون داد inspector نمی‌تونست خودش DB بسازه چون
+    # tool نداشت. Render API این رو پشتیبانی می‌کنه.
+    # ════════════════════════════════════════════════════════════════════
+    async def list_postgres(self) -> Dict[str, Any]:
+        """لیست همهٔ PostgreSQL databases (owner-level)."""
+        if not self._load_api_key():
+            return {"success": False, "databases": [], "error": "کلید API رندر یافت نشد"}
+        try:
+            session = await self._get_session()
+            url = f"{self.BASE_URL}/postgres?limit=100"
+            async with session.get(url) as response:
+                body_text = await response.text()
+                if response.status == 200:
+                    raw = json.loads(body_text) if body_text else []
+                    # Render API گاهی [{ "postgres": {...}, "cursor": ... }] برمی‌گردونه
+                    items = []
+                    for entry in raw:
+                        if isinstance(entry, dict):
+                            pg = entry.get("postgres") if "postgres" in entry else entry
+                            if isinstance(pg, dict):
+                                items.append({
+                                    "id": pg.get("id"),
+                                    "name": pg.get("name"),
+                                    "status": pg.get("status"),
+                                    "plan": pg.get("plan"),
+                                    "region": pg.get("region"),
+                                    "version": pg.get("version"),
+                                    "suspended": pg.get("suspended"),
+                                    "createdAt": pg.get("createdAt"),
+                                })
+                    return {"success": True, "databases": items, "error": None}
+                return {"success": False, "databases": [], "error": f"HTTP {response.status}: {body_text[:200]}"}
+        except Exception as e:
+            return {"success": False, "databases": [], "error": str(e)}
+
+    async def get_postgres(self, postgres_id: str) -> Dict[str, Any]:
+        """جزئیات یک PostgreSQL database."""
+        if not self._load_api_key():
+            return {"success": False, "error": "کلید API رندر یافت نشد"}
+        try:
+            session = await self._get_session()
+            url = f"{self.BASE_URL}/postgres/{postgres_id}"
+            async with session.get(url) as response:
+                body_text = await response.text()
+                if response.status == 200:
+                    data = json.loads(body_text) if body_text else {}
+                    return {"success": True, "database": data, "error": None}
+                return {"success": False, "error": f"HTTP {response.status}: {body_text[:200]}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def get_postgres_connection_info(self, postgres_id: str) -> Dict[str, Any]:
+        """دریافت connection string (internal + external) یک DB."""
+        if not self._load_api_key():
+            return {"success": False, "error": "کلید API رندر یافت نشد"}
+        try:
+            session = await self._get_session()
+            url = f"{self.BASE_URL}/postgres/{postgres_id}/connection-info"
+            async with session.get(url) as response:
+                body_text = await response.text()
+                if response.status == 200:
+                    data = json.loads(body_text) if body_text else {}
+                    return {
+                        "success": True,
+                        "internal_url": data.get("internalConnectionString"),
+                        "external_url": data.get("externalConnectionString"),
+                        "psql_command": data.get("psqlCommand"),
+                        "error": None,
+                    }
+                return {"success": False, "error": f"HTTP {response.status}: {body_text[:200]}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def create_postgres(
+        self,
+        *,
+        name: str,
+        owner_id: str,
+        plan: str = "free",
+        region: str = "oregon",
+        version: str = "16",
+        database_name: Optional[str] = None,
+        database_user: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """ایجاد یک PostgreSQL database جدید.
+
+        Args:
+            name: نام readable (نه id)
+            owner_id: ownerId از Render account — برای پیدا کردنش از get_services() اولین سرویس
+            plan: 'free' یا 'starter' یا 'standard' و ...
+            region: 'oregon'، 'frankfurt'، 'singapore' و ...
+            version: '14'، '15'، '16'
+            database_name: نام DB داخل instance (default: name)
+            database_user: نام user (default: random)
+        """
+        if not self._load_api_key():
+            return {"success": False, "error": "کلید API رندر یافت نشد"}
+        slog.start("Creating Postgres", name=name, plan=plan, region=region)
+        try:
+            session = await self._get_session()
+            url = f"{self.BASE_URL}/postgres"
+            payload = {
+                "name": name,
+                "ownerId": owner_id,
+                "plan": plan,
+                "region": region,
+                "version": version,
+            }
+            if database_name:
+                payload["databaseName"] = database_name
+            if database_user:
+                payload["databaseUser"] = database_user
+            async with session.post(url, json=payload) as response:
+                body_text = await response.text()
+                if response.status in (200, 201, 202):
+                    try:
+                        data = json.loads(body_text) if body_text else {}
+                    except Exception:
+                        data = {}
+                    pg_id = data.get("id") if isinstance(data, dict) else None
+                    slog.success("Postgres created", id=pg_id, name=name)
+                    return {
+                        "success": True,
+                        "postgres_id": pg_id,
+                        "name": name,
+                        "status": data.get("status"),
+                        "note": "ایجاد شد. provisioning ~1-3 دقیقه طول می‌کشه. بعدش با get_postgres_connection_info می‌تونی URL رو بگیری.",
+                        "error": None,
+                    }
+                slog.error("Failed to create postgres", status=response.status, body=body_text[:300])
+                return {"success": False, "error": f"HTTP {response.status}: {body_text[:300]}"}
+        except Exception as e:
+            slog.error("Exception creating postgres", exception=e)
+            return {"success": False, "error": str(e)}
+
+    async def get_owner_id_from_services(self) -> Optional[str]:
+        """ownerId رو از اولین سرویس استخراج می‌کنه (برای create_postgres)."""
+        res = await self.get_services()
+        if not res.get("success"):
+            return None
+        for s in res.get("services") or []:
+            # ممکنه ownerId در serviceDetails یا روی خود service باشه
+            for key in ("ownerId", "owner_id"):
+                if s.get(key):
+                    return s.get(key)
+            details = s.get("serviceDetails") or {}
+            for key in ("ownerId", "owner_id"):
+                if details.get(key):
+                    return details.get(key)
+        # تلاش با endpoint owners
+        try:
+            session = await self._get_session()
+            url = f"{self.BASE_URL}/owners"
+            async with session.get(url) as response:
+                if response.status == 200:
+                    raw = await response.json()
+                    if isinstance(raw, list) and raw:
+                        first = raw[0]
+                        if isinstance(first, dict):
+                            owner = first.get("owner") if "owner" in first else first
+                            if isinstance(owner, dict):
+                                return owner.get("id")
+        except Exception:
+            pass
+        return None
+
 
 # Singleton instance
 _render_service: Optional[RenderAPIService] = None
