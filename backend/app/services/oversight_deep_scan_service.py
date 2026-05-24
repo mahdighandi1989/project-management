@@ -596,6 +596,148 @@ PASSES = [
 ]
 
 
+# 🆕 (inspector-scoped-scan) — keyword→passes mapping for narrowing the
+# auto-scan when triggered from Inspector chat. Goal: when user asks about a
+# specific area (frontend bug, deploy issue, ...), don't run all 12 passes
+# and generate 96 unrelated proposals — run only what's relevant.
+_INSPECTOR_PASS_KEYWORDS_FA: Dict[str, List[str]] = {
+    "frontend": [
+        "فرانت", "فرانت‌اند", "صفحه", "کامپوننت", "ui", "تب", "دکمه",
+        "نمایش", "رندر", "css", "استایل", "react", "vue", "next",
+        "page", "component", "screen",
+    ],
+    "backend": [
+        "بک‌اند", "بک اند", "بک‌اند", "api", "endpoint", "روت", "route",
+        "سرور", "fastapi", "django", "flask", "database", "دیتابیس",
+        "مدل", "model",
+    ],
+    "cross_stack": [
+        "اتصال", "وصل", "ارتباط", "api call", "fetch", "axios",
+        "frontend به backend", "endpoint",
+    ],
+    "security": ["امنیت", "auth", "احراز هویت", "permission", "vuln", "csrf", "xss"],
+    "security_deep": ["secret", "credential", "token", "نشت", "leak", "license"],
+    "quality": ["کیفیت", "dead code", "lint", "tidy", "refactor عمومی"],
+    "dependency": [
+        "deploy", "دیپلوی", "build", "بیلد", "render", "vercel",
+        "requirements", "package", "npm", "pip", "dependency", "وابستگی",
+        "نصب", "install", "اجرا نشد", "بالا نمیاد", "بالا بیار",
+    ],
+    "completeness": ["ناقص", "کامل نیست", "todo", "placeholder", "هنوز ساخته نشده"],
+    "coverage": ["test", "تست", "coverage", "پوشش تست"],
+    "logical_alignment": ["منطق", "logic", "هماهنگی", "conflict", "تضاد"],
+    "functional_correctness": [
+        "خطا", "error", "باگ", "bug", "کرش", "crash", "ناقص کار",
+        "اشتباه", "wrong", "broken", "نشد", "کار نمی‌کند", "کار نمیکنه",
+    ],
+    "integrity": ["یکپارچگی", "duplicate", "تکراری"],
+}
+
+
+def _select_passes_for_inspector_focus(
+    focus_notes: str,
+    all_passes: List[str],
+) -> List[str]:
+    """Inspector chat-triggered scan: pick only passes relevant to user's request.
+
+    Returns at most ~5 passes. Always includes a small core (frontend+backend)
+    when nothing else matches so we don't end up with zero passes. If the user
+    request mentions deploy/build, prioritizes dependency pass.
+    """
+    if not focus_notes or not focus_notes.strip():
+        # No anchor — fall back to a sensible default (no 12-pass blowout)
+        return [p for p in ["frontend", "backend", "functional_correctness"] if p in all_passes]
+    text = focus_notes.lower()
+    scored: List[Tuple[str, int]] = []
+    for pass_id, kws in _INSPECTOR_PASS_KEYWORDS_FA.items():
+        if pass_id not in all_passes:
+            continue
+        hits = sum(1 for kw in kws if kw.lower() in text)
+        if hits > 0:
+            scored.append((pass_id, hits))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    selected = [p for p, _ in scored[:5]]
+    # Safety net — always run functional_correctness if user described a bug/error
+    if any(w in text for w in ("خطا", "error", "باگ", "bug", "broken", "نشد")):
+        if "functional_correctness" in all_passes and "functional_correctness" not in selected:
+            selected.append("functional_correctness")
+    # If nothing matched at all, default to frontend+backend minimal
+    if not selected:
+        selected = [p for p in ["frontend", "backend"] if p in all_passes]
+    return selected[:6]
+
+
+async def _filter_proposals_by_relevance(
+    service: Any,
+    *,
+    proposals: List[Dict[str, Any]],
+    focus_notes: str,
+    model_id: Optional[str],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Ask an LLM to keep only proposals relevant to user's request.
+
+    Returns (kept, dropped). Falls back to (all, []) on any failure so we
+    never silently lose work on an LLM hiccup.
+    """
+    if not proposals:
+        return proposals, []
+    # Build compact index for the LLM — id + title + first 200 chars description
+    index_lines: List[str] = []
+    for idx, p in enumerate(proposals):
+        title = (p.get("title") or "").strip()[:150]
+        desc = (p.get("description") or "").strip().replace("\n", " ")[:200]
+        targets = ", ".join((p.get("target_files") or [])[:3])
+        index_lines.append(f"{idx}|{title}|{desc}|{targets}")
+    index_blob = "\n".join(index_lines)
+
+    prompt = f"""تو یک فیلتر دقیق برای پیشنهادهای اسکن هستی.
+
+کاربر این درخواست را در چت بازرس ویژه نوشته:
+---
+{focus_notes.strip()[:2000]}
+---
+
+اسکن این {len(proposals)} پیشنهاد را تولید کرده. هر سطر: `index|title|description|target_files`
+
+{index_blob}
+
+# وظیفه
+فقط index پیشنهادهایی را برگردان که **مستقیماً به درخواست کاربر مربوط هستند**.
+- اگر کاربر گفته «فرانت سفیده»، پیشنهادهای backend/cleanup/security_audit بی‌ربط‌اند → drop
+- اگر کاربر گفته «دیپلوی نمی‌شه»، پیشنهادهای UI styling بی‌ربط‌اند → drop
+- معیار: «اگر این پیشنهاد را اعمال کنم، آیا به حل مشکل/درخواست کاربر کمک می‌کند؟»
+- در شک، نگه دار (better err on keeping than dropping)
+
+# خروجی (فقط JSON)
+{{"kept_indices": [0, 2, 5], "dropped_indices": [1, 3, 4]}}"""
+
+    try:
+        response = await service._ai_generate(
+            prompt, model_id=model_id, max_tokens=600, temperature=0.0
+        )
+        parsed = service._extract_json(response) or {}
+        kept_idx = set(int(i) for i in (parsed.get("kept_indices") or []) if isinstance(i, (int, str)))
+    except Exception as e:
+        logger.warning(f"relevance-filter: LLM call failed ({e}); keeping all")
+        return proposals, []
+
+    if not kept_idx:
+        logger.warning("relevance-filter: LLM returned no kept indices; keeping all (safety)")
+        return proposals, []
+
+    kept: List[Dict[str, Any]] = []
+    dropped: List[Dict[str, Any]] = []
+    for idx, p in enumerate(proposals):
+        if idx in kept_idx:
+            kept.append(p)
+        else:
+            dropped.append(p)
+    # Safety: if filter would drop everything, keep all
+    if not kept:
+        return proposals, []
+    return kept, dropped
+
+
 def _build_pass_prompt(
     pass_id: str,
     *,
@@ -1485,20 +1627,34 @@ async def run_deep_scan(
     # وگرنه از watched.scan_depth بخوان
     # 🆕 (P3) به‌روز: حالا ۱۲ pass موجود است (logical_alignment + functional_correctness اضافه شدند)
     if enabled_passes is None:
-        depth = getattr(watched, "scan_depth", "deep") or "deep"
-        if depth == "quick":
-            # سریع: فقط ۳ pass essential
-            enabled_passes = ["frontend", "backend", "security_deep"]
-        elif depth == "standard":
-            # متعادل: ۶ pass (پنج تای قبلی + logical_alignment)
-            enabled_passes = ["frontend", "backend", "security_deep",
-                              "quality", "completeness", "logical_alignment"]
-        elif depth == "thorough":
-            # کامل + per-file scoring + roadmap (همهٔ ۱۲)
-            enabled_passes = [p[0] for p in PASSES]
-        else:  # "deep" (default)
-            # عمیق: همهٔ ۱۲ pass
-            enabled_passes = [p[0] for p in PASSES]
+        # 🆕 (inspector-scoped-scan) — اگر این scan از Inspector chat آمده و
+        # کاربر focus_notes داده، فقط passهای مرتبط با همان درخواست را اجرا
+        # کن. این جلوی ۹۶ پیشنهاد بی‌ربط را می‌گیرد بدون اینکه قابلیت
+        # auto-scan را حذف کند.
+        if _output_target_session_id is not None and (focus_notes or "").strip():
+            _all_pass_ids = [p[0] for p in PASSES]
+            enabled_passes = _select_passes_for_inspector_focus(
+                focus_notes or "", _all_pass_ids
+            )
+            logger.info(
+                f"inspector-scoped-scan: focus_notes='{(focus_notes or '')[:120]}' → "
+                f"selected passes={enabled_passes} (of {len(_all_pass_ids)})"
+            )
+        else:
+            depth = getattr(watched, "scan_depth", "deep") or "deep"
+            if depth == "quick":
+                # سریع: فقط ۳ pass essential
+                enabled_passes = ["frontend", "backend", "security_deep"]
+            elif depth == "standard":
+                # متعادل: ۶ pass (پنج تای قبلی + logical_alignment)
+                enabled_passes = ["frontend", "backend", "security_deep",
+                                  "quality", "completeness", "logical_alignment"]
+            elif depth == "thorough":
+                # کامل + per-file scoring + roadmap (همهٔ ۱۲)
+                enabled_passes = [p[0] for p in PASSES]
+            else:  # "deep" (default)
+                # عمیق: همهٔ ۱۲ pass
+                enabled_passes = [p[0] for p in PASSES]
 
     # 🆕 (Phase 5 — bug 19) — deep_read_count حالا depth-aware است.
     # default ۳۵ (× ۲ داخلی = ۷۰) برای پروژه‌های متوسط کفایت می‌کرد، ولی
@@ -2846,12 +3002,40 @@ async def run_deep_scan(
         # را به همان session لاگ کن. _save_tasks فراخوانی نمی‌شود چون هیچ
         # task جدیدی در service.tasks اضافه نشده.
         if _inspector_session_id is not None:
+            # 🆕 (inspector-scoped-scan) — post-filter پیشنهادها بر اساس ربط
+            # به focus_notes. حتی با pass-scoping، ممکنه LLM پیشنهاد بسازه
+            # که به درخواست کاربر بی‌ربط باشه (مثلاً اسکن frontend بزنیم
+            # ولی پیشنهاد بده برای backend هم refactor کن). با یک پاس
+            # سریعِ relevance-scoring اون‌ها رو drop می‌کنیم.
+            _dropped_irrelevant: List[Dict[str, Any]] = []
+            try:
+                _fn_for_filter = (focus_notes or "").strip()
+                if _fn_for_filter and len(proposal_payloads) > 3:
+                    proposal_payloads, _dropped_irrelevant = await _filter_proposals_by_relevance(
+                        service,
+                        proposals=proposal_payloads,
+                        focus_notes=_fn_for_filter,
+                        model_id=(model_ids[0] if model_ids else model_id),
+                    )
+                    if _dropped_irrelevant:
+                        logger.info(
+                            f"inspector-scoped-scan: dropped "
+                            f"{len(_dropped_irrelevant)} irrelevant proposals "
+                            f"(kept {len(proposal_payloads)})"
+                        )
+            except Exception as _filt_e:
+                logger.warning(f"inspector-scoped-scan: relevance filter failed: {_filt_e}")
+
             try:
                 from .scan_v5.scan_inspector_session import log_scan_message
                 _ss = scan_scope_meta or {}
+                _dropped_note = (
+                    f" ({len(_dropped_irrelevant)} پیشنهاد بی‌ربط حذف شد)"
+                    if _dropped_irrelevant else ""
+                )
                 summary_text = (
                     f"✅ اسکن موردی تمام شد — **{len(proposal_payloads)} پیشنهاد** "
-                    f"از {len(unique)} finding استخراج شد. "
+                    f"از {len(unique)} finding استخراج شد{_dropped_note}. "
                     f"می‌توانید هر پیشنهاد را جداگانه «اجرا با AI» کنید یا "
                     f"«اعمال همهٔ تغییرات» را برای commit + push همه با هم بزنید."
                 )
