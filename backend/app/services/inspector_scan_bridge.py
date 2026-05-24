@@ -401,10 +401,15 @@ async def trigger_inspector_selective_scan(
                 from ..models.inspector_session import InspectorMessage as _IM
                 _db = SessionLocal()
                 try:
+                    # 🆕 (scope-empty-fix) — حالا چک می‌کنیم scan_aborted هم
+                    # موجود باشه. اگر scan با scope_empty abort شده، نباید
+                    # «اسکن موردی تمام شد — 0 پیشنهاد (پیام scan_complete اصلی
+                    # لاگ نشد — احتمالاً extra_data بزرگ بود)» رو لاگ کنیم —
+                    # این پیام گمراه‌کننده است چون دلیل واقعی scope_empty بود.
                     _has_complete = (
                         _db.query(_IM)
                         .filter(_IM.session_id == int(session_id))
-                        .filter(_IM.action_type == "scan_complete")
+                        .filter(_IM.action_type.in_(["scan_complete", "scan_aborted"]))
                         .order_by(_IM.id.desc())
                         .first()
                     )

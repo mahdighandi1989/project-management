@@ -4911,6 +4911,15 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
                       }
                     } else if (eventType === 'error') {
                       stepResponseContent = `❌ ${data.message}`;
+                      // 🆕 (multi-step-cascade-fix) — اگر backend می‌گه
+                      // «یک درخواست قبلی هنوز در حال پردازش است» (concurrent
+                      // lock)، کل multi-step رو متوقف کن. قبلاً ۵ مرحلهٔ بعدی
+                      // هم همین خطا می‌خوردن (transcript کاربر).
+                      const _errMsg = String(data.message || '');
+                      if (_errMsg.includes('یک درخواست قبلی هنوز در حال پردازش') ||
+                          _errMsg.includes('concurrent_request')) {
+                        (stepActionPlan as any) = { _concurrent_request_abort: true };
+                      }
                     }
                   } catch {}
                   eventType = '';
@@ -4934,6 +4943,27 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
           }
         }
         if (!_stepOk) throw _lastStepErr || new Error('No response after 3 retries');
+
+        // 🆕 (multi-step-cascade-fix) — اگر این step با concurrent_lock
+        // err گرفت، کل multi-step رو متوقف کن (نه ادامه به stepهای بعدی
+        // که همگی همین err رو می‌خورن).
+        if ((stepActionPlan as any)?._concurrent_request_abort) {
+          setInspectorChatMessages(prev => [...prev, {
+            id: `ms_abort_concurrent_${Date.now()}`,
+            role: 'system' as const,
+            content: (
+              `🛑 multi-step متوقف شد — یک درخواست قبلی روی سشن قفل بود ` +
+              `(احتمالاً scan یا smart-chat ناتمام). از مراحل ${steps.length - i} ` +
+              `باقی‌مانده صرف‌نظر شد.\n\n` +
+              `راه‌حل: ۱) چند ثانیه صبر کن. ۲) صفحه را reload کن اگر بیش از ۳۰ ثانیه طول کشید.`
+            ),
+            timestamp: new Date(),
+          }]);
+          setInspectorChatLoading(false);
+          setInspectorOpLock(false);
+          setInspectorOpType(null);
+          return;  // exit entire executeMultiStep
+        }
 
         // جمع‌آوری نتایج مرحله
         collectedAnalysis.push(stepResponseContent.slice(0, 500));
@@ -6873,6 +6903,12 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                             }
                           } else if (stepEventType === 'error') {
                             stepResponseContent = `❌ ${sData.message}`;
+                            // 🆕 (multi-step-cascade-fix vd)
+                            const _vdErr = String(sData.message || '');
+                            if (_vdErr.includes('یک درخواست قبلی هنوز در حال پردازش') ||
+                                _vdErr.includes('concurrent_request')) {
+                              (stepActionPlan as any) = { _concurrent_request_abort: true };
+                            }
                           }
                         } catch {}
                         stepEventType = '';
@@ -6897,6 +6933,24 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                 }
               }
               if (!_stepOk) throw _lastStepErr || new Error('No response after 3 retries');
+
+              // 🆕 (multi-step-cascade-fix vd) — اگر concurrent_lock بود،
+              // متوقف کن.
+              if ((stepActionPlan as any)?._concurrent_request_abort) {
+                setInspectorChatMessages(prev => [...prev, {
+                  id: `vd_ms_abort_concurrent_${Date.now()}`,
+                  role: 'system' as const,
+                  content: (
+                    `🛑 visual-debug multi-step متوقف شد — یک درخواست قبلی روی سشن قفل بود. ` +
+                    `از مراحل ${vdSteps.length - i} باقی‌مانده صرف‌نظر شد. ` +
+                    `چند ثانیه صبر کن یا صفحه را reload کن.`
+                  ),
+                  timestamp: new Date(),
+                }]);
+                setInspectorOpLock(false);
+                setInspectorOpType(null);
+                return;
+              }
 
               // جمع‌آوری نتایج مرحله — با step_number واقعی برای جلوگیری از shift
               collectedAnalysis.push({

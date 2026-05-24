@@ -14450,8 +14450,21 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
         return StreamingResponse(_reject_stream(), media_type="text/event-stream")
     _SMART_CHAT_ACTIVE[_pid_key] = _now_sc
 
+    # 🆕 (lock-leak-fix) — helper برای آزادسازی lock در همهٔ early-return ها.
+    # قبل از این، اگر smart-chat با _scan_init_stream یا _scan_clarify_stream
+    # یا _scan_busy_stream یا "پروژه یافت نشد" early-return می‌داد، lock
+    # تا 10 دقیقه قفل می‌موند چون safe_event_stream.finally هرگز اجرا نمی‌شد.
+    # نتیجه: کاربر transcript نشان داد ۲۰+ دقیقه پشت‌سرهم پیام «یک درخواست
+    # قبلی هنوز در حال پردازش است» می‌دید. این helper اون رو حل می‌کنه.
+    def _release_lock():
+        try:
+            _SMART_CHAT_ACTIVE.pop(_pid_key, None)
+        except Exception:
+            pass
+
     project = db.query(Project).filter(Project.id == request.project_id).first()
     if not project:
+        _release_lock()
         return {"success": False, "error": "پروژه یافت نشد"}
 
     # استخراج اطلاعات GitHub
@@ -14557,6 +14570,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                             ),
                         }
                         yield f"event: scan_clarification_needed\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    _release_lock()
                     return StreamingResponse(_scan_clarify_stream(), media_type="text/event-stream")
                 if _scan_res.get("success"):
                     async def _scan_init_stream():
@@ -14584,6 +14598,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         # SSE فرمت با event prefix که frontend smart-chat انتظار دارد
                         yield f"event: scan_initiated\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
+                    _release_lock()
                     return StreamingResponse(_scan_init_stream(), media_type="text/event-stream")
             elif sess_id and is_scan_active_for_session(sess_id):
                 async def _scan_busy_stream():
@@ -14596,6 +14611,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         ),
                     }
                     yield f"event: scan_already_running\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                _release_lock()
                 return StreamingResponse(_scan_busy_stream(), media_type="text/event-stream")
     except Exception as _intent_e:
         slog.warning(f"[smart-chat] selective-scan path failed; fallback to chat: {_intent_e}")
