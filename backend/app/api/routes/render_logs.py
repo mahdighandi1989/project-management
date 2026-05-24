@@ -12146,9 +12146,26 @@ def _strip_reasoning_blocks(text: str) -> str:
     """
     حذف بلوک‌های استدلال (reasoning/thinking) از پاسخ مدل‌ها.
     دلیگیت به ماژول مرکزی content_sanitizer.
+
+    🆕 (whitespace-bloat) — همچنین runs بیش از حد whitespace رو compact
+    می‌کنه. در transcript کاربر Gemini یه متن تولید کرد که هزاران فضای
+    خالی پشت سر هم داشت ((به صورت موقت غیرفعال شده است) با ~10K space)
+    که چت رو نامفهوم کرد. این sanitization جلوش رو می‌گیره.
     """
     from ...services.content_sanitizer import strip_reasoning_blocks as _central_strip
-    return _central_strip(text)
+    cleaned = _central_strip(text)
+    if not cleaned:
+        return cleaned
+    # whitespace bloat: ۲۰+ کاراکتر whitespace یکسان پشت سر هم → یکی
+    try:
+        import re as _re_ws
+        # spaces, tabs, و newlines همگی normalize می‌شن
+        cleaned = _re_ws.sub(r" {30,}", " ", cleaned)
+        cleaned = _re_ws.sub(r"\t{20,}", "\t", cleaned)
+        cleaned = _re_ws.sub(r"\n{5,}", "\n\n\n", cleaned)  # حداکثر ۳ خط خالی
+    except Exception:
+        pass
+    return cleaned
 
 
 def _sanitize_file_content(content: str, file_path: str) -> str:

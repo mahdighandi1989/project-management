@@ -5808,6 +5808,15 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
                     content: `❌ ${data.message}${data.detail ? '\n\n📊 ' + data.detail : ''}`,
                     timestamp: new Date(),
                   }]);
+                  // 🆕 (concurrent-skip-retry) — اگر backend می‌گه «یک درخواست
+                  // قبلی هنوز در حال پردازش است»، auto-retry نکن چون retry هم
+                  // همین خطا رو می‌خوره و loop ساخته می‌شه (transcript کاربر:
+                  // 5 step × auto-retry = chaos). علامت می‌ذاریم تا retry skip بشه.
+                  const _errMsg2 = String(data.message || '');
+                  if (_errMsg2.includes('یک درخواست قبلی هنوز در حال پردازش') ||
+                      _errMsg2.includes('concurrent_request')) {
+                    responseReceived = true;
+                  }
                 } else if (eventType === 'scan_initiated') {
                   // 🆕 (inspector-scan) — backend تشخیص داد scan موردی لازم است.
                   // یک پیام assistant با محتوای scan_initiated اضافه می‌کنیم،
