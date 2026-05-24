@@ -5928,7 +5928,11 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
                     model_id: data.model_used,
                     timestamp: new Date(),
                     tokens_used: data.tokens_used,
-                    action_type: (data.type === 'action' || data.has_action) ? 'smart_action' as any : undefined,
+                    // 🆕 (no-files-misclassify-fix) — فقط وقتی واقعاً action داریم
+                    // (files غیرخالی) action_type='smart_action' ست می‌شه. اگر
+                    // مدل عمداً files=[] فرستاده (analysis/options)، type=analysis
+                    // و دکمه retry نشون داده نمی‌شه.
+                    action_type: (data.type === 'action' && data.has_action) ? 'smart_action' as any : undefined,
                     action_plan: data.action_plan,
                     files_were_read: data.files_were_read ?? false,
                     selected_file_paths: data.selected_file_paths || [],
