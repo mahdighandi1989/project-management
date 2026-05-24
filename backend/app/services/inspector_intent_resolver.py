@@ -778,6 +778,20 @@ def resolve_intent_from_chat_context(
     has_stack_in_logs = bool(_extract_files_from_logs(backend_logs or []) or _extract_files_from_logs(console_logs or []))
     has_screenshots = bool(screenshots) or mode == "visual_debug"
 
+    # 🆕 (short-message-gate) — پیام‌های خیلی کوتاه («؟؟»، «چی شد»، «هان؟»)
+    # نباید فقط به‌خاطر stack trace در logs قبلی scan رو فعال کنن. کاربر
+    # transcript نشون داد «؟؟» باعث شد scan دوباره fire بشه. برای پیام
+    # کوتاه‌تر از 15 char باید **حتماً** keyword صریح باشه — backend_logs
+    # alone کافی نیست.
+    _msg_chars = len(user_message.strip())
+    _is_very_short = _msg_chars < 15
+    if _is_very_short and not matched:
+        return ResolvedScanIntent(
+            should_scan=False,
+            reason="short_message_no_keyword",
+            focus_notes=user_message,
+        )
+
     # هر یک از این سه شرط برای trigger کافی است. visual_debug + screenshot
     # هم به‌تنهایی trigger است چون کاربر صریحاً ابزار بصری را به کار برده —
     # یعنی قصد بررسی دارد.

@@ -157,6 +157,45 @@ _ACTIVE_SCANS: Dict[int, Dict[str, Any]] = {}
 # در دو فراخوانی هم‌زمان is_scan_active + claim.
 _SCAN_CLAIM_LOCK = asyncio.Lock()
 
+# 🆕 (scan-dedup) — جلوگیری از scan های پشت سر هم برای پیام مشابه.
+# transcript کاربر نشون داد یک پیام «؟؟» در 60s سه بار scan trigger کرد.
+# هر entry: (session_id, msg_hash) → epoch timestamp. window: 60s.
+_RECENT_SCAN_TRIGGERS: Dict[str, float] = {}
+_SCAN_DEDUP_WINDOW_SECONDS = 60.0
+
+
+def _scan_dedup_key(session_id: int, user_message: str) -> str:
+    import hashlib
+    _h = hashlib.md5((user_message or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
+    return f"{session_id}:{_h}"
+
+
+def _is_recent_scan_trigger(session_id: int, user_message: str) -> bool:
+    """آیا scan مشابه برای همین session در ۶۰ ثانیهٔ اخیر trigger شده؟"""
+    import time as _t
+    key = _scan_dedup_key(session_id, user_message)
+    last = _RECENT_SCAN_TRIGGERS.get(key)
+    if last is None:
+        return False
+    age = _t.time() - last
+    if age < _SCAN_DEDUP_WINDOW_SECONDS:
+        return True
+    # expired — پاک کن
+    _RECENT_SCAN_TRIGGERS.pop(key, None)
+    return False
+
+
+def _mark_scan_triggered(session_id: int, user_message: str) -> None:
+    import time as _t
+    key = _scan_dedup_key(session_id, user_message)
+    _RECENT_SCAN_TRIGGERS[key] = _t.time()
+    # housekeeping — اگر cache بزرگ شد، entryهای قدیمی پاک کن
+    if len(_RECENT_SCAN_TRIGGERS) > 200:
+        now = _t.time()
+        for k in list(_RECENT_SCAN_TRIGGERS.keys()):
+            if now - _RECENT_SCAN_TRIGGERS.get(k, 0) > _SCAN_DEDUP_WINDOW_SECONDS:
+                _RECENT_SCAN_TRIGGERS.pop(k, None)
+
 
 def is_scan_active_for_session(session_id: int) -> bool:
     info = _ACTIVE_SCANS.get(session_id)
@@ -314,6 +353,17 @@ async def trigger_inspector_selective_scan(
                 "code": "scan_already_running",
                 "active_scan": dict(_ACTIVE_SCANS.get(session_id) or {}),
             }
+        # 🆕 (scan-dedup) — اگر همین پیام در ۶۰ ثانیهٔ اخیر scan trigger
+        # کرده، دوباره trigger نکن. transcript کاربر «؟؟» سه بار scan
+        # ساخت — این جلوش رو می‌گیره.
+        if _is_recent_scan_trigger(session_id, user_message):
+            return {
+                "success": False,
+                "status": "error",
+                "error": "این پیام تازگی scan trigger کرده — لطفاً نتیجهٔ scan قبلی رو ببین (یا scope را تنظیم کن).",
+                "code": "scan_recently_triggered",
+            }
+        _mark_scan_triggered(session_id, user_message)
         # claim
         _ACTIVE_SCANS[session_id] = {
             "scan_id": scan_id,
