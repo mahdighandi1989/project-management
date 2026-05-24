@@ -499,7 +499,7 @@ async def run_inspector_agent(
     system_prompt: str,
     user_prompt: str,
     file_list: List[str],
-    max_iterations: int = 24,
+    max_iterations: int = 30,
     max_file_chars: int = 18000,
     max_tokens: int = 8000,
 ) -> AsyncIterator[Tuple[str, Dict[str, Any]]]:
@@ -529,6 +529,12 @@ async def run_inspector_agent(
     final_analysis = ""
     action_plan: Optional[Dict[str, Any]] = None
     stop_reason = "natural_stop"
+
+    # 🆕 (polling-guard) — اگر agent همان tool رو با همان args چندبار
+    # پشت سر هم صدا بزنه (مثل polling get_postgres برای provisioning)،
+    # token waste می‌کنه. تشخیص می‌دیم و در پاسخ tool به‌صراحت می‌گیم
+    # «submit کن و خروج».
+    _recent_tool_calls: List[str] = []  # signature های اخیر
 
     for _iter in range(1, max_iterations + 1):
         try:
@@ -582,6 +588,23 @@ async def run_inspector_agent(
                 if is_error:
                     d["is_error"] = True
                 return d
+
+            # 🆕 (polling-guard) — اگر همین tool با همین args ۳ بار پشت
+            # سر هم صدا زده شده، احتمالاً polling است (مثل get_postgres
+            # برای provisioning). injection می‌کنیم در پاسخ tool که agent
+            # متوقف بشه و submit کنه.
+            try:
+                import json as _pj
+                _sig = f"{name}::{_pj.dumps(args, sort_keys=True, ensure_ascii=False)[:200]}"
+            except Exception:
+                _sig = f"{name}::?"
+            _recent_tool_calls.append(_sig)
+            if len(_recent_tool_calls) > 5:
+                _recent_tool_calls = _recent_tool_calls[-5:]
+            _polling_detected = (
+                len(_recent_tool_calls) >= 3
+                and _recent_tool_calls[-1] == _recent_tool_calls[-2] == _recent_tool_calls[-3]
+            )
 
             if name == "read_file":
                 path = (args.get("path") or "").strip().lstrip("/")
@@ -1224,6 +1247,25 @@ async def run_inspector_agent(
 
             else:
                 tool_results.append(_tr(f"ابزار ناشناخته: {name}", is_error=True))
+
+        # 🆕 (polling-guard) — اگر detection فعال شد، یک پیام صریح به
+        # tool_results اضافه کن تا agent مجبور به submit بشه.
+        if _polling_detected:
+            try:
+                tool_results.append({
+                    "tool_use_id": resp.tool_calls[-1].get("id", "polling_warn"),
+                    "name": resp.tool_calls[-1].get("name", "warn"),
+                    "content": (
+                        "🛑 polling-guard: همین tool رو ۳ بار پشت سر هم با همین args "
+                        "صدا زدی. این polling است و token هدر می‌ده. "
+                        "**همین الان submit_action_plan با files=[] و analysis** که "
+                        "توضیح بده وضعیت فعلی چیه و اگه provisioning هست از کاربر "
+                        "بخواه چند دقیقه دیگه پیام بفرسته تا ادامه بدی. نه polling!"
+                    ),
+                    "is_error": False,
+                })
+            except Exception:
+                pass
 
         # نتایج ابزار را با فیلد کانونیکال tool_results برمی‌گردانیم (provider-agnostic).
         messages.append(Message(role="user", content="", tool_results=tool_results))

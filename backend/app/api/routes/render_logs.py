@@ -15019,6 +15019,21 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
   5. `render_set_env_var(<web_service_id>, 'DATABASE_URL', internal_url)`
   6. `render_trigger_deploy(<web_service_id>)` → app با DB stable می‌شه
 
+🔴🔴 **قانون حیاتی polling**: provisioning Postgres در Render معمولاً
+1-3 دقیقه طول می‌کشه. **هرگز در یک agent session منتظر نمون** —
+این باعث می‌شه max_iterations رو پر کنی و session fail بشه. به‌جاش:
+
+  - بعد از `render_create_postgres` موفق، **بلافاصله** `submit_action_plan`
+    با `files=[]` بزن و در analysis توضیح بده:
+    «DB ساخته شد (id=X). در حال provisioning. وقتی status='available' شد
+    (~۲ دقیقه)، یک پیام جدید بنویس مثلاً «DATABASE_URL رو ست کن» تا
+    من با همان postgres_id ادامه بدم.»
+  - فقط **یک بار** `render_get_postgres` صدا بزن تا status فعلی رو
+    گزارش کنی (مثلاً 'creating'). اگر 'available' بود ادامه بده، اگر نه
+    submit کن و خروج بزن.
+  - **هرگز** در loop `get_postgres` رو polling نکن — هر iteration
+    ~25K توکن می‌بره و session شکست می‌خوره.
+
 ### 🆕 revert/recovery — وقتی کاربر می‌گوید «برگرد به branch X» یا «این فایل را از branch قدیمی بازیابی کن»:
 - 🔴 `revert_to_branch(target_branch, file_paths?, commit_message?)`: **بهترین راه** برای revert کامل به یک branch. این ابزار خودش با GitHub compare API تفاوت‌ها رو پیدا می‌کنه، محتوا رو از target branch می‌خونه، و action_plan رو می‌سازه و submit می‌کنه. **فقط همین یک ابزار رو صدا بزن** وقتی کاربر می‌گه «منو برگردون به branch X». نیازی به list_branches یا read_file_from_branch تک‌تک نیست.
 - `list_branches()`: لیست branchها (فقط برای discovery، اگر اسم branch مطمئن نیستی).
