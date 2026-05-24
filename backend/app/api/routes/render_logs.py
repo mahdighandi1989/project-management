@@ -14977,7 +14977,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - `read_file_from_branch(path, branch)`: محتوای یک فایل را از branch دیگر (نه branch فعلی) می‌خواند. ⚠️ این برای revert استفاده می‌شود — وقتی کاربر می‌گوید «برگرد به state branch X»، برای هر فایلی که باید برگردد:
   ۱) `read_file_from_branch(path, X)` بزن تا محتوای branch X را بگیری.
   ۲) همان محتوا را در `action_plan.files` با `operation='modify'` و `content=<محتوای branch X>` قرار بده.
-  ۳) commit_message را با ذکر «Revert {path} to {branch_X}» بنویس.
+  ۳) commit_message را با ذکر «Revert <path> to <branch_X>» بنویس.
 
   ❗ این یک operation explicit است — کاربر صریحاً revert خواسته. بدون درخواست صریح کاربر از این استفاده نکن.
 
