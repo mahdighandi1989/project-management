@@ -351,6 +351,40 @@ def _build_tools() -> List[Dict[str, Any]]:
                 "required": ["files"],
             },
         },
+        # ────────────────────────────────────────────────────────────────────
+        # 🆕 (git-revert) — ابزارهای revert/recovery: برای زمانی که کاربر
+        # می‌خواد به یک branch قدیمی برگرده یا state یک فایل رو از branch
+        # دیگری بازیابی کنه. transcript کاربر نشون داد نیاز جدی به این
+        # قابلیت هست.
+        # ────────────────────────────────────────────────────────────────────
+        {
+            "name": "list_branches",
+            "description": (
+                "لیست branchهای repo رو برمی‌گردونه. وقتی کاربر می‌گه «برگرد به branch X» یا"
+                " «من می‌خوام state branch قدیمی رو ببینم» از این استفاده کن تا اول branch"
+                " مرجع رو پیدا کنی. خروجی: لیست نام branchها."
+            ),
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        },
+        {
+            "name": "read_file_from_branch",
+            "description": (
+                "محتوای یک فایل رو از یک branch مشخص (نه branch فعلی) می‌خونه. وقتی کاربر می‌گه"
+                " «این فایل رو از branch X برگردون»، اول با این ابزار محتوای فایل رو از branch مرجع"
+                " بخون، بعد در action_plan با operation=modify اون محتوا رو set کن."
+                " مثلاً کاربر گفت «برگرد به inspector/smart-fix-1779608575» → برای هر فایل که"
+                " تفاوت داره، این ابزار رو با branch=inspector/smart-fix-1779608575 صدا بزن"
+                " و محتوای برگشت رو در action_plan قرار بده."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "مسیر فایل نسبت به root repo"},
+                    "branch": {"type": "string", "description": "نام branch مرجع، مثلاً 'inspector/smart-fix-XXXXX' یا 'main'"},
+                },
+                "required": ["path", "branch"],
+            },
+        },
     ]
 
 
@@ -591,6 +625,83 @@ async def run_inspector_agent(
                                 _nlines = _c.count("\n") + 1
                                 _txt += f"\n### `{_fp}` ({_nlines} خط):\n```\n{_c_trunc}\n```\n"
                         tool_results.append(_tr(_txt))
+
+            # 🆕 (git-revert) — list branches و read from branch
+            elif name == "list_branches":
+                try:
+                    _session = await github_svc._get_session()
+                    _headers = github_svc._get_headers(token)
+                    _url = f"{github_svc.GITHUB_API}/repos/{owner}/{repo}/branches?per_page=100"
+                    async with _session.get(_url, headers=_headers, timeout=20) as _resp:
+                        if _resp.status != 200:
+                            tool_results.append(_tr(
+                                f"خطا در گرفتن branches: HTTP {_resp.status}",
+                                is_error=True,
+                            ))
+                            continue
+                        _data = await _resp.json()
+                    _branches = [b.get("name", "") for b in (_data or []) if b.get("name")]
+                    tool_results.append(_tr(
+                        f"branches موجود ({len(_branches)} مورد):\n" + "\n".join(_branches[:100])
+                    ))
+                    yield ("progress", {
+                        "step": "agent_list_branches",
+                        "message": f"🌿 {_tag} لیست branches: {len(_branches)} مورد",
+                    })
+                except Exception as _be:
+                    tool_results.append(_tr(f"خطا: {str(_be)[:200]}", is_error=True))
+
+            elif name == "read_file_from_branch":
+                _path = (args.get("path") or "").strip().lstrip("/")
+                _branch_ref = (args.get("branch") or "").strip()
+                if not _path or not _branch_ref:
+                    tool_results.append(_tr("path و branch هر دو لازم‌اند", is_error=True))
+                    continue
+                yield ("progress", {
+                    "step": "agent_read_branch",
+                    "message": f"📖 {_tag} خواندن {_path} از branch '{_branch_ref}'...",
+                    "file": _path,
+                    "branch": _branch_ref,
+                })
+                try:
+                    _res = await github_svc.get_file_content(
+                        owner, repo, _path, branch=_branch_ref, token=token
+                    )
+                except Exception as _re:
+                    tool_results.append(_tr(f"خطا در خواندن: {str(_re)[:200]}", is_error=True))
+                    continue
+                if not _res.get("success"):
+                    _err = _res.get("error", "unknown")
+                    tool_results.append(_tr(
+                        f"❌ نمی‌توان فایل '{_path}' را از branch '{_branch_ref}' خواند: {_err}. "
+                        f"اول با list_branches مطمئن شو branch وجود دارد.",
+                        is_error=True,
+                    ))
+                    continue
+                _branch_content = _res.get("content", "") or ""
+                # 🆕 (git-revert) — ثبت در files_read تا validator (blind-overwrite
+                # check) قبول کنه که این path "خوانده شده". محتوا از branch Y
+                # ست می‌شه ولی purpose اینه که commit به branch فعلی بشه با
+                # محتوای branch Y (revert intent).
+                files_read[_path] = _branch_content
+                # برای امن بودن agent context، اگر بزرگ شد truncate کنیم
+                # ولی توجه: agent باید این محتوا رو کامل در action_plan بذاره،
+                # پس فقط در پاسخ tool truncate می‌کنیم با هشدار.
+                _full_len = len(_branch_content)
+                _shown = _branch_content
+                if len(_shown) > max_file_chars:
+                    _shown = _shown[:max_file_chars] + (
+                        f"\n... [بریده شد به دلیل اندازه — کل فایل {_full_len} کاراکتر است؛ "
+                        f"وقتی در action_plan قرار می‌دهی محتوای کامل را از branch بازخوانی کن]"
+                    )
+                _nlines = _branch_content.count("\n") + 1
+                tool_results.append(_tr(
+                    f"محتوای {_path} از branch '{_branch_ref}' ({_nlines} خط، {_full_len} کاراکتر):\n"
+                    f"```\n{_shown}\n```\n"
+                    f"⚠️ برای revert: این محتوا را در action_plan با operation='modify' و "
+                    f"path='{_path}' قرار بده — اگر کاربر صراحتاً revert خواست، این کار درست است "
+                    f"حتی اگر فایل را در branch فعلی هم نخوانده باشی."
+                ))
 
             elif name in ("render_list_services", "render_get_service",
                           "render_get_env_vars", "render_set_env_var",
