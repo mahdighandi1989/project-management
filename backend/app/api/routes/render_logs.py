@@ -16950,6 +16950,52 @@ async def _execute_render_actions(render_actions: List[dict]) -> Dict[str, Any]:
     results: List[Dict[str, Any]] = []
     errors: List[str] = []
 
+    # 🆕 (placeholder-detection) — مدل گاهی value های نامعتبر مثل
+    # "postgresql+asyncpg://user:password@host:port/database_name" تولید می‌کنه
+    # که templateهای placeholder هستن. این env varها رو اگه apply کنیم،
+    # deploy بعدی crash می‌کنه. این تابع placeholderهای واضح رو detect می‌کنه.
+    def _is_placeholder_value(key: str, value: str) -> Optional[str]:
+        """برمی‌گردونه دلیل placeholder بودن، یا None اگر مقدار واقعی به نظر برسه."""
+        if not value or not isinstance(value, str):
+            return None
+        v = value.strip()
+        if not v:
+            return None
+        v_lower = v.lower()
+        # markers صریح
+        if "<" in v and ">" in v and any(t in v_lower for t in ("your", "<host", "<user", "<pass", "<db", "<port")):
+            return f"placeholder template (<…> markers)"
+        if "{" in v and "}" in v:
+            return f"placeholder template ({{…}} markers)"
+        # templates شناخته‌شده
+        _bad_substrings = [
+            "user:password", "username:password", "user:pass@",
+            "your-password", "your-username", "your-host", "your-db",
+            "your-database", "your-secret", "your_secret", "your-api-key",
+            "your_api_key", "your_client_id", "your_client_secret",
+            "host:port", "database_name", "dbname",
+            "change-in-production", "change-this", "replace-me",
+            "REPLACE_ME", "TODO", "PLACEHOLDER", "PASTE_HERE",
+            "example.com", "yourdomain.com",
+        ]
+        for bad in _bad_substrings:
+            if bad.lower() in v_lower:
+                return f"placeholder phrase '{bad}'"
+        # 🆕 prefix/suffix patterns: YOUR_X_HERE, YOUR_X, X_HERE, FILL_ME_X
+        if v_lower.startswith("your_") and "_" in v_lower[5:]:
+            return f"'YOUR_...' placeholder"
+        if v_lower.endswith("_here") or v_lower.endswith("-here"):
+            return f"'..._HERE' placeholder"
+        if v_lower.startswith("fill_") or v_lower.startswith("fill-"):
+            return f"'FILL_...' placeholder"
+        if v_lower in ("your_value", "your-value", "set_me", "set-me"):
+            return f"generic placeholder '{v}'"
+        # برای DATABASE_URL خاص، چک کن host واقعی باشه
+        if key.upper() in ("DATABASE_URL", "POSTGRES_URL", "MYSQL_URL", "MONGO_URL", "REDIS_URL"):
+            if "@localhost" in v_lower and key.upper() != "REDIS_URL":
+                return "localhost در DATABASE_URL — معمولاً برای production نامعتبر"
+        return None
+
     for action in render_actions:
         if not isinstance(action, dict):
             continue
@@ -16976,6 +17022,19 @@ async def _execute_render_actions(render_actions: List[dict]) -> Dict[str, Any]:
                 value = action.get("value", "")
                 if not key:
                     errors.append(f"set_env_var: key خالی است")
+                    continue
+                # 🆕 (placeholder-detection) — رد placeholder های واضح
+                _placeholder_reason = _is_placeholder_value(key, str(value))
+                if _placeholder_reason:
+                    errors.append(
+                        f"🚫 set_env_var {key}: مقدار placeholder شناسایی شد ({_placeholder_reason}) "
+                        f"— رد شد. کاربر باید مقدار واقعی رو از Render Dashboard یا env var واقعی ست کنه."
+                    )
+                    results.append({
+                        "action": "set_env_var", "service": service_name, "key": key,
+                        "success": False, "error": "placeholder_value_rejected",
+                        "placeholder_reason": _placeholder_reason,
+                    })
                     continue
                 r = await rs.set_env_var(service_id, key, str(value))
                 results.append({"action": "set_env_var", "service": service_name, "key": key, **r})
