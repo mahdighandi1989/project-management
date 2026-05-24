@@ -55,6 +55,129 @@ class GitHubPRService:
             headers["Authorization"] = f"token {use_token}"
         return headers
 
+    # 🆕 (rate-limit-retry) — GitHub API 403/429 با Retry-After header می‌فرستد.
+    # قبلاً هیچ retry نداشتیم و apply_all با rate limit کاملاً fail می‌شد
+    # (request ID 5552:2D733F:...). این helper تا ۴ بار با backoff نمایی
+    # retry می‌کنه و Retry-After رو هم احترام می‌ذاره.
+    async def _gh_request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Dict[str, str],
+        json_body: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
+        max_attempts: int = 4,
+    ) -> Dict[str, Any]:
+        """درخواست HTTP با retry برای 403 rate-limit / 429 / 5xx transient.
+
+        Returns: {"status": int, "body_text": str, "body_json": Optional[dict],
+                  "headers": dict, "ok": bool, "retries": int}
+        هیچ exception برای HTTP error نمی‌اندازه — caller status رو چک می‌کنه.
+        فقط network exceptions بعد از همه retryها propagate می‌شن.
+        """
+        import asyncio
+        session = await self._get_session()
+        last_exc: Optional[Exception] = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                async with session.request(
+                    method, url, headers=headers, json=json_body, params=params,
+                ) as response:
+                    status = response.status
+                    try:
+                        body_text = await response.text()
+                    except Exception:
+                        body_text = ""
+                    resp_headers = dict(response.headers)
+
+                # موفق یا خطای دایمی غیر-retriable → return
+                if status < 500 and status not in (403, 429):
+                    body_json: Optional[Dict[str, Any]] = None
+                    if body_text and (body_text.startswith("{") or body_text.startswith("[")):
+                        try:
+                            body_json = json.loads(body_text)
+                        except Exception:
+                            body_json = None
+                    return {
+                        "status": status,
+                        "body_text": body_text,
+                        "body_json": body_json,
+                        "headers": resp_headers,
+                        "ok": 200 <= status < 300,
+                        "retries": attempt - 1,
+                    }
+
+                # تشخیص rate-limit از 403 معمول (permission)
+                body_lower = body_text.lower()
+                is_rate_limit = (
+                    status == 429
+                    or (status == 403 and (
+                        "rate limit" in body_lower
+                        or "api rate limit exceeded" in body_lower
+                        or "secondary rate limit" in body_lower
+                    ))
+                )
+                # 403 بدون rate-limit signal → permission/auth، retry بی‌فایده
+                if status == 403 and not is_rate_limit:
+                    return {
+                        "status": status,
+                        "body_text": body_text,
+                        "body_json": None,
+                        "headers": resp_headers,
+                        "ok": False,
+                        "retries": attempt - 1,
+                    }
+
+                # محاسبهٔ wait
+                wait_seconds = 2 ** (attempt - 1)  # 1, 2, 4, 8
+                retry_after = resp_headers.get("Retry-After") or resp_headers.get("x-ratelimit-reset")
+                if retry_after:
+                    try:
+                        if str(retry_after).isdigit():
+                            n = int(retry_after)
+                            # خیلی اعداد بزرگ → احتمالاً Unix timestamp از x-ratelimit-reset
+                            if n > 10_000_000:
+                                import time as _t
+                                wait_seconds = min(max(1, n - int(_t.time())), 60)
+                            else:
+                                wait_seconds = min(n, 60)
+                    except Exception:
+                        pass
+
+                slog.warning(
+                    "github_retry",
+                    status=status,
+                    attempt=attempt,
+                    wait_seconds=wait_seconds,
+                    url=url.replace(self.GITHUB_API, ""),
+                )
+                if attempt < max_attempts:
+                    await asyncio.sleep(wait_seconds)
+                    continue
+
+                # exhausted — همان response آخر رو برمی‌گردونیم
+                return {
+                    "status": status,
+                    "body_text": body_text,
+                    "body_json": None,
+                    "headers": resp_headers,
+                    "ok": False,
+                    "retries": attempt - 1,
+                }
+
+            except Exception as e:
+                # network-level error → retry with backoff
+                last_exc = e
+                if attempt < max_attempts:
+                    await asyncio.sleep(2 ** (attempt - 1))
+                    continue
+                raise
+
+        # نباید برسیم اینجا
+        raise last_exc or RuntimeError("github retry exhausted without response")
+
     def _parse_repo_url(self, github_path: str) -> Dict[str, str]:
         """استخراج owner و repo از URL یا path"""
         if not github_path:
@@ -108,19 +231,15 @@ class GitHubPRService:
         branch: str,
         token: str = None
     ) -> Optional[str]:
-        """دریافت SHA آخرین commit یک branch"""
-        session = await self._get_session()
+        """دریافت SHA آخرین commit یک branch — با retry برای rate limit."""
         headers = self._get_headers(token)
-
+        url = f"{self.GITHUB_API}/repos/{owner}/{repo}/git/ref/heads/{branch}"
         try:
-            url = f"{self.GITHUB_API}/repos/{owner}/{repo}/git/ref/heads/{branch}"
-            async with session.get(url, headers=headers) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return data.get("object", {}).get("sha")
+            res = await self._gh_request("GET", url, headers=headers)
+            if res["ok"] and res["body_json"]:
+                return res["body_json"].get("object", {}).get("sha")
         except Exception as e:
             slog.error("Failed to get branch SHA", exception=e)
-
         return None
 
     async def create_branch(
@@ -131,8 +250,7 @@ class GitHubPRService:
         base_branch: str = None,
         token: str = None
     ) -> Dict[str, Any]:
-        """ایجاد branch جدید"""
-        session = await self._get_session()
+        """ایجاد branch جدید — با retry برای rate limit (403/429)."""
         headers = self._get_headers(token)
 
         try:
@@ -155,28 +273,18 @@ class GitHubPRService:
                 "sha": sha
             }
 
-            async with session.post(url, headers=headers, json=payload) as response:
-                if response.status == 201:
-                    slog.success("Branch created", branch=new_branch)
-                    return {
-                        "success": True,
-                        "branch": new_branch,
-                        "sha": sha
-                    }
-                elif response.status == 422:
-                    # Branch already exists
-                    return {
-                        "success": True,
-                        "branch": new_branch,
-                        "already_exists": True
-                    }
-                else:
-                    error = await response.text()
-                    return {
-                        "success": False,
-                        "error": f"Failed to create branch: {error}"
-                    }
-
+            res = await self._gh_request("POST", url, headers=headers, json_body=payload)
+            if res["status"] == 201:
+                slog.success("Branch created", branch=new_branch, retries=res["retries"])
+                return {"success": True, "branch": new_branch, "sha": sha}
+            elif res["status"] == 422:
+                return {"success": True, "branch": new_branch, "already_exists": True}
+            else:
+                return {
+                    "success": False,
+                    "error": f"Failed to create branch (status={res['status']}): {res['body_text'][:300]}",
+                    "rate_limited": res["status"] in (403, 429) and "rate limit" in res["body_text"].lower(),
+                }
         except Exception as e:
             slog.error("Create branch failed", exception=e)
             return {"success": False, "error": str(e)}
@@ -221,8 +329,7 @@ class GitHubPRService:
         branch: str = None,
         token: str = None
     ) -> Dict[str, Any]:
-        """ایجاد یا به‌روزرسانی فایل"""
-        session = await self._get_session()
+        """ایجاد یا به‌روزرسانی فایل — با retry برای rate limit."""
         headers = self._get_headers(token)
 
         try:
@@ -245,21 +352,19 @@ class GitHubPRService:
             if sha:
                 payload["sha"] = sha
 
-            async with session.put(url, headers=headers, json=payload) as response:
-                if response.status in [200, 201]:
-                    data = await response.json()
-                    return {
-                        "success": True,
-                        "sha": data.get("content", {}).get("sha"),
-                        "path": path
-                    }
-                else:
-                    error = await response.text()
-                    return {
-                        "success": False,
-                        "error": f"Failed to create/update file: {error}"
-                    }
-
+            res = await self._gh_request("PUT", url, headers=headers, json_body=payload)
+            if res["status"] in (200, 201):
+                data = res["body_json"] or {}
+                return {
+                    "success": True,
+                    "sha": (data.get("content") or {}).get("sha"),
+                    "path": path,
+                }
+            return {
+                "success": False,
+                "error": f"Failed to create/update file (status={res['status']}): {res['body_text'][:300]}",
+                "rate_limited": res["status"] in (403, 429) and "rate limit" in res["body_text"].lower(),
+            }
         except Exception as e:
             slog.error("File operation failed", exception=e)
             return {"success": False, "error": str(e)}
@@ -296,23 +401,21 @@ class GitHubPRService:
                 "draft": draft
             }
 
-            async with session.post(url, headers=headers, json=payload) as response:
-                if response.status == 201:
-                    data = await response.json()
-                    slog.success("Pull request created", pr_number=data.get("number"))
-                    return {
-                        "success": True,
-                        "pr_number": data.get("number"),
-                        "pr_url": data.get("html_url"),
-                        "state": data.get("state")
-                    }
-                else:
-                    error = await response.text()
-                    return {
-                        "success": False,
-                        "error": f"Failed to create PR: {error}"
-                    }
-
+            res = await self._gh_request("POST", url, headers=headers, json_body=payload)
+            if res["status"] == 201:
+                data = res["body_json"] or {}
+                slog.success("Pull request created", pr_number=data.get("number"), retries=res["retries"])
+                return {
+                    "success": True,
+                    "pr_number": data.get("number"),
+                    "pr_url": data.get("html_url"),
+                    "state": data.get("state"),
+                }
+            return {
+                "success": False,
+                "error": f"Failed to create PR (status={res['status']}): {res['body_text'][:300]}",
+                "rate_limited": res["status"] in (403, 429) and "rate limit" in res["body_text"].lower(),
+            }
         except Exception as e:
             slog.error("Create PR failed", exception=e)
             return {"success": False, "error": str(e)}

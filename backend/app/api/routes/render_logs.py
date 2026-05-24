@@ -11609,6 +11609,11 @@ class ApplyActionRequest(BaseModel):
     #   {"type": "trigger_deploy", "service_name": "lifemanager"},
     # ]
     render_actions: Optional[List[dict]] = None
+    # 🆕 (review-gate) — اگر smart-chat plan رو با review_blocked=True
+    # برگردونده، apply-action باید بدون این acknowledgement رد بشه.
+    # frontend بعد از نمایش confirm dialog به کاربر، این flag رو set می‌کنه.
+    review_acknowledged: bool = False
+    review_critical_signals: Optional[List[str]] = None
 
 
 class ScreenshotRequest(BaseModel):
@@ -15090,6 +15095,29 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 else:
                     yield sse("progress", {"step": "agent_revise_skip", "message": "ℹ️ بازنگری نتیجهٔ جدیدی نداد — طرح اولیه حفظ شد"})
 
+            # 🆕 (review-gate) — اگر reviewer issue critical پیدا کرده و
+            # revision هم نتونسته حلش کنه (یا اصلاً revise نشد)، plan رو
+            # برای apply-all مارک می‌کنیم. این به frontend می‌گه که قبل از
+            # commit باید کاربر تصمیم بگیره. (در transcript کاربر هر مرحله
+            # critical issue داشت ولی apply ادامه پیدا می‌کرد.)
+            _review_blocked = False
+            _review_critical_signals: List[str] = []
+            if _review and _review.get("has_critical_issues"):
+                # اگر revision نکرده‌ایم یا revision کم بوده، block
+                if not _revised:
+                    _review_blocked = True
+                    _review_critical_signals = _review.get("critical_signals", [])
+                else:
+                    # revision شد — ولی نمی‌دونیم آیا حل شد. به‌جای دوبار review
+                    # (هزینهٔ دوبرابر)، notes اولیه رو نگه می‌داریم و فقط
+                    # کاربر رو با warning ملایم‌تر مطلع می‌کنیم.
+                    _review_critical_signals = _review.get("critical_signals", [])
+                    _content += (
+                        "\n\n⚠️ **توجه**: بازبینی اولیه issue critical پیدا کرد "
+                        f"({', '.join(_review_critical_signals[:3])}). طرح "
+                        "بازنگری شد ولی قبل از «اعمال همهٔ تغییرات» نگاه دقیق کن."
+                    )
+
             yield sse("response", {
                 "type": "action",
                 "content": _content,
@@ -15113,7 +15141,16 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                     "model": _review.get("reviewer_model"),
                     "verdict": _review.get("verdict"),
                     "notes": _review.get("notes"),
+                    # 🆕 (review-gate) — flagهای جدید برای frontend
+                    "has_critical_issues": _review.get("has_critical_issues", False),
+                    "critical_signals": _review.get("critical_signals", []),
+                    "blocked": _review_blocked,
                 } if _review else None),
+                # 🆕 (review-gate) — flag سطح بالا تا frontend بتونه قبل از
+                # apply-all کاربر رو با confirm dialog حساس کنه (یا apply رو
+                # ببنده تا تأیید صریح بگیره).
+                "review_blocked": _review_blocked,
+                "review_critical_signals": _review_critical_signals,
             })
             yield sse("done", {"success": True})
             yield ("__handled__", True)
@@ -16905,6 +16942,23 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
 
     if not owner or not repo:
         return {"success": False, "error": "اطلاعات GitHub پروژه یافت نشد"}
+
+    # 🆕 (review-gate) — اگر کلاینت critical_signals می‌فرسته ولی
+    # review_acknowledged=False، apply رو رد می‌کنیم تا کاربر صراحتاً
+    # هشدارها رو ببینه. این جلوی commit شدن plan با bug شناخته‌شده رو می‌گیره
+    # (همان چیزی که در transcript کاربر ۲۳ فایل با ۴-۵ critical issue اتفاق افتاد).
+    _crit_signals = (request.review_critical_signals or [])
+    if _crit_signals and not request.review_acknowledged:
+        return {
+            "success": False,
+            "code": "review_acknowledgement_required",
+            "error": (
+                f"بازبینی این طرح {len(_crit_signals)} مشکل critical پیدا کرد: "
+                f"{', '.join(_crit_signals[:5])}. قبل از apply باید "
+                "review_acknowledged=true بفرستی (یعنی کاربر هشدارها رو دیده)."
+            ),
+            "critical_signals": _crit_signals,
+        }
 
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
