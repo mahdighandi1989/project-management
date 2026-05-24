@@ -15228,8 +15228,32 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         "بازنگری شد ولی قبل از «اعمال همهٔ تغییرات» نگاه دقیق کن."
                     )
 
+            # 🆕 (no-files-misclassify-fix) — اگر مدل عمداً `files=[]` submit
+            # کرده (مثلاً برای gathering info، presenting options، status check)،
+            # نباید type='action' فرستاد. در transcript کاربر «بررسی کن آیا
+            # دیتابیس متصله» مدل ۳ گزینه به user داد ولی type=action باعث شد
+            # frontend دکمه retry نشون بده و کاربر retry بزنه — همان جواب.
+            # حالا اگر files خالی، type='analysis' می‌فرستیم.
+            _response_type = "action" if _has_files else "analysis"
+
+            # 🆕 (response-truncation-warn) — اگر agent loop به ساده‌ای finish
+            # نشد (مثلاً max_iterations یا content مشکوک به truncate)، یک
+            # هشدار به content اضافه کن.
+            _stop_r = _agent_result.get("stop_reason") or ""
+            _content_stripped = (_content or "").rstrip()
+            if _content_stripped and not _content_stripped.endswith(
+                (".", "!", "?", "؟", "»", "\"", "'", "`", "]", ")", "}", "*")
+            ):
+                # احتمالاً قطع شده mid-sentence
+                _content = _content + (
+                    "\n\n⚠️ **هشدار**: پاسخ مدل ممکن است ناقص باشد "
+                    "(بدون پایان منطقی). شاید به سقف token خورده. "
+                    "اگر گزینه‌ها/توضیحات کامل دیده نمی‌شن، با مدل قوی‌تر یا "
+                    "پرامپت کوتاه‌تر دوباره امتحان کن."
+                )
+
             yield sse("response", {
-                "type": "action",
+                "type": _response_type,
                 "content": _content,
                 "model_used": _agent_result.get("model_used"),
                 "tokens_used": _agent_tokens,
