@@ -1792,13 +1792,58 @@ async def run_deep_scan(
                         ),
                     )
                 else:
-                    # اگر فیلتر چیزی برنگشت، scope را نادیده بگیر و scan کلی کن
-                    # تا کاربر گیر نکنه. لاگ هشدار می‌زنیم.
+                    # 🔴 (scope-empty-abort) — قبلاً اینجا fallback به scan کلی
+                    # داشتیم → باعث شد در transcript کاربر «منو برگردون به branch»
+                    # اسکن `selected_sections=['backend']` چون scope=0 شد به
+                    # scan کل پروژه fallback کرد و ۷۳ پیشنهاد بی‌ربط ساخت.
+                    # حالا اگر inspector explicitly scope داده ولی هیچ فایلی match
+                    # نکرد، scan را با success=False و reason="scope_empty"
+                    # متوقف می‌کنیم. این جلوی pollution chat با پیشنهادهای بی‌ربط را
+                    # می‌گیرد.
                     write_progress(
                         watched_id,
-                        phase="phase1_scope_empty",
-                        message="⚠️ هیچ فایلی با selection match نشد — برمی‌گردیم به اسکن کلی",
+                        status="completed",
+                        phase="phase1_scope_empty_abort",
+                        message=(
+                            "🚫 scope با هیچ فایلی match نشد — اسکن انجام نمی‌شود "
+                            "(جلوگیری از پیشنهادهای بی‌ربط)."
+                        ),
                     )
+                    # اگر در حالت inspector session هستیم، یک پیام informational
+                    # log کن تا کاربر متوجه شود scan اجرا نشد
+                    if _output_target_session_id is not None:
+                        try:
+                            from .scan_v5.scan_inspector_session import log_scan_message
+                            log_scan_message(
+                                session_id=_output_target_session_id,
+                                role="assistant",
+                                content=(
+                                    "ℹ️ scan متوقف شد: scope انتخاب‌شده "
+                                    f"(`{', '.join(selected_sections or ['—'])}`"
+                                    f"{' + ' + str(len(custom_paths or [])) + ' مسیر سفارشی' if custom_paths else ''}) "
+                                    "با هیچ فایلی در repo match نکرد. "
+                                    "این یعنی درخواست شما احتمالاً نیاز به scan ندارد — "
+                                    "به‌جای آن از chat ساده استفاده کن، یا scope را تنظیم کن."
+                                ),
+                                action_type="scan_aborted",
+                                extra_data={
+                                    "kind": "scan_aborted",
+                                    "reason": "scope_empty",
+                                    "selected_sections": list(selected_sections or []),
+                                    "custom_paths": list(custom_paths or []),
+                                },
+                            )
+                        except Exception as _log_e:
+                            logger.debug(f"scan_aborted log failed: {_log_e}")
+                    return {
+                        "success": False,
+                        "aborted": True,
+                        "reason": "scope_empty",
+                        "passes_run": 0,
+                        "findings": 0,
+                        "tasks_created": 0,
+                        "message": "scope با هیچ فایلی match نشد",
+                    }
             except Exception as _scope_e:
                 write_progress(
                     watched_id,
