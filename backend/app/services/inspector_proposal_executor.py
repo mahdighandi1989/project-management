@@ -576,7 +576,61 @@ async def run_proposal(
         valid_changes = new_valid
 
     # 🆕 (v2 M4) — syntax validation pre-stage
+    # 🆕 (truncation-guard) — قبل از syntax check، چک کن کد در middle قطع
+    # نشده باشه. reviewer در chat لاگ کاربر چندبار "کد ناقص است" گفت ولی
+    # syntax check unbalanced braces رو نگرفت چون قطع‌شدگی مثل
+    # `'خطا در تأیید ک'` (Persian mid-word) brace balance رو خراب نمی‌کنه.
+    def _looks_truncated(content_str: str) -> Optional[str]:
+        """تشخیص قطع‌شدگی content. None اگر سالم، یا متن دلیل اگر truncated."""
+        if not content_str:
+            return None
+        s = content_str.rstrip()
+        if not s:
+            return None
+        # heuristic 1: ends with explicit truncation marker
+        tail = s[-200:]
+        bad_markers = (
+            "... (ادامه",
+            "// ... (",
+            "/* ... */",
+            "[... truncated",
+            "[continues",
+            "...continued",
+        )
+        for m in bad_markers:
+            if m in tail:
+                return f"explicit truncation marker found in tail: '{m}'"
+        # heuristic 2: ends mid-token — last non-ws char suggests incomplete syntax
+        last_char = s[-1]
+        # ends with open bracket, comma, operator, or quote start
+        if last_char in "([{,=+-*&|<>:":
+            return f"ends mid-statement with '{last_char}'"
+        # ends with single quote or double quote — possibly unclosed string
+        if last_char in "'\"`":
+            # check it's actually unbalanced (more open than close)
+            quote_count = s.count(last_char) - s.count("\\" + last_char)
+            if quote_count % 2 == 1:
+                return f"ends with unclosed string delimiter '{last_char}'"
+        # heuristic 3: ends inside a line comment that looks cut off
+        last_line = s.rsplit("\n", 1)[-1].strip()
+        if (last_line.startswith("//") or last_line.startswith("#")) and len(last_line) > 5:
+            # comment line at end of file — often a sign of cut-off
+            # but only suspicious if the line ends mid-sentence (no period, no closing)
+            comment_body = last_line.lstrip("/# ").strip()
+            if (
+                comment_body
+                and not comment_body.endswith((".", "!", "?", "*/", ")", "]"))
+                and len(comment_body) > 15
+                and " " in comment_body  # multi-word, not a short tag
+            ):
+                # check: last char of comment body is letter (Latin or Persian)
+                last_alpha = comment_body[-1]
+                if last_alpha.isalpha():
+                    return f"ends with incomplete comment line: '{last_line[:60]}...'"
+        return None
+
     syntax_errors: List[Dict[str, str]] = []
+    truncation_errors: List[Dict[str, str]] = []
     for ch in valid_changes:
         if ch.get("change_kind") in ("delete", "patch"):
             continue  # patch با apply-all چک می‌شود؛ delete content ندارد
@@ -584,6 +638,12 @@ async def run_proposal(
         content = ch.get("content", "")
         if not content:
             continue
+        # truncation gate — قبل از syntax
+        _trunc_reason = _looks_truncated(content)
+        if _trunc_reason:
+            truncation_errors.append({"path": path, "error": _trunc_reason})
+            logger.warning(f"truncation detected in {path}: {_trunc_reason}")
+            continue  # truncated file دیگر syntax check نشه
         low = path.lower()
         try:
             if low.endswith(".py"):
@@ -621,6 +681,42 @@ async def run_proposal(
         except Exception as ve:
             # هر خطای دیگر را در validation سختگیر نگیر
             logger.debug(f"syntax check unexpected error for {path}: {ve}")
+
+    # 🆕 (truncation-guard) — اگر detect شد، همان مسیر failed_syntax می‌ره
+    # ولی reason متفاوته. این جلوی commit کد ناقص رو می‌گیره (مثل
+    # `'خطا در تأیید ک'` در chat کاربر).
+    if truncation_errors:
+        _update_proposal_in_message(message_id, proposal_id, {
+            "execution_status": "failed_syntax",
+            "execution_error": "کد تولیدشده توسط مدل ناقص/قطع‌شده است",
+            "syntax_errors": truncation_errors,
+            "executed_at": _now_iso(),
+            "raw_response": (response.content or "")[:2000],
+        })
+        log_scan_message(
+            session_id=session_id,
+            role="assistant",
+            content=(
+                f"❌ پیشنهاد «{proposal.get('title', '')[:80]}» کد ناقص تولید کرد "
+                f"(احتمالاً به سقف tokens خورده):\n\n"
+                + "\n".join(f"- `{e['path']}`: {e['error']}" for e in truncation_errors)
+                + "\n\nلطفاً «↻ بازاجرا» را با مدلی با context بزرگ‌تر بزنید."
+            ),
+            action_type="proposal_failed",
+            model_id=response.model_id if 'response' in locals() else model_id,
+            extra_data={
+                "kind": "proposal_executed",
+                "proposal_id": proposal_id,
+                "status": "failed_truncation",
+                "truncation_errors": truncation_errors,
+            },
+        )
+        return {
+            "success": False,
+            "error": "code_truncated",
+            "truncation_errors": truncation_errors,
+            "code": "failed_truncation",
+        }
 
     if syntax_errors:
         _update_proposal_in_message(message_id, proposal_id, {

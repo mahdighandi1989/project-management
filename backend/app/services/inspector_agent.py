@@ -962,12 +962,33 @@ async def run_reviewer_pass(
             # JSON نبود — متن خام را به‌عنوان notes نگه دار
             notes = raw[:800]
             verdict = "concerns" if any(w in raw.lower() for w in ("مشکل", "نمی", "concern", "break", "خراب", "حذف")) else "approve"
+        # 🆕 (review-gate) — تشخیص severity از notes. اگر notes شامل
+        # کلیدواژه‌های critical (بازنویسی مخرب، کد ناقص، حذف فایل بدون
+        # بررسی، blind overwrite، ...) باشد، plan را برای apply-all
+        # blocked می‌کنیم. این جلوی کاربر transcript ۲۳-فایلی با bug
+        # شناخته‌شده از commit شدن رو می‌گیره.
+        _notes_lower = (notes or "").lower()
+        _critical_signals = [
+            "بازنویسی مخرب", "کد ناقص", "ناقص است", "کد در وسط",
+            "قطع شده", "قطع‌شده", "blind overwrite", "overwrite کور",
+            "deploy می‌شکند", "deploy فیل", "crash می‌کند",
+            "import شکست", "importerror", "syntaxerror",
+            "nullable=false", "nullable false",  # شایع در گزارش‌های schema
+            "بدون بررسی وابستگی", "بدون اطمینان از",
+            "اشتباه است", "fail می‌کند", "fail می کند",
+            "endpoint غایب", "endpoint وجود ندارد",
+            "حدسی است", "حدسی‌اند",
+        ]
+        _matched_signals = [s for s in _critical_signals if s in _notes_lower]
+        _is_critical = verdict == "concerns" and len(_matched_signals) >= 1
         return {
             "reviewer_model": reviewer_model,
             "verdict": verdict,
             "notes": notes,
             "tokens_used": resp.tokens_used or 0,
             "self_review": _is_self_review,
+            "has_critical_issues": _is_critical,
+            "critical_signals": _matched_signals[:5],
         }
     except Exception as e:
         slog.warning(f"[reviewer] pass failed: {e}")
