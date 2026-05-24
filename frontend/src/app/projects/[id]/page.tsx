@@ -3707,6 +3707,38 @@ export default function ProjectDetailPage() {
       return;
     }
 
+    // 🆕 (review-gate) — اگر reviewer issue critical پیدا کرده،
+    // قبل از apply کاربر باید صراحتاً تأیید کنه. backend هم همین flag رو
+    // می‌خواد (review_acknowledged=true) وگرنه با کد review_acknowledgement_required
+    // رد می‌کنه.
+    const criticalSignals: string[] = msg.review_critical_signals || [];
+    let reviewAcknowledged = false;
+    if (criticalSignals.length > 0 || msg.review_blocked) {
+      const reviewerNotes = msg.review?.notes || '';
+      const signalsTxt = criticalSignals.slice(0, 5).join(', ');
+      const confirmMsg =
+        `⚠️ Reviewer در این طرح ${criticalSignals.length} مشکل critical پیدا کرد:\n\n` +
+        (signalsTxt ? `نشانه‌ها: ${signalsTxt}\n\n` : '') +
+        (reviewerNotes ? `یادداشت reviewer:\n${reviewerNotes.slice(0, 500)}\n\n` : '') +
+        `با اعمال این تغییرات، احتمال bug در PR بالاست. آیا با apply موافقی؟`;
+      // window.confirm را با ROOT-level confirm یا modal جایگزین کنیم اگر در دسترس بود
+      // ولی برای حداقل-تغییر، فعلاً از window.confirm استفاده می‌کنیم
+      try {
+        reviewAcknowledged = window.confirm(confirmMsg);
+      } catch {
+        reviewAcknowledged = false;
+      }
+      if (!reviewAcknowledged) {
+        setInspectorChatMessages(prev => [...prev, {
+          id: `apply_cancel_${Date.now()}`,
+          role: 'system' as const,
+          content: `⏸️ apply لغو شد — کاربر هشدارهای reviewer را تأیید نکرد. می‌تونی پیشنهاد رو دوباره از مدل بخوای یا با درخواست تمیزتر مجدد بزنی.`,
+          timestamp: new Date(),
+        }]);
+        return;
+      }
+    }
+
     // 🔒 قفل
     setInspectorOpLock(true);
     setInspectorOpType('fix');
@@ -3734,6 +3766,11 @@ export default function ProjectDetailPage() {
           // 🆕 (v3 render-ops) — forward render_actions اگر AI آن را در
           // action_plan شامل کرد (مثلاً set DATABASE_URL، restart service)
           render_actions: msg.action_plan.render_actions || undefined,
+          // 🆕 (review-gate) — برای backend که reviewer issue critical پیدا
+          // کرده بود. اگر critical_signals غیرخالی ولی reviewAcknowledged=false،
+          // backend با review_acknowledgement_required رد می‌کنه.
+          review_critical_signals: criticalSignals.length > 0 ? criticalSignals : undefined,
+          review_acknowledged: reviewAcknowledged,
         }),
         signal: inspectorOpAbortRef.current?.signal,
       });
@@ -4694,6 +4731,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     // 🆕 (v3 safety-net) — فایل‌هایی که در stack trace ذکر شده‌اند ولی AI
     // در action_plan قرار نداده — این یعنی فکس احتمالاً ناقص است
     const collectedStackTraceWarnings: string[] = _resumeState ? [..._resumeState.collectedStackTraceWarnings] : [];
+    // 🆕 (review-gate) — جمع‌آوری critical signals از reviewer در هر مرحله
+    // برای gate کردن apply نهایی
+    const collectedReviewSignals: string[] = [];
+    const collectedReviewNotes: string[] = [];
     let commitMessage = _resumeState?.commitMessage || '';
     let allFilesWereRead = _resumeState?.allFilesWereRead ?? true;
     let lastModelUsed = _resumeState?.lastModelUsed || '';
@@ -4712,60 +4753,82 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         timestamp: new Date(),
       }]);
 
-      // ساختن پرامپت مرحله با context مراحل قبلی
-      let stepPrompt = `${basePrompt}\n\n## ⚡ مرحله فعلی (${step.step_number} از ${steps.length}):\n${step.description}\n`;
-      if (collectedAnalysis.length > 0) {
-        stepPrompt += `\n## 📊 خلاصه مراحل قبلی:\n${collectedAnalysis.map((a, idx) => `مرحله ${idx + 1}: ${a.slice(0, 300)}`).join('\n')}\n`;
-      }
-      if (collectedActionFiles.length > 0) {
-        // 🔑 پاس دادن محتوای واقعی فایل‌های مراحل قبلی
-        stepPrompt += `\n## 📁 فایل‌های تغییر یافته تا الان (محتوای واقعی — بازنویسی نکن!):\n`;
-        let contentBudget = 30000;
-        for (const f of collectedActionFiles) {
-          // modify_sections: نمایش sections بجای content
-          if (f.operation === 'modify_sections' && f.sections) {
-            const sectionsStr = JSON.stringify(f.sections, null, 2);
-            stepPrompt += `\n### 📄 ${f.path} (modify_sections — ${f.sections.length} بخش):\n\`\`\`json\n${sectionsStr.slice(0, 3000)}\n\`\`\`\n`;
-            contentBudget -= Math.min(sectionsStr.length, 3000);
-            continue;
-          }
-          const fileContent = f.content || '';
-          const truncated = fileContent.length > 5000 ? fileContent.slice(0, 5000) + '\n// ... (ادامه فایل موجود)' : fileContent;
-          if (contentBudget <= 0) {
-            stepPrompt += `- \`${f.path}\` (${f.operation}) — [محتوا به خاطر حجم نمایش داده نشد]\n`;
-            continue;
-          }
-          stepPrompt += `\n### 📄 ${f.path} (${f.operation}):\n\`\`\`\n${truncated}\n\`\`\`\n`;
-          contentBudget -= truncated.length;
-        }
-        stepPrompt += `\n⚠️ **قانون حیاتی**: اگر فایلی در لیست بالا هست و در مرحله فعلی هم باید تغییر کنه → تمام محتوای بالا حفظ شود و فقط تغییرات جدید اضافه شود. هرگز از صفر بازنویسی نکن!\n`;
-      }
-      stepPrompt += `\n## 🚨 دستور قطعی — حتماً action_plan تولید کن
+      // 🆕 (step-scope v2) — رفع باگ بنیادی: قبلاً stepPrompt با
+      // `${basePrompt}\n...مرحله فعلی` شروع می‌شد. basePrompt کل ۷ مرحله را
+      // داشت، پس مدل scope کامل را می‌دید و در هر مرحله همه چیز را dump
+      // می‌کرد (در transcript کاربر، مراحل ۲، ۳، ۴ همگی مدل User + admin
+      // endpoints را بازساخته بودند). حالا step description اول می‌آید،
+      // basePrompt فقط به‌عنوان background خلاصه‌شده در انتها، و فایل‌های
+      // قبلی به‌جای محتوا فقط با عنوان (path + operation) لیست می‌شن.
+      const previousFileSummary = collectedActionFiles.length > 0
+        ? collectedActionFiles.map(f => {
+            const op = f.operation || 'modify';
+            return `  - \`${f.path}\` (${op})`;
+          }).join('\n')
+        : '';
+      const prevAnalysisSummary = collectedAnalysis.length > 0
+        ? collectedAnalysis.map((a, idx) => `  مرحله ${idx + 1}: ${a.slice(0, 200).replace(/\n/g, ' ')}`).join('\n')
+        : '';
+      // basePrompt را به ۵۰۰ کاراکتر کوتاه می‌کنیم تا فقط goal کلی پروژه
+      // را بفهماند، نه فهرست همهٔ مراحل. اگر کاربر context بیشتری بخواهد،
+      // در مرحلهٔ بعدی پیغام جدید می‌فرستد.
+      const baseContext = (basePrompt || '').slice(0, 500);
 
-این مرحله **بدون action_plan شکست خورده** تلقی می‌شود. صرف تحلیل کافی نیست!
+      let stepPrompt = `# 🎯 وظیفهٔ این مرحله (تنها همین — هیچ‌چیز خارج از این انجام نده)
 
-**خروجی موردانتظار**:
-1. حداکثر ۵ خط تحلیل (کوتاه)
-2. **حتماً** یک بلوک JSON با ساختار زیر:
+**مرحله ${step.step_number} از ${steps.length}:** ${step.description}
+
+# ⛔ scope محکم — قانون شکست‌ناپذیر
+- فقط فایل‌هایی که **مستقیماً به همین مرحله مربوط‌اند** را در action_plan بگذار
+- اگر مرحلهٔ بعدی قرار است کاری بکند، **همین الان** آن کار را انجام نده — حتی اگر مرتبط به نظر برسد
+- اگر شک داری «آیا این فایل به مرحلهٔ ${step.step_number} مربوط است؟» → پاسخت احتمالاً "نه" است — رهایش کن
+- بازنویسی فایل‌هایی که در مراحل قبلی توسط مدل تغییر کرده‌اند (لیست زیر) **ممنوع** است مگر اینکه این مرحله صریحاً بخواهد
+`;
+
+      if (previousFileSummary) {
+        stepPrompt += `
+# ✅ فایل‌هایی که در مراحل قبلی تغییر کرده‌اند (دست‌نخورده — re-dump نکن)
+${previousFileSummary}
+
+⚠️ این فایل‌ها روی branch staged هستند. اگر این مرحله **واقعاً** نیاز دارد یکی از این‌ها را
+دوباره تغییر دهد، حتماً در content جدید **تمام تغییرات قبلی را حفظ کن** و فقط delta این مرحله را اضافه کن.
+در صورت شک، از modify_sections استفاده کن نه modify کامل.
+`;
+      }
+
+      if (prevAnalysisSummary) {
+        stepPrompt += `
+# 📊 خلاصهٔ مراحل قبلی (فقط برای آگاهی)
+${prevAnalysisSummary}
+`;
+      }
+
+      stepPrompt += `
+# 📌 هدف کلی پروژه (background — کار نکن روش)
+${baseContext}${baseContext.length >= 500 ? '...' : ''}
+
+# 🚨 خروجی الزامی
+
 \`\`\`json
 {
   "files": [
     {
       "path": "مسیر دقیق فایل از ریشه",
-      "operation": "create" | "modify",
-      "content": "محتوای کامل فایل پس از تغییر"
+      "operation": "create" | "modify" | "modify_sections",
+      "content": "محتوای کامل فایل (فقط برای create/modify)"
     }
   ],
-  "commit_message": "پیام مختصر commit"
+  "commit_message": "پیام مختصر commit این مرحله"
 }
 \`\`\`
 
 🚫 **ممنوع‌ها**:
-- پاسخ فقط با تحلیل (بدون JSON files block) → fail
-- توضیح اینکه "این فایل باید ساخته شود" بدون اینکه آن را در files بگذاری → fail
+- شامل کردن فایلی که قبلاً در مراحل قبلی dump شده و این مرحله به آن کاری ندارد → fail
+- خروجی فقط تحلیل بدون JSON → fail
 - پاسخ خالی یا "نمی‌توانم" → fail
+- شامل کردن فایل‌های مرحله‌های بعدی (مثلاً frontend اگر این مرحله فقط backend است) → fail
 
-✅ مرحله ${step.step_number} از ${steps.length}: ${step.description}`;
+✅ یادآوری: مرحله ${step.step_number}/${steps.length}: **${step.description}**`;
 
       try {
         // تاریخچه چت برای context
@@ -4781,6 +4844,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         let stepResponseContent = '';
         let stepActionPlan: any = null;
         let stepFilesWereRead = false;
+        // 🆕 (review-gate) — review info per step
+        let stepReview: any = null;
+        let stepReviewBlocked = false;
+        let stepReviewCriticalSignals: string[] = [];
         let _stepOk = false;
         let _lastStepErr: any = null;
 
@@ -4831,6 +4898,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                       stepActionPlan = data.action_plan || null;
                       stepFilesWereRead = data.files_were_read ?? false;
                       lastModelUsed = data.model_used || '';
+                      // 🆕 (review-gate)
+                      stepReview = data.review || null;
+                      stepReviewBlocked = data.review_blocked || false;
+                      stepReviewCriticalSignals = data.review_critical_signals || [];
 
                       if (data.selected_file_paths?.length) {
                         setPreviouslyReadFiles(prev => {
@@ -4867,6 +4938,15 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         // جمع‌آوری نتایج مرحله
         collectedAnalysis.push(stepResponseContent.slice(0, 500));
         if (!stepFilesWereRead) allFilesWereRead = false;
+        // 🆕 (review-gate) — جمع‌آوری critical signals از این مرحله
+        if (stepReviewCriticalSignals.length > 0) {
+          for (const sig of stepReviewCriticalSignals) {
+            if (!collectedReviewSignals.includes(sig)) collectedReviewSignals.push(sig);
+          }
+        }
+        if (stepReview?.notes && (stepReviewBlocked || stepReview?.has_critical_issues)) {
+          collectedReviewNotes.push(`مرحله ${step.step_number}: ${stepReview.notes.slice(0, 200)}`);
+        }
 
         // 🆕 (clarify-first) — اگر AI در میانهٔ stepwise سوال پرسید،
         // اجرا را متوقف کن. state در pendingStepwiseRef ذخیره می‌شود تا
@@ -5051,6 +5131,18 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       commit_message: commitMessage || `Multi-step fix: ${steps.map(s => s.description).join(', ')}`,
     } : null;
 
+    // 🆕 (review-gate) — اگر در هیچ مرحله reviewer issue critical نگرفته،
+    // علامت می‌ذاریم. در غیر این صورت signals جمع‌شده در message حفظ می‌شه.
+    if (collectedReviewSignals.length > 0) {
+      finalContent += `\n\n## ⚠️ بازبینی هشدارهای مهم\n`;
+      finalContent += `Reviewer در ${collectedReviewNotes.length} مرحله issue critical پیدا کرد:\n`;
+      finalContent += `- نشانه‌ها: ${collectedReviewSignals.slice(0, 5).join(', ')}\n`;
+      if (collectedReviewNotes.length > 0) {
+        finalContent += `\n${collectedReviewNotes.slice(0, 3).map(n => `> ${n}`).join('\n')}\n`;
+      }
+      finalContent += `\nقبل از «اعمال همهٔ تغییرات»، حتماً پیشنهادها رو دقیق چک کن. apply با confirm کاربر ادامه پیدا می‌کنه.`;
+    }
+
     setInspectorChatMessages(prev => [...prev, {
       id: finalReportId,
       role: 'assistant' as const,
@@ -5061,6 +5153,9 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
       action_plan: combinedActionPlan,
       files_were_read: allFilesWereRead,
       is_multi_step_report: true,
+      // 🆕 (review-gate) — passing review state to applySmartAction
+      review_blocked: collectedReviewSignals.length > 0,
+      review_critical_signals: collectedReviewSignals,
     } as any]);
 
     setInspectorChatLoading(false);
@@ -5799,6 +5894,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                     files_were_read: data.files_were_read ?? false,
                     selected_file_paths: data.selected_file_paths || [],
                     original_message: userMessage,
+                    // 🆕 (review-gate) — review info شامل critical_signals
+                    review: data.review || null,
+                    review_blocked: data.review_blocked || false,
+                    review_critical_signals: data.review_critical_signals || [],
                   } as any]);
 
                   // 🆕 (anti-stuck-loop) — اگر این یک action request بود
@@ -6523,6 +6622,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   tokens_used: data.tokens_used,
                   action_type: data.has_action ? 'smart_action' as any : undefined,
                   action_plan: data.action_plan,
+                  // 🆕 (review-gate) — review info forwarded
+                  review: data.review || null,
+                  review_blocked: data.review_blocked || false,
+                  review_critical_signals: data.review_critical_signals || [],
                   ...(_isMultiStep
                     ? { _is_multi_step_part: true }
                     : { is_visual_debug_report: true }),
@@ -6583,6 +6686,9 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
           // ذخیره می‌شود تا گزارش نهایی شیفت نخورد وقتی مرحله‌ای fail می‌کند.
           const collectedAnalysis: Array<{ step_number: number; description: string; content: string }> = [];
           const failedSteps: Array<{ step_number: number; description: string; error: string }> = [];
+          // 🆕 (review-gate) — جمع‌آوری critical signals در visual-debug multi-step
+          const vdCollectedReviewSignals: string[] = [];
+          const vdCollectedReviewNotes: string[] = [];
           let commitMessage = '';
           let lastModelUsed = vdStep1ModelUsed;
 
@@ -6622,61 +6728,74 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
               timestamp: new Date(),
             }]);
 
-            // ساختن پرامپت مرحله با context مراحل قبلی
-            let stepPrompt = `${vdBasePrompt}\n\n## ⚡ مرحله فعلی (${step.step_number} از ${vdSteps.length}):\n${step.description}\n`;
-            if (collectedAnalysis.length > 0) {
-              stepPrompt += `\n## 📊 خلاصه مراحل قبلی:\n${collectedAnalysis.map(a => `مرحله ${a.step_number}: ${a.content.slice(0, 300)}`).join('\n')}\n`;
-            }
-            if (collectedActionFiles.length > 0) {
-              // 🔑 پاس دادن محتوای واقعی فایل‌های تغییر یافته مراحل قبلی
-              // تا مدل بداند چه کدی قبلاً نوشته شده و از صفر بازنویسی نکند
-              stepPrompt += `\n## 📁 فایل‌های تغییر یافته تا الان (محتوای واقعی — بازنویسی نکن!):\n`;
-              let contentBudget = 30000; // حداکثر 30K کاراکتر برای محتوای فایل‌ها
-              for (const f of collectedActionFiles) {
-                // modify_sections: نمایش sections بجای content
-                if (f.operation === 'modify_sections' && f.sections) {
-                  const sectionsStr = JSON.stringify(f.sections, null, 2);
-                  stepPrompt += `\n### 📄 ${f.path} (modify_sections — ${f.sections.length} بخش):\n\`\`\`json\n${sectionsStr.slice(0, 3000)}\n\`\`\`\n`;
-                  contentBudget -= Math.min(sectionsStr.length, 3000);
-                  continue;
-                }
-                const fileContent = f.content || '';
-                const truncated = fileContent.length > 5000 ? fileContent.slice(0, 5000) + '\n// ... (ادامه فایل موجود)' : fileContent;
-                if (contentBudget <= 0) {
-                  stepPrompt += `- \`${f.path}\` (${f.operation}) — [محتوا به خاطر حجم نمایش داده نشد]\n`;
-                  continue;
-                }
-                stepPrompt += `\n### 📄 ${f.path} (${f.operation}):\n\`\`\`\n${truncated}\n\`\`\`\n`;
-                contentBudget -= truncated.length;
-              }
-              stepPrompt += `\n⚠️ **قانون حیاتی**: اگر فایلی در لیست بالا هست و در مرحله فعلی هم باید تغییر کنه → تمام محتوای بالا حفظ شود و فقط تغییرات جدید اضافه شود. هرگز از صفر بازنویسی نکن!\n`;
-            }
-            stepPrompt += `\n## 🚨 دستور قطعی — حتماً action_plan تولید کن
+            // 🆕 (step-scope v2) — همان fix در executeMultiStep visual-debug.
+            // قبلاً vdBasePrompt که شامل کل ۷ مرحله بود به مدل پاس می‌شد →
+            // مدل scope را کامل می‌دید و در هر مرحله همه‌چیز را dump می‌کرد.
+            // حالا step description اول، basePrompt فقط preview، و فایل‌های
+            // قبلی فقط لیست (path+operation) بدون content.
+            const vdPreviousFileSummary = collectedActionFiles.length > 0
+              ? collectedActionFiles.map((f: any) => `  - \`${f.path}\` (${f.operation || 'modify'})`).join('\n')
+              : '';
+            const vdPrevAnalysisSummary = collectedAnalysis.length > 0
+              ? collectedAnalysis.map((a: any) => `  مرحله ${a.step_number}: ${a.content.slice(0, 200).replace(/\n/g, ' ')}`).join('\n')
+              : '';
+            const vdBaseContext = (vdBasePrompt || '').slice(0, 500);
 
-این مرحله **بدون action_plan شکست خورده** تلقی می‌شود. صرف تحلیل کافی نیست!
+            let stepPrompt = `# 🎯 وظیفهٔ این مرحله (تنها همین — هیچ‌چیز خارج از این انجام نده)
 
-**خروجی موردانتظار**:
-1. حداکثر ۵ خط تحلیل (کوتاه)
-2. **حتماً** یک بلوک JSON با ساختار زیر:
+**مرحله ${step.step_number} از ${vdSteps.length}:** ${step.description}
+
+# ⛔ scope محکم — قانون شکست‌ناپذیر
+- فقط فایل‌هایی که **مستقیماً به همین مرحله مربوط‌اند** را در action_plan بگذار
+- اگر مرحلهٔ بعدی قرار است کاری بکند، **همین الان** آن کار را انجام نده — حتی اگر مرتبط به نظر برسد
+- اگر شک داری «آیا این فایل به مرحلهٔ ${step.step_number} مربوط است؟» → پاسخت احتمالاً "نه" است — رهایش کن
+- بازنویسی فایل‌هایی که در مراحل قبلی توسط مدل تغییر کرده‌اند (لیست زیر) **ممنوع** است مگر اینکه این مرحله صریحاً بخواهد
+`;
+
+            if (vdPreviousFileSummary) {
+              stepPrompt += `
+# ✅ فایل‌هایی که در مراحل قبلی تغییر کرده‌اند (دست‌نخورده — re-dump نکن)
+${vdPreviousFileSummary}
+
+⚠️ این فایل‌ها روی branch staged هستند. اگر این مرحله **واقعاً** نیاز دارد یکی از این‌ها را
+دوباره تغییر دهد، حتماً تمام تغییرات قبلی را حفظ کن و فقط delta این مرحله را اضافه کن.
+در صورت شک، از modify_sections استفاده کن نه modify کامل.
+`;
+            }
+
+            if (vdPrevAnalysisSummary) {
+              stepPrompt += `
+# 📊 خلاصهٔ مراحل قبلی (فقط برای آگاهی)
+${vdPrevAnalysisSummary}
+`;
+            }
+
+            stepPrompt += `
+# 📌 هدف کلی پروژه (background — کار نکن روش)
+${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
+
+# 🚨 خروجی الزامی
+
 \`\`\`json
 {
   "files": [
     {
       "path": "مسیر دقیق فایل از ریشه",
-      "operation": "create" | "modify",
-      "content": "محتوای کامل فایل پس از تغییر"
+      "operation": "create" | "modify" | "modify_sections",
+      "content": "محتوای کامل فایل (فقط برای create/modify)"
     }
   ],
-  "commit_message": "پیام مختصر commit"
+  "commit_message": "پیام مختصر commit این مرحله"
 }
 \`\`\`
 
 🚫 **ممنوع‌ها**:
-- پاسخ فقط با تحلیل (بدون JSON files block) → fail
-- توضیح اینکه "این فایل باید ساخته شود" بدون اینکه آن را در files بگذاری → fail
+- شامل کردن فایلی که قبلاً در مراحل قبلی dump شده و این مرحله به آن کاری ندارد → fail
+- خروجی فقط تحلیل بدون JSON → fail
 - پاسخ خالی یا "نمی‌توانم" → fail
+- شامل کردن فایل‌های مرحله‌های بعدی → fail
 
-✅ مرحله ${step.step_number} از ${vdSteps.length}: ${step.description}`;
+✅ یادآوری: مرحله ${step.step_number}/${vdSteps.length}: **${step.description}**`;
 
             try {
               const chatHistory = inspectorChatMessages
@@ -6690,6 +6809,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
               let stepResponseContent = '';
               let stepActionPlan: any = null;
               let stepFilesWereRead = false;
+              // 🆕 (review-gate) — review state per vd step
+              let vdStepReview: any = null;
+              let vdStepReviewBlocked = false;
+              let vdStepReviewCriticalSignals: string[] = [];
               let _stepOk = false;
               let _lastStepErr: any = null;
 
@@ -6738,6 +6861,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                             stepActionPlan = sData.action_plan || null;
                             stepFilesWereRead = sData.files_were_read ?? false;
                             lastModelUsed = sData.model_used || lastModelUsed;
+                            // 🆕 (review-gate)
+                            vdStepReview = sData.review || null;
+                            vdStepReviewBlocked = sData.review_blocked || false;
+                            vdStepReviewCriticalSignals = sData.review_critical_signals || [];
                             if (sData.selected_file_paths?.length) {
                               setPreviouslyReadFiles(prev => {
                                 const newF = sData.selected_file_paths.filter((f: string) => !prev.includes(f));
@@ -6777,6 +6904,15 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                 description: step.description,
                 content: stepResponseContent.slice(0, 500),
               });
+              // 🆕 (review-gate) — جمع signals این مرحله
+              if (vdStepReviewCriticalSignals.length > 0) {
+                for (const sig of vdStepReviewCriticalSignals) {
+                  if (!vdCollectedReviewSignals.includes(sig)) vdCollectedReviewSignals.push(sig);
+                }
+              }
+              if (vdStepReview?.notes && (vdStepReviewBlocked || vdStepReview?.has_critical_issues)) {
+                vdCollectedReviewNotes.push(`مرحله ${step.step_number}: ${vdStepReview.notes.slice(0, 200)}`);
+              }
               // 🆕 (clarify-first) — همان رفتار توقف stepwise در visual-debug
               if (stepActionPlan?.ask_user || stepActionPlan?.route_to) {
                 setInspectorChatMessages(prev => [...prev, {
@@ -6864,6 +7000,18 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
             commit_message: commitMessage || `Multi-step visual debug fix: ${vdSteps.map(s => s.description).join(', ')}`,
           } : null;
 
+          // 🆕 (review-gate) — اگر در vd steps reviewer issue critical پیدا کرد،
+          // به finalContent و message اضافه می‌کنیم
+          if (vdCollectedReviewSignals.length > 0) {
+            finalContent += `\n\n## ⚠️ بازبینی هشدارهای مهم (visual-debug)\n`;
+            finalContent += `Reviewer در ${vdCollectedReviewNotes.length} مرحله issue critical پیدا کرد:\n`;
+            finalContent += `- نشانه‌ها: ${vdCollectedReviewSignals.slice(0, 5).join(', ')}\n`;
+            if (vdCollectedReviewNotes.length > 0) {
+              finalContent += `\n${vdCollectedReviewNotes.slice(0, 3).map(n => `> ${n}`).join('\n')}\n`;
+            }
+            finalContent += `\nقبل از «اعمال همهٔ تغییرات»، حتماً پیشنهادها رو دقیق چک کن. apply با confirm کاربر ادامه پیدا می‌کنه.`;
+          }
+
           setInspectorChatMessages(prev => [...prev, {
             id: `vd_ms_final_${Date.now()}`,
             role: 'assistant' as const,
@@ -6874,6 +7022,9 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
             action_plan: combinedActionPlan,
             is_multi_step_report: true,
             is_visual_debug_report: true,
+            // 🆕 (review-gate) — passing review state to applySmartAction
+            review_blocked: vdCollectedReviewSignals.length > 0,
+            review_critical_signals: vdCollectedReviewSignals,
           } as any]);
         }
       }
@@ -7040,6 +7191,10 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
                   tokens_used: data.tokens_used,
                   action_type: data.has_action ? 'smart_action' as any : undefined,
                   action_plan: data.action_plan,
+                  // 🆕 (review-gate) — review info forwarded
+                  review: data.review || null,
+                  review_blocked: data.review_blocked || false,
+                  review_critical_signals: data.review_critical_signals || [],
                   is_reanalysis_report: true,
                   vision_model: data.vision_model,
                 } as any]);
