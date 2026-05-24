@@ -14334,6 +14334,14 @@ async def enhance_prompt_endpoint(request: EnhancePromptRequest, db: Session = D
         }
 
 
+# 🔴 (anti-parallel) — قفل per-project برای smart-chat. وقتی یک agent در
+# حال اجراست، درخواست دوم (مثلاً از retry یا double-click) نباید همزمان
+# اجرا شود — چون SSE هر دو event می‌فرستن، چت قاتی می‌شود (همان شکایت
+# کاربر دربارهٔ ترتیب پیام‌ها).
+_SMART_CHAT_ACTIVE: Dict[str, float] = {}  # project_id → start_timestamp
+_SMART_CHAT_LOCK_TIMEOUT = 600  # ۱۰ دقیقه — اگر چیزی بیشتر طول کشید، احتمالاً hung است
+
+
 @router.post("/inspector/smart-chat")
 async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
     """
@@ -14342,11 +14350,30 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
     2. اگر درخواست اقدام باشه: تحلیل + پیشنهاد اصلاح + دکمه اعمال
     SSE streaming برای گزارش لحظه‌ای
     """
+    import time as _time_sc
     from fastapi.responses import StreamingResponse
     from ...models.project import Project
     from ...services.github_import import get_github_import_service
     from ...services.ai_manager import get_ai_manager
     from ...services.ai_base import Message
+
+    # 🔴 (anti-parallel) — اگر چت دیگری برای همین project در حال اجراست،
+    # درخواست جدید را رد کن. این جلوی interleaved SSE events را می‌گیرد که
+    # چت را به‌هم می‌ریخت.
+    _now_sc = _time_sc.time()
+    _pid_key = str(request.project_id or "")
+    _active_since = _SMART_CHAT_ACTIVE.get(_pid_key)
+    if _active_since and (_now_sc - _active_since) < _SMART_CHAT_LOCK_TIMEOUT:
+        slog.info(f"[smart-chat] rejecting concurrent request for project {_pid_key} (active for {_now_sc - _active_since:.1f}s)")
+        async def _reject_stream():
+            _msg = (
+                "⏳ یک درخواست قبلی هنوز در حال پردازش است. لطفاً صبر کن تا تمام شود "
+                "(یا صفحه را reload کن اگر بیش از حد طول کشید)."
+            )
+            yield f"event: error\ndata: {json.dumps({'message': _msg}, ensure_ascii=False)}\n\n"
+            yield f"event: done\ndata: {json.dumps({'success': False, 'reason': 'concurrent_request'})}\n\n"
+        return StreamingResponse(_reject_stream(), media_type="text/event-stream")
+    _SMART_CHAT_ACTIVE[_pid_key] = _now_sc
 
     project = db.query(Project).filter(Project.id == request.project_id).first()
     if not project:
@@ -14381,6 +14408,13 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
     # skip می‌شود. بدون این، executeMultiStep response های scan_initiated
     # را نمی‌فهمد و هیچ action_plan ای تولید نمی‌شود → 0 file changed.
     _selective_scan_disabled = not getattr(request, "enable_selective_scan", True)
+    # 🔴 (anti-overreach) — روی retry هرگز intent-path/scan اجرا نشود.
+    # retry یعنی «همان کار قبلی را دوباره کن»، نه «یک scan جدید راه بنداز».
+    # این یکی از دلایل «scan ناخواسته» در سشن‌های کاربر بود.
+    _is_retry_attempt = bool(getattr(request, "retry_attempt", None))
+    if _is_retry_attempt:
+        _selective_scan_disabled = True
+        slog.info("[smart-chat] retry detected — selective scan disabled to prevent unwanted auto-scan")
     if _selective_scan_disabled:
         slog.info("[smart-chat] selective-scan intent path disabled by request flag — direct to chat")
     # یک sentinel exception برای exit تمیز از intent path. توسط except کلی
@@ -16736,6 +16770,13 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 yield f"event: error\ndata: {json.dumps({'message': f'❌ خطای غیرمنتظره ({type(e).__name__}): {str(e)[:150]}'}, ensure_ascii=False)}\n\n"
                 yield f"event: done\ndata: {json.dumps({'success': False})}\n\n"
             except GeneratorExit:
+                pass
+        finally:
+            # 🔴 (anti-parallel) — قفل را همیشه آزاد کن، حتی روی exception یا
+            # cancellation. بدون این، session تا timeout قفل می‌ماند.
+            try:
+                _SMART_CHAT_ACTIVE.pop(_pid_key, None)
+            except Exception:
                 pass
 
     return StreamingResponse(

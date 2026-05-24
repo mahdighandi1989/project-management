@@ -25,40 +25,25 @@ from typing import Any, Dict, List, Optional
 
 
 # ─── کلیدواژه‌های trigger ─────────────────────────────────────────
+# 🔴🔴 ریشهٔ مشکلِ «scan خودکار اتفاقی»: قبلاً این لیست شامل کلمات بسیار
+# عادی مثل «اصلاح کن»، «درست کن»، «اضافه کن»، «قابلیت» بود — یعنی **هر پیام
+# روزمره** scan ۱۲-pass را فعال می‌کرد. کاربر فقط می‌خواست چت کند، scan
+# ۱۷ دقیقه‌ای راه می‌افتاد. حالا فقط با **کلیدواژه‌های صریح scan** فعال می‌شود.
 _TRIGGER_KEYWORDS_FA = (
-    "بررسی کن", "اصلاح کن", "درست کن", "این باگ", "مشکل دار",
-    "خطا داره", "خطا میده", "این کار نمی", "این کار نمیکن", "این کار نمیکنه",
-    "این چرا", "این رو ببین", "اعمال کن", "پیاده کن", "پیاده‌سازی",
-    "refactor", "بهینه", "ارتقا", "ارتقاء", "این رو درست", "رفع",
-    "این رو حل", "حل کن", "این رو بهبود", "بهبود بده", "این مشکل",
-    "چه مشکلی", "چی مشکلی", "این صفحه چه", "این صفحه چی",
-    "ایراد داره", "ایراد دار", "بهینه کن", "بازنویسی کن",
-    # 🆕 (v2 M1) — vague + feature/upgrade keywords
-    "شکست خورد", "بالا نیومد", "بالا نیامد", "دیپلوی نشد", "بیلد خراب",
-    "بیلد نشد", "ارور داد", "ارور میده", "ارور می‌دهد", "down شده",
-    "اضافه کن", "اضافه‌ش کن", "اضافه میکنی", "قابلیت", "ویژگی",
-    "امکان", "بتونم", "بتوانم", "بتونه", "بتواند",
-    "این رو بساز", "بسازش", "merge کن", "integrate", "این رو ادغام",
-    "ارتقا بده", "ارتقا بدم",
+    "اسکن کن", "اسکن عمیق", "اسکن موردی", "اسکن کامل", "بررسی عمیق",
+    "اودیت کن", "audit کن", "تحلیل کامل پروژه", "تحلیل عمیق پروژه",
+    "گزارش کامل", "بازرسی کامل",
 )
 _TRIGGER_KEYWORDS_EN = (
-    "fix", "bug", "broken", "not working", "doesn't work", "doesnt work",
-    "investigate", "refactor", "improve", "apply", "implement",
-    "solve", "diagnose", "debug this", "this issue", "why does",
-    # 🆕 (v2 M1)
-    "add feature", "add support", "implement support", "add ability",
-    "introduce", "deploy failed", "build failed", "ci failed",
-    "deployment broken", "build broken", "feature add",
+    "scan deep", "deep scan", "audit", "full scan", "selective scan",
+    "comprehensive analysis", "full audit",
 )
 
-# 🆕 (v2 M1) — کلیدواژه‌های قوی برای vague-intent fallback. اگر یکی از
-# این‌ها match کرد و هیچ anchor (URL/log/file) نداشتیم، به‌جای
-# `no_anchor`، scan با semantic_search_only=True را trigger می‌کنیم.
+# 🔴 کلیدواژه‌های قوی برای vague-intent fallback نیز محدود شد.
+# فقط صریحاً اگر کاربر اسکن خواست.
 _STRONG_KEYWORDS = {
-    "شکست خورد", "بالا نیومد", "دیپلوی نشد", "بیلد خراب", "بیلد نشد",
-    "ارور داد", "اضافه کن", "قابلیت", "امکان", "ارتقا بده",
-    "deploy failed", "build failed", "ci failed", "add feature",
-    "add support", "introduce",
+    "اسکن کن", "اسکن عمیق", "اسکن موردی", "اودیت کن",
+    "deep scan", "scan deep", "audit", "full scan",
 }
 
 
