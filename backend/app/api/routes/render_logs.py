@@ -17585,7 +17585,14 @@ section‌های شکست‌خورده:
                                 if _fallback_sections:
                                     # اعمال sections روی فایل اصلی
                                     _sec_result = _apply_section_modifications(_orig_content, _fallback_sections)
-                                    if _sec_result["applied"] > 0:
+                                    # 🔴 (partial-apply-bug) — قبلاً اگر فقط بخشی از sections اعمال می‌شد
+                                    # (مثلاً 3/4)، نتیجه partial **بی‌سروصدا** پذیرفته می‌شد. در transcript
+                                    # کاربر این باعث شد `security = HTTPBearer()` گم بشه و deploy با
+                                    # `NameError: name 'security' is not defined` کرش کرد. حالا
+                                    # **همهٔ** sections باید apply بشن وگرنه فایل drop می‌شه.
+                                    _total_sections = len(_fallback_sections)
+                                    _applied_count = _sec_result.get("applied", 0)
+                                    if _applied_count > 0 and _applied_count == _total_sections:
                                         _sec_syntax = _validate_file_content_syntax(_sec_result["content"], file_path)
                                         if _sec_syntax["valid"]:
                                             f["content"] = _sec_result["content"]
@@ -17593,13 +17600,28 @@ section‌های شکست‌خورده:
                                             yield sse("progress", {
                                                 "step": "destructive_rewrite_section_converted",
                                                 "message": f"🔄 {file_path}: بازنویسی مخرب → تبدیل خودکار به modify_sections: "
-                                                           f"{_sec_result['applied']}/{len(_fallback_sections)} بخش اعمال شد"
+                                                           f"{_applied_count}/{_total_sections} بخش اعمال شد"
                                             })
-                                            slog.info(f"[apply-action] AUTO-CONVERTED destructive rewrite {file_path}: {_sec_result['applied']} sections applied")
+                                            slog.info(f"[apply-action] AUTO-CONVERTED destructive rewrite {file_path}: {_applied_count}/{_total_sections} sections applied")
                                             continue
                                         else:
                                             _sec_errs = "; ".join(_sec_syntax.get("errors", [])[:2])
                                             slog.warning(f"[apply-action] Section-convert syntax failed {file_path}: {_sec_errs}")
+                                    elif _applied_count > 0 and _applied_count < _total_sections:
+                                        # partial — جلوگیری از commit ناقص که bug شناخته‌شده تولید می‌کنه
+                                        _missing = _total_sections - _applied_count
+                                        yield sse("progress", {
+                                            "step": "destructive_rewrite_partial_rejected",
+                                            "message": (
+                                                f"🚫 {file_path}: auto-convert فقط {_applied_count} از {_total_sections} "
+                                                f"بخش رو اعمال کرد ({_missing} بخش گم شده) — این می‌تونه قابلیت‌های "
+                                                f"حذف‌شده تولید کنه (مثل تعریف ناقص متغیر). فایل drop شد."
+                                            ),
+                                        })
+                                        slog.warning(
+                                            f"[apply-action] PARTIAL section apply rejected for {file_path}: "
+                                            f"{_applied_count}/{_total_sections} (dropped to avoid silent bugs)"
+                                        )
 
                                 # If all recovery methods failed, drop the file
                                 yield sse("progress", {
