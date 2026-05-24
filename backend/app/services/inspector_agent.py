@@ -981,12 +981,30 @@ async def run_inspector_agent(
                             if not res.get("success"):
                                 tool_results.append(_tr(f"خطا: {res.get('error')}", is_error=True))
                             else:
+                                # 🆕 (asyncpg-ready) — internal_url خام از Render
+                                # با `postgresql://` شروع می‌شه. برای FastAPI async،
+                                # asyncpg لازمه. هر دو variant رو ارائه می‌دیم
+                                # و صریحاً به مدل می‌گیم کدوم رو برای DATABASE_URL
+                                # ست کنه.
+                                _int = res.get("internal_url") or ""
+                                _ext = res.get("external_url") or ""
+                                def _to_asyncpg(_u: str) -> str:
+                                    if _u.startswith("postgresql://") and "+asyncpg" not in _u and "+psycopg" not in _u:
+                                        return "postgresql+asyncpg://" + _u[len("postgresql://"):]
+                                    return _u
+                                _int_async = _to_asyncpg(_int)
+                                _ext_async = _to_asyncpg(_ext)
                                 tool_results.append(_tr(
                                     "Connection info:\n"
-                                    f"- internal_url: {res.get('internal_url')}\n"
-                                    f"- external_url: {res.get('external_url')}\n"
+                                    f"- internal_url (raw): {_int}\n"
+                                    f"- internal_url (asyncpg): {_int_async}\n"
+                                    f"- external_url (raw): {_ext}\n"
+                                    f"- external_url (asyncpg): {_ext_async}\n"
                                     f"- psql_command: {res.get('psql_command')}\n\n"
-                                    f"📌 برای production همیشه از internal_url استفاده کن (DATABASE_URL)."
+                                    f"📌 **برای DATABASE_URL یک اپ FastAPI/async:**\n"
+                                    f"  - اگر اپ + DB در **same region** هستن → از `internal_url (asyncpg)` استفاده کن\n"
+                                    f"  - اگر region متفاوته → باید از `external_url (asyncpg)` استفاده کنی\n"
+                                    f"  - اگر اپ sync است (psycopg) → از `internal_url (raw)` استفاده کن"
                                 ))
                     elif name == "render_create_postgres":
                         pg_name = (args.get("name") or "").strip()
@@ -1150,11 +1168,63 @@ async def run_inspector_agent(
                                 tool_results.append(_tr(f"❌ ایمنی: {err}", is_error=True))
                             else:
                                 yield ("progress", {"step": "agent_render_set_env", "message": f"☁️ {_tag} تنظیم {k} روی سرویس {sid}..."})
-                                res = await _rds.set_env_var(sid, k, v)
+                                # 🆕 (asyncpg-scheme-fix) — اگر key یکی از
+                                # DATABASE_URL هست و value با `postgresql://`
+                                # شروع می‌شه (نه `postgresql+asyncpg://`)، خودکار
+                                # asyncpg رو اضافه می‌کنیم. اپ‌های FastAPI
+                                # async معمولاً از asyncpg استفاده می‌کنن و
+                                # sqlalchemy نمی‌تونه از scheme بدون driver
+                                # استنباط کنه.
+                                _v_str = str(v or "")
+                                _transformed_note = ""
+                                if k.upper() in ("DATABASE_URL", "POSTGRES_URL", "SQLALCHEMY_DATABASE_URI"):
+                                    if _v_str.startswith("postgresql://") and "+asyncpg" not in _v_str and "+psycopg" not in _v_str:
+                                        _v_str = "postgresql+asyncpg://" + _v_str[len("postgresql://"):]
+                                        _transformed_note = (
+                                            f"\n\n🔧 scheme خودکار به `postgresql+asyncpg://` تبدیل شد "
+                                            f"(اپ‌های FastAPI async به asyncpg نیاز دارن، sqlalchemy "
+                                            f"از scheme بدون driver نمی‌تونه استنباط کنه)."
+                                        )
+                                # 🆕 (region-mismatch-warn) — اگر value یک Render
+                                # internal URL هست و service در region دیگری باشه،
+                                # نمی‌تونه connect کنه.
+                                _region_warning = ""
+                                try:
+                                    if "render.com" in _v_str and "@" in _v_str:
+                                        import re as _re_rg
+                                        _m = _re_rg.search(r"@[^/@]+\.([a-z\-]+)-postgres\.render\.com", _v_str)
+                                        _db_region = _m.group(1) if _m else None
+                                        _svc_info = await _rds.get_service(sid)
+                                        _svc_region = ((_svc_info.get("service") or {}).get("region") or "").lower()
+                                        if _db_region and _svc_region and _db_region != _svc_region:
+                                            _region_warning = (
+                                                f"\n\n🔴 **هشدار region mismatch**: DB در '{_db_region}' "
+                                                f"ولی سرویس در '{_svc_region}'. internal URL **کار نمی‌کنه** "
+                                                f"چون internal فقط درون same region routable است. "
+                                                f"راه‌حل: external URL بگیر (همان get_postgres_connection.external_url) "
+                                                f"یا DB رو در region سرویس دوباره بساز."
+                                            )
+                                except Exception:
+                                    pass
+                                res = await _rds.set_env_var(sid, k, _v_str)
                                 if res.get("success"):
-                                    tool_results.append(_tr(f"✅ {k} تنظیم شد. برای اعمال، render_trigger_deploy را با clear_cache=true صدا بزن."))
+                                    _msg = f"✅ {k} تنظیم شد. برای اعمال، render_trigger_deploy را با clear_cache=true صدا بزن."
+                                    if _transformed_note:
+                                        _msg += _transformed_note
+                                    if _region_warning:
+                                        _msg += _region_warning
+                                    tool_results.append(_tr(_msg))
+                                    yield ("progress", {
+                                        "step": "agent_render_set_env_done",
+                                        "message": f"✅ {_tag} {k} ست شد روی {sid}",
+                                    })
                                 else:
-                                    tool_results.append(_tr(f"خطا: {res.get('error')}", is_error=True))
+                                    _err = res.get("error", "unknown")
+                                    tool_results.append(_tr(f"❌ خطا در ست کردن {k}: {_err}", is_error=True))
+                                    yield ("progress", {
+                                        "step": "agent_render_set_env_fail",
+                                        "message": f"❌ {_tag} ست کردن {k} fail شد: {str(_err)[:80]}",
+                                    })
 
                     elif name == "render_trigger_deploy":
                         sid = (args.get("service_id") or "").strip()
@@ -1169,9 +1239,19 @@ async def run_inspector_agent(
                                 yield ("progress", {"step": "agent_render_deploy", "message": f"🚀 {_tag} اجرای deploy جدید روی {sid} (clear_cache={cc})..."})
                                 res = await _rds.trigger_deploy(sid, clear_cache=cc)
                                 if res.get("success"):
-                                    tool_results.append(_tr(f"✅ deploy آغاز شد — deploy_id: {res.get('deploy_id')}, status: {res.get('status')}"))
+                                    _dep_id = res.get("deploy_id") or "?"
+                                    tool_results.append(_tr(f"✅ deploy آغاز شد — deploy_id: {_dep_id}, status: {res.get('status')}"))
+                                    yield ("progress", {
+                                        "step": "agent_render_deploy_done",
+                                        "message": f"✅ {_tag} deploy آغاز شد: {_dep_id}",
+                                    })
                                 else:
-                                    tool_results.append(_tr(f"خطا: {res.get('error')}", is_error=True))
+                                    _err = res.get("error", "unknown")
+                                    tool_results.append(_tr(f"❌ خطا در deploy: {_err}", is_error=True))
+                                    yield ("progress", {
+                                        "step": "agent_render_deploy_fail",
+                                        "message": f"❌ {_tag} deploy fail شد: {str(_err)[:80]}",
+                                    })
 
                     elif name == "render_get_deploys":
                         sid = (args.get("service_id") or "").strip()
