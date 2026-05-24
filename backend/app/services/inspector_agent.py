@@ -974,10 +974,17 @@ async def run_reviewer_pass(
             "deploy می‌شکند", "deploy فیل", "crash می‌کند",
             "import شکست", "importerror", "syntaxerror",
             "nullable=false", "nullable false",  # شایع در گزارش‌های schema
-            "بدون بررسی وابستگی", "بدون اطمینان از",
+            "بدون بررسی وابستگی", "بدون بررسی", "بدون اطمینان از",
             "اشتباه است", "fail می‌کند", "fail می کند",
-            "endpoint غایب", "endpoint وجود ندارد",
+            "endpoint غایب", "endpoint وجود ندارد", "endpoint ذکر نشده",
             "حدسی است", "حدسی‌اند",
+            # 🆕 (audit 2) — کلیدواژه‌های اضافی بعد از تست با ۱۰ note از transcript
+            "خراب کند", "خراب می‌کند", "خراب می کند",
+            "خطرناک است", "خطرناک",
+            "بازنویسی می‌شود", "بازنویسی شده",
+            "از صفر بازنویسی", "کامل بازنویسی",
+            "رشته باز", "string باز",
+            "حذف می‌شود بدون", "حذف می شود بدون",
         ]
         _matched_signals = [s for s in _critical_signals if s in _notes_lower]
         _is_critical = verdict == "concerns" and len(_matched_signals) >= 1
