@@ -13106,6 +13106,65 @@ def _check_stack_traced_files_in_action_plan(
     }
 
 
+# 🆕 (pypi-validation) — کش ساده برای جلوگیری از hit مکرر PyPI
+_PYPI_EXISTS_CACHE: Dict[str, bool] = {}
+
+
+def _check_pypi_package_exists(package_name: str, timeout: float = 2.0) -> bool:
+    """چک می‌کنه که آیا یک package در PyPI وجود داره.
+
+    Returns True اگر وجود داره یا چک fail شد (fail-open، چون نمی‌خوایم
+    network glitch باعث reject شدن همهٔ پکیج‌ها بشه). False فقط وقتی
+    PyPI صریحاً 404 می‌ده.
+    """
+    if not package_name or not package_name.strip():
+        return True
+    name = package_name.strip().lower()
+    # normalize: PyPI با _ و - مشابه هستن
+    name_norm = name.replace("_", "-")
+    if name_norm in _PYPI_EXISTS_CACHE:
+        return _PYPI_EXISTS_CACHE[name_norm]
+    try:
+        import urllib.request
+        import urllib.error
+        req = urllib.request.Request(
+            f"https://pypi.org/pypi/{name_norm}/json",
+            method="HEAD",
+            headers={"User-Agent": "lifemanager-inspector/1.0"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                exists = resp.status == 200
+        except urllib.error.HTTPError as e:
+            exists = e.code != 404
+        _PYPI_EXISTS_CACHE[name_norm] = exists
+        return exists
+    except Exception:
+        # network/timeout/dns → fail-open
+        _PYPI_EXISTS_CACHE[name_norm] = True
+        return True
+
+
+def _extract_pypi_package_names(requirements_content: str) -> List[str]:
+    """استخراج نام پکیج‌ها از محتوای requirements.txt."""
+    import re as _re
+    packages: List[str] = []
+    for raw_line in requirements_content.splitlines():
+        line = raw_line.strip()
+        # skip comments, empty lines, options like -r, -e, --
+        if not line or line.startswith("#") or line.startswith("-"):
+            continue
+        # strip inline comments
+        line = line.split("#", 1)[0].strip()
+        # extract just the package name (before ==, >=, <=, ~=, !=, ;, [, etc.)
+        m = _re.match(r"^([A-Za-z0-9_\-\.]+)", line)
+        if m:
+            pkg = m.group(1).strip()
+            if pkg and pkg.lower() not in ("python", "pip"):
+                packages.append(pkg)
+    return packages
+
+
 def _validate_action_plan_syntax(
     action_plan: dict,
     original_files: dict = None,
@@ -13118,13 +13177,6 @@ def _validate_action_plan_syntax(
     اعتبارسنجی سینتکس فایل‌های action_plan قبل از ارسال به فرانت.
     فایل‌هایی با خطای بحرانی (❌) از action_plan حذف میشن تا commit نشن.
     فایل‌هایی با هشدار (⚠️) باقی می‌مونن ولی هشدار نمایش داده میشه.
-
-    پارامترها:
-    - action_plan: نتیجه action_plan تولیدشده توسط AI
-    - original_files: دیکشنری {path: content} فایل‌های اصلی خوانده‌شده
-    - repo_file_paths: 🆕 (v3) لیست همه فایل‌های repo برای جلوگیری از
-      false-positive در hallucination detection (ماژول‌هایی که در action_plan
-      یا original_files نیستند ولی در repo موجود اند)
     """
     if not action_plan or not action_plan.get("files"):
         return action_plan
@@ -13225,6 +13277,24 @@ def _validate_action_plan_syntax(
             if marker.lower() in content.lower():
                 file_critical.append(f"❌ فایل ناقص: محتوا شامل '{marker}' — این فایل حذف شد")
                 break
+
+        # 🆕 (pypi-validation) — اگر فایل requirements.txt هست، هر پکیج
+        # رو در PyPI چک کن. transcript کاربر نشون داد مدل `autosqlite==0.19.0`
+        # نوشت (typo برای `aiosqlite`) و deploy fail شد. این gate جلوش رو می‌گیره.
+        # cache در سطح ماژول مدیریت می‌شه؛ timeout 2s؛ fail-open اگر network
+        # خراب بود.
+        _path_lower = path.lower()
+        if _path_lower.endswith("requirements.txt") or _path_lower.endswith("/requirements.txt"):
+            _pkgs = _extract_pypi_package_names(content)
+            _missing_pkgs: List[str] = []
+            for _pkg in _pkgs:
+                if not _check_pypi_package_exists(_pkg):
+                    _missing_pkgs.append(_pkg)
+            if _missing_pkgs:
+                file_critical.append(
+                    f"❌ پکیج‌های نامعتبر در PyPI: {', '.join(_missing_pkgs[:5])} — "
+                    f"این فایل حذف شد. احتمالاً مدل اسم اشتباه نوشته (مثلاً autosqlite→aiosqlite)."
+                )
 
         # تعادل پرانتز/آکولاد/براکت
         # threshold نسبی: فایل‌های بزرگ‌تر اختلاف بیشتری مجازن
@@ -14901,6 +14971,15 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - `render_trigger_deploy(service_id, clear_cache)`: deploy جدید اجرا می‌کند. اگر env یا dependency یا buildCommand عوض کردی clear_cache=true.
 - `render_get_deploys(service_id, limit)`: فهرست deploy های اخیر با وضعیت — برای فهمیدن «آیا آخرین deploy موفق بود؟».
 - 🔴 `render_get_deploy_logs(service_id, deploy_id?, log_type?)`: **مهم‌ترین وقتی deploy fail شده** — لاگ‌های واقعی Render را مستقیماً می‌خواند. **قبل از حدس‌زدن از روی config files، این را صدا بزن تا با چشم خودت ببینی build چه خطایی داد.**
+
+### 🆕 revert/recovery — وقتی کاربر می‌گوید «برگرد به branch X» یا «این فایل را از branch قدیمی بازیابی کن»:
+- `list_branches()`: لیست همهٔ branchهای repo. اول این را صدا بزن تا اسم دقیق branch مرجع را پیدا کنی.
+- `read_file_from_branch(path, branch)`: محتوای یک فایل را از branch دیگر (نه branch فعلی) می‌خواند. ⚠️ این برای revert استفاده می‌شود — وقتی کاربر می‌گوید «برگرد به state branch X»، برای هر فایلی که باید برگردد:
+  ۱) `read_file_from_branch(path, X)` بزن تا محتوای branch X را بگیری.
+  ۲) همان محتوا را در `action_plan.files` با `operation='modify'` و `content=<محتوای branch X>` قرار بده.
+  ۳) commit_message را با ذکر «Revert {path} to {branch_X}» بنویس.
+
+  ❗ این یک operation explicit است — کاربر صریحاً revert خواسته. بدون درخواست صریح کاربر از این استفاده نکن.
 
 ### بررسی پیش از ثبت (CRITICAL — جلوگیری از whack-a-mole deploy fail):
 - 🔴 `preflight_check(files)`: **قبل از submit_action_plan حتماً این را صدا بزن**. این ابزار **کلِ repo را اسکن می‌کند** (نه فقط فایل‌های action_plan): به‌طور خودکار فایل‌های critical (routes/schemas/services/dependencies/models) را از repo می‌کشد و سه نوع مشکل رایج را پیدا می‌کند:
