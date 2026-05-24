@@ -622,6 +622,42 @@ def resolve_intent_from_chat_context(
     if not user_message:
         return ResolvedScanIntent(should_scan=False, reason="empty_message")
 
+    # 🆕 (git-revert-gate) — درخواست بازگشت به یک branch یا revert فایل
+    # هرگز نباید scan فعال کنه. transcript کاربر نشون داد «منو برگردون
+    # به این برنچ» باعث شد ۷۳ پیشنهاد بی‌ربط ساخته بشه. این gate مستقیم
+    # به agent loop می‌فرسته (که حالا list_branches + read_file_from_branch
+    # tools داره).
+    _msg_lower = user_message.lower()
+    _git_revert_patterns = [
+        # Persian — branch revert/checkout variants
+        "برگرد به برنچ", "برگرد به branch", "برگرد به همون", "برگرد به این برنچ",
+        "برگردون به برنچ", "برگردون به branch", "منو برگردون به",
+        "منو برگردان به", "برگرد به نسخه", "برگردی به برنچ",
+        "برگردی به همون", "برگردی به branch", "برگردی به این",
+        "بازگشت به برنچ", "بازگشت به branch", "rollback",
+        "checkout کن", "checkout به", "ریست کن به", "reset به",
+        # English
+        "revert to branch", "revert branch", "go back to branch",
+        "checkout branch", "git checkout", "rollback to",
+        "restore from branch", "switch to branch", "switch branch to",
+    ]
+    if any(p in _msg_lower for p in _git_revert_patterns):
+        return ResolvedScanIntent(
+            should_scan=False,
+            reason="git_revert_intent",
+            focus_notes=(
+                f"درخواست revert/checkout شناسایی شد. کاربر می‌خواد به branch دیگه‌ای "
+                f"برگرده یا فایل‌ها رو از branch قبلی بازیابی کنه. این یک عملیات "
+                f"git است، نه code analysis — هرگز scan نزن.\n\n"
+                f"درخواست کاربر: {user_message[:500]}\n\n"
+                f"در smart-chat با agent loop این کارها رو انجام بده:\n"
+                f"1) `list_branches()` تا اسم branch مرجع رو پیدا کنی\n"
+                f"2) برای هر فایلی که باید برگرده، `read_file_from_branch(path, branch)` بزن\n"
+                f"3) محتوای برگشت‌داده‌شده رو در action_plan با operation=modify قرار بده\n"
+                f"4) commit_message: 'Revert to {{branch_name}}'\n"
+            ),
+        )
+
     # 🆕 (clarify-first) — اگر این پیام پاسخ کاربر به یک سوال ask_user قبلی
     # است (با تگ [user_clarification ...])، scan را trigger نکن. این یک
     # continuation است و باید مستقیم به smart-chat برود تا با context قبلی
