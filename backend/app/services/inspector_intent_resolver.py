@@ -646,15 +646,16 @@ def resolve_intent_from_chat_context(
             should_scan=False,
             reason="git_revert_intent",
             focus_notes=(
-                f"درخواست revert/checkout شناسایی شد. کاربر می‌خواد به branch دیگه‌ای "
-                f"برگرده یا فایل‌ها رو از branch قبلی بازیابی کنه. این یک عملیات "
-                f"git است، نه code analysis — هرگز scan نزن.\n\n"
+                f"درخواست revert شناسایی شد. کاربر می‌خواد به branch دیگه‌ای "
+                f"برگرده. این یک عملیات git است، نه code analysis — هرگز scan نزن.\n\n"
                 f"درخواست کاربر: {user_message[:500]}\n\n"
-                f"در smart-chat با agent loop این کارها رو انجام بده:\n"
-                f"1) `list_branches()` تا اسم branch مرجع رو پیدا کنی\n"
-                f"2) برای هر فایلی که باید برگرده، `read_file_from_branch(path, branch)` بزن\n"
-                f"3) محتوای برگشت‌داده‌شده رو در action_plan با operation=modify قرار بده\n"
-                f"4) commit_message: 'Revert to {{branch_name}}'\n"
+                f"🔴 **بهترین راه**: فقط ابزار `revert_to_branch(target_branch=...)` رو "
+                f"صدا بزن. این ابزار خودش با GitHub compare API تفاوت‌ها رو پیدا می‌کنه، "
+                f"محتوا رو از target branch می‌خونه، action_plan کامل می‌سازه و submit می‌کنه. "
+                f"نیاز نیست list_branches یا read_file_from_branch تک‌تک صدا بزنی.\n\n"
+                f"اسم branch مقصد رو از پیام کاربر استخراج کن. مثال:\n"
+                f"  پیام: «منو برگردون به این برنچ: inspector/smart-fix-1779608575»\n"
+                f"  → `revert_to_branch(target_branch='inspector/smart-fix-1779608575')`"
             ),
         )
 

@@ -14973,13 +14973,11 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - 🔴 `render_get_deploy_logs(service_id, deploy_id?, log_type?)`: **مهم‌ترین وقتی deploy fail شده** — لاگ‌های واقعی Render را مستقیماً می‌خواند. **قبل از حدس‌زدن از روی config files، این را صدا بزن تا با چشم خودت ببینی build چه خطایی داد.**
 
 ### 🆕 revert/recovery — وقتی کاربر می‌گوید «برگرد به branch X» یا «این فایل را از branch قدیمی بازیابی کن»:
-- `list_branches()`: لیست همهٔ branchهای repo. اول این را صدا بزن تا اسم دقیق branch مرجع را پیدا کنی.
-- `read_file_from_branch(path, branch)`: محتوای یک فایل را از branch دیگر (نه branch فعلی) می‌خواند. ⚠️ این برای revert استفاده می‌شود — وقتی کاربر می‌گوید «برگرد به state branch X»، برای هر فایلی که باید برگردد:
-  ۱) `read_file_from_branch(path, X)` بزن تا محتوای branch X را بگیری.
-  ۲) همان محتوا را در `action_plan.files` با `operation='modify'` و `content=<محتوای branch X>` قرار بده.
-  ۳) commit_message را با ذکر «Revert <path> to <branch_X>» بنویس.
+- 🔴 `revert_to_branch(target_branch, file_paths?, commit_message?)`: **بهترین راه** برای revert کامل به یک branch. این ابزار خودش با GitHub compare API تفاوت‌ها رو پیدا می‌کنه، محتوا رو از target branch می‌خونه، و action_plan رو می‌سازه و submit می‌کنه. **فقط همین یک ابزار رو صدا بزن** وقتی کاربر می‌گه «منو برگردون به branch X». نیازی به list_branches یا read_file_from_branch تک‌تک نیست.
+- `list_branches()`: لیست branchها (فقط برای discovery، اگر اسم branch مطمئن نیستی).
+- `read_file_from_branch(path, branch)`: خواندن یک فایل از branch مرجع (برای revert تک‌فایلی یا inspection).
 
-  ❗ این یک operation explicit است — کاربر صریحاً revert خواسته. بدون درخواست صریح کاربر از این استفاده نکن.
+  ❗ این operations explicit هستند — کاربر صریحاً revert خواسته. بدون درخواست صریح کاربر از این‌ها استفاده نکن.
 
 ### بررسی پیش از ثبت (CRITICAL — جلوگیری از whack-a-mole deploy fail):
 - 🔴 `preflight_check(files)`: **قبل از submit_action_plan حتماً این را صدا بزن**. این ابزار **کلِ repo را اسکن می‌کند** (نه فقط فایل‌های action_plan): به‌طور خودکار فایل‌های critical (routes/schemas/services/dependencies/models) را از repo می‌کشد و سه نوع مشکل رایج را پیدا می‌کند:

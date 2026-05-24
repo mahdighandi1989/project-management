@@ -385,6 +385,38 @@ def _build_tools() -> List[Dict[str, Any]]:
                 "required": ["path", "branch"],
             },
         },
+        {
+            "name": "revert_to_branch",
+            "description": (
+                "🔴 برای revert کامل یا جزئی به یک branch مرجع. این ابزار خودش:\n"
+                "  1) با GitHub compare API لیست تمام فایل‌هایی که بین branch فعلی و target branch فرق دارن رو می‌گیره\n"
+                "  2) برای هر فایل، محتوا رو از target branch می‌خونه\n"
+                "  3) یک action_plan کامل می‌سازه و submit می‌کنه (شامل modify/create/delete operations)\n"
+                "  4) حلقه رو تمام می‌کنه (مثل submit_action_plan)\n\n"
+                "وقتی کاربر می‌گه «منو برگردون به branch X» یا «revert to branch X»، فقط این ابزار"
+                " رو با target_branch صدا بزن — نیازی به read_file_from_branch تک‌تک نیست.\n\n"
+                "اگر کاربر فقط چند فایل خاص رو می‌خواد revert کنه، file_paths رو پر کن (فقط همون فایل‌ها revert می‌شن)."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "target_branch": {
+                        "type": "string",
+                        "description": "نام branch مقصد که می‌خوای به state اون برگردی",
+                    },
+                    "file_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "اختیاری: اگر فقط چند فایل خاص رو می‌خوای revert کنی، اینجا لیست کن. خالی = همه فایل‌های متفاوت revert می‌شن.",
+                    },
+                    "commit_message": {
+                        "type": "string",
+                        "description": "پیام commit (اختیاری). اگر خالی، خودکار 'Revert to <target_branch>' ست می‌شه.",
+                    },
+                },
+                "required": ["target_branch"],
+            },
+        },
     ]
 
 
@@ -701,6 +733,125 @@ async def run_inspector_agent(
                     f"⚠️ برای revert: این محتوا را در action_plan با operation='modify' و "
                     f"path='{_path}' قرار بده — اگر کاربر صراحتاً revert خواست، این کار درست است "
                     f"حتی اگر فایل را در branch فعلی هم نخوانده باشی."
+                ))
+
+            elif name == "revert_to_branch":
+                _target = (args.get("target_branch") or "").strip()
+                _requested_paths = args.get("file_paths") or []
+                _custom_msg = (args.get("commit_message") or "").strip()
+                if not _target:
+                    tool_results.append(_tr("target_branch لازم است", is_error=True))
+                    continue
+                _base = branch or "main"
+                yield ("progress", {
+                    "step": "agent_revert_compare",
+                    "message": f"🔍 {_tag} مقایسهٔ '{_base}' با '{_target}'...",
+                })
+                try:
+                    _session = await github_svc._get_session()
+                    _headers = github_svc._get_headers(token)
+                    # GitHub compare: /repos/{owner}/{repo}/compare/{base}...{head}
+                    # base=target, head=current_branch  →
+                    #   "added" status = added در current (نسبت به target) → برای revert باید DELETE بشه
+                    #   "removed" = removed در current (یعنی در target بود) → برای revert باید CREATE بشه
+                    #   "modified" = در هر دو هست ولی متفاوت → MODIFY با محتوای target
+                    _compare_url = (
+                        f"{github_svc.GITHUB_API}/repos/{owner}/{repo}/compare/"
+                        f"{_target}...{_base}"
+                    )
+                    async with _session.get(_compare_url, headers=_headers, timeout=30) as _cmp_resp:
+                        if _cmp_resp.status != 200:
+                            _err_body = (await _cmp_resp.text())[:300]
+                            tool_results.append(_tr(
+                                f"خطا در compare: HTTP {_cmp_resp.status}: {_err_body}",
+                                is_error=True,
+                            ))
+                            continue
+                        _cmp_data = await _cmp_resp.json()
+                except Exception as _ce:
+                    tool_results.append(_tr(f"خطا در compare: {str(_ce)[:200]}", is_error=True))
+                    continue
+
+                _diff_files = _cmp_data.get("files") or []
+                # status می‌تونه: added, removed, modified, renamed, copied, changed, unchanged
+                _to_revert: List[Dict[str, Any]] = []
+                for _df in _diff_files:
+                    _fp = _df.get("filename") or ""
+                    if not _fp:
+                        continue
+                    # اگر کاربر file_paths داده، فقط همون‌ها
+                    if _requested_paths and _fp not in _requested_paths:
+                        continue
+                    _status = _df.get("status", "modified")
+                    if _status == "added":
+                        # در current branch اضافه شده ولی در target نبود → DELETE
+                        _to_revert.append({
+                            "path": _fp, "operation": "delete",
+                            "status_in_diff": "added_in_current",
+                        })
+                    elif _status in ("removed", "modified", "renamed", "changed", "copied"):
+                        # محتوا رو از target بخون
+                        try:
+                            _rb = await github_svc.get_file_content(
+                                owner, repo, _fp, branch=_target, token=token
+                            )
+                        except Exception as _re:
+                            tool_results.append(_tr(
+                                f"⚠️ فایل {_fp}: خطا در خواندن از {_target}: {str(_re)[:100]}",
+                                is_error=True,
+                            ))
+                            continue
+                        if not _rb.get("success"):
+                            # شاید رفته بود — رد شو
+                            continue
+                        _content_from_target = _rb.get("content", "") or ""
+                        _op = "create" if _status == "removed" else "modify"
+                        _to_revert.append({
+                            "path": _fp, "operation": _op,
+                            "content": _content_from_target,
+                            "status_in_diff": _status,
+                        })
+                        # هم در files_read ست کن تا blind-overwrite check قبول کنه
+                        files_read[_fp] = _content_from_target
+
+                if not _to_revert:
+                    tool_results.append(_tr(
+                        f"هیچ تفاوتی بین '{_base}' و '{_target}' یافت نشد — revert لازم نیست."
+                    ))
+                    continue
+
+                # ساخت action_plan و submit مستقیم
+                _final_msg = _custom_msg or f"Revert to {_target}"
+                action_plan = {
+                    "files": [
+                        {k: v for k, v in f.items() if k != "status_in_diff"}
+                        for f in _to_revert
+                    ],
+                    "commit_message": _final_msg,
+                }
+                final_analysis = (
+                    f"Revert از '{_base}' به '{_target}': "
+                    f"{len(_to_revert)} فایل تغییر می‌کند "
+                    f"(modify: {sum(1 for f in _to_revert if f.get('operation') == 'modify')}, "
+                    f"create: {sum(1 for f in _to_revert if f.get('operation') == 'create')}, "
+                    f"delete: {sum(1 for f in _to_revert if f.get('operation') == 'delete')})."
+                )
+                _submitted = True
+                stop_reason = "submitted"
+                yield ("progress", {
+                    "step": "agent_revert_done",
+                    "message": (
+                        f"✅ {_tag} revert plan ساخته شد: {len(_to_revert)} فایل از '{_target}'"
+                    ),
+                })
+                tool_results.append(_tr(
+                    f"✅ revert plan آماده شد:\n"
+                    f"- target: {_target}\n"
+                    f"- تعداد فایل: {len(_to_revert)}\n"
+                    f"- modify: {sum(1 for f in _to_revert if f.get('operation') == 'modify')}\n"
+                    f"- create: {sum(1 for f in _to_revert if f.get('operation') == 'create')}\n"
+                    f"- delete: {sum(1 for f in _to_revert if f.get('operation') == 'delete')}\n"
+                    f"action_plan ثبت شد و این مرحله تمام است."
                 ))
 
             elif name in ("render_list_services", "render_get_service",
