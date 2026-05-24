@@ -310,6 +310,73 @@ def _build_tools() -> List[Dict[str, Any]]:
                 "required": ["service_id"],
             },
         },
+        # ────────────────────────────────────────────────────────────────────
+        # 🆕 (postgres-ops) — ابزارهای PostgreSQL در Render. transcript کاربر
+        # نشون داد agent می‌گفت «نمی‌تونم DB بسازم» در حالی که Render API
+        # کاملاً پشتیبانی می‌کنه.
+        # ────────────────────────────────────────────────────────────────────
+        {
+            "name": "render_list_postgres",
+            "description": (
+                "لیست همهٔ PostgreSQL databases در حساب Render. اول این رو "
+                "صدا بزن تا ببینی آیا DB موجود است یا نه. خروجی: لیست {id, "
+                "name, status, plan, region, version, suspended}."
+            ),
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        },
+        {
+            "name": "render_get_postgres",
+            "description": (
+                "جزئیات یک PostgreSQL database. وقتی از list_postgres یک id "
+                "گرفتی، این رو صدا بزن تا status فعلی و metadata رو ببینی."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {"postgres_id": {"type": "string"}},
+                "required": ["postgres_id"],
+            },
+        },
+        {
+            "name": "render_get_postgres_connection",
+            "description": (
+                "connection string (internal + external) یک PostgreSQL "
+                "database. internal_url باید در DATABASE_URL سرویس Web "
+                "تنظیم شود (همان region)، external_url برای dev محلی است."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {"postgres_id": {"type": "string"}},
+                "required": ["postgres_id"],
+            },
+        },
+        {
+            "name": "render_create_postgres",
+            "description": (
+                "ایجاد یک PostgreSQL database جدید در Render. وقتی کاربر "
+                "نیاز به DB داره و فعلاً هیچ DB نداره از این استفاده کن.\n\n"
+                "**جریان معمول** برای auto-fix «DATABASE_URL connection refused»:\n"
+                "  1) `render_list_postgres()` → ببین DB موجوده یا نه\n"
+                "  2) اگر نه، `render_create_postgres(name='...', plan='free')`\n"
+                "  3) صبر کن provisioning (یا با `render_get_postgres` چک کن)\n"
+                "  4) `render_get_postgres_connection(postgres_id)` → internal_url\n"
+                "  5) `render_set_env_var(web_service_id, 'DATABASE_URL', internal_url)`\n"
+                "  6) `render_trigger_deploy(web_service_id)` → app با DB stable می‌شه\n\n"
+                "ownerId اختیاری — اگر ندادی، خودش از اولین سرویس استخراج می‌کنه."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "نام readable برای DB، مثلاً 'lifemanager-db'"},
+                    "plan": {"type": "string", "enum": ["free", "starter", "standard", "pro"], "default": "free"},
+                    "region": {"type": "string", "description": "region — همان region سرویس Web، مثلاً 'oregon'، 'frankfurt'، 'singapore'"},
+                    "version": {"type": "string", "default": "16", "description": "نسخهٔ Postgres: '14'، '15'، '16'"},
+                    "owner_id": {"type": "string", "description": "اختیاری — اگر ندادی خودش پیدا می‌کنه"},
+                    "database_name": {"type": "string", "description": "اختیاری — نام DB داخل instance"},
+                    "database_user": {"type": "string", "description": "اختیاری — نام user"},
+                },
+                "required": ["name"],
+            },
+        },
         {
             "name": "preflight_check",
             "description": (
@@ -853,6 +920,94 @@ async def run_inspector_agent(
                     f"- delete: {sum(1 for f in _to_revert if f.get('operation') == 'delete')}\n"
                     f"action_plan ثبت شد و این مرحله تمام است."
                 ))
+
+            # 🆕 (postgres-ops) — Render PostgreSQL handlers
+            elif name in ("render_list_postgres", "render_get_postgres",
+                          "render_get_postgres_connection", "render_create_postgres"):
+                try:
+                    from .render_service import get_render_service as _grs
+                except Exception as _ie:
+                    tool_results.append(_tr(f"render_service در دسترس نیست: {_ie}", is_error=True))
+                    continue
+                _rs = _grs()
+                try:
+                    if name == "render_list_postgres":
+                        yield ("progress", {"step": "agent_pg_list", "message": f"🗄️ {_tag} لیست PostgreSQL databases..."})
+                        res = await _rs.list_postgres()
+                        if not res.get("success"):
+                            tool_results.append(_tr(f"خطا: {res.get('error')}", is_error=True))
+                        else:
+                            tool_results.append(_tr(_json.dumps(res.get("databases") or [], ensure_ascii=False, indent=2)[:max_file_chars]))
+                    elif name == "render_get_postgres":
+                        pid = (args.get("postgres_id") or "").strip()
+                        if not pid:
+                            tool_results.append(_tr("postgres_id لازم است", is_error=True))
+                        else:
+                            res = await _rs.get_postgres(pid)
+                            if not res.get("success"):
+                                tool_results.append(_tr(f"خطا: {res.get('error')}", is_error=True))
+                            else:
+                                tool_results.append(_tr(_json.dumps(res.get("database") or {}, ensure_ascii=False, indent=2)[:max_file_chars]))
+                    elif name == "render_get_postgres_connection":
+                        pid = (args.get("postgres_id") or "").strip()
+                        if not pid:
+                            tool_results.append(_tr("postgres_id لازم است", is_error=True))
+                        else:
+                            yield ("progress", {"step": "agent_pg_conn", "message": f"🔑 {_tag} گرفتن connection string برای DB {pid}..."})
+                            res = await _rs.get_postgres_connection_info(pid)
+                            if not res.get("success"):
+                                tool_results.append(_tr(f"خطا: {res.get('error')}", is_error=True))
+                            else:
+                                tool_results.append(_tr(
+                                    "Connection info:\n"
+                                    f"- internal_url: {res.get('internal_url')}\n"
+                                    f"- external_url: {res.get('external_url')}\n"
+                                    f"- psql_command: {res.get('psql_command')}\n\n"
+                                    f"📌 برای production همیشه از internal_url استفاده کن (DATABASE_URL)."
+                                ))
+                    elif name == "render_create_postgres":
+                        pg_name = (args.get("name") or "").strip()
+                        if not pg_name:
+                            tool_results.append(_tr("name لازم است", is_error=True))
+                            continue
+                        plan = (args.get("plan") or "free").strip().lower()
+                        region = (args.get("region") or "oregon").strip().lower()
+                        version = str(args.get("version") or "16").strip()
+                        owner_id = (args.get("owner_id") or "").strip() or None
+                        if not owner_id:
+                            yield ("progress", {"step": "agent_pg_owner", "message": f"🔎 {_tag} پیدا کردن owner_id..."})
+                            owner_id = await _rs.get_owner_id_from_services()
+                            if not owner_id:
+                                tool_results.append(_tr(
+                                    "owner_id پیدا نشد. لطفاً owner_id رو دستی بفرست (از Render Dashboard > Account Settings)",
+                                    is_error=True,
+                                ))
+                                continue
+                        yield ("progress", {"step": "agent_pg_create", "message": f"🗄️ {_tag} ایجاد PostgreSQL '{pg_name}' (plan={plan}, region={region})..."})
+                        res = await _rs.create_postgres(
+                            name=pg_name, owner_id=owner_id, plan=plan,
+                            region=region, version=version,
+                            database_name=args.get("database_name"),
+                            database_user=args.get("database_user"),
+                        )
+                        if not res.get("success"):
+                            tool_results.append(_tr(f"خطا: {res.get('error')}", is_error=True))
+                        else:
+                            tool_results.append(_tr(
+                                f"✅ PostgreSQL ساخته شد:\n"
+                                f"- postgres_id: {res.get('postgres_id')}\n"
+                                f"- name: {res.get('name')}\n"
+                                f"- status: {res.get('status')}\n"
+                                f"- {res.get('note')}\n\n"
+                                f"مرحله بعد:\n"
+                                f"  1) چند دقیقه صبر کن تا provisioning تمام شه (با render_get_postgres status رو چک کن).\n"
+                                f"  2) `render_get_postgres_connection(postgres_id='{res.get('postgres_id')}')` رو صدا بزن تا internal_url بگیری.\n"
+                                f"  3) `render_set_env_var(<web_service_id>, 'DATABASE_URL', internal_url)` رو set کن.\n"
+                                f"  4) `render_trigger_deploy(<web_service_id>)` برای restart با env جدید."
+                            ))
+                except Exception as _pg_e:
+                    tool_results.append(_tr(f"خطای postgres tool: {str(_pg_e)[:200]}", is_error=True))
+                continue
 
             elif name in ("render_list_services", "render_get_service",
                           "render_get_env_vars", "render_set_env_var",
