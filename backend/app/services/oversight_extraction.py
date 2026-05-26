@@ -57,7 +57,7 @@ MAX_ROWS_PER_SHEET: int = 100_000_000
 # 🛡 (Stage 10 audit fix #2) — طبق درخواست صریح کاربر «محدودیت استخراج متن
 # اصلاً نداشته باشه»، این سقف فقط محافظ JSON store در برابر فایل JSON عظیم
 # است (≥10MB). در عمل، هیچ segment معمولی به این سقف نمی‌رسد.
-SEGMENT_TEXT_MAX_CHARS: int = 10_000_000  # 10M char per segment (~10MB)
+SEGMENT_TEXT_MAX_CHARS: int = 100_000_000  # 🔴 (extraction-100pct-fix) 10MB→100MB per segment
 PER_SEGMENT_TIMEOUT_SEC: int = 300  # 5 دقیقه
 INLINE_MEDIA_BYTES_LIMIT: int = 18 * 1024 * 1024  # 18MB
 AV_CHUNK_SECONDS: int = 300  # 5 دقیقه per audio/video chunk
@@ -538,9 +538,11 @@ async def _plan_headings(model_id: str, user_idea: str, filename: str, mime: str
         m = re.search(r'\{[^{}]*"headings"\s*:\s*\[.*?\]\s*\}', resp.content or "", re.DOTALL)
         if m:
             data = json.loads(m.group(0))
-            hs = [str(x)[:200] for x in (data.get("headings") or [])]
+            # 🔴 (extraction-100pct-fix) 200→500 per heading، 8→50 total
+            # برای document بزرگ با ۲۰+ section نباید heading ها drop بشن
+            hs = [str(x)[:500] for x in (data.get("headings") or [])]
             if hs:
-                return hs[:8]
+                return hs[:50]
     except Exception as e:
         logger.debug(f"_plan_headings failed: {e}")
     # fallback عمومی
@@ -822,9 +824,18 @@ async def _extract_zip_archive(
         raise ExtractionError(f"zip open failed: {e}")
     try:
         names = [n for n in zf.namelist() if not n.endswith("/")]
-        # سقف ایمنی: ۱۰۰۰ فایل
-        if len(names) > 1000:
-            names = names[:1000]
+        # 🔴 (extraction-100pct-fix) — قبلاً 1000 فایل + 2MB per file.
+        # حالا 10K فایل + 50MB per file. اگر هنوز بیشتر بود، WARNING واضح.
+        _ZIP_MAX_FILES = 10_000
+        _ZIP_MAX_BYTES_PER_FILE = 50 * 1024 * 1024  # 50MB
+        _zip_truncation_warning = ""
+        if len(names) > _ZIP_MAX_FILES:
+            _zip_truncation_warning = (
+                f"🔴 zip دارای {len(names)} فایل بود ولی فقط {_ZIP_MAX_FILES} اول "
+                f"extract شد ({len(names) - _ZIP_MAX_FILES} فایل drop شد)."
+            )
+            logger.warning(f"[extraction-100pct-fix] {_zip_truncation_warning}")
+            names = names[:_ZIP_MAX_FILES]
         await repo.update_extraction(fe.id, total_segments=len(names) + 1)
         # text-decode safe per file
         for idx, name in enumerate(names, start=1):
@@ -832,12 +843,27 @@ async def _extract_zip_archive(
                 continue
             try:
                 with zf.open(name) as f:
-                    raw = f.read(2 * 1024 * 1024)  # تا ۲MB per inner file
+                    raw = f.read(_ZIP_MAX_BYTES_PER_FILE)
+                    # detect if file was truncated
+                    _was_truncated_inner = False
+                    try:
+                        with zf.open(name) as _f2:
+                            _f2.seek(0, 2)  # to end
+                            _full_size = _f2.tell()
+                            _was_truncated_inner = _full_size > _ZIP_MAX_BYTES_PER_FILE
+                    except Exception:
+                        pass
             except Exception as e:
                 await persist_segment_fn(
                     idx, name, f"[خطا در خواندن: {str(e)[:100]}]", f"zip_entry={name}",
                 )
                 continue
+            # اگر فایل internal بزرگتر بود، یک هشدار به متن چسبیده می‌شه
+            if _was_truncated_inner:
+                logger.warning(
+                    f"[extraction-100pct-fix] zip entry '{name}' بود {_full_size:,} byte، "
+                    f"فقط {_ZIP_MAX_BYTES_PER_FILE:,} byte اول خوانده شد."
+                )
             # تلاش text decode
             try:
                 text = raw.decode("utf-8")
@@ -1170,9 +1196,23 @@ async def _run_extraction(
     completed = {s.segment_index for s in repo.get_segments(fe.id) if s.status == "done"}
 
     async def _persist_segment(idx: int, title: str, text: str, page_ts: str = "") -> None:
-        # truncate طولانی‌های بسیار بزرگ — جلوگیری از JSON عظیم
+        # 🔴 (extraction-100pct-fix) — قبلاً silently truncate می‌شد در 10MB.
+        # حالا 100MB sanity limit است و اگر بهش رسید WARNING واضح در logs و
+        # error_summary می‌چسبه — silently drop نمی‌کنه.
         if len(text) > SEGMENT_TEXT_MAX_CHARS:
-            text = text[:SEGMENT_TEXT_MAX_CHARS] + "\n…[TRUNCATED at limit]"
+            _original_len = len(text)
+            logger.warning(
+                f"[extraction-100pct-fix] segment[{idx}] text {_original_len:,} chars > "
+                f"{SEGMENT_TEXT_MAX_CHARS:,} cap. این یک bug است — segment باید کوچک‌تر "
+                f"باشه. به caller گزارش می‌شه و {_original_len - SEGMENT_TEXT_MAX_CHARS:,} "
+                f"char از دست رفت."
+            )
+            text = text[:SEGMENT_TEXT_MAX_CHARS] + (
+                f"\n\n🔴 [TRUNCATED] — این segment {_original_len:,} char بود ولی به "
+                f"{SEGMENT_TEXT_MAX_CHARS:,} char truncate شد. "
+                f"{_original_len - SEGMENT_TEXT_MAX_CHARS:,} char از دست رفت. "
+                f"این یک bug است — segment باید کوچک‌تر باشه."
+            )
         seg = ExtractionSegment(
             id=str(uuid.uuid4()),
             extraction_id=fe.id,

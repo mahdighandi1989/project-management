@@ -3371,6 +3371,11 @@ class OversightService:
 
         # 🆕 (bug 30) — اگر بخش‌بندی صریح زیاد دیدیم، prompt را hint بزن
         # و فرمت compact بخواه تا output در ۱۲۰۰۰ توکن جای کافی داشته باشد.
+        # 🔴 (extraction-100pct-fix) — اگر idea بزرگه (>200KB، نشانهٔ
+        # attachment غول‌پیکر)، compact-hint رو **حذف** می‌کنیم — اجازه می‌دیم
+        # AI به اندازهٔ نیاز scope و raw_excerpt بزرگ بنویسه. کاربر گفت
+        # «هزینه مهم نیست» و output budget هم به 64K بومپ شده.
+        _has_huge_attachment = len(idea) > 200_000
         _section_hint = ""
         if _is_multi_section:
             # 🆕 (bug 30 v3) — همهٔ sections را به AI نشان بده (cap 200)
@@ -3384,10 +3389,22 @@ class OversightService:
                 f"مرحله** بسازی، هر کدام مربوط به یکی از این بخش‌های صریح. "
                 f"اگر تعداد کمتر برگردانی، یعنی کار را خلاصه کرده‌ای — این "
                 f"اشتباه است.\n\n"
-                f"💡 **برای جا کردن همه در پاسخ**: scope هر مرحله را **حداکثر "
-                f"۴۰۰ کاراکتر** و raw_excerpt را **حداکثر ۸۰۰ کاراکتر** "
-                f"نگه‌دار. غنی‌سازی در pass بعدی انجام می‌شود."
             )
+            if _has_huge_attachment:
+                # حالت attachment بزرگ — اجازه به AI که verbose باشه
+                _section_hint += (
+                    f"💡 **این متن شامل فایل پیوست بزرگ است ({len(idea):,} char). "
+                    f"کاربر صریحاً گفت «هیچ بخش drop نکن، خلاصه‌سازی مخرب ممنوع».**\n"
+                    f"- scope هر مرحله: **حداکثر {min(20000, len(idea)//max(_section_count, 1)):,} char** — یعنی همهٔ محتوای آن بخش\n"
+                    f"- raw_excerpt: **عیناً متن آن بخش از idea** (تا 50KB در صورت نیاز)\n"
+                    f"- هرگز «و موارد مشابه» یا «خلاصه» ننویس — verbatim کامل\n"
+                )
+            else:
+                _section_hint += (
+                    f"💡 **برای جا کردن همه در پاسخ**: scope هر مرحله را **حداکثر "
+                    f"۴۰۰ کاراکتر** و raw_excerpt را **حداکثر ۸۰۰ کاراکتر** "
+                    f"نگه‌دار. غنی‌سازی در pass بعدی انجام می‌شود."
+                )
             if _skipped_ref_count > 0:
                 _section_hint += (
                     f"\n\n🚫 **{_skipped_ref_count} بخش 'مرور/قبلاً اجرا شده' "
@@ -3519,12 +3536,12 @@ class OversightService:
                     continue
                 out.append({
                     "id": int(s.get("id") or (i + 1)),
-                    "title": title[:200],
-                    "scope": scope[:2500],
-                    "raw_excerpt": (s.get("raw_excerpt") or "").strip()[:4000],
-                    "key_terms": [str(k) for k in (s.get("key_terms") or [])[:25]],
-                    "behavior_observable": str(s.get("behavior_observable") or "").strip()[:500],
-                    "verification_hint": str(s.get("verification_hint") or "").strip()[:300],
+                    "title": title[:300],  # 🔴 (extraction-100pct-fix) 200→300
+                    "scope": scope[:20000],  # 🔴 was 2500 — برای فایل‌های بزرگ کم بود
+                    "raw_excerpt": (s.get("raw_excerpt") or "").strip()[:50000],  # 🔴 was 4000 — کاربر گفت «هزینه مهم نیست»
+                    "key_terms": [str(k) for k in (s.get("key_terms") or [])[:50]],  # 25→50
+                    "behavior_observable": str(s.get("behavior_observable") or "").strip()[:2000],  # 500→2000
+                    "verification_hint": str(s.get("verification_hint") or "").strip()[:1000],  # 300→1000
                     "business_intent": str(s.get("business_intent") or "").strip()[:300],
                     "non_goals": str(s.get("non_goals") or "").strip()[:300],
                 })
@@ -3621,10 +3638,10 @@ class OversightService:
                     return None
                 return {
                     "id": section_idx + 1,
-                    "title": title[:200],
-                    "scope": scope[:2500],
-                    "raw_excerpt": (_parsed.get("raw_excerpt") or "").strip()[:4000],
-                    "key_terms": [str(k) for k in (_parsed.get("key_terms") or [])[:25]],
+                    "title": title[:300],  # 🔴 (extraction-100pct-fix) 200→300
+                    "scope": scope[:20000],  # 🔴 was 2500 — برای فایل‌های بزرگ
+                    "raw_excerpt": (_parsed.get("raw_excerpt") or "").strip()[:50000],  # 🔴 was 4000
+                    "key_terms": [str(k) for k in (_parsed.get("key_terms") or [])[:50]],
                     "behavior_observable": str(_parsed.get("behavior_observable") or "").strip()[:500],
                     "verification_hint": str(_parsed.get("verification_hint") or "").strip()[:300],
                     "business_intent": str(_parsed.get("business_intent") or "").strip()[:300],
