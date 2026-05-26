@@ -134,7 +134,7 @@ async def _fetch_file(
     path: str,
     headers: Dict[str, str],
     branch: Optional[str] = None,
-    max_bytes: int = 40000,
+    max_bytes: int = 500_000,  # 🔴 (extraction-100pct-fix) 40KB→500KB — verifier نیاز به محتوای کامل فایل داره
 ) -> Optional[str]:
     import base64
 
@@ -153,7 +153,18 @@ async def _fetch_file(
         except Exception:
             return None
         if len(decoded) > max_bytes:
-            decoded = decoded[:max_bytes] + "\n... [TRUNCATED]"
+            # 🔴 (extraction-100pct-fix) — قبلاً silently truncate می‌شد.
+            # حالا WARNING واضح در logs و در محتوای برگشتی هست.
+            logger.warning(
+                f"[verifier _fetch_file] فایل {len(decoded):,} byte بود، فقط "
+                f"{max_bytes:,} byte اول fetch شد. {len(decoded) - max_bytes:,} "
+                f"byte از دست رفت — verification ممکنه بر اساس محتوای ناقص باشه."
+            )
+            decoded = decoded[:max_bytes] + (
+                f"\n... 🔴 [TRUNCATED — فایل اصلی {len(decoded):,} byte بود ولی "
+                f"verifier فقط {max_bytes:,} byte اول رو fetch کرد. "
+                f"{len(decoded) - max_bytes:,} byte بقیه دیده نشده.]"
+            )
         return decoded
     except Exception:
         return None
@@ -437,8 +448,8 @@ def _evaluate_acs_against_files(
             )
 
         out.append({
-            "ac": ac_text[:200],
-            "keywords": ac_keywords[:8],
+            "ac": ac_text[:2000],  # 🔴 (extraction-100pct-fix) 200→2000 — AC کامل لازمه برای verifier
+            "keywords": ac_keywords[:20],  # 8→20 — کلمات کلیدی بیشتر برای match
             "hits_in_files": hits_in_files,
             "matched_keywords_per_file": matched_keywords_per_file,
             "hits_in_tree": hits_in_tree,
@@ -480,7 +491,7 @@ def _extract_relevant_chunks(
     keywords: List[str],
     lines_around: int = 60,
     max_chunks: int = 8,
-    max_total_chars: int = 12000,
+    max_total_chars: int = 60000,  # 🔴 (extraction-100pct-fix) 12KB→60KB — verifier باید بخش‌های بیشتری از فایل رو ببینه
 ) -> str:
     """برای فایل‌های بزرگ (مثل page.tsx 4000+ خط)، فقط chunk‌های مرتبط
     با keywords را extract می‌کند به‌جای فقط N کاراکتر اول.
@@ -2226,8 +2237,11 @@ async def verify_task(
         else:
             # 🆕 chunk extraction هوشمند — اگر فایل بزرگ است (>10000 char)،
             # فقط بخش‌های مرتبط با کلمات کلیدی AC را بگیر، نه فقط N char اول
-            if len(c) > 10000 and chunk_keywords:
-                chunk = _extract_relevant_chunks(c, chunk_keywords, lines_around=60, max_total_chars=12000)
+            # 🔴 (extraction-100pct-fix) — قبلاً 10K threshold + 12KB limit. حالا
+            # 50K threshold + 60KB limit. برای فایل‌های زیر 50K، کل فایل ارسال
+            # می‌شه به verifier (نه chunk).
+            if len(c) > 50000 and chunk_keywords:
+                chunk = _extract_relevant_chunks(c, chunk_keywords, lines_around=80, max_total_chars=60000)
                 files_blob_parts.append(
                     f"=== {p} ({len(c.splitlines())} line file — chunk‌های مرتبط با AC) ===\n{chunk}"
                 )
