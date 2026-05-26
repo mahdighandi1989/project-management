@@ -4344,24 +4344,49 @@ class OversightService:
                 )
                 continue
 
-            # 🛡 (Stage 10 audit fix #2) — طبق درخواست کاربر «محدودیت استخراج
-            # متن اصلاً نداشته باشه»، cap به 1MB افزایش یافت. متن کامل (هر چه
-            # بزرگ هست) همیشه در DB قابل بازیابی است.
-            # توجه: این cap فقط در آنچه به idea→prompt پاس می‌شود اعمال می‌شود
-            # — model context window خود محدودیت بعدی دارد.
-            FILE_CAP = 1_000_000
+            # 🔴 (extraction-100pct-fix) — کاربر گزارش داد ۹۰٪+ محتوای
+            # فایل‌های آپلودی به task نمی‌رسید. ریشه: cap 1MB روی متن
+            # استخراج‌شده. کاربر صریحاً گفت «هزینه توکنش مهم نیست، باید
+            # ۱۰۰٪ کامل باشه».
+            #
+            # **استراتژی جدید**:
+            # - cap بسیار بالا (50MB متن = ~12M token برای Gemini 2.5 Pro
+            #   که 2M context داره — هنوز overshoots ولی synthesis layer
+            #   باید خودش به chunks برسه)
+            # - اگر متن بزرگه و overflow context احتمالی، یک هشدار صریح
+            #   به مدل می‌چسبونیم: «این فایل بزرگه — همهٔ بخش‌ها رو
+            #   پوشش بده، خلاصه نکن، چیزی drop نکن.»
+            # - متن کامل همیشه در DB قابل بازیابی است (به‌جای 1MB قبلی)
+            FILE_CAP = 50_000_000  # 50MB — practically unlimited برای اکثر کاربردها
             head = full_text[:FILE_CAP]
             tail_note = ""
             if len(full_text) > FILE_CAP:
+                # فقط فایل‌های واقعاً غول‌پیکر (>50MB) tail note می‌گیرن
                 tail_note = (
-                    f"\n\n_[…متن کامل ({len(full_text):,} char) در DB موجود است. "
-                    f"این بخش اول 1MB از متن است؛ بقیه با extraction_id={fe.id} "
-                    f"از endpoint /extractions/{{id}}/full-text قابل بازیابی است.]_"
+                    f"\n\n_[…متن کامل ({len(full_text):,} char) در DB است. "
+                    f"این بخش اول {FILE_CAP//1_000_000}MB از متن است؛ بقیه با "
+                    f"extraction_id={fe.id} از /extractions/{{id}}/full-text قابل دسترسی است.]_"
+                )
+            # 🆕 (extraction-100pct-fix) — اگر متن بزرگه (>500KB)، یک یادآور
+            # صریح به مدل تولید پرامپت می‌چسبونیم تا همهٔ بخش‌ها رو در
+            # task task_steps پوشش بده و خلاصه‌سازی مخرب انجام نده.
+            _completeness_warning = ""
+            if len(head) > 500_000:
+                _completeness_warning = (
+                    f"\n\n⚠️ **این فایل بزرگ است ({len(head):,} char). برای synthesis:**\n"
+                    f"- **هیچ بخشی را drop نکن** — همهٔ topics/sections/items "
+                    f"در task_steps منعکس بشن.\n"
+                    f"- **خلاصه‌سازی مخرب ممنوع** — اگر فایل ۲۰۰ مورد داره، "
+                    f"task_steps هم باید ۲۰۰ مورد رو پوشش بده (یا "
+                    f"group بندی صریح کنه ولی هیچ موردی حذف نشه).\n"
+                    f"- **تعداد steps محدود نیست** — نیاز شد، ۵۰ یا ۱۰۰ step بساز.\n"
                 )
             appended_parts.append(
                 f"\n\n## 📎 فایل پیوست #{s.file_order}: {s.original_filename}\n"
                 f"_mime={s.mime_type} • model={fe.model_used} • "
-                f"{fe.total_segments} segment استخراج شد_\n\n"
+                f"{fe.total_segments} segment استخراج شد • "
+                f"{len(head):,} char متن_\n"
+                f"{_completeness_warning}\n"
                 f"{head}{tail_note}"
             )
 
@@ -4906,10 +4931,35 @@ class OversightService:
 {chr(10).join(f'  • {p}' for p in deep_paths[:25]) if deep_paths else '  (هیچ‌کدام)'}
 """
 
+        # 🔴 (extraction-100pct-fix) — اگر فایل پیوست داره، یک قانون صریح
+        # اضافه می‌کنیم به system prompt تا synthesis از روی متن کامل پیوست
+        # ساخته بشه، نه خلاصه‌ای از idea.
+        _attachment_block = ""
+        if "📎 فایل پیوست" in idea:
+            _attachment_block = (
+                "\n\n# 🔴🔴 قانون پیوست (CRITICAL — کاربر گزارش داد ۹۰٪+ محتوای فایل گم می‌شه)\n"
+                "متن user حاوی بخش‌های `## 📎 فایل پیوست #N` است که محتوای **استخراج‌شده "
+                "از فایل‌های آپلودی** هستن. این محتوا **بخش اصلی درخواست** کاربر است.\n\n"
+                "**قوانین مطلق**:\n"
+                "1. **هیچ بخش/مورد/topic از پیوست drop نکن**. اگه فایل ۲۰۰ آیتم داره، "
+                "task_steps باید ۲۰۰ مورد رو پوشش بده (یا با grouping صریح، ولی هیچی "
+                "حذف نشه).\n"
+                "2. **task_steps تعدادش محدود نیست** — برای فایل بزرگ، 30-100 step "
+                "هم منطقی است. کم گفتن = شکست.\n"
+                "3. **description باید همهٔ section های پیوست رو reference بده** "
+                "(نام‌بردن از hint های `## بخش X` یا `## فایل پیوست #N`).\n"
+                "4. **acceptance_criteria باید verifiable برای هر بخش پیوست باشه** — "
+                "نه فقط top-level «task انجام شد».\n"
+                "5. **هرگز خلاصه‌سازی مخرب نکن** مثل «و موارد مشابه از فایل پیوست» — "
+                "هر مورد رو explicit بنویس.\n"
+                "6. اگر پیوست بزرگه و JSON خروجی محدودیت ظرفیت داره، task_steps رو "
+                "به sub-tasks تقسیم کن (با `parent_step_id`) — نه drop.\n"
+            )
+
         system_prompt = f"""تو یک معمار ارشد نرم‌افزاری هستی که به repository واقعی پروژه دسترسی داری. وظیفه‌ات این است که ایده/مشکل/درخواست خام کاربر را به یک تسک ساختاریافتهٔ **مبتنی بر کد واقعی پروژه** تبدیل کنی — نه یک پرامپت عمومی.
 
 خروجی این تسک به یک ابزار کدنویس خارجی (Cursor/Copilot/ChatGPT) داده می‌شود — پس فیلدها باید **کاملاً مشخص، grounded در کد واقعی، و قابل اعمال** باشند.
-
+{_attachment_block}
 # 🧠 چارچوب فکر کردن (الزامی — قبل از تولید JSON، این مراحل را ذهنی طی کن)
 
 **مرحله ۱ — تحلیل کامل متن کاربر** (هیچ‌چیز را skip نکن):
@@ -5121,7 +5171,16 @@ AC = «طراحی شیک‌تر باشد»:
             effective_models = model_ids or ([model_id] if model_id else None)
             # 🆕 max_tokens بالاتر برای پرامپت‌های غنی (description >=500، target_locations
             # با snippet کد واقعی، AC چندتایی، …)
-            grounded_max_tokens = 16000 if deep_ctx.get("ok") else 10000
+            # 🔴 (extraction-100pct-fix) — اگر فایل پیوست بزرگ داریم (>500KB idea)،
+            # output budget رو به 64K می‌بریم. کاربر گفت «هزینه مهم نیست». این
+            # برای task با 100+ step از فایل‌های بزرگ ضروری است.
+            _has_large_attachment = len(idea) > 500_000
+            if _has_large_attachment:
+                grounded_max_tokens = 64000  # برای task های با ۵۰+ step
+            elif deep_ctx.get("ok"):
+                grounded_max_tokens = 16000
+            else:
+                grounded_max_tokens = 10000
             # 🆕 temperature خیلی پایین برای grounding بیشتر در deep_context واقعی
             grounded_temperature = 0.1 if deep_ctx.get("ok") else 0.25
             if effective_models and len(effective_models) > 1:

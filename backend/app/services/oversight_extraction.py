@@ -399,7 +399,9 @@ async def _ai_extract_text(
     prompt: str,
     image_b64: Optional[str] = None,
     inline_file_data: Optional[Tuple[str, bytes]] = None,  # (mime, bytes) — for Gemini Files
-    max_tokens: int = 32000,
+    max_tokens: int = 64000,  # 🔴 (extraction-100pct-fix) — bump 32K→64K، چون
+    # prompt جدید verbose-ـتر است و verbatim می‌خواد. مدل‌های مدرن (Gemini
+    # 2.5 Pro=64K، Claude=64K، GPT-4=16K) اکثراً 64K پشتیبانی می‌کنن.
 ) -> str:
     """فراخوانی AI برای استخراج متن از یک قطعه (صفحه/فریم/audio chunk).
 
@@ -446,12 +448,45 @@ async def _ai_extract_text(
     mgr = get_ai_manager()
     messages = [
         Message(role="system", content=(
-            "تو یک ابزار استخراج متن دقیق هستی. وظیفه‌ات:\n"
-            "1) متن کامل و literal از محتوای داده‌شده استخراج کن.\n"
-            "2) هیچ‌چیز را خلاصه نکن، هیچ‌چیز را drop نکن.\n"
-            "3) اگر صحبت اضافی هست، آن را هم بنویس.\n"
-            "4) اگر متن داخل تصویر/سند به زبان فارسی است، فارسی بنویس.\n"
-            "5) اگر صدا است، transcript کامل بنویس با timestamp اگر ممکن است.\n"
+            # 🔴 (extraction-100pct-fix) — prompt قدیمی فقط ۵ خط بود و باعث می‌شد
+            # مدل verbose نباشه. کاربر گزارش داد ۹۰٪+ محتوا گم می‌شد. این prompt
+            # جدید سختگیرانه‌تر است: verbatim، no-summarization، preserve-format،
+            # explicit min-output-length proportional به input، و instructions
+            # برای حالت‌های خاص (PDF، DOCX، code، table، audio، image).
+            "تو یک extractor دقیق و کامل هستی. وظیفه‌ات استخراج **عین به عین** (verbatim) "
+            "از محتوای ورودی است. این کار **حیاتی** است — output تو مستقیماً به "
+            "task synthesis می‌ره، اگر چیزی drop کنی task ناقص می‌شه و کاربر "
+            "محتوای از دست رفته رو می‌فهمه.\n\n"
+            "## قوانین مطلق (هیچ‌کدوم optional نیست)\n"
+            "1. **verbatim کامل** — هر کلمه، هر جمله، هر paragraph عیناً منتقل شه.\n"
+            "2. **هیچ summarization** — اگه فایل ۲۰۰ آیتم داره، ۲۰۰ تا منتقل کن (نه «و ۱۹۸ تای دیگه...»).\n"
+            "3. **هیچ drop** — حتی boilerplate، header/footer، صفحات تشکر، imageای که "
+            "متن داره (OCR)، watermark، disclaimer، signature، table of contents... همگی شامل می‌شه.\n"
+            "4. **preserve formatting**:\n"
+            "   - code blocks دقیقاً با همان whitespace و indentation\n"
+            "   - tables به‌صورت Markdown table (| col1 | col2 |)\n"
+            "   - bullet/numbered lists با همان نشانه‌ها (-، *، 1.، 2.، الف، ب)\n"
+            "   - headings با # (سطح متناسب)\n"
+            "   - inline formatting (**bold**, *italic*, `code`) حفظ شه\n"
+            "5. **page/section markers** — اگه ورودی چندصفحه‌ای یا چندبخشی است، "
+            "هر صفحه/بخش رو با `--- صفحه N ---` یا `### بخش: Title` جدا کن.\n"
+            "6. **multilingual** — اگه متن چندزبانه‌ست، همگی رو منتقل کن. زبان فارسی "
+            "رو با حروف فارسی بنویس (RTL).\n"
+            "7. **audio/video**: transcript کامل + speaker labels اگه قابل تشخیصه + "
+            "timestamps هر ~۳۰s (مثال: `[02:15] گوینده ۱: …`).\n"
+            "8. **image/photo**: همهٔ متن قابل خواندن + توصیف عناصر بصری مهم "
+            "(اگه متن به‌تنهایی context رو نمی‌رسونه).\n\n"
+            "## ممنوعات\n"
+            "- ❌ «… و موارد مشابه»، «… و غیره»، «خلاصه»، «in summary»\n"
+            "- ❌ پرش از بخشی چون تکراری به نظر می‌رسه\n"
+            "- ❌ کوتاه‌سازی برای صرفه‌جویی tokens — کاربر گفته «هزینه مهم نیست»\n"
+            "- ❌ paraphrase — کلمات کاربر باید عین به عین منتقل بشن\n"
+            "- ❌ اضافه کردن تحلیل/نظر — فقط استخراج\n\n"
+            "## حداقل خروجی\n"
+            "اگه ورودی متنی است، حجم خروجی باید **حداقل ۹۰٪** حجم ورودی باشه.\n"
+            "اگه ورودی image-only هست (PDF اسکن، عکس)، خروجی باید تمام متن قابل "
+            "خواندن رو شامل شه — اگر مطمئن نیستی، توصیف هم اضافه کن.\n\n"
+            "تو باید پر-حرف و پر-جزئیات باشی. لطفاً بفهم: کم گفتن = شکست."
         )),
         Message(
             role="user",
