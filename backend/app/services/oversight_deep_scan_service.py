@@ -1792,26 +1792,36 @@ async def run_deep_scan(
                         ),
                     )
                 else:
-                    # 🔴 (scope-empty-abort) — قبلاً اینجا fallback به scan کلی
-                    # داشتیم → باعث شد در transcript کاربر «منو برگردون به branch»
-                    # اسکن `selected_sections=['backend']` چون scope=0 شد به
-                    # scan کل پروژه fallback کرد و ۷۳ پیشنهاد بی‌ربط ساخت.
-                    # حالا اگر inspector explicitly scope داده ولی هیچ فایلی match
-                    # نکرد، scan را با success=False و reason="scope_empty"
-                    # متوقف می‌کنیم. این جلوی pollution chat با پیشنهادهای بی‌ربط را
-                    # می‌گیرد.
-                    write_progress(
-                        watched_id,
-                        status="completed",
-                        phase="phase1_scope_empty_abort",
-                        message=(
-                            "🚫 scope با هیچ فایلی match نشد — اسکن انجام نمی‌شود "
-                            "(جلوگیری از پیشنهادهای بی‌ربط)."
-                        ),
-                    )
-                    # اگر در حالت inspector session هستیم، یک پیام informational
-                    # log کن تا کاربر متوجه شود scan اجرا نشد
-                    if _output_target_session_id is not None:
+                    # 🔴 (scope-empty) — تا commit fa86f99 اینجا فقط
+                    # fallback به scan کلی داشتیم. در transcript کاربر «منو
+                    # برگردون به branch» اسکن `selected_sections=['backend']`
+                    # چون scope=0 شد به scan کل پروژه fallback کرد و ۷۳
+                    # پیشنهاد بی‌ربط ساخت.
+                    #
+                    # 🆕 (regression-fix audit) — abort فقط برای Inspector
+                    # path. در Oversight Deep Scan endpoint (/api/scan/X/deep)
+                    # رفتار قبلی (fallback به full scan) رو حفظ می‌کنیم تا
+                    # UI موجود که این endpoint رو استفاده می‌کنه نشکنه.
+                    if _output_target_session_id is None:
+                        # Oversight path — legacy behavior: fallback to full scan
+                        write_progress(
+                            watched_id,
+                            phase="phase1_scope_empty",
+                            message="⚠️ هیچ فایلی با selection match نشد — برمی‌گردیم به اسکن کلی (Oversight legacy)",
+                        )
+                        # scan_scope_meta=None باقی می‌مونه → scan کلی
+                    else:
+                        # Inspector path — abort (prevent unrelated proposals)
+                        write_progress(
+                            watched_id,
+                            status="completed",
+                            phase="phase1_scope_empty_abort",
+                            message=(
+                                "🚫 scope با هیچ فایلی match نشد — اسکن انجام نمی‌شود "
+                                "(جلوگیری از پیشنهادهای بی‌ربط)."
+                            ),
+                        )
+                        # informational log در chat session
                         try:
                             from .scan_v5.scan_inspector_session import log_scan_message
                             log_scan_message(
@@ -1835,15 +1845,15 @@ async def run_deep_scan(
                             )
                         except Exception as _log_e:
                             logger.debug(f"scan_aborted log failed: {_log_e}")
-                    return {
-                        "success": False,
-                        "aborted": True,
-                        "reason": "scope_empty",
-                        "passes_run": 0,
-                        "findings": 0,
-                        "tasks_created": 0,
-                        "message": "scope با هیچ فایلی match نشد",
-                    }
+                        return {
+                            "success": False,
+                            "aborted": True,
+                            "reason": "scope_empty",
+                            "passes_run": 0,
+                            "findings": 0,
+                            "tasks_created": 0,
+                            "message": "scope با هیچ فایلی match نشد",
+                        }
             except Exception as _scope_e:
                 write_progress(
                     watched_id,
