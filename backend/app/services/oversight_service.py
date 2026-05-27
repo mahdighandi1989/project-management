@@ -559,6 +559,16 @@ def _write_json(path: Path, data: Any) -> None:
 
 
 # ====================================================================
+# 🔴 (extraction-100pct-fix v3) — Attachment size thresholds
+# قبلاً سه magic number جدا داشتیم: 200_000، 500_000، 500_000.
+# حالا یک constant، با dual-tier: "huge" برای step-planner hint،
+# "large" برای output budget bump + completeness warning.
+# ====================================================================
+HUGE_IDEA_CHARS: int = 200_000   # step planner: «attachment غول‌پیکر» — instruction relaxed
+LARGE_IDEA_CHARS: int = 500_000  # synthesis: bump output budget + add per-file completeness warning
+
+
+# ====================================================================
 # Service
 # ====================================================================
 
@@ -3375,7 +3385,7 @@ class OversightService:
         # attachment غول‌پیکر)، compact-hint رو **حذف** می‌کنیم — اجازه می‌دیم
         # AI به اندازهٔ نیاز scope و raw_excerpt بزرگ بنویسه. کاربر گفت
         # «هزینه مهم نیست» و output budget هم به 64K بومپ شده.
-        _has_huge_attachment = len(idea) > 200_000
+        _has_huge_attachment = len(idea) > HUGE_IDEA_CHARS
         _section_hint = ""
         if _is_multi_section:
             # 🆕 (bug 30 v3) — همهٔ sections را به AI نشان بده (cap 200)
@@ -3651,12 +3661,15 @@ class OversightService:
                 return {
                     "id": section_idx + 1,
                     "title": title[:300],
-                    # 🔴 v2: همان مقادیر loop بالا برای consistency
+                    # 🔴 v3 (code-review-followup): همهٔ caps با builder بالا یکسان شد.
+                    # قبلاً behavior_observable[:500] و verification_hint[:300] بود
+                    # (مقادیر pre-v1) ولی builder بالا [:2000] و [:1000] داره.
+                    # divergence که از v1 جا مونده بود.
                     "scope": scope[:5000],
                     "raw_excerpt": (_parsed.get("raw_excerpt") or "").strip()[:15000],
                     "key_terms": [str(k) for k in (_parsed.get("key_terms") or [])[:50]],
-                    "behavior_observable": str(_parsed.get("behavior_observable") or "").strip()[:500],
-                    "verification_hint": str(_parsed.get("verification_hint") or "").strip()[:300],
+                    "behavior_observable": str(_parsed.get("behavior_observable") or "").strip()[:2000],
+                    "verification_hint": str(_parsed.get("verification_hint") or "").strip()[:1000],
                     "business_intent": str(_parsed.get("business_intent") or "").strip()[:300],
                     "non_goals": str(_parsed.get("non_goals") or "").strip()[:300],
                 }
@@ -4401,7 +4414,7 @@ class OversightService:
             # صریح به مدل تولید پرامپت می‌چسبونیم تا همهٔ بخش‌ها رو در
             # task task_steps پوشش بده و خلاصه‌سازی مخرب انجام نده.
             _completeness_warning = ""
-            if len(head) > 500_000:
+            if len(head) > LARGE_IDEA_CHARS:
                 _completeness_warning = (
                     f"\n\n⚠️ **این فایل بزرگ است ({len(head):,} char). برای synthesis:**\n"
                     f"- **هیچ بخشی را drop نکن** — همهٔ topics/sections/items "
@@ -5204,7 +5217,7 @@ AC = «طراحی شیک‌تر باشد»:
             # 🔴 (extraction-100pct-fix) — اگر فایل پیوست بزرگ داریم (>500KB idea)،
             # output budget رو به 64K می‌بریم. کاربر گفت «هزینه مهم نیست». این
             # برای task با 100+ step از فایل‌های بزرگ ضروری است.
-            _has_large_attachment = len(idea) > 500_000
+            _has_large_attachment = len(idea) > LARGE_IDEA_CHARS
             if _has_large_attachment:
                 grounded_max_tokens = 64000  # برای task های با ۵۰+ step
             elif deep_ctx.get("ok"):

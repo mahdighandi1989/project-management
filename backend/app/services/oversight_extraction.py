@@ -61,6 +61,63 @@ SEGMENT_TEXT_MAX_CHARS: int = 20_000_000  # 🔴 (extraction-100pct-fix v2) 10MB
 # 100MB از v1 خیلی بزرگ بود — _save() کل JSON رو در یک json.dumps() بارگذاری
 # می‌کنه؛ چند segment با ۱۰۰MB متن = JSON multi-GB = OOM. 20MB دو برابر قبلیه
 # ولی هنوز safe برای JSON store. متن کامل در DB قابل بازیابی است.
+
+# 🔴 (extraction-100pct-fix v3) — extraction system prompt به‌عنوان module
+# constant. قبلاً ۴۰ خط در body تابع `_ai_extract_text` بود؛ حالا یک‌بار
+# تعریف می‌شه و هر فراخوانی همان referencee رو می‌گیره.
+EXTRACTION_SYSTEM_PROMPT: str = (
+    "تو یک extractor دقیق و کامل هستی. وظیفه‌ات استخراج **عین به عین** (verbatim) "
+    "از محتوای ورودی است. این کار **حیاتی** است — output تو مستقیماً به "
+    "task synthesis می‌ره، اگر چیزی drop کنی task ناقص می‌شه و کاربر "
+    "محتوای از دست رفته رو می‌فهمه.\n\n"
+    "## قوانین مطلق (هیچ‌کدوم optional نیست)\n"
+    "1. **verbatim کامل** — هر کلمه، هر جمله، هر paragraph عیناً منتقل شه.\n"
+    "2. **هیچ summarization** — اگه فایل ۲۰۰ آیتم داره، ۲۰۰ تا منتقل کن (نه «و ۱۹۸ تای دیگه...»).\n"
+    "3. **هیچ drop** — حتی boilerplate، header/footer، صفحات تشکر، imageای که "
+    "متن داره (OCR)، watermark، disclaimer، signature، table of contents... همگی شامل می‌شه.\n"
+    "4. **preserve formatting**:\n"
+    "   - code blocks دقیقاً با همان whitespace و indentation\n"
+    "   - tables به‌صورت Markdown table (| col1 | col2 |)\n"
+    "   - bullet/numbered lists با همان نشانه‌ها (-، *، 1.، 2.، الف، ب)\n"
+    "   - headings با # (سطح متناسب)\n"
+    "   - inline formatting (**bold**, *italic*, `code`) حفظ شه\n"
+    "5. **page/section markers** — اگه ورودی چندصفحه‌ای یا چندبخشی است، "
+    "هر صفحه/بخش رو با `--- صفحه N ---` یا `### بخش: Title` جدا کن.\n"
+    "6. **multilingual** — اگه متن چندزبانه‌ست، همگی رو منتقل کن. زبان فارسی "
+    "رو با حروف فارسی بنویس (RTL).\n"
+    "7. **audio/video**: transcript کامل + speaker labels اگه قابل تشخیصه + "
+    "timestamps هر ~۳۰s (مثال: `[02:15] گوینده ۱: …`).\n"
+    "8. **image/photo**: همهٔ متن قابل خواندن + توصیف عناصر بصری مهم "
+    "(اگه متن به‌تنهایی context رو نمی‌رسونه).\n\n"
+    "## ممنوعات\n"
+    "- ❌ «… و موارد مشابه»، «… و غیره»، «خلاصه»، «in summary»\n"
+    "- ❌ پرش از بخشی چون تکراری به نظر می‌رسه\n"
+    "- ❌ کوتاه‌سازی برای صرفه‌جویی tokens — کاربر گفته «هزینه مهم نیست»\n"
+    "- ❌ paraphrase — کلمات کاربر باید عین به عین منتقل بشن\n"
+    "- ❌ اضافه کردن تحلیل/نظر — فقط استخراج\n\n"
+    "## حداقل خروجی\n"
+    "اگه ورودی متنی است، حجم خروجی باید **حداقل ۹۰٪** حجم ورودی باشه.\n"
+    "اگه ورودی image-only هست (PDF اسکن، عکس)، خروجی باید تمام متن قابل "
+    "خواندن رو شامل شه — اگر مطمئن نیستی، توصیف هم اضافه کن.\n\n"
+    "تو باید پر-حرف و پر-جزئیات باشی. لطفاً بفهم: کم گفتن = شکست."
+)
+
+
+def _truncation_marker(orig_len: int, kept_len: int, what: str = "content") -> str:
+    """🔴 (extraction-100pct-fix v3) — helper یکپارچه برای پیام truncation.
+    قبلاً این فرمت در ۳ سایت تکرار می‌شد (_persist_segment، _fetch_file،
+    zip block). حالا یکپارچه برای consistency و راحتی نگهداری.
+
+    خروجی نمونه:
+      "\\n🔴 [TRUNCATED — content از 50,000,000 char به 20,000,000 char "
+      "کاهش یافت؛ 30,000,000 char (60%) از دست رفت]"
+    """
+    lost = max(0, orig_len - kept_len)
+    pct = (lost * 100 // orig_len) if orig_len > 0 else 0
+    return (
+        f"\n🔴 [TRUNCATED — {what} از {orig_len:,} char به {kept_len:,} char "
+        f"کاهش یافت؛ {lost:,} char ({pct}%) از دست رفت]"
+    )
 PER_SEGMENT_TIMEOUT_SEC: int = 300  # 5 دقیقه
 INLINE_MEDIA_BYTES_LIMIT: int = 18 * 1024 * 1024  # 18MB
 AV_CHUNK_SECONDS: int = 300  # 5 دقیقه per audio/video chunk
@@ -451,47 +508,7 @@ async def _ai_extract_text(
 
     mgr = get_ai_manager()
     messages = [
-        Message(role="system", content=(
-            # 🔴 (extraction-100pct-fix) — prompt قدیمی فقط ۵ خط بود و باعث می‌شد
-            # مدل verbose نباشه. کاربر گزارش داد ۹۰٪+ محتوا گم می‌شد. این prompt
-            # جدید سختگیرانه‌تر است: verbatim، no-summarization، preserve-format،
-            # explicit min-output-length proportional به input، و instructions
-            # برای حالت‌های خاص (PDF، DOCX، code، table، audio، image).
-            "تو یک extractor دقیق و کامل هستی. وظیفه‌ات استخراج **عین به عین** (verbatim) "
-            "از محتوای ورودی است. این کار **حیاتی** است — output تو مستقیماً به "
-            "task synthesis می‌ره، اگر چیزی drop کنی task ناقص می‌شه و کاربر "
-            "محتوای از دست رفته رو می‌فهمه.\n\n"
-            "## قوانین مطلق (هیچ‌کدوم optional نیست)\n"
-            "1. **verbatim کامل** — هر کلمه، هر جمله، هر paragraph عیناً منتقل شه.\n"
-            "2. **هیچ summarization** — اگه فایل ۲۰۰ آیتم داره، ۲۰۰ تا منتقل کن (نه «و ۱۹۸ تای دیگه...»).\n"
-            "3. **هیچ drop** — حتی boilerplate، header/footer، صفحات تشکر، imageای که "
-            "متن داره (OCR)، watermark، disclaimer، signature، table of contents... همگی شامل می‌شه.\n"
-            "4. **preserve formatting**:\n"
-            "   - code blocks دقیقاً با همان whitespace و indentation\n"
-            "   - tables به‌صورت Markdown table (| col1 | col2 |)\n"
-            "   - bullet/numbered lists با همان نشانه‌ها (-، *، 1.، 2.، الف، ب)\n"
-            "   - headings با # (سطح متناسب)\n"
-            "   - inline formatting (**bold**, *italic*, `code`) حفظ شه\n"
-            "5. **page/section markers** — اگه ورودی چندصفحه‌ای یا چندبخشی است، "
-            "هر صفحه/بخش رو با `--- صفحه N ---` یا `### بخش: Title` جدا کن.\n"
-            "6. **multilingual** — اگه متن چندزبانه‌ست، همگی رو منتقل کن. زبان فارسی "
-            "رو با حروف فارسی بنویس (RTL).\n"
-            "7. **audio/video**: transcript کامل + speaker labels اگه قابل تشخیصه + "
-            "timestamps هر ~۳۰s (مثال: `[02:15] گوینده ۱: …`).\n"
-            "8. **image/photo**: همهٔ متن قابل خواندن + توصیف عناصر بصری مهم "
-            "(اگه متن به‌تنهایی context رو نمی‌رسونه).\n\n"
-            "## ممنوعات\n"
-            "- ❌ «… و موارد مشابه»، «… و غیره»، «خلاصه»، «in summary»\n"
-            "- ❌ پرش از بخشی چون تکراری به نظر می‌رسه\n"
-            "- ❌ کوتاه‌سازی برای صرفه‌جویی tokens — کاربر گفته «هزینه مهم نیست»\n"
-            "- ❌ paraphrase — کلمات کاربر باید عین به عین منتقل بشن\n"
-            "- ❌ اضافه کردن تحلیل/نظر — فقط استخراج\n\n"
-            "## حداقل خروجی\n"
-            "اگه ورودی متنی است، حجم خروجی باید **حداقل ۹۰٪** حجم ورودی باشه.\n"
-            "اگه ورودی image-only هست (PDF اسکن، عکس)، خروجی باید تمام متن قابل "
-            "خواندن رو شامل شه — اگر مطمئن نیستی، توصیف هم اضافه کن.\n\n"
-            "تو باید پر-حرف و پر-جزئیات باشی. لطفاً بفهم: کم گفتن = شکست."
-        )),
+        Message(role="system", content=EXTRACTION_SYSTEM_PROMPT),
         Message(
             role="user",
             content=prompt + extra_text,
@@ -1217,15 +1234,11 @@ async def _run_extraction(
             _original_len = len(text)
             logger.warning(
                 f"[extraction-100pct-fix] segment[{idx}] text {_original_len:,} chars > "
-                f"{SEGMENT_TEXT_MAX_CHARS:,} cap. این یک bug است — segment باید کوچک‌تر "
-                f"باشه. به caller گزارش می‌شه و {_original_len - SEGMENT_TEXT_MAX_CHARS:,} "
-                f"char از دست رفت."
+                f"{SEGMENT_TEXT_MAX_CHARS:,} cap. segment باید کوچک‌تر باشه — "
+                f"{_original_len - SEGMENT_TEXT_MAX_CHARS:,} char از دست رفت."
             )
-            text = text[:SEGMENT_TEXT_MAX_CHARS] + (
-                f"\n\n🔴 [TRUNCATED] — این segment {_original_len:,} char بود ولی به "
-                f"{SEGMENT_TEXT_MAX_CHARS:,} char truncate شد. "
-                f"{_original_len - SEGMENT_TEXT_MAX_CHARS:,} char از دست رفت. "
-                f"این یک bug است — segment باید کوچک‌تر باشه."
+            text = text[:SEGMENT_TEXT_MAX_CHARS] + _truncation_marker(
+                _original_len, SEGMENT_TEXT_MAX_CHARS, what=f"segment[{idx}]"
             )
         seg = ExtractionSegment(
             id=str(uuid.uuid4()),

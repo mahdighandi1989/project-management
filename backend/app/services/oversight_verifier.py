@@ -153,17 +153,17 @@ async def _fetch_file(
         except Exception:
             return None
         if len(decoded) > max_bytes:
-            # 🔴 (extraction-100pct-fix) — قبلاً silently truncate می‌شد.
-            # حالا WARNING واضح در logs و در محتوای برگشتی هست.
+            # 🔴 (extraction-100pct-fix v3) — از helper مشترک استفاده می‌کنیم
+            # تا فرمت truncation در همهٔ سایت‌ها یکسان باشه.
+            from .oversight_extraction import _truncation_marker
+            _orig = len(decoded)
             logger.warning(
-                f"[verifier _fetch_file] فایل {len(decoded):,} byte بود، فقط "
-                f"{max_bytes:,} byte اول fetch شد. {len(decoded) - max_bytes:,} "
+                f"[verifier _fetch_file] فایل {_orig:,} byte بود، فقط "
+                f"{max_bytes:,} byte اول fetch شد. {_orig - max_bytes:,} "
                 f"byte از دست رفت — verification ممکنه بر اساس محتوای ناقص باشه."
             )
-            decoded = decoded[:max_bytes] + (
-                f"\n... 🔴 [TRUNCATED — فایل اصلی {len(decoded):,} byte بود ولی "
-                f"verifier فقط {max_bytes:,} byte اول رو fetch کرد. "
-                f"{len(decoded) - max_bytes:,} byte بقیه دیده نشده.]"
+            decoded = decoded[:max_bytes] + _truncation_marker(
+                _orig, max_bytes, what=f"file fetch by verifier"
             )
         return decoded
     except Exception:
