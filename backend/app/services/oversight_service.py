@@ -3392,11 +3392,17 @@ class OversightService:
             )
             if _has_huge_attachment:
                 # حالت attachment بزرگ — اجازه به AI که verbose باشه
+                # 🔴 v2: caps هماهنگ با field truncation در step builder
+                # (scope[:5000], raw_excerpt[:15000]) — قبلاً 20K/50K بود
+                # که overflow output budget می‌شد.
+                _per_step_scope = min(5000, max(500, len(idea) // max(_section_count, 1)))
                 _section_hint += (
                     f"💡 **این متن شامل فایل پیوست بزرگ است ({len(idea):,} char). "
                     f"کاربر صریحاً گفت «هیچ بخش drop نکن، خلاصه‌سازی مخرب ممنوع».**\n"
-                    f"- scope هر مرحله: **حداکثر {min(20000, len(idea)//max(_section_count, 1)):,} char** — یعنی همهٔ محتوای آن بخش\n"
-                    f"- raw_excerpt: **عیناً متن آن بخش از idea** (تا 50KB در صورت نیاز)\n"
+                    f"- scope هر مرحله: **حداکثر {_per_step_scope:,} char**\n"
+                    f"- raw_excerpt: **عیناً متن آن بخش (تا 15KB در صورت نیاز)**\n"
+                    f"- اگر یک بخش بیشتر از این می‌خواهد، آن را به sub-steps "
+                    f"بشکن (مرحله 4.1، 4.2، ...) — نه drop\n"
                     f"- هرگز «و موارد مشابه» یا «خلاصه» ننویس — verbatim کامل\n"
                 )
             else:
@@ -3536,12 +3542,18 @@ class OversightService:
                     continue
                 out.append({
                     "id": int(s.get("id") or (i + 1)),
-                    "title": title[:300],  # 🔴 (extraction-100pct-fix) 200→300
-                    "scope": scope[:20000],  # 🔴 was 2500 — برای فایل‌های بزرگ کم بود
-                    "raw_excerpt": (s.get("raw_excerpt") or "").strip()[:50000],  # 🔴 was 4000 — کاربر گفت «هزینه مهم نیست»
-                    "key_terms": [str(k) for k in (s.get("key_terms") or [])[:50]],  # 25→50
-                    "behavior_observable": str(s.get("behavior_observable") or "").strip()[:2000],  # 500→2000
-                    "verification_hint": str(s.get("verification_hint") or "").strip()[:1000],  # 300→1000
+                    "title": title[:300],  # 🔴 v1: 200→300
+                    # 🔴 v2: 20000→5000 — 20K per-step خیلی زیاد بود برای
+                    # output budget. step planner 64K خروجی داره؛ با
+                    # 50 step × 70K (scope+excerpt) = 3.5MB → overflow.
+                    # 5K scope + 15K excerpt = 20K/step × 50 step = 1MB
+                    # هنوز بیش از budget، ولی AI خودش انتخاب می‌کنه چقدر
+                    # بنویسه (cap فقط max-allowed است، نه instruction).
+                    "scope": scope[:5000],
+                    "raw_excerpt": (s.get("raw_excerpt") or "").strip()[:15000],
+                    "key_terms": [str(k) for k in (s.get("key_terms") or [])[:50]],
+                    "behavior_observable": str(s.get("behavior_observable") or "").strip()[:2000],
+                    "verification_hint": str(s.get("verification_hint") or "").strip()[:1000],
                     "business_intent": str(s.get("business_intent") or "").strip()[:300],
                     "non_goals": str(s.get("non_goals") or "").strip()[:300],
                 })
@@ -3638,9 +3650,10 @@ class OversightService:
                     return None
                 return {
                     "id": section_idx + 1,
-                    "title": title[:300],  # 🔴 (extraction-100pct-fix) 200→300
-                    "scope": scope[:20000],  # 🔴 was 2500 — برای فایل‌های بزرگ
-                    "raw_excerpt": (_parsed.get("raw_excerpt") or "").strip()[:50000],  # 🔴 was 4000
+                    "title": title[:300],
+                    # 🔴 v2: همان مقادیر loop بالا برای consistency
+                    "scope": scope[:5000],
+                    "raw_excerpt": (_parsed.get("raw_excerpt") or "").strip()[:15000],
                     "key_terms": [str(k) for k in (_parsed.get("key_terms") or [])[:50]],
                     "behavior_observable": str(_parsed.get("behavior_observable") or "").strip()[:500],
                     "verification_hint": str(_parsed.get("verification_hint") or "").strip()[:300],
@@ -4361,20 +4374,20 @@ class OversightService:
                 )
                 continue
 
-            # 🔴 (extraction-100pct-fix) — کاربر گزارش داد ۹۰٪+ محتوای
-            # فایل‌های آپلودی به task نمی‌رسید. ریشه: cap 1MB روی متن
-            # استخراج‌شده. کاربر صریحاً گفت «هزینه توکنش مهم نیست، باید
-            # ۱۰۰٪ کامل باشه».
+            # 🔴 (extraction-100pct-fix v2) — کاربر گزارش داد ۹۰٪+ محتوای
+            # فایل‌های آپلودی به task نمی‌رسید با cap 1MB. اول 50MB کردیم
+            # ولی این از context window همهٔ مدل‌ها بزرگ‌تر بود (Gemini 2.5
+            # Pro = 2M token ≈ 6MB UTF-8، Claude = 200K ≈ 600KB، GPT-4o =
+            # 128K ≈ 400KB). 50MB یعنی request یا fail می‌شد یا silently
+            # truncate می‌شد.
             #
-            # **استراتژی جدید**:
-            # - cap بسیار بالا (50MB متن = ~12M token برای Gemini 2.5 Pro
-            #   که 2M context داره — هنوز overshoots ولی synthesis layer
-            #   باید خودش به chunks برسه)
-            # - اگر متن بزرگه و overflow context احتمالی، یک هشدار صریح
-            #   به مدل می‌چسبونیم: «این فایل بزرگه — همهٔ بخش‌ها رو
-            #   پوشش بده، خلاصه نکن، چیزی drop نکن.»
-            # - متن کامل همیشه در DB قابل بازیابی است (به‌جای 1MB قبلی)
-            FILE_CAP = 50_000_000  # 50MB — practically unlimited برای اکثر کاربردها
+            # **استراتژی v2**:
+            # - cap 5MB: ~5x بزرگ‌تر از 1MB قبلی، در محدودهٔ Gemini 2.5 Pro
+            #   جا می‌شه (با حاشیه برای system prompt + سایر context)
+            # - برای documentهای بزرگتر از 5MB، متن کامل در DB هست،
+            #   می‌شه با چندین task جداگانه پردازش کرد
+            # - هشدار صریح اگر متن > 500KB
+            FILE_CAP = 5_000_000  # 5MB — متناسب با context window مدل‌ها
             head = full_text[:FILE_CAP]
             tail_note = ""
             if len(full_text) > FILE_CAP:
