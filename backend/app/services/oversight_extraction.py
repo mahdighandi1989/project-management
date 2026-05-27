@@ -57,7 +57,10 @@ MAX_ROWS_PER_SHEET: int = 100_000_000
 # 🛡 (Stage 10 audit fix #2) — طبق درخواست صریح کاربر «محدودیت استخراج متن
 # اصلاً نداشته باشه»، این سقف فقط محافظ JSON store در برابر فایل JSON عظیم
 # است (≥10MB). در عمل، هیچ segment معمولی به این سقف نمی‌رسد.
-SEGMENT_TEXT_MAX_CHARS: int = 100_000_000  # 🔴 (extraction-100pct-fix) 10MB→100MB per segment
+SEGMENT_TEXT_MAX_CHARS: int = 20_000_000  # 🔴 (extraction-100pct-fix v2) 10MB→20MB.
+# 100MB از v1 خیلی بزرگ بود — _save() کل JSON رو در یک json.dumps() بارگذاری
+# می‌کنه؛ چند segment با ۱۰۰MB متن = JSON multi-GB = OOM. 20MB دو برابر قبلیه
+# ولی هنوز safe برای JSON store. متن کامل در DB قابل بازیابی است.
 PER_SEGMENT_TIMEOUT_SEC: int = 300  # 5 دقیقه
 INLINE_MEDIA_BYTES_LIMIT: int = 18 * 1024 * 1024  # 18MB
 AV_CHUNK_SECONDS: int = 300  # 5 دقیقه per audio/video chunk
@@ -399,9 +402,10 @@ async def _ai_extract_text(
     prompt: str,
     image_b64: Optional[str] = None,
     inline_file_data: Optional[Tuple[str, bytes]] = None,  # (mime, bytes) — for Gemini Files
-    max_tokens: int = 64000,  # 🔴 (extraction-100pct-fix) — bump 32K→64K، چون
-    # prompt جدید verbose-ـتر است و verbatim می‌خواد. مدل‌های مدرن (Gemini
-    # 2.5 Pro=64K، Claude=64K، GPT-4=16K) اکثراً 64K پشتیبانی می‌کنن.
+    max_tokens: int = 32000,  # 🔴 (extraction-100pct-fix v2) برگشت 64K→32K.
+    # 64K در v1 برای GPT-4 turbo (16K) و DeepSeek (8K) شکست می‌خورد و چون
+    # allow_fallback=False است، extraction silently fail می‌شد. 32K همهٔ
+    # مدل‌های مدرن پشتیبانی می‌کنن (Gemini 2.5، Claude، GPT-4o، DeepSeek v3).
 ) -> str:
     """فراخوانی AI برای استخراج متن از یک قطعه (صفحه/فریم/audio chunk).
 
@@ -538,11 +542,14 @@ async def _plan_headings(model_id: str, user_idea: str, filename: str, mime: str
         m = re.search(r'\{[^{}]*"headings"\s*:\s*\[.*?\]\s*\}', resp.content or "", re.DOTALL)
         if m:
             data = json.loads(m.group(0))
-            # 🔴 (extraction-100pct-fix) 200→500 per heading، 8→50 total
-            # برای document بزرگ با ۲۰+ section نباید heading ها drop بشن
-            hs = [str(x)[:500] for x in (data.get("headings") or [])]
+            # 🔴 (extraction-100pct-fix v2) 200→400 per heading، 8→20 total.
+            # 50 از v1 خیلی زیاد بود — هر heading منجر به یک AI call جداگانه
+            # برای extraction می‌شه (PER_SEGMENT_TIMEOUT_SEC=300s هر کدوم).
+            # 50 heading × 300s timeout = ~4hr extraction در بدترین حالت.
+            # 20 تا برای documentهای واقعی (PDF ≤ 100 صفحه) کافیه.
+            hs = [str(x)[:400] for x in (data.get("headings") or [])]
             if hs:
-                return hs[:50]
+                return hs[:20]
     except Exception as e:
         logger.debug(f"_plan_headings failed: {e}")
     # fallback عمومی
@@ -841,27 +848,34 @@ async def _extract_zip_archive(
         for idx, name in enumerate(names, start=1):
             if idx in completed:
                 continue
+            # 🆕 (efficiency v2) — یک‌بار open + read با حد +1. اگر len(raw) ==
+            # حد + 1 یعنی فایل بزرگتر بوده. قبلاً دو بار open می‌شد (یک‌بار
+            # read، یک‌بار seek/tell) → دو decompression روی یک entry.
+            _was_truncated_inner = False
+            _full_size_known: Optional[int] = None
             try:
                 with zf.open(name) as f:
-                    raw = f.read(_ZIP_MAX_BYTES_PER_FILE)
-                    # detect if file was truncated
-                    _was_truncated_inner = False
+                    raw = f.read(_ZIP_MAX_BYTES_PER_FILE + 1)
+                if len(raw) > _ZIP_MAX_BYTES_PER_FILE:
+                    _was_truncated_inner = True
+                    raw = raw[:_ZIP_MAX_BYTES_PER_FILE]
+                    # full size رو از namelist info می‌گیریم (بدون decompression)
                     try:
-                        with zf.open(name) as _f2:
-                            _f2.seek(0, 2)  # to end
-                            _full_size = _f2.tell()
-                            _was_truncated_inner = _full_size > _ZIP_MAX_BYTES_PER_FILE
+                        _full_size_known = zf.getinfo(name).file_size
                     except Exception:
-                        pass
+                        _full_size_known = None
             except Exception as e:
                 await persist_segment_fn(
                     idx, name, f"[خطا در خواندن: {str(e)[:100]}]", f"zip_entry={name}",
                 )
                 continue
-            # اگر فایل internal بزرگتر بود، یک هشدار به متن چسبیده می‌شه
             if _was_truncated_inner:
+                _size_str = (
+                    f"{_full_size_known:,} byte" if _full_size_known
+                    else f">{_ZIP_MAX_BYTES_PER_FILE:,} byte"
+                )
                 logger.warning(
-                    f"[extraction-100pct-fix] zip entry '{name}' بود {_full_size:,} byte، "
+                    f"[extraction-100pct-fix] zip entry '{name}' بود {_size_str}، "
                     f"فقط {_ZIP_MAX_BYTES_PER_FILE:,} byte اول خوانده شد."
                 )
             # تلاش text decode

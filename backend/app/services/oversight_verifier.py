@@ -2237,10 +2237,11 @@ async def verify_task(
         else:
             # 🆕 chunk extraction هوشمند — اگر فایل بزرگ است (>10000 char)،
             # فقط بخش‌های مرتبط با کلمات کلیدی AC را بگیر، نه فقط N char اول
-            # 🔴 (extraction-100pct-fix) — قبلاً 10K threshold + 12KB limit. حالا
-            # 50K threshold + 60KB limit. برای فایل‌های زیر 50K، کل فایل ارسال
-            # می‌شه به verifier (نه chunk).
-            if len(c) > 50000 and chunk_keywords:
+            # 🔴 (extraction-100pct-fix v2) — برگشت threshold از 50K به 15K،
+            # نگه داشتن max_total_chars=60K. فایل‌های 15-50KB هم باید chunk
+            # بشن چون چندین فایل × 30KB = context overflow در verifier.
+            # 60KB chunks (به‌جای 12KB قبلی) همچنان context کافی می‌ده.
+            if len(c) > 15000 and chunk_keywords:
                 chunk = _extract_relevant_chunks(c, chunk_keywords, lines_around=80, max_total_chars=60000)
                 files_blob_parts.append(
                     f"=== {p} ({len(c.splitlines())} line file — chunk‌های مرتبط با AC) ===\n{chunk}"
