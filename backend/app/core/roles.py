@@ -24,6 +24,10 @@ class RoleType(str, Enum):
     ANALYST = "analyst"
     JUDGE = "judge"
     SUMMARIZER = "summarizer"
+    # 🆕 (Prompt-GitHub Sync) — نقش مخصوص ابزارهای خارجی (Cloud Code و …)
+    # که فقط می‌توانند پرامپت را بخوانند، claim کنند و وضعیت اجرا را گزارش
+    # کنند. اجازهٔ archive/delete ندارند.
+    EXTERNAL_TOOL = "external_tool"
 
 
 class AIRole(BaseModel):
