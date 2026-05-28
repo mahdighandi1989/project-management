@@ -798,12 +798,26 @@ async def _build_super_task(
         "source_count": len(source_task_objs),
     }
 
+    # 🆕 EXECUTOR_DISCLAIMER را به ابتدای prompt اضافه کن (super-tasks تا قبل
+    # از این به‌صورت raw مستقیم prompt را می‌گذاشتند و disclaimer شامل
+    # یادداشت‌های وابستگی‌ها و همگام‌سازی را از دست می‌دادند). idempotency check
+    # سازگار با همان منطق idea_to_prompt و سایر مسیرهای تولید پرامپت است.
+    try:
+        from .oversight_strong_prompt import EXECUTOR_DISCLAIMER
+        if "یادداشت مهم برای مدل اجراکننده" not in merged_idea[:500]:
+            super_prompt = EXECUTOR_DISCLAIMER + "\n" + merged_idea
+        else:
+            super_prompt = merged_idea
+    except Exception as _e:
+        logger.debug(f"_build_super_task: EXECUTOR_DISCLAIMER prepend skipped: {_e}")
+        super_prompt = merged_idea
+
     super_task = OversightTask(
         id=new_id,
         watched_id=watched_id,
         project_full_name=project_full_name,
         title=super_title[:200],
-        prompt=merged_idea,
+        prompt=super_prompt,
         raw_idea=merged_idea,
         type=super_type if super_type in (
             "idea", "bug", "feature_request", "refactor", "docs", "reminder", "other"

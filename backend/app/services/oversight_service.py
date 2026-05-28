@@ -2125,6 +2125,18 @@ class OversightService:
 
         title = payload.get("title", "").strip() or "تسک بدون عنوان"
         prompt = payload.get("prompt", "").strip()
+        # 🆕 defensive disclaimer prepend — هر مسیری که create_task را صدا می‌زند
+        # (API مستقیم، scan، consolidation، inspector، ...) تضمین می‌کند که
+        # EXECUTOR_DISCLAIMER (شامل بخش وابستگی‌ها و همگام‌سازی) در ابتدای
+        # prompt باشد. اگر prompt قبلاً از idea_to_prompt آمده، header در 500
+        # کاراکتر اول هست و prepend skip می‌شود.
+        if prompt:
+            try:
+                from .oversight_strong_prompt import EXECUTOR_DISCLAIMER
+                if "یادداشت مهم برای مدل اجراکننده" not in prompt[:500]:
+                    prompt = EXECUTOR_DISCLAIMER + "\n" + prompt
+            except Exception as _e:
+                logger.debug(f"create_task: disclaimer prepend skipped: {_e}")
         # 🆕 (C5 — بند ۹) — title validator + retry. اگر AI عنوان generic داد،
         # یک پاس دیگر با hint قوی‌تر می‌زنیم تا عنوان معنادار شود.
         if title != "تسک بدون عنوان" and not self._validate_title_quality(title):
