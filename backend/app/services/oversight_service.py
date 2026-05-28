@@ -2723,32 +2723,73 @@ class OversightService:
         # 4) idea_to_prompt را صدا بزن
         # 🆕 برای super-task (source=auto_consolidation یا merged_from non-empty)
         # یا raw_idea خیلی بزرگ، optimizations اعمال می‌کنیم تا از Render edge
-        # timeout (30s) جلوگیری شود:
-        #   - multi_pass=never: skip plan + per-step generation (~20s)
-        #   - _skip_deep_context=True: skip 60-file GitHub fetch (~20-40s)
-        # content از قبل ساختاریافته است (consolidation پیش‌نیاز را انجام داده)
-        # پس re-planning و re-fetching context ضرورتی ندارد.
+        # timeout (30s) جلوگیری شود.
         is_super_task = (
             getattr(task, "source", "") == "auto_consolidation"
             or bool(getattr(task, "merged_from", []) or [])
         )
         is_heavy = is_super_task or len(raw) > 5000
-        _mp_mode = "never" if is_heavy else "auto"
-        _skip_deep = is_heavy
-        try:
-            new_data = await self.idea_to_prompt(
-                idea=raw,
-                watched_id=task.watched_id,
-                type_=task.type,
-                priority=task.priority,
-                model_id=model_id,
-                model_ids=model_ids,
-                multi_pass_mode=_mp_mode,
-                _skip_deep_context=_skip_deep,
+
+        # 🆕 super-task **instant fast-path** — بدون AI call.
+        # برای super-task ها content قبلاً ساختاریافته است (consolidation
+        # منطقی پیش‌نیاز را انجام داده). regenerate کاربر معمولاً برای ارتقای
+        # یک تسک قدیمی به نسخهٔ جدید EXECUTOR_DISCLAIMER است (مثلاً اضافه
+        # شدن بخش وابستگی‌ها). انجام full AI regenerate در این حالت ضرورت
+        # ندارد و باعث Render timeout می‌شود.
+        # روند instant:
+        #   1) متن body را از task.prompt قدیمی استخراج کن (بدون disclaimer قدیمی)
+        #   2) EXECUTOR_DISCLAIMER جدید را prepend کن
+        #   3) raw_idea را به‌عنوان منبع نگه‌دار
+        #   4) AI صدا زده نمی‌شود — instant
+        if is_super_task:
+            from .oversight_strong_prompt import EXECUTOR_DISCLAIMER
+            old_prompt = task.prompt or ""
+            # disclaimer قدیمی را strip کن (هر نسخه‌ای)
+            old_header = "## ⚠️ یادداشت مهم برای مدل اجراکننده"
+            if old_header in old_prompt:
+                # پیدا کن کجا disclaimer تمام می‌شود (آخرین --- قبل از body اصلی)
+                # disclaimer همیشه با یک خط "---" به پایان می‌رسد
+                idx = old_prompt.find(old_header)
+                if idx >= 0:
+                    # پیدا کن "---" پایانی disclaimer (اولین --- بعد از header)
+                    end_marker = old_prompt.find("\n---\n", idx)
+                    if end_marker > 0:
+                        body = old_prompt[end_marker + len("\n---\n"):].lstrip()
+                    else:
+                        body = old_prompt[idx + len(old_header):].lstrip()
+                else:
+                    body = old_prompt
+            else:
+                body = old_prompt
+            new_prompt = EXECUTOR_DISCLAIMER + "\n" + body
+            logger.info(
+                f"regenerate (instant fast-path super-task): task={task_id[:8]}, "
+                f"old_len={len(old_prompt)}, new_len={len(new_prompt)}"
             )
-        except Exception as e:
-            # transaction-safe: اگر AI fail شد، چیزی تغییر نمی‌کند
-            raise RuntimeError(f"بازتولید پرامپت ناموفق: {e}")
+            new_data = {
+                "prompt": new_prompt,
+                "title": task.title,
+                "target_files": task.target_files,
+                "acceptance_criteria": task.acceptance_criteria,
+                "task_steps": task.task_steps,
+            }
+        else:
+            _mp_mode = "never" if is_heavy else "auto"
+            _skip_deep = is_heavy
+            try:
+                new_data = await self.idea_to_prompt(
+                    idea=raw,
+                    watched_id=task.watched_id,
+                    type_=task.type,
+                    priority=task.priority,
+                    model_id=model_id,
+                    model_ids=model_ids,
+                    multi_pass_mode=_mp_mode,
+                    _skip_deep_context=_skip_deep,
+                )
+            except Exception as e:
+                # transaction-safe: اگر AI fail شد، چیزی تغییر نمی‌کند
+                raise RuntimeError(f"بازتولید پرامپت ناموفق: {e}")
 
         # 5) فقط حالا history را push کن و تسک را به‌روز کن (atomic)
         async with self._lock:
