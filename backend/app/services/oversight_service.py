@@ -2722,15 +2722,19 @@ class OversightService:
 
         # 4) idea_to_prompt را صدا بزن
         # 🆕 برای super-task (source=auto_consolidation یا merged_from non-empty)
-        # یا raw_idea خیلی بزرگ، multi_pass را skip می‌کنیم تا از Render edge
-        # timeout (30s) جلوگیری شود. content از قبل ساختاریافته است
-        # (consolidation منطقی پیش‌نیاز را انجام داده) پس re-planning ضرورتی ندارد.
+        # یا raw_idea خیلی بزرگ، optimizations اعمال می‌کنیم تا از Render edge
+        # timeout (30s) جلوگیری شود:
+        #   - multi_pass=never: skip plan + per-step generation (~20s)
+        #   - _skip_deep_context=True: skip 60-file GitHub fetch (~20-40s)
+        # content از قبل ساختاریافته است (consolidation پیش‌نیاز را انجام داده)
+        # پس re-planning و re-fetching context ضرورتی ندارد.
         is_super_task = (
             getattr(task, "source", "") == "auto_consolidation"
             or bool(getattr(task, "merged_from", []) or [])
         )
-        # heuristic: اگر raw_idea > 5000 char، multi-pass احتمالاً timeout می‌خورد
-        _mp_mode = "never" if (is_super_task or len(raw) > 5000) else "auto"
+        is_heavy = is_super_task or len(raw) > 5000
+        _mp_mode = "never" if is_heavy else "auto"
+        _skip_deep = is_heavy
         try:
             new_data = await self.idea_to_prompt(
                 idea=raw,
@@ -2740,6 +2744,7 @@ class OversightService:
                 model_id=model_id,
                 model_ids=model_ids,
                 multi_pass_mode=_mp_mode,
+                _skip_deep_context=_skip_deep,
             )
         except Exception as e:
             # transaction-safe: اگر AI fail شد، چیزی تغییر نمی‌کند
@@ -5088,6 +5093,9 @@ class OversightService:
         upload_session_ids: Optional[List[str]] = None,
         # 🆕 (Stage 6) — اگر داده شد، progress updates روی این track_id ثبت می‌شود
         progress_track_id: Optional[str] = None,
+        # 🆕 (perf fix) — skip deep_context (60-file GitHub fetch ~20-40s).
+        # برای regenerate سریع super-task که content از قبل ساختاریافته است.
+        _skip_deep_context: bool = False,
     ) -> Dict[str, Any]:
         if not idea.strip() and not upload_session_ids:
             raise ValueError("ایده خالی است")
@@ -5269,27 +5277,38 @@ class OversightService:
             # importهای داخلی + special filesها (README، tsconfig، ...)
             # بدون این مرحله، AI فقط نام فایل‌ها را می‌بیند و پرامپتش
             # عمومی و جدا از پروژه می‌شود.
-            try:
-                token_for_deep = get_github_token()
-                if token_for_deep:
-                    from .oversight_deep_scan_service import build_deep_context_for_idea
-                    # 🛡 (audit fix #1) — context عمیق‌تر و گسترده‌تر:
-                    # 40 → 60 فایل، per-file byte cap 50K → 120K، خط 350 → 800
-                    deep_ctx = await build_deep_context_for_idea(
-                        watched.repo_full_name,
-                        branch=watched.default_branch or "main",
-                        token=token_for_deep,
-                        max_deep_read=60,        # افزایش از 40
-                        max_file_bytes=120000,   # افزایش از 50K — هر فایل ~120KB
-                        max_file_lines=800,      # افزایش از 350 — فایل‌های بزرگ بهتر دیده شوند
-                        idea=idea,  # keyword-aware file selection
-                    )
-                    if not deep_ctx.get("ok"):
-                        logger.warning(f"deep_context for idea failed: {deep_ctx.get('error')}")
-                        deep_ctx = {}
-            except Exception as _e:
-                logger.warning(f"build_deep_context_for_idea exception: {_e}")
-                deep_ctx = {}
+            #
+            # 🆕 (perf fix) — برای regenerate سریع super-task این مرحله
+            # skip می‌شود (20-40s صرفه‌جویی + جلوگیری از Render edge timeout).
+            # content super-task از قبل ساختاریافته است و نیازی به re-fetch
+            # 60 فایل از GitHub ندارد.
+            if _skip_deep_context:
+                logger.info(
+                    f"idea_to_prompt: deep_context skipped (fast-path requested) "
+                    f"watched={watched.id}"
+                )
+            else:
+                try:
+                    token_for_deep = get_github_token()
+                    if token_for_deep:
+                        from .oversight_deep_scan_service import build_deep_context_for_idea
+                        # 🛡 (audit fix #1) — context عمیق‌تر و گسترده‌تر:
+                        # 40 → 60 فایل، per-file byte cap 50K → 120K، خط 350 → 800
+                        deep_ctx = await build_deep_context_for_idea(
+                            watched.repo_full_name,
+                            branch=watched.default_branch or "main",
+                            token=token_for_deep,
+                            max_deep_read=60,        # افزایش از 40
+                            max_file_bytes=120000,   # افزایش از 50K — هر فایل ~120KB
+                            max_file_lines=800,      # افزایش از 350 — فایل‌های بزرگ بهتر دیده شوند
+                            idea=idea,  # keyword-aware file selection
+                        )
+                        if not deep_ctx.get("ok"):
+                            logger.warning(f"deep_context for idea failed: {deep_ctx.get('error')}")
+                            deep_ctx = {}
+                except Exception as _e:
+                    logger.warning(f"build_deep_context_for_idea exception: {_e}")
+                    deep_ctx = {}
 
             # Context سطحی: README + commits + issues — همچنان مفید است
             try:
