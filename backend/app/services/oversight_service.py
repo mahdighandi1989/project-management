@@ -211,6 +211,13 @@ class WatchedProject:
     # 'github_import' | 'manual_api' | None
     # برای نمایش badge در UI WatchedCard و audit trail
     auto_added_source: Optional[str] = None
+    # 🆕 (Prompt-GitHub Sync) — اگر True، تسک‌های این پروژه به
+    # ریپوی همین پروژه (در پوشهٔ prompt/) sync می‌شوند تا ابزارهای خارجی
+    # (Cloud Code و …) بتوانند آن‌ها را به‌ترتیب اولویت اجرا کنند.
+    # default True — برای همه‌ی پروژه‌های فعلی و آینده فعال است.
+    prompt_sync_enabled: bool = True
+    # شاخه‌ای که فایل‌های prompt در آن نگه‌داری می‌شوند (پیش‌فرض = default_branch)
+    prompt_sync_branch: Optional[str] = None
     # 🆕 (auto-loop) ping-pong scheduler-driven:
     # اگر فعال، پس از verify=partial scheduler خودکار:
     #   1. status تسک به pending برمی‌گردد
@@ -460,6 +467,38 @@ class OversightTask:
     # مدیریت در backend/app/services/verify_runtime/ac_cache_service.py
     ac_verify_cache: Dict[str, Any] = field(default_factory=dict)
 
+    # 🆕 (Prompt-GitHub Sync) — نگاشت تسک ↔ فایل پرامپت در ریپو
+    # github_prompt_path: مسیر فایل در ریپو (e.g., "prompt/task-{id}.md")
+    # github_prompt_sha: sha فعلی فایل (برای update/delete via Contents API)
+    # github_prompt_synced_at: ISO آخرین sync موفق
+    # github_prompt_archived: True اگر فایل در prompt/archive/ است
+    # github_prompt_last_error: اگر sync fail شد، پیام خطا (برای retry/UI)
+    github_prompt_path: Optional[str] = None
+    github_prompt_sha: Optional[str] = None
+    github_prompt_synced_at: Optional[str] = None
+    github_prompt_archived: bool = False
+    github_prompt_last_error: Optional[str] = None
+
+    # 🆕 (External Tool / Cloud Code) — اولویت اجرا + قفل اجرا
+    # execution_priority: عدد صحیح (کوچک‌تر = اولویت بالاتر). داینامیک recompute.
+    # external_status: گردش کار اجرای خارجی
+    #   "pending"     = آماده پیک‌آپ
+    #   "claimed"     = ابزار خارجی قفل گرفته، در حال اجرا
+    #   "in_progress" = ابزار خارجی صراحتاً پیشرفت داده
+    #   "done"        = ابزار اعلام تکمیل
+    #   "failed"      = ابزار خطا گزارش داد، به pending برمی‌گردد
+    # external_locked_by: شناسه ابزار/agent (e.g., "cloud-code-1")
+    # external_lease_until: ISO منقضی شدن lease (default 30min)
+    # external_attempts: شمارش‌گر تلاش‌ها
+    # external_last_error: متن آخرین خطا
+    execution_priority: int = 100
+    external_status: str = "pending"
+    external_locked_by: Optional[str] = None
+    external_locked_at: Optional[str] = None
+    external_lease_until: Optional[str] = None
+    external_attempts: int = 0
+    external_last_error: Optional[str] = None
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
@@ -666,6 +705,77 @@ class OversightService:
 
     def _save_tasks(self) -> None:
         _write_json(TASKS_FILE, [t.to_dict() for t in self.tasks])
+
+    def _recompute_execution_priorities(self) -> None:
+        """به‌روزرسانی execution_priority همهٔ تسک‌های pending پس از mutation.
+
+        این تابع هیچ I/O ندارد و سریع است؛ توسط _save_tasks یا قبل از rebuild_index
+        صدا زده می‌شود.
+        """
+        try:
+            from .prompt_github_sync import compute_execution_priority
+        except Exception:
+            return
+        for t in self.tasks:
+            try:
+                if not getattr(t, "archived", False):
+                    t.execution_priority = compute_execution_priority(t)
+            except Exception:
+                continue
+
+    def _schedule_prompt_sync(
+        self, task: Optional["OversightTask"] = None, *, rebuild_index: bool = True,
+        delete: bool = False,
+    ) -> None:
+        """fire-and-forget sync پرامپت‌ها به GitHub.
+
+        هرگز exception نمی‌اندازد؛ هرگز task save را block نمی‌کند.
+        - اگر task داده شد: همان تسک sync یا delete می‌شود.
+        - rebuild_index=True: _index.json پروژه‌ی مربوطه بازسازی می‌شود.
+        """
+        try:
+            from .prompt_github_sync import (
+                safe_sync_task, safe_rebuild_index, safe_delete_task,
+            )
+        except Exception:
+            return
+        token = get_github_token()
+        if not token:
+            return
+
+        watched_ids: set = set()
+        coros = []
+        if task is not None:
+            watched = self._find_watched(task.watched_id) if task.watched_id else None
+            if watched is not None and getattr(watched, "prompt_sync_enabled", True):
+                if delete:
+                    coros.append(safe_delete_task(task, watched, token=token))
+                else:
+                    coros.append(safe_sync_task(task, watched, token=token))
+                watched_ids.add(watched.id)
+
+        if rebuild_index:
+            for wid in (watched_ids or {
+                t.watched_id for t in self.tasks if t.watched_id
+            }):
+                w = self._find_watched(wid)
+                if w is None or not getattr(w, "prompt_sync_enabled", True):
+                    continue
+                coros.append(safe_rebuild_index(list(self.tasks), w, token=token))
+
+        if not coros:
+            return
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                for c in coros:
+                    asyncio.create_task(c)
+            else:
+                # سناریوی غیرمحتمل (sync context) — اجرا را skip می‌کنیم
+                for c in coros:
+                    c.close()
+        except Exception as e:
+            logger.debug(f"_schedule_prompt_sync dispatch failed: {e}")
 
     def _save_reports(self) -> None:
         _write_json(REPORTS_FILE, [r.to_dict() for r in self.reports])
@@ -2004,6 +2114,9 @@ class OversightService:
                     f"create_task {t.id}: attach_to_task returned 0 — هیچ session "
                     f"به این تسک ربط نخورد. کاربر باید دستی attach کند."
                 )
+        # 🆕 (Prompt-GitHub Sync) — sync فایل پرامپت + بازسازی index پروژه
+        self._recompute_execution_priorities()
+        self._schedule_prompt_sync(t, rebuild_index=True)
         return CreateTaskResult(
             status="created",
             task=t.to_dict(),
@@ -2107,16 +2220,23 @@ class OversightService:
                             t.acceptance_criteria = extract_acceptance_criteria(t.prompt)
                     t.updated_at = now_iso()
                     self._save_tasks()
+                    # 🆕 (Prompt-GitHub Sync) — هر mutation روی تسک، فایل را sync کن
+                    self._recompute_execution_priorities()
+                    self._schedule_prompt_sync(t, rebuild_index=True)
                     return t.to_dict()
         return None
 
     async def delete_task(self, task_id: str) -> bool:
         async with self._lock:
+            target = next((t for t in self.tasks if t.id == task_id), None)
             before = len(self.tasks)
             self.tasks = [t for t in self.tasks if t.id != task_id]
             removed = len(self.tasks) < before
             if removed:
                 self._save_tasks()
+                # 🆕 (Prompt-GitHub Sync) — حذف فایل از ریپو + بازسازی index
+                if target is not None:
+                    self._schedule_prompt_sync(target, rebuild_index=True, delete=True)
             return removed
 
     # ================================================================
@@ -2378,6 +2498,9 @@ class OversightService:
                 task.models_used = [model_id]
             task.updated_at = now_iso()
             self._save_tasks()
+            # 🆕 (Prompt-GitHub Sync) — regenerate باید فایل ریپو را هم آپدیت کند
+            self._recompute_execution_priorities()
+            self._schedule_prompt_sync(task, rebuild_index=True)
             return task.to_dict()
 
     # ====================================================================

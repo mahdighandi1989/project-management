@@ -4117,6 +4117,12 @@ async def verify_task(
         task.updated_at = now_iso()
         service._save_reports()
         service._save_tasks()
+        # 🆕 (Prompt-GitHub Sync) — verify_status تغییر کرد، فایل را sync کن
+        try:
+            service._recompute_execution_priorities()
+            service._schedule_prompt_sync(task, rebuild_index=True)
+        except Exception as _e:
+            logger.debug(f"verify: prompt-sync dispatch failed: {_e}")
 
     # 🔁 Follow-up prompt: پس از append تاریخچه، اگر status != done
     # یک پرامپت "ادامه" ساخته و روی task ست می‌شود تا کاربر در دور

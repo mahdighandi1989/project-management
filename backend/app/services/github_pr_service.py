@@ -369,6 +369,78 @@ class GitHubPRService:
             slog.error("File operation failed", exception=e)
             return {"success": False, "error": str(e)}
 
+    async def get_file_content(
+        self,
+        owner: str,
+        repo: str,
+        path: str,
+        branch: str = None,
+        token: str = None,
+    ) -> Dict[str, Any]:
+        """خواندن محتوای یک فایل از GitHub.
+
+        Returns: {"success": bool, "content": str, "sha": str, "error": str?}
+        """
+        headers = self._get_headers(token)
+        url = f"{self.GITHUB_API}/repos/{owner}/{repo}/contents/{path}"
+        if branch:
+            url += f"?ref={branch}"
+        try:
+            res = await self._gh_request("GET", url, headers=headers)
+            if not res["ok"]:
+                return {
+                    "success": False,
+                    "error": f"status={res['status']}",
+                    "not_found": res["status"] == 404,
+                }
+            data = res["body_json"] or {}
+            content_b64 = data.get("content", "") or ""
+            try:
+                content_text = base64.b64decode(content_b64).decode("utf-8")
+            except Exception:
+                content_text = ""
+            return {
+                "success": True,
+                "content": content_text,
+                "sha": data.get("sha"),
+                "path": data.get("path", path),
+            }
+        except Exception as e:
+            slog.error("get_file_content failed", exception=e)
+            return {"success": False, "error": str(e)}
+
+    async def delete_file(
+        self,
+        owner: str,
+        repo: str,
+        path: str,
+        message: str,
+        branch: str = None,
+        token: str = None,
+        sha: str = None,
+    ) -> Dict[str, Any]:
+        """حذف یک فایل از GitHub. اگر sha داده نشد، خودش می‌گیرد."""
+        headers = self._get_headers(token)
+        url = f"{self.GITHUB_API}/repos/{owner}/{repo}/contents/{path}"
+        try:
+            if not sha:
+                sha = await self.get_file_sha(owner, repo, path, branch, token)
+            if not sha:
+                return {"success": False, "error": "file_not_found", "not_found": True}
+            payload = {"message": message, "sha": sha}
+            if branch:
+                payload["branch"] = branch
+            res = await self._gh_request("DELETE", url, headers=headers, json_body=payload)
+            if res["status"] in (200, 204):
+                return {"success": True}
+            return {
+                "success": False,
+                "error": f"status={res['status']}: {res['body_text'][:300]}",
+            }
+        except Exception as e:
+            slog.error("delete_file failed", exception=e)
+            return {"success": False, "error": str(e)}
+
     # =====================================
     # Pull Request Operations
     # =====================================
