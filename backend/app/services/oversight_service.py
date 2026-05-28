@@ -2721,6 +2721,16 @@ class OversightService:
         }
 
         # 4) idea_to_prompt را صدا بزن
+        # 🆕 برای super-task (source=auto_consolidation یا merged_from non-empty)
+        # یا raw_idea خیلی بزرگ، multi_pass را skip می‌کنیم تا از Render edge
+        # timeout (30s) جلوگیری شود. content از قبل ساختاریافته است
+        # (consolidation منطقی پیش‌نیاز را انجام داده) پس re-planning ضرورتی ندارد.
+        is_super_task = (
+            getattr(task, "source", "") == "auto_consolidation"
+            or bool(getattr(task, "merged_from", []) or [])
+        )
+        # heuristic: اگر raw_idea > 5000 char، multi-pass احتمالاً timeout می‌خورد
+        _mp_mode = "never" if (is_super_task or len(raw) > 5000) else "auto"
         try:
             new_data = await self.idea_to_prompt(
                 idea=raw,
@@ -2729,6 +2739,7 @@ class OversightService:
                 priority=task.priority,
                 model_id=model_id,
                 model_ids=model_ids,
+                multi_pass_mode=_mp_mode,
             )
         except Exception as e:
             # transaction-safe: اگر AI fail شد، چیزی تغییر نمی‌کند
