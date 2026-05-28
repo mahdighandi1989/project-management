@@ -148,9 +148,10 @@ async def lifespan(app: FastAPI):
         logger.warning(f"upload orphan cleanup failed (non-fatal): {e}")
 
     # 🆕 (Prompt-GitHub Sync) — bootstrap: تسک‌های قدیمی (بدون
-    # github_prompt_synced_at) خودکار به ریپوهای پروژه‌ها منتقل می‌شوند.
-    # غیر-blocking است؛ پشت per-repo lock سریالیزه می‌شود تا rate-limit
-    # GitHub نشکند. فقط در صورت داشتن GITHUB_TOKEN فعال است.
+    # github_prompt_synced_at) خودکار به ریپوهای پروژه‌ها منتقل می‌شوند +
+    # _index.json هر پروژه صریح rebuild می‌شود (نه debounce — تا اگر سرویس
+    # restart شد، فایل index از دست نرود).
+    # غیر-blocking است؛ پشت per-repo lock + semaphore=5 سریالیزه می‌شود.
     try:
         import asyncio as _asyncio2
         from .services.oversight_service import (
@@ -163,14 +164,22 @@ async def lifespan(app: FastAPI):
                     return
                 svc = _gos2()
                 dirty_n = sum(1 for t in svc.tasks if svc._is_task_dirty(t))
-                if dirty_n == 0:
+                project_n = sum(
+                    1 for w in svc.watched
+                    if getattr(w, "prompt_sync_enabled", True)
+                )
+                if project_n == 0:
                     return
                 logger.info(
-                    f"📝 prompt-sync bootstrap: {dirty_n} task(s) not yet "
-                    f"synced — migrating to GitHub in background"
+                    f"📝 prompt-sync bootstrap: {dirty_n} dirty task(s), "
+                    f"rebuilding index for {project_n} project(s)"
                 )
-                # یک save معمولی → خودکار همه‌ی dirty را sync می‌کند
-                svc._sync_dirty_tasks_to_github()
+                # sync سینکرون + rebuild صریح — منتظر اتمام
+                result = await svc.force_sync_and_rebuild_all()
+                logger.info(
+                    f"📝 prompt-sync bootstrap done: synced={result.get('synced')}, "
+                    f"index_rebuilt={result.get('rebuilt')}/{project_n}"
+                )
             except Exception as e:
                 logger.warning(f"prompt-sync bootstrap failed (non-fatal): {e}")
 
