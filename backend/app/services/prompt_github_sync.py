@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -32,6 +33,28 @@ logger = logging.getLogger(__name__)
 PROMPT_DIR = "prompt"
 ARCHIVE_DIR = "prompt/archive"
 INDEX_PATH = "prompt/_index.json"
+
+# 🆕 (deploy-loop prevention) marker که در همهٔ commit messages قرار می‌گیرد
+# تا Render auto-deploy و GitHub Actions trigger نشوند. اگر backend خودش
+# در فهرست watched باشد، این marker از حلقه‌ی deploy جلوگیری می‌کند.
+SKIP_CI_MARKER = "[skip render][skip ci]"
+
+
+def _commit_message(verb: str, *, details: str = "") -> str:
+    """commit message یکپارچه با skip-CI marker."""
+    base = f"chore(prompt): {verb}"
+    if details:
+        base = f"{base} — {details}"
+    return f"{base}\n\n{SKIP_CI_MARKER}"
+
+
+# repo های مستثنی (مثلاً backend خودش) — از env var
+# PROMPT_SYNC_EXCLUDE_REPOS خوانده می‌شود (comma-separated).
+def _excluded_repos() -> set:
+    raw = os.environ.get("PROMPT_SYNC_EXCLUDE_REPOS", "").strip()
+    if not raw:
+        return set()
+    return {r.strip().lower() for r in raw.split(",") if r.strip()}
 
 # نگاشت priority متنی → عدد پایه (کوچک‌تر = اولویت بالاتر)
 PRIORITY_BASE = {
@@ -198,12 +221,18 @@ def format_prompt_markdown(task: Any) -> str:
 
 
 def _resolve_repo_and_branch(watched: Any) -> Optional[Tuple[str, str, str]]:
-    """از watched project: (owner, repo, branch). None اگر فاقد config باشد."""
+    """از watched project: (owner, repo, branch). None اگر فاقد config باشد.
+
+    اگر repo در PROMPT_SYNC_EXCLUDE_REPOS باشد، None برمی‌گرداند تا از
+    deploy loop (backend writing to its own repo) جلوگیری شود.
+    """
     if watched is None:
         return None
     if not getattr(watched, "prompt_sync_enabled", True):
         return None
     repo_full = getattr(watched, "repo_full_name", "") or ""
+    if repo_full.strip().lower() in _excluded_repos():
+        return None
     owner, repo = _parse_repo(repo_full)
     if not owner or not repo:
         return None
@@ -247,7 +276,10 @@ async def sync_task_to_github(task: Any, watched: Any, *, token: str) -> Dict[st
                 owner=owner,
                 repo=repo,
                 path=prior_path,
-                message=f"chore(prompt): move task {task.id} ({'archive' if archived else 'unarchive'})",
+                message=_commit_message(
+                    f"move task {task.id}",
+                    details=("archive" if archived else "unarchive"),
+                ),
                 branch=branch,
                 token=token,
                 sha=getattr(task, "github_prompt_sha", None),
@@ -264,7 +296,9 @@ async def sync_task_to_github(task: Any, watched: Any, *, token: str) -> Dict[st
             repo=repo,
             path=desired_path,
             content=body,
-            message=f"chore(prompt): sync task {task.id} — {task.title[:80]}",
+            message=_commit_message(
+                f"sync task {task.id}", details=task.title[:80],
+            ),
             branch=branch,
             token=token,
         )
@@ -298,7 +332,7 @@ async def delete_task_from_github(task: Any, watched: Any, *, token: str) -> Dic
             owner=owner,
             repo=repo,
             path=path,
-            message=f"chore(prompt): delete task {task.id}",
+            message=_commit_message(f"delete task {task.id}"),
             branch=branch,
             token=token,
             sha=getattr(task, "github_prompt_sha", None),
@@ -369,7 +403,9 @@ async def rebuild_project_index(
             repo=repo,
             path=INDEX_PATH,
             content=content,
-            message=f"chore(prompt): rebuild index ({len(pickable)} tasks)",
+            message=_commit_message(
+                "rebuild index", details=f"{len(pickable)} tasks",
+            ),
             branch=branch,
             token=token,
         )
