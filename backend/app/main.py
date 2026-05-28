@@ -147,6 +147,37 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"upload orphan cleanup failed (non-fatal): {e}")
 
+    # 🆕 (Prompt-GitHub Sync) — bootstrap: تسک‌های قدیمی (بدون
+    # github_prompt_synced_at) خودکار به ریپوهای پروژه‌ها منتقل می‌شوند.
+    # غیر-blocking است؛ پشت per-repo lock سریالیزه می‌شود تا rate-limit
+    # GitHub نشکند. فقط در صورت داشتن GITHUB_TOKEN فعال است.
+    try:
+        import asyncio as _asyncio2
+        from .services.oversight_service import (
+            get_oversight_service as _gos2, get_github_token as _ggt,
+        )
+
+        async def _prompt_sync_bootstrap():
+            try:
+                if not _ggt():
+                    return
+                svc = _gos2()
+                dirty_n = sum(1 for t in svc.tasks if svc._is_task_dirty(t))
+                if dirty_n == 0:
+                    return
+                logger.info(
+                    f"📝 prompt-sync bootstrap: {dirty_n} task(s) not yet "
+                    f"synced — migrating to GitHub in background"
+                )
+                # یک save معمولی → خودکار همه‌ی dirty را sync می‌کند
+                svc._sync_dirty_tasks_to_github()
+            except Exception as e:
+                logger.warning(f"prompt-sync bootstrap failed (non-fatal): {e}")
+
+        _asyncio2.create_task(_prompt_sync_bootstrap())
+    except Exception as e:
+        logger.warning(f"prompt-sync bootstrap launch failed: {e}")
+
     # 🔬 (Runtime Verify auto-detect) — برای watched های موجود که هنوز
     # frontend/backend URL ندارند، در background autodetect را بزن.
     # غیر-blocking است؛ create_task می‌سازیم.
