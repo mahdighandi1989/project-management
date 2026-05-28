@@ -52,6 +52,11 @@ class BackgroundScheduler:
     JOB_SECURITY_TRANSFER = "auto_security_transfer"
     JOB_TEST_COVERAGE_TRANSFER = "auto_test_coverage_transfer"
     JOB_ENGINEERING_REPORT = "auto_engineering_report"
+    # 🆕 (Auto Discover) — کشف خودکار repo های جدید GitHub
+    # و اضافه‌کردن به watched list. به‌صورت پیش‌فرض هر ۶۰ دقیقه.
+    # کنترل: env var REPO_AUTO_DISCOVER_ENABLED (default: 1)
+    # کنترل بازه: env var REPO_AUTO_DISCOVER_INTERVAL_MINUTES (default: 60)
+    JOB_REPO_AUTO_DISCOVER = "auto_repo_discover"
 
     def __init__(self):
         self.scheduler: Optional[AsyncIOScheduler] = None
@@ -92,6 +97,9 @@ class BackgroundScheduler:
 
             # 6. Engineering report
             await self._sync_engineering_report_settings()
+
+            # 7. 🆕 (Auto Discover) — کشف repo های جدید GitHub
+            await self._sync_repo_auto_discover_settings()
 
             slog.success("All scheduler jobs initialized")
 
@@ -705,6 +713,146 @@ class BackgroundScheduler:
             return {"success": False, "error": str(e)}
         finally:
             db.close()
+
+    # =====================================================
+    # 7. Auto Repo Discover (🆕 — GitHub → watched خودکار)
+    # =====================================================
+    #
+    # هدف: هر N دقیقه repos کاربر را از GitHub بخواند، با لیست watched
+    # موجود مقایسه کند، و repo های جدید را به‌صورت خودکار با
+    # `auto_register_watched` ثبت کند.
+    #
+    # **محافظت در برابر خراب‌شدن**:
+    # - off-by-default روی env var `REPO_AUTO_DISCOVER_ENABLED` (default: "1" = on)
+    # - max_instances=1 (همزمانی نداریم)
+    # - try/except سراسری — هرگز scheduler را crash نمی‌کند
+    # - rate-limit aware: از cache 6 ساعته‌ی list_user_repos استفاده می‌کند
+    # - **dedup در sublevel** — auto_register_watched خودش duplicate-check دارد
+    # - **respects ignored repos** — اگر کاربر repo را از watched حذف کرده،
+    #   در audit trail user_notes دیده می‌شود. در نسخه‌ی فعلی دوباره ثبت
+    #   می‌شود (می‌توان در آینده با blocklist بهبود داد).
+
+    async def _sync_repo_auto_discover_settings(self):
+        """راه‌اندازی job کشف خودکار repo بر اساس env vars."""
+        try:
+            import os as _os
+            enabled = _os.environ.get(
+                "REPO_AUTO_DISCOVER_ENABLED", "1"
+            ).strip().lower() in ("1", "true", "yes", "on")
+            interval_minutes = int(
+                _os.environ.get("REPO_AUTO_DISCOVER_INTERVAL_MINUTES", "60") or 60
+            )
+            if interval_minutes < 5:
+                # حفاظت: حداقل 5 دقیقه interval تا rate-limit نخوریم
+                interval_minutes = 5
+
+            if enabled:
+                await self._enable_repo_auto_discover(interval_minutes)
+            else:
+                await self._disable_job(self.JOB_REPO_AUTO_DISCOVER)
+        except Exception as e:
+            slog.error("Failed to sync repo auto-discover settings", exception=e)
+
+    async def _enable_repo_auto_discover(self, interval_minutes: int = 60):
+        """فعال‌سازی job کشف خودکار repo."""
+        if not self.scheduler:
+            return
+        self._remove_job_if_exists(self.JOB_REPO_AUTO_DISCOVER)
+        self.scheduler.add_job(
+            self._run_repo_auto_discover,
+            trigger=IntervalTrigger(minutes=interval_minutes),
+            id=self.JOB_REPO_AUTO_DISCOVER,
+            name="Auto Discover New GitHub Repos",
+            replace_existing=True,
+            max_instances=1,
+        )
+        slog.success(
+            "Repo auto-discover enabled",
+            interval_minutes=interval_minutes,
+        )
+
+    async def _run_repo_auto_discover(self) -> Dict[str, Any]:
+        """اجرای یک round کشف repo. ایمن در برابر هر خطایی."""
+        try:
+            from .oversight_service import get_oversight_service
+            service = get_oversight_service()
+
+            # ۱) repos فعلی کاربر را از GitHub بگیر (force_refresh=True تا
+            # یک snapshot تازه داشته باشیم — cache 6 ساعته در غیر این حالت
+            # تشخیص repo جدید را به تأخیر می‌اندازد)
+            repos_result = await service.list_user_repos(
+                max_pages=5, force_refresh=True
+            )
+            if not repos_result.get("success"):
+                slog.warning(
+                    "repo-auto-discover: list_user_repos failed",
+                    error=repos_result.get("error", "?"),
+                )
+                return {"success": False, "error": repos_result.get("error")}
+
+            github_repos = repos_result.get("repos", []) or []
+            if not github_repos:
+                return {"success": True, "discovered": 0, "skipped_existing": 0}
+
+            # ۲) مجموعه‌ی repos موجود در watched (case-insensitive)
+            existing_watched = {
+                (w.repo_full_name or "").strip().lower()
+                for w in service.watched
+            }
+
+            # ۳) برای هر repo جدید، auto_register_watched را صدا بزن
+            discovered: List[Dict[str, Any]] = []
+            skipped = 0
+            failed: List[Dict[str, str]] = []
+            for r in github_repos:
+                full_name = (r.get("full_name") or "").strip()
+                if not full_name or "/" not in full_name:
+                    continue
+                if full_name.lower() in existing_watched:
+                    skipped += 1
+                    continue
+                # repo جدید پیدا شد
+                try:
+                    res = await service.auto_register_watched(
+                        repo_full_name=full_name,
+                        source="auto_discover_scheduler",
+                        repo_url=r.get("html_url") or r.get("clone_url") or "",
+                        default_branch=r.get("default_branch") or "main",
+                        language=r.get("language") or "",
+                        private=bool(r.get("private", False)),
+                    )
+                    if res.get("_was_duplicate"):
+                        skipped += 1
+                    else:
+                        discovered.append({
+                            "repo": full_name,
+                            "watched_id": res.get("id"),
+                        })
+                except Exception as inner_e:
+                    failed.append({"repo": full_name, "error": str(inner_e)})
+                    slog.warning(
+                        "repo-auto-discover: register failed",
+                        repo=full_name,
+                        error=str(inner_e),
+                    )
+
+            if discovered:
+                slog.success(
+                    "repo-auto-discover: new repos added",
+                    count=len(discovered),
+                    repos=[d["repo"] for d in discovered][:10],
+                )
+            return {
+                "success": True,
+                "discovered": len(discovered),
+                "skipped_existing": skipped,
+                "failed": len(failed),
+                "details": discovered,
+            }
+        except Exception as e:
+            # هرگز scheduler را crash نکن
+            slog.error("repo-auto-discover: unexpected error", exception=e)
+            return {"success": False, "error": str(e)}
 
     # =====================================================
     # Helper Methods
