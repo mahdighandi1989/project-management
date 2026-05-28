@@ -350,12 +350,29 @@ async def backfill_all(watched_id: Optional[str] = Query(default=None)):
     """sync همهٔ تسک‌های موجود به ریپوهای مربوطه + ساخت index.
 
     اگر watched_id داده شد فقط همان پروژه. وگرنه همه‌ی پروژه‌های با
-    prompt_sync_enabled=True. برای مقیاس‌پذیری از asyncio.Semaphore با
-    concurrency=5 استفاده می‌کند تا rate-limit GitHub نشکند.
+    prompt_sync_enabled=True. این endpoint از service.force_sync_and_rebuild_all
+    استفاده می‌کند که semaphore=5، _index.json صریح، و persistence نهایی
+    را تضمین می‌کند.
     """
-    from ...services.prompt_github_sync import (
-        safe_sync_task, rebuild_project_index,
-    )
+    service = get_oversight_service()
+    result = await service.force_sync_and_rebuild_all(watched_id=watched_id)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=503,
+            detail=result.get("error", "force_sync failed"),
+        )
+    return result
+
+
+@router.post("/_admin/rebuild-index", dependencies=[Depends(require_admin_token)])
+async def rebuild_index_only(watched_id: Optional[str] = Query(default=None)):
+    """فقط _index.json پروژه‌ها را بازسازی می‌کند — بدون re-sync تسک‌ها.
+
+    کاربرد: اگر در runtime به دلیل debounce-race یا restart، _index.json
+    یک پروژه ساخته نشد، این endpoint سریع بازسازی می‌کند بدون اینکه
+    تمام تسک‌ها دوباره به GitHub push شوند (که rate-limit مصرف می‌کند).
+    """
+    from ...services.prompt_github_sync import rebuild_project_index
     from ...services.oversight_service import get_github_token
     token = get_github_token()
     if not token:
@@ -367,32 +384,35 @@ async def backfill_all(watched_id: Optional[str] = Query(default=None)):
         if getattr(w, "prompt_sync_enabled", True)
         and (watched_id is None or w.id == watched_id)
     ]
-    if not targets:
-        return {"success": True, "synced_tasks": 0, "projects": 0}
-
-    # full sweep قبل از backfill — وضعیت اولیه را consistent کن
-    service._recompute_execution_priorities()
-    import asyncio as _asyncio
-    sem = _asyncio.Semaphore(5)
-    synced = 0
-
-    async def _sync_one(t, w):
-        async with sem:
-            await safe_sync_task(t, w, token=token)
-
+    results: List[Dict[str, Any]] = []
     for w in targets:
-        project_tasks = [t for t in service.tasks if t.watched_id == w.id]
-        if project_tasks:
-            await _asyncio.gather(*(_sync_one(t, w) for t in project_tasks))
-            synced += len(project_tasks)
-        # یک rebuild_index نهایی بعد از همه task ها
         try:
-            await rebuild_project_index(list(service.tasks), w, token=token)
+            res = await rebuild_project_index(list(service.tasks), w, token=token)
+            ok = bool(res.get("success"))
+            results.append({
+                "watched_id": w.id,
+                "repo": w.repo_full_name,
+                "rebuilt": ok,
+                "error": res.get("error") if not ok else None,
+            })
+            if ok:
+                logger.info(
+                    f"rebuild-index: ✓ {w.repo_full_name} (manual trigger)"
+                )
+            else:
+                logger.warning(
+                    f"rebuild-index: ✗ {w.repo_full_name}: {res.get('error')}"
+                )
         except Exception as e:
-            logger.warning(f"backfill: rebuild_index failed watched={w.id}: {e}")
-    service._save_tasks()
+            results.append({
+                "watched_id": w.id,
+                "repo": w.repo_full_name,
+                "rebuilt": False,
+                "error": str(e),
+            })
     return {
         "success": True,
         "projects": len(targets),
-        "synced_tasks": synced,
+        "rebuilt": sum(1 for r in results if r["rebuilt"]),
+        "results": results,
     }

@@ -803,6 +803,116 @@ class OversightService:
                 f"{len(affected_wids)} project(s) in background"
             )
 
+    async def force_sync_and_rebuild_all(
+        self, *, watched_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """sync سینکرون همهٔ تسک‌های dirty + rebuild صریح _index.json هر پروژه.
+
+        کاربرد:
+          - bootstrap startup (تا مطمئن باشیم _index.json قبل از redeploy ساخته
+            می‌شود — بدون اتکا به debounce که در restart از دست می‌رود)
+          - /_admin/rebuild-index برای فیکس دستی پروژه‌هایی که _index.json نگرفتند
+          - /_admin/backfill برای راه‌اندازی اولیه
+
+        Returns: {"synced": N, "rebuilt": M, "projects": [...]}
+        """
+        try:
+            from .prompt_github_sync import (
+                safe_sync_task, rebuild_project_index, compute_execution_priority,
+            )
+        except Exception as e:
+            return {"success": False, "error": f"import_failed: {e}"}
+
+        token = get_github_token()
+        if not token:
+            return {"success": False, "error": "no_github_token"}
+
+        targets = [
+            w for w in self.watched
+            if getattr(w, "prompt_sync_enabled", True)
+            and (watched_id is None or w.id == watched_id)
+        ]
+        if not targets:
+            return {"success": True, "synced": 0, "rebuilt": 0, "projects": []}
+
+        sem = asyncio.Semaphore(5)
+        synced_count = 0
+        rebuilt_projects: List[Dict[str, Any]] = []
+
+        def _persist():
+            try:
+                _write_json(TASKS_FILE, [t.to_dict() for t in self.tasks])
+            except Exception as e:
+                logger.debug(f"force_sync persist failed: {e}")
+
+        async def _sync_one(t, w):
+            async with sem:
+                await safe_sync_task(t, w, token=token, on_done=_persist)
+
+        for w in targets:
+            project_tasks = [t for t in self.tasks if t.watched_id == w.id]
+            # priority recompute برای هر تسک پروژه
+            for t in project_tasks:
+                try:
+                    if not getattr(t, "archived", False):
+                        t.execution_priority = compute_execution_priority(t)
+                except Exception:
+                    pass
+            # فقط تسک‌های dirty را sync کن (تسک‌های قبلاً sync شده اسپم نکن)
+            dirty_tasks = [t for t in project_tasks if self._is_task_dirty(t)]
+            if dirty_tasks:
+                await asyncio.gather(
+                    *(_sync_one(t, w) for t in dirty_tasks),
+                    return_exceptions=True,
+                )
+                synced_count += len(dirty_tasks)
+            # rebuild_index صریح — منتظر اتمام syncها — نه debounce
+            try:
+                result = await rebuild_project_index(
+                    list(self.tasks), w, token=token,
+                )
+                ok = bool(result.get("success"))
+                rebuilt_projects.append({
+                    "watched_id": w.id,
+                    "repo": w.repo_full_name,
+                    "synced_tasks": len(dirty_tasks),
+                    "rebuilt_index": ok,
+                    "error": result.get("error") if not ok else None,
+                })
+                if ok:
+                    logger.info(
+                        f"prompt-sync: rebuilt index for {w.repo_full_name} "
+                        f"(synced {len(dirty_tasks)} dirty task(s))"
+                    )
+                else:
+                    logger.warning(
+                        f"prompt-sync: rebuild_index failed for "
+                        f"{w.repo_full_name}: {result.get('error')}"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"prompt-sync: rebuild_index exception for "
+                    f"{w.repo_full_name}: {e}"
+                )
+                rebuilt_projects.append({
+                    "watched_id": w.id,
+                    "repo": w.repo_full_name,
+                    "synced_tasks": len(dirty_tasks),
+                    "rebuilt_index": False,
+                    "error": str(e),
+                })
+        # یک save نهایی برای ذخیرهٔ تمام متادیتای جدید (sha/path/synced_at)
+        try:
+            _write_json(TASKS_FILE, [t.to_dict() for t in self.tasks])
+        except Exception:
+            pass
+        return {
+            "success": True,
+            "synced": synced_count,
+            "rebuilt": sum(1 for p in rebuilt_projects if p["rebuilt_index"]),
+            "projects": rebuilt_projects,
+        }
+
     def _recompute_execution_priorities(
         self, task: Optional["OversightTask"] = None,
     ) -> None:
