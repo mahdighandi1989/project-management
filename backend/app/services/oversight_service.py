@@ -742,20 +742,27 @@ class OversightService:
         - هر پروژه فقط یک rebuild_index debounced می‌گیرد
         - per-repo lock در prompt_github_sync writeهای concurrent را
           سریالیزه می‌کند
+
+        Logging strategy:
+        - INFO وقتی dispatch واقعی صورت گرفت (visible در Render logs)
+        - DEBUG برای no-op cases (skip ها)
         """
         try:
             from .prompt_github_sync import (
                 safe_sync_task, schedule_index_rebuild, compute_execution_priority,
             )
-        except Exception:
+        except Exception as e:
+            logger.debug(f"prompt-sync: import failed — skip: {e}")
             return
         token = get_github_token()
         if not token:
+            logger.debug("prompt-sync: no GITHUB_TOKEN — skip")
             return
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return  # sync context — هیچ loop در حال اجرا نیست
+            logger.debug("prompt-sync: no running loop — skip (sync context)")
+            return
 
         # شناسایی تسک‌های dirty
         dirty: List["OversightTask"] = []
@@ -763,6 +770,7 @@ class OversightService:
             if self._is_task_dirty(t):
                 dirty.append(t)
         if not dirty:
+            logger.debug("prompt-sync: no dirty tasks — skip")
             return
 
         # priority را برای dirty ها recompute کن
@@ -780,14 +788,21 @@ class OversightService:
             except Exception as e:
                 logger.debug(f"prompt-sync persist after sync failed: {e}")
 
+        dispatched = 0
+        skipped_disabled = 0
         affected_wids: set = set()
         for t in dirty:
             watched = self._find_watched(t.watched_id) if t.watched_id else None
-            if watched is None or not getattr(watched, "prompt_sync_enabled", True):
+            if watched is None:
+                skipped_disabled += 1
+                continue
+            if not getattr(watched, "prompt_sync_enabled", True):
+                skipped_disabled += 1
                 continue
             asyncio.create_task(
                 safe_sync_task(t, watched, token=token, on_done=_persist_after_sync)
             )
+            dispatched += 1
             affected_wids.add(watched.id)
 
         # یک rebuild_index debounced برای هر پروژهٔ متأثر
@@ -797,10 +812,18 @@ class OversightService:
                 continue
             schedule_index_rebuild(lambda: list(self.tasks), w, token=token)
 
-        if len(dirty) > 20:
+        # INFO log: visible در Render تا کاربر بفهمد sync trigger شده
+        if dispatched > 0:
             logger.info(
-                f"prompt-sync: backfilling {len(dirty)} dirty tasks across "
-                f"{len(affected_wids)} project(s) in background"
+                f"prompt-sync: dispatched {dispatched} task(s) to "
+                f"{len(affected_wids)} project(s) "
+                f"(skipped: {skipped_disabled} disabled/no-watched)"
+            )
+        elif skipped_disabled > 0:
+            logger.info(
+                f"prompt-sync: {skipped_disabled} dirty task(s) found but ALL "
+                f"skipped (prompt_sync_enabled=False or watched missing). "
+                f"Check PROMPT_SYNC_EXCLUDE_REPOS env var or watched config."
             )
 
     async def force_sync_and_rebuild_all(

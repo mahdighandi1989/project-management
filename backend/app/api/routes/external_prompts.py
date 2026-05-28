@@ -416,3 +416,137 @@ async def rebuild_index_only(watched_id: Optional[str] = Query(default=None)):
         "rebuilt": sum(1 for r in results if r["rebuilt"]),
         "results": results,
     }
+
+
+@router.get("/_admin/diagnose/{task_id}", dependencies=[Depends(require_admin_token)])
+async def diagnose_task_sync(task_id: str):
+    """تشخیص دلیل عدم همگام‌سازی یک تسک به GitHub.
+
+    خروجی شامل تمام شواهد لازم برای فهم اینکه چرا/چگونه sync انجام
+    می‌شود (یا نمی‌شود):
+      - وضعیت dirty (updated vs synced timestamps)
+      - وجود token
+      - وضعیت watched project (enabled, repo, branch)
+      - exclude list
+      - last_error قبلی
+      - مسیر مورد انتظار در GitHub
+    """
+    import os as _os
+    from ...services.oversight_service import get_github_token
+    from ...services.prompt_github_sync import (
+        _resolve_repo_and_branch, _excluded_repos, _file_path,
+        compute_execution_priority,
+    )
+
+    service = get_oversight_service()
+    t = next((x for x in service.tasks if x.id == task_id), None)
+    if not t:
+        raise HTTPException(status_code=404, detail="task not found")
+
+    token = get_github_token()
+    watched = service._find_watched(t.watched_id) if t.watched_id else None
+
+    # detect why dirty (یا نه)
+    synced_at = getattr(t, "github_prompt_synced_at", None)
+    is_dirty = service._is_task_dirty(t)
+    dirty_reason = (
+        "never synced" if not synced_at
+        else (f"updated_at({t.updated_at}) > synced_at({synced_at})" if is_dirty
+              else "in sync (updated_at <= synced_at)")
+    )
+
+    # resolve repo info
+    repo_info = None
+    if watched:
+        resolved = _resolve_repo_and_branch(watched)
+        if resolved:
+            owner, repo, branch = resolved
+            repo_info = {
+                "owner": owner, "repo": repo, "branch": branch,
+                "expected_path": _file_path(t.id, archived=getattr(t, "archived", False)),
+            }
+        else:
+            repo_info = {"error": "_resolve_repo_and_branch returned None"}
+
+    excluded = _excluded_repos()
+    is_excluded = bool(watched) and getattr(
+        watched, "repo_full_name", ""
+    ).strip().lower() in excluded
+
+    return {
+        "task_id": t.id,
+        "title": t.title,
+        "is_dirty": is_dirty,
+        "dirty_reason": dirty_reason,
+        "github_state": {
+            "github_prompt_path": getattr(t, "github_prompt_path", None),
+            "github_prompt_sha": getattr(t, "github_prompt_sha", None),
+            "github_prompt_synced_at": synced_at,
+            "github_prompt_last_error": getattr(t, "github_prompt_last_error", None),
+            "github_prompt_archived": getattr(t, "github_prompt_archived", False),
+            "updated_at": t.updated_at,
+            "execution_priority": getattr(t, "execution_priority", None),
+        },
+        "watched": {
+            "found": watched is not None,
+            "watched_id": t.watched_id,
+            "repo_full_name": getattr(watched, "repo_full_name", None) if watched else None,
+            "prompt_sync_enabled": (
+                getattr(watched, "prompt_sync_enabled", None)
+                if watched else None
+            ),
+            "default_branch": (
+                getattr(watched, "default_branch", None)
+                if watched else None
+            ),
+            "is_excluded_by_env": is_excluded,
+        },
+        "config": {
+            "github_token_set": bool(token),
+            "excluded_repos": sorted(excluded),
+            "external_tool_token_set": bool(
+                _os.environ.get("EXTERNAL_TOOL_TOKEN", "").strip()
+            ),
+            "admin_token_set": bool(
+                _os.environ.get("ADMIN_TOKEN", "").strip()
+            ),
+        },
+        "diagnosis": _diagnose_summary(t, watched, token, is_dirty, is_excluded, repo_info),
+        "repo_info": repo_info,
+    }
+
+
+def _diagnose_summary(task, watched, token, is_dirty, is_excluded, repo_info) -> str:
+    """تشخیص محتمل‌ترین دلیل عدم sync — به فارسی برای کاربر."""
+    if not token:
+        return "❌ GITHUB_TOKEN روی backend ست نیست — sync کاملاً غیرفعال."
+    if not watched:
+        return f"❌ watched project با id={task.watched_id} پیدا نشد."
+    if not getattr(watched, "prompt_sync_enabled", True):
+        return "❌ prompt_sync_enabled=False روی این watched. در config پروژه فعالش کن."
+    if is_excluded:
+        return (
+            f"❌ ریپو {watched.repo_full_name} در PROMPT_SYNC_EXCLUDE_REPOS هست. "
+            f"اگر می‌خوای sync بشه، اسمش رو از env var حذف کن."
+        )
+    if not repo_info or repo_info.get("error"):
+        return f"❌ _resolve_repo_and_branch fail شد: {repo_info.get('error', '?')}"
+    if not is_dirty:
+        return (
+            "✓ تسک in-sync است (updated_at <= synced_at). "
+            "اگر می‌خوای force sync بشه، یک update فیک بزن (مثلاً regenerate) "
+            "یا /admin/backfill رو با watched_id این پروژه صدا بزن."
+        )
+    last_err = getattr(task, "github_prompt_last_error", None)
+    if last_err:
+        return (
+            f"⚠️ تسک dirty هست و sync trigger می‌شه ولی آخرین تلاش fail شده: "
+            f"{last_err}. logs Render رو چک کن برای 'prompt-sync ✗' marker."
+        )
+    return (
+        "✓ همه شرایط fulfilled. تسک باید sync بشه. اگه نمی‌بینی فایل رو در "
+        f"{repo_info['owner']}/{repo_info['repo']}@{repo_info['branch']}:"
+        f"{repo_info['expected_path']}، logs Render رو دنبال 'prompt-sync ✓' "
+        "یا 'prompt-sync ✗' برای task_id="
+        f"{task.id[:8]} بگرد."
+    )

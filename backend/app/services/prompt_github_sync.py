@@ -420,10 +420,30 @@ async def safe_sync_task(
     on_done: اختیاری — پس از موفقیت (یا شکست) صدا زده می‌شود تا state تسک
     (که در همان task object تغییر کرده) را در دیسک ذخیره کنیم.
     """
+    repo = getattr(watched, "repo_full_name", "?")
+    task_id_short = (getattr(task, "id", "?") or "?")[:8]
     try:
-        await sync_task_to_github(task, watched, token=token)
+        result = await sync_task_to_github(task, watched, token=token)
+        if result.get("success"):
+            logger.info(
+                f"prompt-sync ✓ task={task_id_short} repo={repo} "
+                f"path={result.get('path')} ({len(task.prompt or '')} chars)"
+            )
+        elif result.get("skipped"):
+            logger.debug(
+                f"prompt-sync ⊘ task={task_id_short} repo={repo} "
+                f"skipped: {result.get('error')}"
+            )
+        else:
+            logger.warning(
+                f"prompt-sync ✗ task={task_id_short} repo={repo} "
+                f"FAILED: {result.get('error')}"
+            )
     except Exception as e:
-        logger.warning(f"prompt-sync: safe_sync_task failed task={task.id}: {e}")
+        logger.warning(
+            f"prompt-sync ✗ task={task_id_short} repo={repo} "
+            f"exception: {e}"
+        )
         try:
             task.github_prompt_last_error = str(e)[:500]
         except Exception:
