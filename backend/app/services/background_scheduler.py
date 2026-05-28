@@ -754,25 +754,36 @@ class BackgroundScheduler:
             slog.error("Failed to sync repo auto-discover settings", exception=e)
 
     async def _enable_repo_auto_discover(self, interval_minutes: int = 60):
-        """فعال‌سازی job کشف خودکار repo."""
+        """فعال‌سازی job کشف خودکار repo.
+
+        اولین اجرا 30 ثانیه پس از startup — تا کاربر سریعاً ببیند کار می‌کند.
+        سپس هر `interval_minutes` دقیقه تکرار.
+        """
         if not self.scheduler:
             return
         self._remove_job_if_exists(self.JOB_REPO_AUTO_DISCOVER)
+        from datetime import datetime as _dt, timedelta as _td
+        first_run = _dt.now() + _td(seconds=30)
         self.scheduler.add_job(
             self._run_repo_auto_discover,
-            trigger=IntervalTrigger(minutes=interval_minutes),
+            trigger=IntervalTrigger(
+                minutes=interval_minutes, start_date=first_run,
+            ),
             id=self.JOB_REPO_AUTO_DISCOVER,
             name="Auto Discover New GitHub Repos",
             replace_existing=True,
             max_instances=1,
+            next_run_time=first_run,
         )
         slog.success(
             "Repo auto-discover enabled",
             interval_minutes=interval_minutes,
+            first_run_in_seconds=30,
         )
 
     async def _run_repo_auto_discover(self) -> Dict[str, Any]:
         """اجرای یک round کشف repo. ایمن در برابر هر خطایی."""
+        slog.info("repo-auto-discover: round started")
         try:
             from .oversight_service import get_oversight_service
             service = get_oversight_service()
@@ -791,7 +802,13 @@ class BackgroundScheduler:
                 return {"success": False, "error": repos_result.get("error")}
 
             github_repos = repos_result.get("repos", []) or []
+            total_github = len(github_repos)
+            total_watched_before = len(service.watched)
             if not github_repos:
+                slog.info(
+                    "repo-auto-discover: no repos returned from GitHub "
+                    "(token may be missing or repo list empty)"
+                )
                 return {"success": True, "discovered": 0, "skipped_existing": 0}
 
             # ۲) مجموعه‌ی repos موجود در watched (case-insensitive)
@@ -836,11 +853,26 @@ class BackgroundScheduler:
                         error=str(inner_e),
                     )
 
+            # خلاصه‌ی نهایی همیشه log می‌شود (حتی اگر discovered=0)
+            slog.info(
+                "repo-auto-discover: round done",
+                total_github_repos=total_github,
+                watched_before=total_watched_before,
+                discovered=len(discovered),
+                skipped_existing=skipped,
+                failed=len(failed),
+            )
             if discovered:
                 slog.success(
-                    "repo-auto-discover: new repos added",
+                    "repo-auto-discover: NEW REPOS AUTO-WATCHED",
                     count=len(discovered),
                     repos=[d["repo"] for d in discovered][:10],
+                )
+            if failed:
+                slog.warning(
+                    "repo-auto-discover: some registrations failed",
+                    count=len(failed),
+                    samples=[f["repo"] for f in failed][:5],
                 )
             return {
                 "success": True,
