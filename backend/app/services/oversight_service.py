@@ -2724,11 +2724,23 @@ class OversightService:
         # 🆕 برای super-task (source=auto_consolidation یا merged_from non-empty)
         # یا raw_idea خیلی بزرگ، optimizations اعمال می‌کنیم تا از Render edge
         # timeout (30s) جلوگیری شود.
+        # detection محکم — هر کدام از این سه شواهد یعنی super-task:
         is_super_task = (
             getattr(task, "source", "") == "auto_consolidation"
             or bool(getattr(task, "merged_from", []) or [])
+            or bool(getattr(task, "consolidation_meta", None))
         )
         is_heavy = is_super_task or len(raw) > 5000
+        # diagnostic log — حتماً visible در Render logs
+        logger.info(
+            f"regenerate START: task={task_id[:8]}, "
+            f"source={getattr(task, 'source', '?')}, "
+            f"merged_from_count={len(getattr(task, 'merged_from', []) or [])}, "
+            f"consolidation_meta={'yes' if getattr(task, 'consolidation_meta', None) else 'no'}, "
+            f"is_super_task={is_super_task}, "
+            f"raw_len={len(raw)}, "
+            f"path={'INSTANT' if is_super_task else ('FAST' if is_heavy else 'NORMAL')}"
+        )
 
         # 🆕 super-task **instant fast-path** — بدون AI call.
         # برای super-task ها content قبلاً ساختاریافته است (consolidation
@@ -2822,6 +2834,11 @@ class OversightService:
             task.updated_at = now_iso()
             self._save_tasks()
             # 🆕 (Prompt-GitHub Sync) — همگام‌سازی خودکار توسط _save_tasks
+            logger.info(
+                f"regenerate DONE: task={task_id[:8]}, "
+                f"new_prompt_len={len(task.prompt)}, "
+                f"saved + sync triggered"
+            )
             return task.to_dict()
 
     # ====================================================================
