@@ -4117,9 +4117,11 @@ async def verify_task(
         task.updated_at = now_iso()
         service._save_reports()
         service._save_tasks()
-        # 🆕 (Prompt-GitHub Sync) — verify_status تغییر کرد، فایل را sync کن
+        # 🆕 (Prompt-GitHub Sync) — verify_status تغییر کرد، فایل را sync کن.
+        # فقط execution_priority همین تسک recompute می‌شود (O(1)) تا از race
+        # با concurrent create_task که iterates self.tasks جلوگیری شود.
         try:
-            service._recompute_execution_priorities()
+            service._recompute_execution_priorities(task)
             service._schedule_prompt_sync(task, rebuild_index=True)
         except Exception as _e:
             logger.debug(f"verify: prompt-sync dispatch failed: {_e}")

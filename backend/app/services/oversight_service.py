@@ -706,15 +706,24 @@ class OversightService:
     def _save_tasks(self) -> None:
         _write_json(TASKS_FILE, [t.to_dict() for t in self.tasks])
 
-    def _recompute_execution_priorities(self) -> None:
-        """به‌روزرسانی execution_priority همهٔ تسک‌های pending پس از mutation.
+    def _recompute_execution_priorities(
+        self, task: Optional["OversightTask"] = None,
+    ) -> None:
+        """به‌روزرسانی execution_priority.
 
-        این تابع هیچ I/O ندارد و سریع است؛ توسط _save_tasks یا قبل از rebuild_index
-        صدا زده می‌شود.
+        اگر task داده شد فقط همان تسک recompute می‌شود (O(1)).
+        اگر None باشد، همهٔ تسک‌های غیر-archived (O(N)) — برای startup/backfill.
         """
         try:
             from .prompt_github_sync import compute_execution_priority
         except Exception:
+            return
+        if task is not None:
+            try:
+                if not getattr(task, "archived", False):
+                    task.execution_priority = compute_execution_priority(task)
+            except Exception:
+                pass
             return
         for t in self.tasks:
             try:
@@ -729,13 +738,16 @@ class OversightService:
     ) -> None:
         """fire-and-forget sync پرامپت‌ها به GitHub.
 
-        هرگز exception نمی‌اندازد؛ هرگز task save را block نمی‌کند.
         - اگر task داده شد: همان تسک sync یا delete می‌شود.
-        - rebuild_index=True: _index.json پروژه‌ی مربوطه بازسازی می‌شود.
+        - rebuild_index=True: rebuild پروژه با debounce (~2s coalescing).
+        - پس از موفقیت/شکست sync، _save_tasks دوباره صدا زده می‌شود تا
+          متادیتای جدید (sha/path/synced_at/last_error) به دیسک برسد.
+
+        هرگز exception نمی‌اندازد؛ هرگز task save را block نمی‌کند.
         """
         try:
             from .prompt_github_sync import (
-                safe_sync_task, safe_rebuild_index, safe_delete_task,
+                safe_sync_task, safe_delete_task, schedule_index_rebuild,
             )
         except Exception:
             return
@@ -744,38 +756,59 @@ class OversightService:
             return
 
         watched_ids: set = set()
-        coros = []
+
+        def _persist_after_sync() -> None:
+            """callback ذخیرهٔ متادیتای جدید — بدون trigger مجدد sync."""
+            try:
+                _write_json(TASKS_FILE, [t.to_dict() for t in self.tasks])
+            except Exception as e:
+                logger.debug(f"prompt-sync persist after sync failed: {e}")
+
+        per_task_coro = None
         if task is not None:
             watched = self._find_watched(task.watched_id) if task.watched_id else None
             if watched is not None and getattr(watched, "prompt_sync_enabled", True):
                 if delete:
-                    coros.append(safe_delete_task(task, watched, token=token))
+                    per_task_coro = safe_delete_task(
+                        task, watched, token=token, on_done=_persist_after_sync,
+                    )
                 else:
-                    coros.append(safe_sync_task(task, watched, token=token))
+                    per_task_coro = safe_sync_task(
+                        task, watched, token=token, on_done=_persist_after_sync,
+                    )
                 watched_ids.add(watched.id)
 
+        # dispatch per-task coro — تنها در صورت داشتن running loop
+        if per_task_coro is not None:
+            try:
+                asyncio.get_running_loop()
+                asyncio.create_task(per_task_coro)
+            except RuntimeError:
+                # هیچ loop در حال اجرا نیست (sync context) — coroutine را
+                # close کن تا warning بیرون نده. این مسیر در tests/init
+                # ممکن است؛ در runtime API همیشه async است.
+                per_task_coro.close()
+                logger.debug("prompt-sync: no running loop; coro closed")
+
+        # rebuild_index با debounce — اگر همان pkg دوباره mutate شد،
+        # rebuild قبلی cancel می‌شود.
         if rebuild_index:
-            for wid in (watched_ids or {
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return  # بدون loop debounce بی‌معنی است
+            target_wids = watched_ids or {
                 t.watched_id for t in self.tasks if t.watched_id
-            }):
+            }
+            for wid in target_wids:
                 w = self._find_watched(wid)
                 if w is None or not getattr(w, "prompt_sync_enabled", True):
                     continue
-                coros.append(safe_rebuild_index(list(self.tasks), w, token=token))
-
-        if not coros:
-            return
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                for c in coros:
-                    asyncio.create_task(c)
-            else:
-                # سناریوی غیرمحتمل (sync context) — اجرا را skip می‌کنیم
-                for c in coros:
-                    c.close()
-        except Exception as e:
-            logger.debug(f"_schedule_prompt_sync dispatch failed: {e}")
+                schedule_index_rebuild(
+                    lambda: list(self.tasks),
+                    w,
+                    token=token,
+                )
 
     def _save_reports(self) -> None:
         _write_json(REPORTS_FILE, [r.to_dict() for r in self.reports])
@@ -2115,7 +2148,7 @@ class OversightService:
                     f"به این تسک ربط نخورد. کاربر باید دستی attach کند."
                 )
         # 🆕 (Prompt-GitHub Sync) — sync فایل پرامپت + بازسازی index پروژه
-        self._recompute_execution_priorities()
+        self._recompute_execution_priorities(t)
         self._schedule_prompt_sync(t, rebuild_index=True)
         return CreateTaskResult(
             status="created",
@@ -2221,7 +2254,7 @@ class OversightService:
                     t.updated_at = now_iso()
                     self._save_tasks()
                     # 🆕 (Prompt-GitHub Sync) — هر mutation روی تسک، فایل را sync کن
-                    self._recompute_execution_priorities()
+                    self._recompute_execution_priorities(t)
                     self._schedule_prompt_sync(t, rebuild_index=True)
                     return t.to_dict()
         return None
@@ -2499,7 +2532,7 @@ class OversightService:
             task.updated_at = now_iso()
             self._save_tasks()
             # 🆕 (Prompt-GitHub Sync) — regenerate باید فایل ریپو را هم آپدیت کند
-            self._recompute_execution_priorities()
+            self._recompute_execution_priorities(task)
             self._schedule_prompt_sync(task, rebuild_index=True)
             return task.to_dict()
 
