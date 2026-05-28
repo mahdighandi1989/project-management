@@ -5829,6 +5829,18 @@ AC = «طراحی شیک‌تر باشد»:
         quality_ok, quality_issues = (False, []) if is_too_thin else _evaluate_quality(parsed, idea)
         needs_retry = is_too_thin or not quality_ok
 
+        # 🆕 (perf fix) — برای fast-path (super-task یا idea بزرگ)، strict-retry
+        # را skip می‌کنیم تا total time در محدودهٔ Render edge timeout (30s)
+        # بماند. strict-retry یک AI call دوم می‌زند که 5-15s اضافی می‌گیرد.
+        # برای super-task content از قبل ساختاریافته است و quality bar پایین‌تر
+        # قابل قبول است.
+        if needs_retry and _skip_deep_context:
+            logger.info(
+                "idea_to_prompt: strict-retry skipped (fast-path requested) "
+                f"despite thin={is_too_thin}, quality_issues={len(quality_issues)}"
+            )
+            needs_retry = False
+
         if needs_retry:
             logger.warning(
                 f"idea_to_prompt: نیاز به retry — "
