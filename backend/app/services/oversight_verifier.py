@@ -4117,14 +4117,9 @@ async def verify_task(
         task.updated_at = now_iso()
         service._save_reports()
         service._save_tasks()
-        # 🆕 (Prompt-GitHub Sync) — verify_status تغییر کرد، فایل را sync کن.
-        # فقط execution_priority همین تسک recompute می‌شود (O(1)) تا از race
-        # با concurrent create_task که iterates self.tasks جلوگیری شود.
-        try:
-            service._recompute_execution_priorities(task)
-            service._schedule_prompt_sync(task, rebuild_index=True)
-        except Exception as _e:
-            logger.debug(f"verify: prompt-sync dispatch failed: {_e}")
+        # 🆕 (Prompt-GitHub Sync) — همگام‌سازی خودکار توسط _save_tasks
+        # (verify_status تغییر کرد → task.updated_at > github_prompt_synced_at
+        # → dirty → sync خودکار)
 
     # 🔁 Follow-up prompt: پس از append تاریخچه، اگر status != done
     # یک پرامپت "ادامه" ساخته و روی task ست می‌شود تا کاربر در دور

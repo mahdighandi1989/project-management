@@ -703,8 +703,105 @@ class OversightService:
     def _save_watched(self) -> None:
         _write_json(WATCHED_FILE, [w.to_dict() for w in self.watched])
 
-    def _save_tasks(self) -> None:
+    def _save_tasks(self, *, skip_sync: bool = False) -> None:
+        """ذخیره‌ی atomic لیست تسک‌ها به JSON + dispatch خودکار sync GitHub.
+
+        skip_sync=True: فقط ذخیره. برای callback های داخلی (پس از sync کامل
+        شد، فقط می‌خواهیم متادیتای جدید را persist کنیم بدون trigger دوباره).
+
+        skip_sync=False (پیش‌فرض): دیسک نوشته می‌شود + هر تسک "dirty" (که
+        از آخرین sync تغییر کرده یا اصلاً sync نشده) به‌صورت fire-and-forget
+        به GitHub همگام می‌شود + _index.json پروژه‌های متأثر debounce می‌شود.
+
+        این معماری تضمین می‌کند هر مسیری که _save_tasks() صدا بزند
+        (verify دوره‌ای/عمیق/سریع، scan دوره‌ای/موردی/عمیق/سریع، merge،
+        consolidation، archive، regenerate، …) همگام‌سازی خودکار اتفاق
+        می‌افتد — بدون نیاز به hook دستی در هر نقطه.
+        """
         _write_json(TASKS_FILE, [t.to_dict() for t in self.tasks])
+        if skip_sync:
+            return
+        self._sync_dirty_tasks_to_github()
+
+    def _is_task_dirty(self, t: "OversightTask") -> bool:
+        """آیا این تسک از آخرین sync تغییر کرده؟ (یا اصلاً sync نشده)"""
+        synced = getattr(t, "github_prompt_synced_at", None)
+        if not synced:
+            return True
+        try:
+            updated = t.updated_at or ""
+            # ISO 8601 UTC strings — مقایسهٔ رشته‌ای ترتیب صحیح می‌دهد
+            return updated > synced
+        except Exception:
+            return True
+
+    def _sync_dirty_tasks_to_github(self) -> None:
+        """sync همهٔ تسک‌هایی که از آخرین sync تغییر کرده‌اند.
+
+        - فقط در صورت داشتن GITHUB_TOKEN + running event loop
+        - هر پروژه فقط یک rebuild_index debounced می‌گیرد
+        - per-repo lock در prompt_github_sync writeهای concurrent را
+          سریالیزه می‌کند
+        """
+        try:
+            from .prompt_github_sync import (
+                safe_sync_task, schedule_index_rebuild, compute_execution_priority,
+            )
+        except Exception:
+            return
+        token = get_github_token()
+        if not token:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return  # sync context — هیچ loop در حال اجرا نیست
+
+        # شناسایی تسک‌های dirty
+        dirty: List["OversightTask"] = []
+        for t in self.tasks:
+            if self._is_task_dirty(t):
+                dirty.append(t)
+        if not dirty:
+            return
+
+        # priority را برای dirty ها recompute کن
+        for t in dirty:
+            try:
+                if not getattr(t, "archived", False):
+                    t.execution_priority = compute_execution_priority(t)
+            except Exception:
+                continue
+
+        # callback persistence — skip_sync=True تا recursion نگیرد
+        def _persist_after_sync() -> None:
+            try:
+                _write_json(TASKS_FILE, [t.to_dict() for t in self.tasks])
+            except Exception as e:
+                logger.debug(f"prompt-sync persist after sync failed: {e}")
+
+        affected_wids: set = set()
+        for t in dirty:
+            watched = self._find_watched(t.watched_id) if t.watched_id else None
+            if watched is None or not getattr(watched, "prompt_sync_enabled", True):
+                continue
+            asyncio.create_task(
+                safe_sync_task(t, watched, token=token, on_done=_persist_after_sync)
+            )
+            affected_wids.add(watched.id)
+
+        # یک rebuild_index debounced برای هر پروژهٔ متأثر
+        for wid in affected_wids:
+            w = self._find_watched(wid)
+            if w is None or not getattr(w, "prompt_sync_enabled", True):
+                continue
+            schedule_index_rebuild(lambda: list(self.tasks), w, token=token)
+
+        if len(dirty) > 20:
+            logger.info(
+                f"prompt-sync: backfilling {len(dirty)} dirty tasks across "
+                f"{len(affected_wids)} project(s) in background"
+            )
 
     def _recompute_execution_priorities(
         self, task: Optional["OversightTask"] = None,
@@ -736,14 +833,12 @@ class OversightService:
         self, task: Optional["OversightTask"] = None, *, rebuild_index: bool = True,
         delete: bool = False,
     ) -> None:
-        """fire-and-forget sync پرامپت‌ها به GitHub.
+        """fire-and-forget sync یا delete مستقیم برای یک تسک خاص.
 
-        - اگر task داده شد: همان تسک sync یا delete می‌شود.
-        - rebuild_index=True: rebuild پروژه با debounce (~2s coalescing).
-        - پس از موفقیت/شکست sync، _save_tasks دوباره صدا زده می‌شود تا
-          متادیتای جدید (sha/path/synced_at/last_error) به دیسک برسد.
-
-        هرگز exception نمی‌اندازد؛ هرگز task save را block نمی‌کند.
+        کاربرد: مسیرهایی که _save_tasks() کافی نیست — مثلاً delete_task که
+        تسک از self.tasks حذف شده و _save_tasks دیگه نمی‌تونه پیداش کنه.
+        برای mutation معمولی (create/update/verify/scan/…) فقط _save_tasks
+        صدا بزنید — همگام‌سازی خودکار اتفاق می‌افتد.
         """
         try:
             from .prompt_github_sync import (
@@ -784,19 +879,15 @@ class OversightService:
                 asyncio.get_running_loop()
                 asyncio.create_task(per_task_coro)
             except RuntimeError:
-                # هیچ loop در حال اجرا نیست (sync context) — coroutine را
-                # close کن تا warning بیرون نده. این مسیر در tests/init
-                # ممکن است؛ در runtime API همیشه async است.
                 per_task_coro.close()
                 logger.debug("prompt-sync: no running loop; coro closed")
 
-        # rebuild_index با debounce — اگر همان pkg دوباره mutate شد،
-        # rebuild قبلی cancel می‌شود.
+        # rebuild_index با debounce
         if rebuild_index:
             try:
                 asyncio.get_running_loop()
             except RuntimeError:
-                return  # بدون loop debounce بی‌معنی است
+                return
             target_wids = watched_ids or {
                 t.watched_id for t in self.tasks if t.watched_id
             }
@@ -2147,9 +2238,8 @@ class OversightService:
                     f"create_task {t.id}: attach_to_task returned 0 — هیچ session "
                     f"به این تسک ربط نخورد. کاربر باید دستی attach کند."
                 )
-        # 🆕 (Prompt-GitHub Sync) — sync فایل پرامپت + بازسازی index پروژه
-        self._recompute_execution_priorities(t)
-        self._schedule_prompt_sync(t, rebuild_index=True)
+        # 🆕 (Prompt-GitHub Sync) — همگام‌سازی خودکار از داخل _save_tasks
+        # هندل می‌شود؛ اینجا hook دستی لازم نیست.
         return CreateTaskResult(
             status="created",
             task=t.to_dict(),
@@ -2253,9 +2343,7 @@ class OversightService:
                             t.acceptance_criteria = extract_acceptance_criteria(t.prompt)
                     t.updated_at = now_iso()
                     self._save_tasks()
-                    # 🆕 (Prompt-GitHub Sync) — هر mutation روی تسک، فایل را sync کن
-                    self._recompute_execution_priorities(t)
-                    self._schedule_prompt_sync(t, rebuild_index=True)
+                    # 🆕 (Prompt-GitHub Sync) — همگام‌سازی خودکار توسط _save_tasks
                     return t.to_dict()
         return None
 
@@ -2531,9 +2619,7 @@ class OversightService:
                 task.models_used = [model_id]
             task.updated_at = now_iso()
             self._save_tasks()
-            # 🆕 (Prompt-GitHub Sync) — regenerate باید فایل ریپو را هم آپدیت کند
-            self._recompute_execution_priorities(task)
-            self._schedule_prompt_sync(task, rebuild_index=True)
+            # 🆕 (Prompt-GitHub Sync) — همگام‌سازی خودکار توسط _save_tasks
             return task.to_dict()
 
     # ====================================================================
