@@ -14,19 +14,16 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ...services.oversight_service import get_oversight_service, now_iso
 from ...services.prompt_github_sync import (
-    compute_execution_priority,
     PICKABLE_STATUSES,
     PICKABLE_EXTERNAL_STATUSES,
 )
 
 logger = logging.getLogger(__name__)
-
-router = APIRouter(prefix="/external/prompts", tags=["External Prompts"])
 
 DEFAULT_LEASE_MINUTES = 30
 
@@ -40,6 +37,30 @@ def _check_external_token(provided: Optional[str]) -> None:
         )
     if not provided or provided.strip() != expected:
         raise HTTPException(status_code=401, detail="Invalid X-External-Token")
+
+
+def require_external_token(
+    x_external_token: Optional[str] = Header(default=None, alias="X-External-Token"),
+) -> None:
+    """FastAPI dependency برای endpoint های ابزار خارجی."""
+    _check_external_token(x_external_token)
+
+
+def require_admin_token(
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+) -> None:
+    """FastAPI dependency برای endpoint های مدیریتی (backfill و …)."""
+    expected = os.environ.get("ADMIN_TOKEN", "").strip()
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail="ADMIN_TOKEN env var تنظیم نشده — endpoint غیرفعال است.",
+        )
+    if not x_admin_token or x_admin_token.strip() != expected:
+        raise HTTPException(status_code=401, detail="Invalid X-Admin-Token")
+
+
+router = APIRouter(prefix="/external/prompts", tags=["External Prompts"])
 
 
 def _is_lease_expired(task: Any) -> bool:
@@ -105,11 +126,10 @@ class ProgressRequest(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@router.get("/next")
+@router.get("/next", dependencies=[Depends(require_external_token)])
 async def list_next_prompts(
     limit: int = Query(default=10, ge=1, le=100),
     watched_id: Optional[str] = Query(default=None),
-    x_external_token: Optional[str] = Header(default=None, alias="X-External-Token"),
 ):
     """لیست تسک‌های pickable به ترتیب اولویت اجرا (کوچک‌تر = اولویت بالاتر).
 
@@ -118,7 +138,6 @@ async def list_next_prompts(
       - status ∈ PICKABLE_STATUSES
       - external_status ∈ PICKABLE_EXTERNAL_STATUSES (یا claimed با lease منقضی)
     """
-    _check_external_token(x_external_token)
     service = get_oversight_service()
     candidates: List[Any] = []
     for t in service.tasks:
@@ -149,13 +168,9 @@ async def list_next_prompts(
     }
 
 
-@router.get("/{task_id}")
-async def get_prompt(
-    task_id: str,
-    x_external_token: Optional[str] = Header(default=None, alias="X-External-Token"),
-):
+@router.get("/{task_id}", dependencies=[Depends(require_external_token)])
+async def get_prompt(task_id: str):
     """محتوای کامل تسک — شامل prompt و acceptance_criteria و task_steps."""
-    _check_external_token(x_external_token)
     service = get_oversight_service()
     t = next((x for x in service.tasks if x.id == task_id), None)
     if not t:
@@ -175,18 +190,13 @@ async def get_prompt(
     }
 
 
-@router.post("/{task_id}/claim")
-async def claim_prompt(
-    task_id: str,
-    payload: ClaimRequest,
-    x_external_token: Optional[str] = Header(default=None, alias="X-External-Token"),
-):
+@router.post("/{task_id}/claim", dependencies=[Depends(require_external_token)])
+async def claim_prompt(task_id: str, payload: ClaimRequest):
     """قفل گرفتن یک تسک برای اجرا (با lease).
 
     اگر تسک قبلاً claim شده و lease معتبر دارد، 409 برمی‌گرداند مگر اینکه
     همان agent_id باشد (renewal).
     """
-    _check_external_token(x_external_token)
     service = get_oversight_service()
     async with service._lock:
         t = next((x for x in service.tasks if x.id == task_id), None)
@@ -224,19 +234,18 @@ async def claim_prompt(
         t.external_attempts = int(getattr(t, "external_attempts", 0) or 0) + 1
         t.updated_at = now_iso()
         service._save_tasks()
-        service._recompute_execution_priorities()
+        service._recompute_execution_priorities(t)
         service._schedule_prompt_sync(t, rebuild_index=True)
     return {"success": True, "task": _task_summary(t), "lease_until": lease_until}
 
 
-@router.post("/{task_id}/progress")
-async def report_progress(
-    task_id: str,
-    payload: ProgressRequest,
-    x_external_token: Optional[str] = Header(default=None, alias="X-External-Token"),
-):
-    """گزارش پیشرفت اختیاری از ابزار خارجی + تمدید lease."""
-    _check_external_token(x_external_token)
+@router.post("/{task_id}/progress", dependencies=[Depends(require_external_token)])
+async def report_progress(task_id: str, payload: ProgressRequest):
+    """گزارش پیشرفت اختیاری از ابزار خارجی + تمدید lease.
+
+    اگر lease قبلاً منقضی شده، 410 برمی‌گرداند — agent نمی‌تواند خاموش-روشن
+    سرقت lease کند، باید claim مجدد بزند.
+    """
     service = get_oversight_service()
     async with service._lock:
         t = next((x for x in service.tasks if x.id == task_id), None)
@@ -247,27 +256,30 @@ async def report_progress(
                 status_code=403,
                 detail="agent_id mismatch — only the claimant can report progress",
             )
+        if _is_lease_expired(t):
+            raise HTTPException(
+                status_code=410,
+                detail="lease expired — please re-claim before reporting progress",
+            )
         t.external_status = "in_progress"
         t.external_lease_until = (
             datetime.now(timezone.utc) + timedelta(minutes=DEFAULT_LEASE_MINUTES)
         ).isoformat()
         t.updated_at = now_iso()
         service._save_tasks()
+        # /progress هم باید فایل GitHub را sync کند (external_status: in_progress
+        # در front-matter دیده شود) — هم‌سو با claim/complete/fail.
+        service._schedule_prompt_sync(t, rebuild_index=False)
     return {"success": True, "task": _task_summary(t)}
 
 
-@router.post("/{task_id}/complete")
-async def complete_prompt(
-    task_id: str,
-    payload: CompleteRequest,
-    x_external_token: Optional[str] = Header(default=None, alias="X-External-Token"),
-):
+@router.post("/{task_id}/complete", dependencies=[Depends(require_external_token)])
+async def complete_prompt(task_id: str, payload: CompleteRequest):
     """گزارش تکمیل توسط ابزار خارجی.
 
     این endpoint تسک را به‌صورت "applied_externally_pending_verify" علامت می‌زند.
     تأیید نهایی فقط با verify انجام می‌شود (نقش EXTERNAL_TOOL نمی‌تواند آرشیو کند).
     """
-    _check_external_token(x_external_token)
     service = get_oversight_service()
     async with service._lock:
         t = next((x for x in service.tasks if x.id == task_id), None)
@@ -299,19 +311,14 @@ async def complete_prompt(
                 pass
         t.updated_at = now_iso()
         service._save_tasks()
-        service._recompute_execution_priorities()
+        service._recompute_execution_priorities(t)
         service._schedule_prompt_sync(t, rebuild_index=True)
     return {"success": True, "task": _task_summary(t)}
 
 
-@router.post("/{task_id}/fail")
-async def fail_prompt(
-    task_id: str,
-    payload: FailRequest,
-    x_external_token: Optional[str] = Header(default=None, alias="X-External-Token"),
-):
+@router.post("/{task_id}/fail", dependencies=[Depends(require_external_token)])
+async def fail_prompt(task_id: str, payload: FailRequest):
     """گزارش شکست از ابزار خارجی. اگر retry=True، تسک به pending برمی‌گردد."""
-    _check_external_token(x_external_token)
     service = get_oversight_service()
     async with service._lock:
         t = next((x for x in service.tasks if x.id == task_id), None)
@@ -328,7 +335,7 @@ async def fail_prompt(
         t.external_status = "failed" if not payload.retry else "pending"
         t.updated_at = now_iso()
         service._save_tasks()
-        service._recompute_execution_priorities()
+        service._recompute_execution_priorities(t)
         service._schedule_prompt_sync(t, rebuild_index=True)
     return {"success": True, "task": _task_summary(t)}
 
@@ -338,22 +345,16 @@ async def fail_prompt(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@router.post("/_admin/backfill")
-async def backfill_all(
-    watched_id: Optional[str] = Query(default=None),
-    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
-):
+@router.post("/_admin/backfill", dependencies=[Depends(require_admin_token)])
+async def backfill_all(watched_id: Optional[str] = Query(default=None)):
     """sync همهٔ تسک‌های موجود به ریپوهای مربوطه + ساخت index.
 
     اگر watched_id داده شد فقط همان پروژه. وگرنه همه‌ی پروژه‌های با
-    prompt_sync_enabled=True.
+    prompt_sync_enabled=True. برای مقیاس‌پذیری از asyncio.Semaphore با
+    concurrency=5 استفاده می‌کند تا rate-limit GitHub نشکند.
     """
-    expected = os.environ.get("ADMIN_TOKEN", "").strip()
-    if not expected or x_admin_token != expected:
-        raise HTTPException(status_code=401, detail="Invalid X-Admin-Token")
-
     from ...services.prompt_github_sync import (
-        safe_sync_task, safe_rebuild_index,
+        safe_sync_task, rebuild_project_index,
     )
     from ...services.oversight_service import get_github_token
     token = get_github_token()
@@ -369,15 +370,26 @@ async def backfill_all(
     if not targets:
         return {"success": True, "synced_tasks": 0, "projects": 0}
 
+    # full sweep قبل از backfill — وضعیت اولیه را consistent کن
     service._recompute_execution_priorities()
+    import asyncio as _asyncio
+    sem = _asyncio.Semaphore(5)
     synced = 0
-    for w in targets:
-        for t in service.tasks:
-            if t.watched_id != w.id:
-                continue
+
+    async def _sync_one(t, w):
+        async with sem:
             await safe_sync_task(t, w, token=token)
-            synced += 1
-        await safe_rebuild_index(list(service.tasks), w, token=token)
+
+    for w in targets:
+        project_tasks = [t for t in service.tasks if t.watched_id == w.id]
+        if project_tasks:
+            await _asyncio.gather(*(_sync_one(t, w) for t in project_tasks))
+            synced += len(project_tasks)
+        # یک rebuild_index نهایی بعد از همه task ها
+        try:
+            await rebuild_project_index(list(service.tasks), w, token=token)
+        except Exception as e:
+            logger.warning(f"backfill: rebuild_index failed watched={w.id}: {e}")
     service._save_tasks()
     return {
         "success": True,

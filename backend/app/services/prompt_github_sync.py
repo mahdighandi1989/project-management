@@ -15,12 +15,16 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+import yaml
+
 from .github_pr_service import get_github_pr_service
+from .oversight_service import now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -42,31 +46,53 @@ PICKABLE_STATUSES = {"pending", "awaiting_review"}
 PICKABLE_EXTERNAL_STATUSES = {"pending", "failed"}
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _file_path(task_id: str, archived: bool = False) -> str:
     folder = ARCHIVE_DIR if archived else PROMPT_DIR
     return f"{folder}/task-{task_id}.md"
 
 
 def _parse_repo(repo_full_name: str) -> Tuple[str, str]:
-    if not repo_full_name or "/" not in repo_full_name:
+    """تجزیه `owner/repo` — حذف `.git` در انتها (سازگار با _parse_repo_url)."""
+    if not repo_full_name:
         return ("", "")
-    owner, _, repo = repo_full_name.partition("/")
+    s = repo_full_name.replace(".git", "").strip("/")
+    if "/" not in s:
+        return ("", "")
+    owner, _, repo = s.partition("/")
     return (owner.strip(), repo.strip())
 
 
+# ────────────────────────────────────────────────────────────────────────
+# Per-repo write-serialization + index-debounce
+# ────────────────────────────────────────────────────────────────────────
+# GitHub Contents API ضد concurrent writes روی یک branch است (409 sha
+# mismatch). برای جلوگیری از write-storm، نوشتن روی هر repo را با یک
+# asyncio.Lock مخصوص همان repo سریالیزه می‌کنیم.
+_repo_locks: Dict[str, asyncio.Lock] = {}
+_index_debounce_tasks: Dict[str, asyncio.Task] = {}
+INDEX_DEBOUNCE_SECONDS = 2.0
+
+
+def _get_repo_lock(owner: str, repo: str, branch: str) -> asyncio.Lock:
+    key = f"{owner}/{repo}@{branch}"
+    lock = _repo_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _repo_locks[key] = lock
+    return lock
+
+
 def compute_execution_priority(task: Any) -> int:
-    """محاسبهٔ اولویت اجرا برای یک تسک.
+    """محاسبهٔ اولویت اجرا برای یک تسک (کوچک‌تر = اولویت بالاتر).
 
     پایه = PRIORITY_BASE[priority]
     تعدیل:
       - pinned          → −500
-      - critical+blocker → −200
+      - awaiting_review → +300 (نیاز به گیت دستی)
       - failed قبلی     → +50 × external_attempts (تسک‌های repeatedly-fail عقب می‌افتند)
-      - awaiting_review → +300 (manual gating)
+
+    Tie-breaker بر اساس created_at توسط callerها (به‌صورت secondary sort key)
+    اعمال می‌شود — اینجا فقط priority پایه برمی‌گردد.
     """
     base = PRIORITY_BASE.get(getattr(task, "priority", "medium"), 3000)
     if getattr(task, "pinned", False):
@@ -76,29 +102,16 @@ def compute_execution_priority(task: Any) -> int:
     attempts = int(getattr(task, "external_attempts", 0) or 0)
     if attempts > 0:
         base += min(attempts * 50, 500)
-    # tie-breaker با created_at به‌صورت صعودی
-    try:
-        ts = datetime.fromisoformat(
-            (getattr(task, "created_at", "") or "").replace("Z", "+00:00")
-        ).timestamp()
-        # اضافه‌کردن secs/1000 → کم‌اهمیت ولی deterministic
-        base += int(ts / 1000) % 1000
-    except Exception:
-        pass
     return int(base)
 
 
 def format_prompt_markdown(task: Any) -> str:
     """رندر فایل markdown نهایی برای یک تسک.
 
-    شامل front-matter YAML + بدنهٔ markdown با کامل‌ترین جزئیات (بدون summarization).
+    شامل front-matter YAML (با yaml.safe_dump برای امن بودن در برابر
+    backslash/CRLF/unicode/multiline) + بدنهٔ markdown با کامل‌ترین جزئیات
+    (بدون summarization).
     """
-    def _yaml_escape(s: str) -> str:
-        if s is None:
-            return ""
-        s = str(s).replace('"', '\\"').replace("\n", " ")
-        return s
-
     ac_list = getattr(task, "acceptance_criteria", []) or []
     ac_lines: List[str] = []
     for i, ac in enumerate(ac_list, 1):
@@ -133,63 +146,55 @@ def format_prompt_markdown(task: Any) -> str:
     target_files = getattr(task, "target_files", []) or []
     tags = getattr(task, "tags", []) or []
 
-    fm: List[str] = [
-        "---",
-        f"task_id: \"{task.id}\"",
-        f"title: \"{_yaml_escape(task.title)}\"",
-        f"type: \"{task.type}\"",
-        f"priority: \"{task.priority}\"",
-        f"execution_priority: {compute_execution_priority(task)}",
-        f"status: \"{task.status}\"",
-        f"external_status: \"{getattr(task, 'external_status', 'pending')}\"",
-        f"verification_status: \"{task.verification_status}\"",
-        f"watched_id: \"{task.watched_id or ''}\"",
-        f"project: \"{task.project_full_name}\"",
-        f"created_at: \"{task.created_at}\"",
-        f"updated_at: \"{task.updated_at}\"",
-    ]
+    fm_data: Dict[str, Any] = {
+        "task_id": task.id,
+        "title": task.title or "",
+        "type": task.type,
+        "priority": task.priority,
+        "execution_priority": (
+            getattr(task, "execution_priority", None)
+            or compute_execution_priority(task)
+        ),
+        "status": task.status,
+        "external_status": getattr(task, "external_status", "pending"),
+        "verification_status": task.verification_status,
+        "watched_id": task.watched_id or "",
+        "project": task.project_full_name,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+    }
     if getattr(task, "archived", False):
-        fm.append(f"archived: true")
+        fm_data["archived"] = True
         if task.archived_at:
-            fm.append(f"archived_at: \"{task.archived_at}\"")
+            fm_data["archived_at"] = task.archived_at
     if getattr(task, "deadline", None):
-        fm.append(f"deadline: \"{task.deadline}\"")
+        fm_data["deadline"] = task.deadline
     if tags:
-        fm.append("tags: [" + ", ".join(f"\"{_yaml_escape(t)}\"" for t in tags) + "]")
+        fm_data["tags"] = list(tags)
     if target_files:
-        fm.append("target_files:")
-        for tf in target_files[:50]:
-            fm.append(f"  - \"{_yaml_escape(tf)}\"")
-    fm.append("---")
-    fm.append("")
-    fm.append(f"# {task.title}")
-    fm.append("")
+        fm_data["target_files"] = list(target_files[:50])
+
+    fm_yaml = yaml.safe_dump(
+        fm_data,
+        allow_unicode=True,
+        sort_keys=False,
+        default_flow_style=False,
+        width=10_000,
+    )
+
+    body_parts: List[str] = ["---", fm_yaml.rstrip(), "---", "", f"# {task.title}", ""]
     if task.raw_idea:
-        fm.append("## Raw Idea")
-        fm.append("")
-        fm.append(task.raw_idea)
-        fm.append("")
-    fm.append("## Prompt")
-    fm.append("")
-    fm.append(task.prompt or "")
-    fm.append("")
+        body_parts += ["## Raw Idea", "", task.raw_idea, ""]
+    body_parts += ["## Prompt", "", task.prompt or "", ""]
     if ac_lines:
-        fm.append("## Acceptance Criteria")
-        fm.append("")
-        fm.extend(ac_lines)
-        fm.append("")
+        body_parts += ["## Acceptance Criteria", ""] + ac_lines + [""]
     if step_lines:
-        fm.append("## Task Steps")
-        fm.append("")
-        fm.extend(step_lines)
+        body_parts += ["## Task Steps", ""] + step_lines
     followup = getattr(task, "followup_prompt", "")
     if followup:
-        fm.append("## Followup Prompt")
-        fm.append("")
-        fm.append(followup)
-        fm.append("")
+        body_parts += ["## Followup Prompt", "", followup, ""]
 
-    return "\n".join(fm).rstrip() + "\n"
+    return "\n".join(body_parts).rstrip() + "\n"
 
 
 def _resolve_repo_and_branch(watched: Any) -> Optional[Tuple[str, str, str]]:
@@ -217,7 +222,9 @@ async def sync_task_to_github(task: Any, watched: Any, *, token: str) -> Dict[st
     این تابع state تسک را در محل تغییر می‌دهد:
       github_prompt_path, github_prompt_sha, github_prompt_synced_at,
       github_prompt_archived, github_prompt_last_error
-    Returns: {"success": bool, "path": str, "error": str?}
+
+    Writes روی همان repo با asyncio.Lock سریالیزه می‌شوند تا از 409 های
+    concurrent جلوگیری شود.
     """
     resolved = _resolve_repo_and_branch(watched)
     if not resolved:
@@ -232,39 +239,40 @@ async def sync_task_to_github(task: Any, watched: Any, *, token: str) -> Dict[st
 
     pr = get_github_pr_service()
 
-    # اگر مسیر قبلی موجود است و با مسیر فعلی فرق دارد (آرشیو/آن‌آرشیو شد) →
-    # اول فایل قبلی را حذف کن
-    if prior_path and prior_path != desired_path:
-        del_res = await pr.delete_file(
+    async with _get_repo_lock(owner, repo, branch):
+        # اگر مسیر قبلی موجود است و با مسیر فعلی فرق دارد (آرشیو/آن‌آرشیو شد) →
+        # اول فایل قبلی را حذف کن
+        if prior_path and prior_path != desired_path:
+            del_res = await pr.delete_file(
+                owner=owner,
+                repo=repo,
+                path=prior_path,
+                message=f"chore(prompt): move task {task.id} ({'archive' if archived else 'unarchive'})",
+                branch=branch,
+                token=token,
+                sha=getattr(task, "github_prompt_sha", None),
+            )
+            if not del_res.get("success") and not del_res.get("not_found"):
+                logger.warning(
+                    f"prompt-sync: delete old path failed task={task.id} "
+                    f"path={prior_path} err={del_res.get('error')}"
+                )
+
+        body = format_prompt_markdown(task)
+        upsert = await pr.create_or_update_file(
             owner=owner,
             repo=repo,
-            path=prior_path,
-            message=f"chore(prompt): move task {task.id} ({'archive' if archived else 'unarchive'})",
+            path=desired_path,
+            content=body,
+            message=f"chore(prompt): sync task {task.id} — {task.title[:80]}",
             branch=branch,
             token=token,
-            sha=getattr(task, "github_prompt_sha", None),
         )
-        if not del_res.get("success") and not del_res.get("not_found"):
-            # خطای حذف فقط لاگ می‌شود — فایل جدید را به هر حال می‌نویسیم
-            logger.warning(
-                f"prompt-sync: delete old path failed task={task.id} "
-                f"path={prior_path} err={del_res.get('error')}"
-            )
 
-    body = format_prompt_markdown(task)
-    upsert = await pr.create_or_update_file(
-        owner=owner,
-        repo=repo,
-        path=desired_path,
-        content=body,
-        message=f"chore(prompt): sync task {task.id} — {task.title[:80]}",
-        branch=branch,
-        token=token,
-    )
     if upsert.get("success"):
         task.github_prompt_path = desired_path
         task.github_prompt_sha = upsert.get("sha")
-        task.github_prompt_synced_at = _now_iso()
+        task.github_prompt_synced_at = now_iso()
         task.github_prompt_archived = archived
         task.github_prompt_last_error = None
         return {"success": True, "path": desired_path}
@@ -285,15 +293,16 @@ async def delete_task_from_github(task: Any, watched: Any, *, token: str) -> Dic
     if not path:
         return {"success": True, "skipped": True}
     pr = get_github_pr_service()
-    res = await pr.delete_file(
-        owner=owner,
-        repo=repo,
-        path=path,
-        message=f"chore(prompt): delete task {task.id}",
-        branch=branch,
-        token=token,
-        sha=getattr(task, "github_prompt_sha", None),
-    )
+    async with _get_repo_lock(owner, repo, branch):
+        res = await pr.delete_file(
+            owner=owner,
+            repo=repo,
+            path=path,
+            message=f"chore(prompt): delete task {task.id}",
+            branch=branch,
+            token=token,
+            sha=getattr(task, "github_prompt_sha", None),
+        )
     if res.get("success") or res.get("not_found"):
         task.github_prompt_path = None
         task.github_prompt_sha = None
@@ -328,11 +337,13 @@ async def rebuild_project_index(
         ext_status = getattr(t, "external_status", "pending") or "pending"
         if ext_status not in PICKABLE_EXTERNAL_STATUSES:
             continue
+        # priority cached را ترجیح بده تا compute مجدد نکنیم
+        eprio = getattr(t, "execution_priority", None) or compute_execution_priority(t)
         pickable.append({
             "task_id": t.id,
             "title": t.title,
             "priority": t.priority,
-            "execution_priority": compute_execution_priority(t),
+            "execution_priority": eprio,
             "status": status,
             "external_status": ext_status,
             "path": getattr(t, "github_prompt_path", _file_path(t.id)),
@@ -344,7 +355,7 @@ async def rebuild_project_index(
     pickable.sort(key=lambda x: (x["execution_priority"], x["created_at"]))
     index_body = {
         "version": 1,
-        "generated_at": _now_iso(),
+        "generated_at": now_iso(),
         "project": getattr(watched, "repo_full_name", ""),
         "watched_id": watched.id,
         "total": len(pickable),
@@ -352,20 +363,27 @@ async def rebuild_project_index(
     }
     content = json.dumps(index_body, ensure_ascii=False, indent=2)
     pr = get_github_pr_service()
-    upsert = await pr.create_or_update_file(
-        owner=owner,
-        repo=repo,
-        path=INDEX_PATH,
-        content=content,
-        message=f"chore(prompt): rebuild index ({len(pickable)} tasks)",
-        branch=branch,
-        token=token,
-    )
+    async with _get_repo_lock(owner, repo, branch):
+        upsert = await pr.create_or_update_file(
+            owner=owner,
+            repo=repo,
+            path=INDEX_PATH,
+            content=content,
+            message=f"chore(prompt): rebuild index ({len(pickable)} tasks)",
+            branch=branch,
+            token=token,
+        )
     return upsert
 
 
-async def safe_sync_task(task: Any, watched: Any, *, token: str) -> None:
-    """wrapper امن — هیچ‌گاه exception نمی‌اندازد. برای fire-and-forget."""
+async def safe_sync_task(
+    task: Any, watched: Any, *, token: str, on_done: Optional[callable] = None,
+) -> None:
+    """wrapper امن — هیچ‌گاه exception نمی‌اندازد. برای fire-and-forget.
+
+    on_done: اختیاری — پس از موفقیت (یا شکست) صدا زده می‌شود تا state تسک
+    (که در همان task object تغییر کرده) را در دیسک ذخیره کنیم.
+    """
     try:
         await sync_task_to_github(task, watched, token=token)
     except Exception as e:
@@ -374,21 +392,63 @@ async def safe_sync_task(task: Any, watched: Any, *, token: str) -> None:
             task.github_prompt_last_error = str(e)[:500]
         except Exception:
             pass
+    finally:
+        if on_done is not None:
+            try:
+                on_done()
+            except Exception as e:
+                logger.debug(f"prompt-sync: on_done callback failed: {e}")
 
 
-async def safe_rebuild_index(
-    tasks: List[Any], watched: Any, *, token: str
+def schedule_index_rebuild(
+    tasks_getter: callable,
+    watched: Any,
+    *,
+    token: str,
+    debounce_seconds: float = INDEX_DEBOUNCE_SECONDS,
 ) -> None:
-    try:
-        await rebuild_project_index(tasks, watched, token=token)
-    except Exception as e:
-        logger.warning(
-            f"prompt-sync: safe_rebuild_index failed watched={watched.id}: {e}"
-        )
+    """rebuild_index را debounce می‌کند — اگر در فاصلهٔ debounce چندبار صدا
+    زده شود، فقط یک بار رخ می‌دهد (آخرین snapshot).
+
+    tasks_getter: callable که هنگام flush، snapshot تازه از لیست تسک‌ها را
+    برمی‌گرداند (مثلاً `lambda: list(service.tasks)`).
+    """
+    resolved = _resolve_repo_and_branch(watched)
+    if not resolved or not token:
+        return
+    watched_id = watched.id
+
+    async def _flush():
+        try:
+            await asyncio.sleep(debounce_seconds)
+            snapshot = tasks_getter()
+            await rebuild_project_index(snapshot, watched, token=token)
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.warning(
+                f"prompt-sync: debounced rebuild_index failed "
+                f"watched={watched_id}: {e}"
+            )
+        finally:
+            _index_debounce_tasks.pop(watched_id, None)
+
+    existing = _index_debounce_tasks.get(watched_id)
+    if existing and not existing.done():
+        existing.cancel()
+    _index_debounce_tasks[watched_id] = asyncio.create_task(_flush())
 
 
-async def safe_delete_task(task: Any, watched: Any, *, token: str) -> None:
+async def safe_delete_task(
+    task: Any, watched: Any, *, token: str, on_done: Optional[callable] = None,
+) -> None:
     try:
         await delete_task_from_github(task, watched, token=token)
     except Exception as e:
         logger.warning(f"prompt-sync: safe_delete_task failed task={task.id}: {e}")
+    finally:
+        if on_done is not None:
+            try:
+                on_done()
+            except Exception as e:
+                logger.debug(f"prompt-sync: on_done callback failed: {e}")
