@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generated_at": "2026-05-29T16:39:31.879833+00:00",
+  "generated_at": "2026-05-29T16:46:24.470092+00:00",
   "project": "mahdighandi1989/project-management",
   "watched_id": "3f34a2b1-2a8d-4ad2-904a-9835a8a5b7c9",
   "total": 116,
@@ -15,7 +15,7 @@
       "path": "prompt/task-daaaa7f6-f4e6-429c-83d7-f05435a955cd.md",
       "external_attempts": 0,
       "created_at": "2026-05-12T13:27:48.245411+00:00",
-      "updated_at": "2026-05-29T16:04:50.715464+00:00"
+      "updated_at": "2026-05-29T16:41:40.095910+00:00"
     },
     {
       "task_id": "8ac20f8a-8436-49a1-9e75-c6455a4ad655",
@@ -195,7 +195,7 @@
       "path": "prompt/task-9551830e-3a02-4e9d-8e85-46c276791dc4.md",
       "external_attempts": 0,
       "created_at": "2026-05-15T05:07:49.396257+00:00",
-      "updated_at": "2026-05-20T04:22:42.983870+00:00"
+      "updated_at": "2026-05-29T16:43:51.568343+00:00"
     },
     {
       "task_id": "e9fedf58-7346-4175-a584-971086095696",
@@ -219,7 +219,7 @@
       "path": "prompt/task-cf9400cc-7cde-4c8d-8ea7-658c2c9486a4.md",
       "external_attempts": 0,
       "created_at": "2026-05-12T15:45:03.024945+00:00",
-      "updated_at": "2026-05-20T04:22:15.132001+00:00"
+      "updated_at": "2026-05-29T16:41:51.194583+00:00"
     },
     {
       "task_id": "4abfb7dd-5101-42d7-97a8-d8ba8a46b37a",
@@ -231,7 +231,7 @@
       "path": "prompt/task-4abfb7dd-5101-42d7-97a8-d8ba8a46b37a.md",
       "external_attempts": 0,
       "created_at": "2026-05-14T19:47:49.450510+00:00",
-      "updated_at": "2026-05-24T09:09:12.884845+00:00"
+      "updated_at": "2026-05-29T16:42:46.452427+00:00"
     },
     {
       "task_id": "014ac9de-cdcf-4425-94fc-dfb486fa1ba6",
@@ -639,7 +639,7 @@
       "path": "prompt/task-779654c6-2c21-459d-9483-9dfacd1f64bd.md",
       "external_attempts": 0,
       "created_at": "2026-05-15T04:21:36.094527+00:00",
-      "updated_at": "2026-05-20T04:22:39.565932+00:00"
+      "updated_at": "2026-05-29T16:43:39.106973+00:00"
     },
     {
       "task_id": "47955926-66fc-4ba0-8a7d-fcb8dfe371e2",
@@ -807,7 +807,7 @@
       "path": "prompt/task-fa7bdf07-d7a6-4136-9919-fe6aeb5abee4.md",
       "external_attempts": 0,
       "created_at": "2026-05-11T17:10:36.204649+00:00",
-      "updated_at": "2026-05-29T16:04:34.581626+00:00"
+      "updated_at": "2026-05-29T16:41:24.834918+00:00"
     },
     {
       "task_id": "17e16826-4cca-466f-863b-f3d514ce091e",
@@ -819,7 +819,7 @@
       "path": "prompt/task-17e16826-4cca-466f-863b-f3d514ce091e.md",
       "external_attempts": 0,
       "created_at": "2026-05-12T04:59:26.780267+00:00",
-      "updated_at": "2026-05-29T16:04:39.313643+00:00"
+      "updated_at": "2026-05-29T16:41:28.622370+00:00"
     },
     {
       "task_id": "587a4bed-64dd-4286-9a83-10a3167c46ec",
@@ -831,7 +831,7 @@
       "path": "prompt/task-587a4bed-64dd-4286-9a83-10a3167c46ec.md",
       "external_attempts": 0,
       "created_at": "2026-05-12T11:32:06.523609+00:00",
-      "updated_at": "2026-05-29T16:04:49.069899+00:00"
+      "updated_at": "2026-05-29T16:41:38.432734+00:00"
     },
     {
       "task_id": "ef8ce95f-a25d-4d82-b2a2-1bee2ebb3777",
@@ -843,7 +843,7 @@
       "path": "prompt/task-ef8ce95f-a25d-4d82-b2a2-1bee2ebb3777.md",
       "external_attempts": 0,
       "created_at": "2026-05-12T13:46:54.156486+00:00",
-      "updated_at": "2026-05-29T16:04:53.886991+00:00"
+      "updated_at": "2026-05-29T16:41:45.411695+00:00"
     },
     {
       "task_id": "c3d57b4b-24c2-405d-8084-86cf2e97b959",
@@ -855,7 +855,7 @@
       "path": "prompt/task-c3d57b4b-24c2-405d-8084-86cf2e97b959.md",
       "external_attempts": 0,
       "created_at": "2026-05-12T18:55:39.596715+00:00",
-      "updated_at": "2026-05-20T04:22:18.644673+00:00"
+      "updated_at": "2026-05-29T16:42:05.904654+00:00"
     },
     {
       "task_id": "340f116c-27ff-4215-bfe9-815a5a50fb4b",
@@ -867,7 +867,7 @@
       "path": "prompt/task-340f116c-27ff-4215-bfe9-815a5a50fb4b.md",
       "external_attempts": 0,
       "created_at": "2026-05-13T21:47:44.317161+00:00",
-      "updated_at": "2026-05-20T04:22:21.239516+00:00"
+      "updated_at": "2026-05-29T16:42:15.753740+00:00"
     },
     {
       "task_id": "4d1c38bb-65dc-4d1d-b37c-9bf75f1fa818",
