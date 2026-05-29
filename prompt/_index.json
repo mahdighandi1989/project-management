@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generated_at": "2026-05-29T20:23:28.357641+00:00",
+  "generated_at": "2026-05-29T20:23:33.801168+00:00",
   "project": "mahdighandi1989/project-management",
   "watched_id": "3f34a2b1-2a8d-4ad2-904a-9835a8a5b7c9",
   "total": 116,
@@ -159,7 +159,7 @@
       "path": "prompt/task-task_8b39f2e6e35d.md",
       "external_attempts": 0,
       "created_at": "2026-05-18T04:22:43.565570+00:00",
-      "updated_at": "2026-05-20T04:28:26.951326+00:00"
+      "updated_at": "2026-05-29T20:23:32.345874+00:00"
     },
     {
       "task_id": "task_4be78aa7a649",
@@ -1131,7 +1131,7 @@
       "path": "prompt/task-task_594ab2aa219b.md",
       "external_attempts": 0,
       "created_at": "2026-05-18T04:21:34.892704+00:00",
-      "updated_at": "2026-05-20T04:28:25.927690+00:00"
+      "updated_at": "2026-05-29T20:23:28.557129+00:00"
     },
     {
       "task_id": "task_287096a4b102",
