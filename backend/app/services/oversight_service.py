@@ -634,6 +634,13 @@ class OversightService:
             "scan_interval_hours": 24,
         }
 
+        # 🆕 (Dispatch Storm Prevention) — set از task_id هایی که در حال حاضر
+        # یک sync background در حال اجرا برای آنها است. _is_task_dirty
+        # تسک‌های inflight را dirty نشمارد تا از dispatch مکرر همان تسک
+        # جلوگیری شود. در on_done callback، task_id از set حذف می‌شود.
+        # این جلوی snowball effect در mass-regenerate را می‌گیرد.
+        self._inflight_sync_tasks: set = set()
+
         try:
             self._load_all()
         except Exception as e:
@@ -795,7 +802,16 @@ class OversightService:
         self._sync_dirty_tasks_to_github()
 
     def _is_task_dirty(self, t: "OversightTask") -> bool:
-        """آیا این تسک از آخرین sync تغییر کرده؟ (یا اصلاً sync نشده)"""
+        """آیا این تسک از آخرین sync تغییر کرده؟ (یا اصلاً sync نشده)
+
+        🆕 اگر تسک در حال حاضر یک sync background در حال اجرا دارد
+        (در self._inflight_sync_tasks است)، dirty حساب نمی‌شود تا از
+        dispatch مکرر همان تسک جلوگیری شود (dispatch-storm prevention).
+        """
+        # inflight check اول — حتی اگر synced_at قدیمی است، تا sync جاری
+        # تمام نشده re-dispatch نکن
+        if getattr(t, "id", None) in self._inflight_sync_tasks:
+            return False
         synced = getattr(t, "github_prompt_synced_at", None)
         if not synced:
             return True
@@ -852,13 +868,6 @@ class OversightService:
             except Exception:
                 continue
 
-        # callback persistence — skip_sync=True تا recursion نگیرد
-        def _persist_after_sync() -> None:
-            try:
-                _write_json(TASKS_FILE, [t.to_dict() for t in self.tasks])
-            except Exception as e:
-                logger.debug(f"prompt-sync persist after sync failed: {e}")
-
         dispatched = 0
         skipped_disabled = 0
         affected_wids: set = set()
@@ -870,8 +879,26 @@ class OversightService:
             if not getattr(watched, "prompt_sync_enabled", True):
                 skipped_disabled += 1
                 continue
+            # 🆕 inflight tracking — قبل از dispatch، task_id را در set ثبت کن
+            # تا save های بعدی تا تکمیل این sync دوباره dispatch نکنند.
+            tid = getattr(t, "id", None)
+            if tid:
+                self._inflight_sync_tasks.add(tid)
+
+            # closure برای persist + remove از inflight set
+            def _make_on_done(task_id: Optional[str]) -> Any:
+                def _on_done() -> None:
+                    try:
+                        _write_json(TASKS_FILE, [tt.to_dict() for tt in self.tasks])
+                    except Exception as e:
+                        logger.debug(f"prompt-sync persist after sync failed: {e}")
+                    finally:
+                        if task_id:
+                            self._inflight_sync_tasks.discard(task_id)
+                return _on_done
+
             asyncio.create_task(
-                safe_sync_task(t, watched, token=token, on_done=_persist_after_sync)
+                safe_sync_task(t, watched, token=token, on_done=_make_on_done(tid))
             )
             dispatched += 1
             affected_wids.add(watched.id)
