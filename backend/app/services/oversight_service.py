@@ -63,6 +63,10 @@ WATCHED_FILE = STORAGE_DIR / "watched_projects.json"
 TASKS_FILE = STORAGE_DIR / "tasks.json"
 REPORTS_FILE = STORAGE_DIR / "reports.json"
 SETTINGS_FILE = STORAGE_DIR / "settings.json"
+# 🆕 (auto-discover blocklist) — repo هایی که کاربر صریحاً از watched
+# حذف کرده. auto_discover scheduler از این لیست رد می‌شود تا دوباره
+# add نکند. وقتی کاربر دستی repo را add می‌کند، از این لیست حذف می‌شود.
+REMOVED_WATCHED_FILE = STORAGE_DIR / "removed_watched.json"
 REPOS_CACHE_FILE = STORAGE_DIR / "repos_cache.json"
 
 GITHUB_API = "https://api.github.com"
@@ -702,6 +706,73 @@ class OversightService:
 
     def _save_watched(self) -> None:
         _write_json(WATCHED_FILE, [w.to_dict() for w in self.watched])
+
+    # 🆕 (auto-discover blocklist) — مدیریت لیست repo های حذف‌شده توسط کاربر
+    # هدف: auto_discover scheduler دوباره این repos را به watched اضافه نکند
+    # مگر کاربر صریحاً add_watched/auto_register_watched بزند.
+
+    def _load_removed_watched(self) -> List[Dict[str, Any]]:
+        """خواندن لیست repo های حذف‌شده. ساختار: [{"repo_full_name": "...",
+        "removed_at": "ISO"}, ...]"""
+        data = _read_json(REMOVED_WATCHED_FILE, {})
+        if isinstance(data, dict):
+            return list(data.get("items", []) or [])
+        # backward-compat: اگر array قدیمی بود
+        if isinstance(data, list):
+            return data
+        return []
+
+    def _save_removed_watched(self, items: List[Dict[str, Any]]) -> None:
+        """ذخیره‌ی لیست repo های حذف‌شده."""
+        _write_json(REMOVED_WATCHED_FILE, {
+            "version": 1,
+            "items": items,
+        })
+
+    def is_repo_removed_by_user(self, repo_full_name: str) -> bool:
+        """آیا این repo قبلاً توسط کاربر از watched حذف شده؟ (case-insensitive)"""
+        if not repo_full_name:
+            return False
+        target = repo_full_name.strip().lower()
+        for item in self._load_removed_watched():
+            if (item.get("repo_full_name") or "").strip().lower() == target:
+                return True
+        return False
+
+    def _mark_repo_removed(self, repo_full_name: str, watched_id: str = "") -> None:
+        """ثبت repo در لیست removed (هنگام delete_watched).
+        اگر قبلاً ثبت شده، فقط timestamp را آپدیت می‌کند."""
+        if not repo_full_name:
+            return
+        target = repo_full_name.strip().lower()
+        items = self._load_removed_watched()
+        items = [
+            it for it in items
+            if (it.get("repo_full_name") or "").strip().lower() != target
+        ]
+        items.append({
+            "repo_full_name": repo_full_name.strip(),
+            "removed_at": now_iso(),
+            "watched_id": watched_id,
+        })
+        self._save_removed_watched(items)
+
+    def _unmark_repo_removed(self, repo_full_name: str) -> bool:
+        """حذف repo از لیست removed (هنگام add_watched/auto_register_watched
+        دستی). برمی‌گرداند True اگر چیزی حذف شد."""
+        if not repo_full_name:
+            return False
+        target = repo_full_name.strip().lower()
+        items = self._load_removed_watched()
+        before = len(items)
+        items = [
+            it for it in items
+            if (it.get("repo_full_name") or "").strip().lower() != target
+        ]
+        if len(items) < before:
+            self._save_removed_watched(items)
+            return True
+        return False
 
     def _save_tasks(self, *, skip_sync: bool = False) -> None:
         """ذخیره‌ی atomic لیست تسک‌ها به JSON + dispatch خودکار sync GitHub.
@@ -1626,6 +1697,18 @@ class OversightService:
             if w.repo_full_name == repo:
                 return w.to_dict()
 
+        # 🆕 (auto-discover blocklist) — اگر کاربر قبلاً این repo را حذف کرده
+        # بود و الان دستی add می‌زند، یعنی نظرش عوض شده. از blocklist حذف کن
+        # تا auto-discover هم در آینده آن را تشخیص دهد به‌عنوان valid.
+        try:
+            if self._unmark_repo_removed(repo):
+                logger.info(
+                    f"add_watched: repo '{repo}' unmarked from removed list "
+                    f"(user re-added manually)"
+                )
+        except Exception:
+            pass
+
         # 🆕 (Creator) defaults هوشمندانه: اگر کاربر صریحاً override نکرده،
         # autonomy=auto و schedule فعال و execution=manual (apply با کلیک)
         w = WatchedProject(
@@ -1783,6 +1866,21 @@ class OversightService:
         if not repo or "/" not in repo:
             raise ValueError("repo_full_name نامعتبر")
 
+        # 🆕 (auto-discover blocklist) — اگر این فراخوانی از مسیر دستی است
+        # (Creator یا github_import)، repo را از blocklist حذف کن.
+        # مسیر auto_discover_scheduler خودش قبل از این فراخوانی blocklist
+        # را چک می‌کند و اگر در آن باشد، اصلاً auto_register_watched را
+        # صدا نمی‌زند. پس اینجا فقط برای مسیرهای دستی مهم است.
+        if source != "auto_discover_scheduler":
+            try:
+                if self._unmark_repo_removed(repo):
+                    logger.info(
+                        f"auto_register_watched: repo '{repo}' unmarked from "
+                        f"removed list (source={source})"
+                    )
+            except Exception:
+                pass
+
         # duplicate check
         for w in self.watched:
             if w.repo_full_name == repo:
@@ -1933,11 +2031,28 @@ class OversightService:
 
     async def delete_watched(self, watched_id: str) -> bool:
         async with self._lock:
+            # 🆕 قبل از حذف، repo_full_name را پیدا کن تا blocklist را آپدیت کنیم
+            target = next((w for w in self.watched if w.id == watched_id), None)
+            target_repo = target.repo_full_name if target else ""
+
             before = len(self.watched)
             self.watched = [w for w in self.watched if w.id != watched_id]
             removed = len(self.watched) < before
             if removed:
                 self._save_watched()
+                # 🆕 (auto-discover blocklist) — ثبت در لیست removed تا
+                # scheduler دوباره این repo را auto-add نکند. اگر کاربر دستی
+                # add_watched/auto_register_watched بزند، از لیست removed
+                # حذف می‌شود (user wants it back).
+                if target_repo:
+                    try:
+                        self._mark_repo_removed(target_repo, watched_id=watched_id)
+                        logger.info(
+                            f"delete_watched: repo '{target_repo}' marked as "
+                            f"removed (auto-discover will skip it)"
+                        )
+                    except Exception as e:
+                        logger.warning(f"failed to mark repo as removed: {e}")
             return removed
 
     def _find_watched(self, watched_id: str) -> Optional[WatchedProject]:
