@@ -733,7 +733,14 @@ class BackgroundScheduler:
     #   می‌شود (می‌توان در آینده با blocklist بهبود داد).
 
     async def _sync_repo_auto_discover_settings(self):
-        """راه‌اندازی job کشف خودکار repo بر اساس env vars."""
+        """راه‌اندازی job کشف خودکار repo بر اساس env vars.
+
+        env vars:
+          REPO_AUTO_DISCOVER_ENABLED          (default: 1)
+          REPO_AUTO_DISCOVER_INTERVAL_MINUTES (default: 60، حداقل 5)
+          REPO_AUTO_DISCOVER_MAX_AGE_HOURS    (default: 48 — فقط repo های
+            ساخته‌شدهٔ کمتر از N ساعت قبل اضافه می‌شوند. 0 = بدون فیلتر زمانی)
+        """
         try:
             import os as _os
             enabled = _os.environ.get(
@@ -782,15 +789,37 @@ class BackgroundScheduler:
         )
 
     async def _run_repo_auto_discover(self) -> Dict[str, Any]:
-        """اجرای یک round کشف repo. ایمن در برابر هر خطایی."""
+        """اجرای یک round کشف repo. ایمن در برابر هر خطایی.
+
+        فیلترها:
+          1. در watched نباشد (idempotent)
+          2. در blocklist (removed_watched.json) نباشد — کاربر حذف نکرده
+          3. created_at کمتر از REPO_AUTO_DISCOVER_MAX_AGE_HOURS باشد (default: 48)
+             تا فقط repo های جدید auto-add شوند، نه قدیمی‌ها
+
+        اگر کاربر یک repo را از watched حذف کند، در blocklist ثبت می‌شود
+        و scheduler هرگز آن را دوباره auto-add نخواهد کرد. اگر کاربر دستی
+        دوباره add کند، از blocklist حذف می‌شود (intent change recognized).
+        """
         slog.info("repo-auto-discover: round started")
         try:
+            import os as _os
+            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
             from .oversight_service import get_oversight_service
+
+            # threshold زمانی برای repo "جدید" — env-controlled
+            max_age_hours = float(
+                _os.environ.get("REPO_AUTO_DISCOVER_MAX_AGE_HOURS", "48") or 48
+            )
+            apply_age_filter = max_age_hours > 0
+            cutoff = (
+                _dt.now(_tz.utc) - _td(hours=max_age_hours)
+                if apply_age_filter else None
+            )
+
             service = get_oversight_service()
 
-            # ۱) repos فعلی کاربر را از GitHub بگیر (force_refresh=True تا
-            # یک snapshot تازه داشته باشیم — cache 6 ساعته در غیر این حالت
-            # تشخیص repo جدید را به تأخیر می‌اندازد)
+            # ۱) repos فعلی کاربر را از GitHub بگیر
             repos_result = await service.list_user_repos(
                 max_pages=5, force_refresh=True
             )
@@ -817,18 +846,62 @@ class BackgroundScheduler:
                 for w in service.watched
             }
 
-            # ۳) برای هر repo جدید، auto_register_watched را صدا بزن
+            # ۳) blocklist را یک‌بار بخوان (به‌جای بار به ازای هر repo)
+            try:
+                removed_list = service._load_removed_watched()
+                removed_set = {
+                    (it.get("repo_full_name") or "").strip().lower()
+                    for it in removed_list
+                }
+            except Exception as e:
+                slog.warning(f"repo-auto-discover: load removed list failed: {e}")
+                removed_set = set()
+
+            # ۴) برای هر repo، فیلترها را اعمال کن
             discovered: List[Dict[str, Any]] = []
-            skipped = 0
+            skipped_already_watched = 0
+            skipped_user_removed = 0
+            skipped_too_old = 0
             failed: List[Dict[str, str]] = []
             for r in github_repos:
                 full_name = (r.get("full_name") or "").strip()
                 if not full_name or "/" not in full_name:
                     continue
-                if full_name.lower() in existing_watched:
-                    skipped += 1
+                name_lower = full_name.lower()
+
+                # فیلتر 1: قبلاً watched است
+                if name_lower in existing_watched:
+                    skipped_already_watched += 1
                     continue
-                # repo جدید پیدا شد
+
+                # فیلتر 2: کاربر صریحاً حذف کرده
+                if name_lower in removed_set:
+                    skipped_user_removed += 1
+                    continue
+
+                # فیلتر 3: قدیمی است (روی GitHub بیش از max_age_hours پیش
+                # ساخته شده). repo "جدید" یعنی recently created.
+                if apply_age_filter:
+                    created_at_str = r.get("created_at") or ""
+                    if created_at_str:
+                        try:
+                            created_dt = _dt.fromisoformat(
+                                created_at_str.replace("Z", "+00:00")
+                            )
+                            if created_dt < cutoff:
+                                skipped_too_old += 1
+                                continue
+                        except Exception:
+                            # اگر parse fail شد، محتاطانه skip کن
+                            skipped_too_old += 1
+                            continue
+                    else:
+                        # بدون created_at، محتاطانه skip — این repo
+                        # نمی‌توانیم تأیید کنیم "جدید" است
+                        skipped_too_old += 1
+                        continue
+
+                # همه فیلترها پاس — auto-register
                 try:
                     res = await service.auto_register_watched(
                         repo_full_name=full_name,
@@ -839,11 +912,12 @@ class BackgroundScheduler:
                         private=bool(r.get("private", False)),
                     )
                     if res.get("_was_duplicate"):
-                        skipped += 1
+                        skipped_already_watched += 1
                     else:
                         discovered.append({
                             "repo": full_name,
                             "watched_id": res.get("id"),
+                            "created_at": r.get("created_at"),
                         })
                 except Exception as inner_e:
                     failed.append({"repo": full_name, "error": str(inner_e)})
@@ -853,14 +927,17 @@ class BackgroundScheduler:
                         error=str(inner_e),
                     )
 
-            # خلاصه‌ی نهایی همیشه log می‌شود (حتی اگر discovered=0)
+            # خلاصه‌ی نهایی همیشه log می‌شود
             slog.info(
                 "repo-auto-discover: round done",
                 total_github_repos=total_github,
                 watched_before=total_watched_before,
                 discovered=len(discovered),
-                skipped_existing=skipped,
+                skipped_already_watched=skipped_already_watched,
+                skipped_user_removed=skipped_user_removed,
+                skipped_too_old=skipped_too_old,
                 failed=len(failed),
+                max_age_hours=max_age_hours if apply_age_filter else "disabled",
             )
             if discovered:
                 slog.success(
@@ -877,7 +954,9 @@ class BackgroundScheduler:
             return {
                 "success": True,
                 "discovered": len(discovered),
-                "skipped_existing": skipped,
+                "skipped_already_watched": skipped_already_watched,
+                "skipped_user_removed": skipped_user_removed,
+                "skipped_too_old": skipped_too_old,
                 "failed": len(failed),
                 "details": discovered,
             }
