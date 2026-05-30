@@ -812,6 +812,24 @@ async def _build_super_task(
         logger.debug(f"_build_super_task: EXECUTOR_DISCLAIMER prepend skipped: {_e}")
         super_prompt = merged_idea
 
+    # 🆕 (Reference Projects) — اجتماع پروژه‌های مرجع از همهٔ تسک‌های منبع
+    # (deduplicated by project_id). super-task باید همهٔ مراجعی که تسک‌های
+    # تشکیل‌دهنده‌اش داشتند را بپذیرد تا regenerate آن مرجع‌ها را گم نکند.
+    _merged_refs: List[Dict[str, Any]] = []
+    _seen_ref_ids: set = set()
+    for _src_t in source_task_objs:
+        for _ref in (getattr(_src_t, "selected_projects", []) or []):
+            if not isinstance(_ref, dict):
+                continue
+            _pid = _ref.get("project_id")
+            if _pid and _pid not in _seen_ref_ids:
+                _seen_ref_ids.add(_pid)
+                _merged_refs.append({
+                    "project_id": _pid,
+                    "project_path": _ref.get("project_path", ""),
+                    "is_selected": True,
+                })
+
     super_task = OversightTask(
         id=new_id,
         watched_id=watched_id,
@@ -832,6 +850,7 @@ async def _build_super_task(
         merged_from=[c["task_id"] for c in source_candidates],
         merged_from_snapshot=snapshot,
         consolidation_meta=consolidation_meta,
+        selected_projects=_merged_refs,
     )
 
     # 🧠 checklist هوشمند (conditional)
