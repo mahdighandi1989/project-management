@@ -4650,6 +4650,10 @@ class NotificationService:
                     "idea": idea,
                     "matches": [m.to_dict() for m in quick_matches[:3]],
                     "source": "telegram_bot",
+                    # 🆕 (Reference Projects) — selected_refs در dup-draft نگه‌داری
+                    # شود تا اگر کاربر «ایجاد جداگانه» را انتخاب کرد، مراجع از دست
+                    # نروند.
+                    "selected_refs": list(selected_refs or []),
                     "expires_at": _now_epoch() + _STATE_TTL_SECONDS,
                 }
                 rows: List[List[Dict[str, str]]] = []
@@ -4934,6 +4938,8 @@ class NotificationService:
         idea = draft.get("idea", "")
         watched_id = draft.get("watched_id")
         source = draft.get("source", "telegram_bot")
+        # 🆕 (Reference Projects) — selected_refs از dup-draft را forward کن
+        selected_refs: List[str] = list(draft.get("selected_refs") or [])
         # یک‌بار مصرف + علامت‌گذاری processing
         del _idea_drafts[token]
         _processing_tokens[token] = _now_epoch()
@@ -4941,6 +4947,7 @@ class NotificationService:
         try:
             return await self._handle_task_dup_callback_inner(
                 chat_id_str, action, parts, idea, watched_id, source, tg,
+                selected_refs=selected_refs,
             )
         finally:
             _processing_tokens.pop(token, None)
@@ -4948,6 +4955,7 @@ class NotificationService:
     async def _handle_task_dup_callback_inner(
         self, chat_id_str: str, action: str, parts: List[str],
         idea: str, watched_id: Optional[str], source: str, tg: Any,
+        *, selected_refs: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """بدنهٔ اصلی task_dup callback — جدا شده تا finally token cleanup کار کند."""
         from .oversight_service import get_oversight_service
@@ -5008,6 +5016,20 @@ class NotificationService:
             # ایجاد جداگانه — مسیر کامل idea_to_prompt + create_task با force_create
             await tg.send("⏳ ایجاد تسک جداگانه — در حال تولید پرامپت...", silent=True)
             try:
+                # 🆕 (Reference Projects) — payload مرجع را برای دو مرحله بساز
+                ref_payload: List[Dict[str, Any]] = []
+                for rid in (selected_refs or []):
+                    if rid == watched_id:
+                        continue
+                    rw = next(
+                        (x for x in _oversight.watched if x.id == rid), None,
+                    )
+                    if rw:
+                        ref_payload.append({
+                            "project_id": rid,
+                            "project_path": rw.repo_full_name,
+                            "is_selected": True,
+                        })
                 # 🛡 (audit fix CRITICAL #1) — multi_pass_mode='always' برای checklist
                 data_p = await _oversight.idea_to_prompt(
                     idea=idea,
@@ -5015,6 +5037,7 @@ class NotificationService:
                     type_="other",
                     priority="medium",
                     multi_pass_mode="always",
+                    selected_projects=ref_payload or None,
                 )
                 result = await _oversight.create_task({
                     "watched_id": watched_id,
@@ -5027,6 +5050,7 @@ class NotificationService:
                     "target_files": data_p.get("target_files") or [],
                     "acceptance_criteria": data_p.get("acceptance_criteria") or [],
                     "force_create": True,
+                    "selected_projects": ref_payload,
                 })
                 new_task = result.get("task") or {}
                 prefs = _read_prefs()

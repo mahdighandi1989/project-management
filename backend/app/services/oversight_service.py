@@ -3042,6 +3042,11 @@ class OversightService:
                     model_ids=model_ids,
                     multi_pass_mode=_mp_mode,
                     _skip_deep_context=_skip_deep,
+                    # 🆕 (Reference Projects) — هنگام regenerate، انتخاب‌های
+                    # قبلیِ تسک باید حفظ شوند تا fusion text در پرامپت جدید هم
+                    # حضور داشته باشد. در غیر این صورت، regenerate مرجع‌ها را
+                    # silently دور می‌انداخت.
+                    selected_projects=list(task.selected_projects or []) or None,
                 )
             except Exception as e:
                 # transaction-safe: اگر AI fail شد، چیزی تغییر نمی‌کند
