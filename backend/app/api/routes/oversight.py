@@ -84,6 +84,8 @@ class IdeaToPromptRequest(BaseModel):
     # 🆕 (Stage 6 — Progress tracker) — اگر داده شد، progress updates روی این track_id
     # ثبت می‌شود تا frontend با /progress/{track_id} poll کند
     progress_track_id: Optional[str] = None
+    # 🆕 (Reference Projects) — پروژه‌های انتخاب‌شده به‌عنوان منبع الهام برای تولید پرامپت.
+    selected_projects: Optional[List[Dict[str, Any]]] = None
 
 
 class TaskCreate(BaseModel):
@@ -111,6 +113,9 @@ class TaskCreate(BaseModel):
     # 🔔 Reminder feature — وقتی type="reminder"، این فیلدها استفاده می‌شوند
     reminder_at: Optional[str] = None   # ISO datetime زمان firing بعدی
     reminder_repeat_rule: Optional[str] = None  # daily|weekly|None
+    # 🆕 (Reference Projects) — پروژه‌های انتخاب‌شده به‌عنوان منبع الهام.
+    # هر آیتم: {project_id: str, project_path: str, is_selected: bool}
+    selected_projects: Optional[List[Dict[str, Any]]] = None
 
 
 class SimilarityCheckRequest(BaseModel):
@@ -184,6 +189,8 @@ class TaskUpdate(BaseModel):
     # 🆕 (C5) — pin + title management
     pinned: Optional[bool] = None
     manual_title_override: Optional[bool] = None
+    # 🆕 (Reference Projects) — به‌روزرسانی پروژه‌های مرجع پس از ایجاد تسک.
+    selected_projects: Optional[List[Dict[str, Any]]] = None
 
 
 class RunTaskRequest(BaseModel):
@@ -1048,6 +1055,7 @@ async def task_from_idea(payload: IdeaToPromptRequest):
             multi_pass_mode=payload.multi_pass_mode,
             upload_session_ids=payload.upload_session_ids,
             progress_track_id=payload.progress_track_id,
+            selected_projects=payload.selected_projects,
         )
     except ValueError as e:
         # 🛡 (audit fix CRITICAL) — اگر blocked_no_vision_model است،

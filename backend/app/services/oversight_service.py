@@ -503,6 +503,21 @@ class OversightTask:
     external_attempts: int = 0
     external_last_error: Optional[str] = None
 
+    # 🆕 (Reference Projects) — پروژه‌های منتخب کاربر به‌عنوان منبع الهام
+    # کاربر در زمان نوشتن تسک می‌تواند چند پروژهٔ از قبل لود-شده (watched)
+    # را به‌عنوان مرجع تیک بزند. در زمان تولید پرامپت، سیستم به این پروژه‌ها
+    # مراجعه می‌کند، فایل‌ها و منطق آنها را استخراج/دسته‌بندی می‌کند، و در
+    # پرامپت نهایی (با شرایط پروژهٔ فعلی) ادغام می‌کند.
+    #
+    # هر آیتم: {
+    #   "project_id": str,    # watched.id یا repo_full_name
+    #   "project_path": str,  # repo_full_name (e.g., "owner/repo")
+    #   "is_selected": bool   # درست (selected toggle from UI/Telegram)
+    # }
+    #
+    # default: لیست خالی (تسک از این فیچر استفاده نمی‌کند)
+    selected_projects: List[Dict[str, Any]] = field(default_factory=list)
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
@@ -2089,6 +2104,76 @@ class OversightService:
         return None
 
     # ====================================================================
+    # 🆕 (Reference Projects) — normalization + validation
+    # ====================================================================
+
+    def _normalize_selected_projects(
+        self,
+        items: Any,
+        *,
+        exclude_watched_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """نرمال‌سازی + اعتبارسنجی لیست پروژه‌های مرجع.
+
+        هر آیتم باید قابل تطبیق با یکی از پروژه‌های watched باشد —
+        شناسایی از طریق `project_id` (watched.id) یا `project_path`
+        (repo_full_name) انجام می‌شود. آیتم‌های نامعتبر silently drop می‌شوند.
+
+        خروجی: لیست تمیز با ساختار:
+            {project_id, project_path, is_selected}
+        فقط مواردی که `is_selected=True` هستند نگه داشته می‌شوند.
+
+        `exclude_watched_id` — اگر داده شود، خود پروژهٔ تسک از لیست مرجع
+        حذف می‌شود (نمی‌توان پروژه را مرجع خودش قرار داد).
+        """
+        if not items or not isinstance(items, list):
+            return []
+        # نقشهٔ سریع watched ها (هم بر اساس id و هم repo_full_name)
+        by_id: Dict[str, WatchedProject] = {w.id: w for w in self.watched}
+        by_path: Dict[str, WatchedProject] = {
+            (w.repo_full_name or "").strip().lower(): w
+            for w in self.watched
+            if w.repo_full_name
+        }
+        seen: set = set()
+        result: List[Dict[str, Any]] = []
+        for raw in items:
+            if not isinstance(raw, dict):
+                continue
+            is_selected = bool(raw.get("is_selected", True))
+            if not is_selected:
+                continue
+            pid = (raw.get("project_id") or "").strip()
+            ppath = (raw.get("project_path") or "").strip()
+            target: Optional[WatchedProject] = None
+            if pid and pid in by_id:
+                target = by_id[pid]
+            elif ppath:
+                target = by_path.get(ppath.lower())
+            if target is None:
+                logger.debug(
+                    f"_normalize_selected_projects: drop unknown item "
+                    f"(id={pid!r}, path={ppath!r})"
+                )
+                continue
+            if exclude_watched_id and target.id == exclude_watched_id:
+                logger.debug(
+                    f"_normalize_selected_projects: drop self-reference "
+                    f"({target.id})"
+                )
+                continue
+            key = target.id
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append({
+                "project_id": target.id,
+                "project_path": target.repo_full_name,
+                "is_selected": True,
+            })
+        return result
+
+    # ====================================================================
     # Tasks
     # ====================================================================
 
@@ -2461,6 +2546,15 @@ class OversightService:
             reminder_state=_reminder_state,
             reminder_repeat_rule=_reminder_repeat_rule,
         )
+        # 🆕 (Reference Projects) — اعتبارسنجی + ذخیره selected_projects.
+        # آیتم‌های نامعتبر drop می‌شوند (سکوت)، خود پروژه از لیست مرجع
+        # حذف می‌شود تا self-reference نباشد.
+        _sel = self._normalize_selected_projects(
+            payload.get("selected_projects"),
+            exclude_watched_id=watched_id,
+        )
+        if _sel:
+            t.selected_projects = _sel
         # اگر reminder، یک رکورد scheduled در history ثبت کن
         if _is_reminder and _reminder_at:
             t.reminder_history.append({
@@ -2593,12 +2687,20 @@ class OversightService:
                         "pinned",
                         "manual_title_override",
                         "tags",
+                        # 🆕 (Reference Projects)
+                        "selected_projects",
                     }
                     # 🆕 (C5) — اگر title از updates آمد، title_history را به‌روز کن
                     _old_title = t.title
                     _title_changed = False
                     for k, v in updates.items():
                         if k in allowed:
+                            # 🆕 (Reference Projects) — قبل از set،
+                            # selected_projects را اعتبارسنجی + نرمال کن.
+                            if k == "selected_projects":
+                                v = self._normalize_selected_projects(
+                                    v, exclude_watched_id=t.watched_id,
+                                )
                             setattr(t, k, v)
                             # وقتی archived true شد، archived_at را ست کن
                             if k == "archived" and v:
@@ -5296,6 +5398,11 @@ class OversightService:
         # 🆕 (perf fix) — skip deep_context (60-file GitHub fetch ~20-40s).
         # برای regenerate سریع super-task که content از قبل ساختاریافته است.
         _skip_deep_context: bool = False,
+        # 🆕 (Reference Projects) — پروژه‌های انتخاب‌شده به‌عنوان منبع الهام.
+        # هر آیتم: {project_id, project_path, is_selected}. اگر داده شود،
+        # محتوای پروژه‌های مرجع scan + classify می‌شود و fusion text به idea
+        # اضافه می‌شود تا AI بتواند ساختار و الگوها را الهام بگیرد.
+        selected_projects: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         if not idea.strip() and not upload_session_ids:
             raise ValueError("ایده خالی است")
@@ -5379,6 +5486,42 @@ class OversightService:
                 attachments_meta=attachments_meta,
                 progress_track_id=progress_track_id,
             )
+
+        # 🆕 (Reference Projects) — اگر کاربر پروژه‌های مرجع انتخاب کرده،
+        # scan + classify + fusion را اجرا کن و خلاصهٔ ساختاریافته را به
+        # idea اضافه کن. AI سپس می‌تواند الگوها/فایل‌ها/معماری پروژه‌های
+        # مرجع را به‌عنوان منبع الهام ببیند و در پرامپت نهایی reflect کند.
+        # تمام failures silently تحمل می‌شوند تا یک GitHub timeout روند
+        # تولید پرامپت را قطع نکند.
+        _normalized_refs = self._normalize_selected_projects(
+            selected_projects, exclude_watched_id=watched_id,
+        ) if selected_projects else []
+        if _normalized_refs:
+            try:
+                from .reference_project_service import get_reference_project_service
+                _ref_svc = get_reference_project_service()
+                _ref_ctx = await _ref_svc.build_reference_context(
+                    selected_projects=_normalized_refs,
+                    task_summary=idea[:500],
+                    token=get_github_token() or None,
+                )
+                if _ref_ctx and _ref_ctx.fusion_text:
+                    idea = (
+                        f"{idea}\n\n"
+                        f"---\n"
+                        f"## 📚 پروژه‌های مرجع (الهام از پیاده‌سازی‌های موجود)\n"
+                        f"_در زیر خلاصهٔ ساختار/فایل‌های پروژه‌های زیر آمده است. "
+                        f"از این منابع به‌عنوان الگو/الهام استفاده کن و در پرامپت نهایی "
+                        f"به فایل‌ها/الگوهای مرتبط ارجاع بده._\n\n"
+                        f"{_ref_ctx.fusion_text}\n"
+                        f"---\n"
+                    )
+                    logger.info(
+                        f"idea_to_prompt: injected reference context for "
+                        f"{len(_normalized_refs)} project(s), {_ref_ctx.total_chars} chars"
+                    )
+            except Exception as _ref_e:
+                logger.warning(f"idea_to_prompt: reference projects scan failed: {_ref_e}")
 
         # 🆕 (Stage 10 audit fix #1 — CRITICAL) — وقتی فایل پیوست هست، طبق
         # درخواست صریح کاربر، **همهٔ کارها از تبدیل به پرامپت تا شرح فایل**
