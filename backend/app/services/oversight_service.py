@@ -2104,6 +2104,76 @@ class OversightService:
         return None
 
     # ====================================================================
+    # 🆕 (Reference Projects) — normalization + validation
+    # ====================================================================
+
+    def _normalize_selected_projects(
+        self,
+        items: Any,
+        *,
+        exclude_watched_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """نرمال‌سازی + اعتبارسنجی لیست پروژه‌های مرجع.
+
+        هر آیتم باید قابل تطبیق با یکی از پروژه‌های watched باشد —
+        شناسایی از طریق `project_id` (watched.id) یا `project_path`
+        (repo_full_name) انجام می‌شود. آیتم‌های نامعتبر silently drop می‌شوند.
+
+        خروجی: لیست تمیز با ساختار:
+            {project_id, project_path, is_selected}
+        فقط مواردی که `is_selected=True` هستند نگه داشته می‌شوند.
+
+        `exclude_watched_id` — اگر داده شود، خود پروژهٔ تسک از لیست مرجع
+        حذف می‌شود (نمی‌توان پروژه را مرجع خودش قرار داد).
+        """
+        if not items or not isinstance(items, list):
+            return []
+        # نقشهٔ سریع watched ها (هم بر اساس id و هم repo_full_name)
+        by_id: Dict[str, WatchedProject] = {w.id: w for w in self.watched}
+        by_path: Dict[str, WatchedProject] = {
+            (w.repo_full_name or "").strip().lower(): w
+            for w in self.watched
+            if w.repo_full_name
+        }
+        seen: set = set()
+        result: List[Dict[str, Any]] = []
+        for raw in items:
+            if not isinstance(raw, dict):
+                continue
+            is_selected = bool(raw.get("is_selected", True))
+            if not is_selected:
+                continue
+            pid = (raw.get("project_id") or "").strip()
+            ppath = (raw.get("project_path") or "").strip()
+            target: Optional[WatchedProject] = None
+            if pid and pid in by_id:
+                target = by_id[pid]
+            elif ppath:
+                target = by_path.get(ppath.lower())
+            if target is None:
+                logger.debug(
+                    f"_normalize_selected_projects: drop unknown item "
+                    f"(id={pid!r}, path={ppath!r})"
+                )
+                continue
+            if exclude_watched_id and target.id == exclude_watched_id:
+                logger.debug(
+                    f"_normalize_selected_projects: drop self-reference "
+                    f"({target.id})"
+                )
+                continue
+            key = target.id
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append({
+                "project_id": target.id,
+                "project_path": target.repo_full_name,
+                "is_selected": True,
+            })
+        return result
+
+    # ====================================================================
     # Tasks
     # ====================================================================
 
@@ -2476,6 +2546,15 @@ class OversightService:
             reminder_state=_reminder_state,
             reminder_repeat_rule=_reminder_repeat_rule,
         )
+        # 🆕 (Reference Projects) — اعتبارسنجی + ذخیره selected_projects.
+        # آیتم‌های نامعتبر drop می‌شوند (سکوت)، خود پروژه از لیست مرجع
+        # حذف می‌شود تا self-reference نباشد.
+        _sel = self._normalize_selected_projects(
+            payload.get("selected_projects"),
+            exclude_watched_id=watched_id,
+        )
+        if _sel:
+            t.selected_projects = _sel
         # اگر reminder، یک رکورد scheduled در history ثبت کن
         if _is_reminder and _reminder_at:
             t.reminder_history.append({
@@ -2608,12 +2687,20 @@ class OversightService:
                         "pinned",
                         "manual_title_override",
                         "tags",
+                        # 🆕 (Reference Projects)
+                        "selected_projects",
                     }
                     # 🆕 (C5) — اگر title از updates آمد، title_history را به‌روز کن
                     _old_title = t.title
                     _title_changed = False
                     for k, v in updates.items():
                         if k in allowed:
+                            # 🆕 (Reference Projects) — قبل از set،
+                            # selected_projects را اعتبارسنجی + نرمال کن.
+                            if k == "selected_projects":
+                                v = self._normalize_selected_projects(
+                                    v, exclude_watched_id=t.watched_id,
+                                )
                             setattr(t, k, v)
                             # وقتی archived true شد، archived_at را ست کن
                             if k == "archived" and v:

@@ -111,6 +111,9 @@ class TaskCreate(BaseModel):
     # 🔔 Reminder feature — وقتی type="reminder"، این فیلدها استفاده می‌شوند
     reminder_at: Optional[str] = None   # ISO datetime زمان firing بعدی
     reminder_repeat_rule: Optional[str] = None  # daily|weekly|None
+    # 🆕 (Reference Projects) — پروژه‌های انتخاب‌شده به‌عنوان منبع الهام.
+    # هر آیتم: {project_id: str, project_path: str, is_selected: bool}
+    selected_projects: Optional[List[Dict[str, Any]]] = None
 
 
 class SimilarityCheckRequest(BaseModel):
@@ -184,6 +187,8 @@ class TaskUpdate(BaseModel):
     # 🆕 (C5) — pin + title management
     pinned: Optional[bool] = None
     manual_title_override: Optional[bool] = None
+    # 🆕 (Reference Projects) — به‌روزرسانی پروژه‌های مرجع پس از ایجاد تسک.
+    selected_projects: Optional[List[Dict[str, Any]]] = None
 
 
 class RunTaskRequest(BaseModel):
