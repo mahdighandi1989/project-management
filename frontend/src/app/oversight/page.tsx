@@ -1494,6 +1494,10 @@ export default function OversightPage() {
   // برای این پرامپت انتخاب شده‌اند. backend در idea_to_prompt محتوای این
   // پروژه‌ها را scan + classify می‌کند و در fusion متن پرامپت inject می‌کند.
   const [referenceProjectIds, setReferenceProjectIds] = useState<string[]>([]);
+  // 🆕 (focus_notes) — متن «روی چی تمرکز کنم؟» per project (project_id → text).
+  // scanner از این متن برای boost اولویت مسیرهای مرتبط استفاده می‌کند و
+  // در fusion text تزریق می‌شود تا AI به همان قسمت محدود شود.
+  const [referenceFocusNotes, setReferenceFocusNotes] = useState<Record<string, string>>({});
   // 🆕 (Stage 3 — File Attachment) — یک taskDraftId پایدار برای گروه فایل‌ها
   // در طول lifecycle این فرم. وقتی تسک ساخته می‌شود یا کاربر idea را reset کند،
   // یک id جدید تولید می‌شود.
@@ -2120,6 +2124,7 @@ export default function OversightPage() {
             project_id: id,
             project_path: w?.repo_full_name || '',
             is_selected: true,
+            focus_notes: (referenceFocusNotes[id] || '').trim(),
           };
         });
       const res = await fetch(`${API_BASE}/api/oversight/tasks/from-idea`, {
@@ -2286,6 +2291,7 @@ export default function OversightPage() {
                   project_id: id,
                   project_path: rw?.repo_full_name || '',
                   is_selected: true,
+                  focus_notes: (referenceFocusNotes[id] || '').trim(),
                 };
               }),
           }),
@@ -3746,32 +3752,58 @@ export default function OversightPage() {
                   AI ساختار/فایل‌های این پروژه‌ها را به‌عنوان الگو در نظر می‌گیرد.
                   پروژه‌های مقصد بالا به‌صورت خودکار از این لیست حذف می‌شوند.
                 </p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 max-h-40 overflow-y-auto">
+                <div className="grid grid-cols-1 gap-2 max-h-64 overflow-y-auto">
                   {watched
                     .filter((w) => !ideaWatchedIds.includes(w.id))
-                    .map((w) => (
-                      <label
-                        key={w.id}
-                        className="flex items-center gap-2 text-sm dark:text-gray-200 px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded cursor-pointer"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={referenceProjectIds.includes(w.id)}
-                          onChange={(e) => {
-                            if (e.target.checked) {
-                              setReferenceProjectIds((prev) => [...prev, w.id]);
-                            } else {
-                              setReferenceProjectIds((prev) =>
-                                prev.filter((id) => id !== w.id),
-                              );
-                            }
-                          }}
-                        />
-                        <span className="truncate" title={w.repo_full_name}>
-                          {w.repo_full_name}
-                        </span>
-                      </label>
-                    ))}
+                    .map((w) => {
+                      const isChecked = referenceProjectIds.includes(w.id);
+                      return (
+                        <div
+                          key={w.id}
+                          className="border border-gray-200 dark:border-gray-600 rounded p-2"
+                        >
+                          <label className="flex items-center gap-2 text-sm dark:text-gray-200 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setReferenceProjectIds((prev) => [...prev, w.id]);
+                                } else {
+                                  setReferenceProjectIds((prev) =>
+                                    prev.filter((id) => id !== w.id),
+                                  );
+                                  // پاک کردن focus متن آن مرجع
+                                  setReferenceFocusNotes((prev) => {
+                                    const cp = { ...prev };
+                                    delete cp[w.id];
+                                    return cp;
+                                  });
+                                }
+                              }}
+                            />
+                            <span className="truncate flex-1" title={w.repo_full_name}>
+                              {w.repo_full_name}
+                            </span>
+                          </label>
+                          {isChecked && (
+                            <input
+                              type="text"
+                              value={referenceFocusNotes[w.id] || ''}
+                              onChange={(e) =>
+                                setReferenceFocusNotes((prev) => ({
+                                  ...prev,
+                                  [w.id]: e.target.value,
+                                }))
+                              }
+                              placeholder="🎯 (اختیاری) فقط از کدام بخش این پروژه الهام بگیرد؟ مثلاً: «auth و middleware»"
+                              maxLength={500}
+                              className="mt-2 w-full text-xs p-1.5 border border-gray-300 dark:border-gray-500 rounded bg-white dark:bg-gray-800 dark:text-gray-100 placeholder:text-gray-400"
+                            />
+                          )}
+                        </div>
+                      );
+                    })}
                 </div>
                 {watched.filter((w) => !ideaWatchedIds.includes(w.id)).length === 0 && (
                   <p className="text-xs text-gray-400 italic mt-1">

@@ -255,12 +255,37 @@ async def idea_to_prompt_preview(request: IdeaToPromptRequest):
                         "project_id": target.id,
                         "project_path": target.repo_full_name,
                         "is_selected": True,
+                        # 🆕 (focus_notes) — نقطهٔ تمرکز این مرجع
+                        "focus_notes": str(raw.get("focus_notes") or "").strip()[:500],
                     })
             if valid_refs:
+                # 🆕 (current_project_profile) — برای creator، پروژهٔ «فعلی» در
+                # واقع پروژه‌ای است که الان ساخته می‌شود (پس watched نیست).
+                # خلاصه‌ای از خواسته‌های کاربر برای پروژهٔ جدید را به‌جای
+                # profile پروژهٔ موجود می‌سازیم.
+                _new_proj_profile_lines: List[str] = []
+                _new_proj_profile_lines.append(
+                    f"- **نام پروژهٔ جدید**: `{request.name}`"
+                )
+                _new_proj_profile_lines.append(
+                    f"- **نوع**: {request.project_type}"
+                )
+                if request.technologies:
+                    _new_proj_profile_lines.append(
+                        f"- **تکنولوژی‌های انتخابی کاربر**: "
+                        f"{', '.join(request.technologies[:10])}"
+                    )
+                _new_proj_profile_lines.append(
+                    "- **توجه**: این یک پروژهٔ جدید است (هنوز کد ندارد). "
+                    "از پروژه‌های مرجع فقط **الگو** را برداشت کن و با stack/"
+                    "نام‌گذاری انتخابی کاربر در بالا پیاده‌سازی کن."
+                )
+                _cur_profile = "\n".join(_new_proj_profile_lines)
                 ref_ctx = await get_reference_project_service().build_reference_context(
                     selected_projects=valid_refs,
                     task_summary=effective_idea[:500],
                     token=get_github_token() or None,
+                    current_project_profile=_cur_profile,
                 )
                 if ref_ctx and ref_ctx.fusion_text:
                     effective_idea = (
@@ -391,6 +416,7 @@ async def create_project(request: CreateProjectRequest):
                         "project_id": target.id,
                         "project_path": target.repo_full_name,
                         "is_selected": True,
+                        "focus_notes": str(raw.get("focus_notes") or "").strip()[:500],
                     })
         except Exception as _e:
             logger.warning(f"create_project: selected_projects normalize failed: {_e}")

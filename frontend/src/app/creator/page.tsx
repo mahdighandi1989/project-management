@@ -110,6 +110,8 @@ export default function CreatorPage() {
     Array<{ id: string; repo_full_name: string }>
   >([]);
   const [referenceProjectIds, setReferenceProjectIds] = useState<string[]>([]);
+  // 🆕 (focus_notes) — نقطهٔ تمرکز per project (project_id → text)
+  const [referenceFocusNotes, setReferenceFocusNotes] = useState<Record<string, string>>({});
 
   // 🆕 GitHub push modal
   const [pushTarget, setPushTarget] = useState<Project | null>(null);
@@ -358,13 +360,14 @@ export default function CreatorPage() {
         .filter((s) => ['completed', 'extracting', 'extracted'].includes(s.status))
         .sort((a, b) => a.file_order - b.file_order)
         .map((s) => s.session_id);
-      // 🆕 (Reference Projects) — payload کلاسیک: id + path + is_selected
+      // 🆕 (Reference Projects) — payload کلاسیک: id + path + is_selected + focus_notes
       const refPayload = referenceProjectIds.map((id) => {
         const w = watchedRefs.find((x) => x.id === id);
         return {
           project_id: id,
           project_path: w?.repo_full_name || '',
           is_selected: true,
+          focus_notes: (referenceFocusNotes[id] || '').trim(),
         };
       });
       const res = await fetch(`${API_BASE}/api/simple/projects/idea-to-prompt`, {
@@ -488,6 +491,7 @@ export default function CreatorPage() {
               project_id: id,
               project_path: w?.repo_full_name || '',
               is_selected: true,
+              focus_notes: (referenceFocusNotes[id] || '').trim(),
             };
           }),
         }),
@@ -842,30 +846,55 @@ export default function CreatorPage() {
                       <p className="text-xs text-gray-400 mt-2 mb-2">
                         AI ساختار/فایل‌های این پروژه‌ها را به‌عنوان الگو در نظر می‌گیرد.
                       </p>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 max-h-40 overflow-y-auto">
-                        {watchedRefs.map((w) => (
-                          <label
-                            key={w.id}
-                            className="flex items-center gap-2 text-sm text-gray-200 px-2 py-1 hover:bg-gray-700/50 rounded cursor-pointer"
-                          >
-                            <input
-                              type="checkbox"
-                              checked={referenceProjectIds.includes(w.id)}
-                              onChange={(e) => {
-                                if (e.target.checked) {
-                                  setReferenceProjectIds((prev) => [...prev, w.id]);
-                                } else {
-                                  setReferenceProjectIds((prev) =>
-                                    prev.filter((id) => id !== w.id),
-                                  );
-                                }
-                              }}
-                            />
-                            <span className="truncate" title={w.repo_full_name}>
-                              {w.repo_full_name}
-                            </span>
-                          </label>
-                        ))}
+                      <div className="grid grid-cols-1 gap-2 max-h-64 overflow-y-auto">
+                        {watchedRefs.map((w) => {
+                          const isChecked = referenceProjectIds.includes(w.id);
+                          return (
+                            <div
+                              key={w.id}
+                              className="border border-gray-700/50 rounded p-2"
+                            >
+                              <label className="flex items-center gap-2 text-sm text-gray-200 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={isChecked}
+                                  onChange={(e) => {
+                                    if (e.target.checked) {
+                                      setReferenceProjectIds((prev) => [...prev, w.id]);
+                                    } else {
+                                      setReferenceProjectIds((prev) =>
+                                        prev.filter((id) => id !== w.id),
+                                      );
+                                      setReferenceFocusNotes((prev) => {
+                                        const cp = { ...prev };
+                                        delete cp[w.id];
+                                        return cp;
+                                      });
+                                    }
+                                  }}
+                                />
+                                <span className="truncate flex-1" title={w.repo_full_name}>
+                                  {w.repo_full_name}
+                                </span>
+                              </label>
+                              {isChecked && (
+                                <input
+                                  type="text"
+                                  value={referenceFocusNotes[w.id] || ''}
+                                  onChange={(e) =>
+                                    setReferenceFocusNotes((prev) => ({
+                                      ...prev,
+                                      [w.id]: e.target.value,
+                                    }))
+                                  }
+                                  placeholder="🎯 (اختیاری) فقط از کدام بخش؟ مثلاً «auth و middleware»"
+                                  maxLength={500}
+                                  className="mt-2 w-full text-xs p-1.5 border border-gray-600 rounded bg-gray-900/50 text-gray-100 placeholder:text-gray-500"
+                                />
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     </details>
                   </div>

@@ -116,6 +116,11 @@ class ProjectExtract:
     total_files_in_repo: int = 0
     scanned_files: int = 0
     error: Optional[str] = None
+    # 🆕 (focus_notes) — متن کاربر دربارهٔ نقطهٔ تمرکز در این پروژه.
+    # مثلاً «فقط از auth و middleware الهام بگیر». scanner از این متن
+    # برای boost اولویت فایل‌های مرتبط استفاده می‌کند و در fusion
+    # نمایش داده می‌شود.
+    focus_notes: str = ""
 
 
 @dataclass
@@ -187,14 +192,64 @@ class ReferenceProjectService:
             return True
         return False
 
+    # 🆕 (focus_notes) — استخراج keyword های مفید از متن focus کاربر برای
+    # تقویت scoring مسیر فایل‌ها. stopword ها حذف می‌شوند و فقط toolکنsهای
+    # ≥3 کاراکتر نگه داشته می‌شوند.
+    _FOCUS_STOPWORDS = {
+        # فارسی
+        "از", "این", "آن", "که", "را", "به", "با", "در", "بر", "یا", "و",
+        "هم", "اگر", "تا", "ولی", "اما", "چون", "همان", "همه", "هر", "فقط",
+        "فقط", "یعنی", "همچنین", "نه", "می‌خوام", "میخوام", "بگیر", "الهام",
+        "بخش", "قسمت", "نقطه", "تمرکز", "روی", "نگاه", "کن", "نکن",
+        # English
+        "the", "and", "or", "but", "for", "with", "from", "into", "only",
+        "just", "all", "any", "some", "this", "that", "those", "these",
+        "is", "are", "was", "were", "be", "been", "being", "have", "has",
+        "had", "do", "does", "did", "will", "would", "should", "could",
+        "look", "see", "use", "used", "take", "make", "made", "want",
+        "focus", "inspiration", "inspire", "inspired", "part", "parts",
+    }
+
+    @classmethod
+    def _extract_focus_keywords(cls, focus_notes: str) -> List[str]:
+        """استخراج keyword های قابل match در path از focus_notes."""
+        if not focus_notes or not focus_notes.strip():
+            return []
+        # تبدیل به lowercase + جداسازی با whitespace و علائم نگارشی
+        cleaned = re.sub(r"[^\w/\.\-_]+", " ", focus_notes.lower())
+        tokens = [t.strip() for t in cleaned.split() if t.strip()]
+        # فیلتر stopword + طول ≥3
+        kws: List[str] = []
+        seen: set = set()
+        for t in tokens:
+            if len(t) < 3:
+                continue
+            if t in cls._FOCUS_STOPWORDS:
+                continue
+            if t in seen:
+                continue
+            seen.add(t)
+            kws.append(t)
+        return kws[:20]  # cap
+
     @staticmethod
-    def _priority_score(path: str) -> int:
-        """اولویت این فایل برای انتخاب (بالاتر = مهم‌تر)."""
+    def _priority_score(path: str, focus_keywords: Optional[List[str]] = None) -> int:
+        """اولویت این فایل برای انتخاب (بالاتر = مهم‌تر).
+
+        🆕 (focus_notes) — اگر focus_keywords پاس داده شود، هر keyword که در
+        path پیدا شود +20 امتیاز اضافه می‌کند (وزن دو برابر HIGH_PRIORITY)
+        تا فایل‌های مرتبط با focus کاربر به top برسند.
+        """
         score = 0
         lower = path.lower()
         for pattern in HIGH_PRIORITY_PATTERNS:
             if pattern.lower() in lower:
                 score += 10
+        # 🆕 focus boost
+        if focus_keywords:
+            for kw in focus_keywords:
+                if kw in lower:
+                    score += 20
         # مسیرهای کم‌عمق مهم‌تر
         depth = path.count("/")
         score -= depth
@@ -209,14 +264,22 @@ class ReferenceProjectService:
         *,
         token: str,
         branch: str = "main",
+        focus_notes: str = "",
     ) -> ProjectExtract:
-        """اسکن یک پروژه — لیست فایل‌ها + محتوای فایل‌های با اولویت بالا."""
+        """اسکن یک پروژه — لیست فایل‌ها + محتوای فایل‌های با اولویت بالا.
+
+        🆕 (focus_notes) — اگر کاربر متن focus داده باشد، scoring فایل‌ها
+        توسط keyword های آن متن boost می‌شود تا فایل‌های مرتبط (مثلاً
+        `auth/*` وقتی کاربر «auth» نوشته) به top برسند.
+        """
         owner, repo = self._parse_repo(repo_full_name)
         extract = ProjectExtract(
             project_id=project_id,
             project_path=repo_full_name,
             branch=branch,
+            focus_notes=focus_notes or "",
         )
+        focus_keywords = self._extract_focus_keywords(focus_notes)
         if not owner or not repo:
             extract.error = f"invalid repo_full_name: {repo_full_name}"
             return extract
@@ -244,8 +307,10 @@ class ReferenceProjectService:
             scannable = [f for f in root_files if f.type == "file" and self._is_scannable(f.path)]
             extract.total_files_in_repo = len(root_files)
 
-            # مرتب‌سازی بر اساس priority سپس size صعودی
-            scannable.sort(key=lambda f: (-self._priority_score(f.path), f.size))
+            # مرتب‌سازی بر اساس priority (با focus boost) سپس size صعودی
+            scannable.sort(
+                key=lambda f: (-self._priority_score(f.path, focus_keywords), f.size)
+            )
 
             # محدود به max_files_per_repo
             selected = scannable[: self.max_files_per_repo]
@@ -381,6 +446,7 @@ class ReferenceProjectService:
         extracts: List[ProjectExtract],
         classified: ClassifiedInfo,
         task_summary: str = "",
+        current_project_profile: str = "",
     ) -> Tuple[str, bool]:
         """متن نهایی برای ادغام در پرامپت. respect max_total_chars.
 
@@ -400,6 +466,23 @@ class ReferenceProjectService:
             lines.append(f"**کار درخواست‌شده روی پروژهٔ فعلی:** {task_summary}")
             lines.append("")
 
+        # 🆕 (current_project_profile) — قبل از مراجع، شناسنامهٔ پروژهٔ فعلی
+        # را نمایش بده. AI باید **اول** این بخش را بخواند تا تفاوت‌های stack/
+        # naming/dependency با مراجع را بفهمد.
+        if current_project_profile and current_project_profile.strip():
+            lines.append("### 🏠 شناسنامهٔ پروژهٔ فعلی (مرجع اصلی برای پیاده‌سازی)")
+            lines.append("")
+            lines.append(
+                "**هرگاه بین پروژهٔ فعلی و پروژه‌های مرجع تفاوت بود (stack، "
+                "نام‌گذاری، dependency)، پروژهٔ فعلی برنده است. هرگز syntax "
+                "یا dependency پروژه‌های مرجع را کورکورانه به پروژهٔ فعلی نیاور.**"
+            )
+            lines.append("")
+            lines.append(current_project_profile.strip())
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+
         # خلاصه‌ی پروژه‌های اسکن‌شده
         lines.append("### پروژه‌های اسکن‌شده")
         lines.append("")
@@ -413,6 +496,18 @@ class ReferenceProjectService:
                     f"- ✅ `{extract.project_path}` — "
                     f"{extract.scanned_files} فایل اسکن‌شده "
                     f"(از {extract.total_files_in_repo} کل)"
+                )
+            # 🆕 (focus_notes) — صراحت دهی روی نقطهٔ تمرکز کاربر برای این پروژه.
+            # AI باید **فقط** الگوهای مرتبط با focus_notes را برداشت کند.
+            if extract.focus_notes and extract.focus_notes.strip():
+                lines.append(
+                    f"  - 🎯 **نقطهٔ تمرکز کاربر**: "
+                    f"_{extract.focus_notes.strip()}_"
+                )
+                lines.append(
+                    f"    (فایل‌های اسکن‌شده بالا با اولویت بر اساس همین "
+                    f"تمرکز انتخاب شده‌اند — به بقیهٔ پروژه توجه نکن مگر "
+                    f"برای زمینه.)"
                 )
         lines.append("")
 
@@ -476,6 +571,7 @@ class ReferenceProjectService:
         task_summary: str = "",
         token: str = "",
         watched_lookup: Optional[Dict[str, Any]] = None,
+        current_project_profile: str = "",
     ) -> ReferenceContext:
         """نقطهٔ ورود اصلی — یک snapshot کامل از پروژه‌های مرجع می‌سازد.
 
@@ -514,6 +610,7 @@ class ReferenceProjectService:
                 repo_full_name=sp.get("project_path", ""),
                 token=token,
                 branch=branch,
+                focus_notes=str(sp.get("focus_notes") or ""),
             )
 
         extracts = await asyncio.gather(*(_scan_one(sp) for sp in active))
@@ -523,7 +620,10 @@ class ReferenceProjectService:
 
         # fusion
         fusion_text, truncated = self.build_fusion_text(
-            extracts, classified, task_summary=task_summary
+            extracts,
+            classified,
+            task_summary=task_summary,
+            current_project_profile=current_project_profile,
         )
 
         return ReferenceContext(

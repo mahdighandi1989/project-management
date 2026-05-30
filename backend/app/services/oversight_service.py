@@ -2104,8 +2104,49 @@ class OversightService:
         return None
 
     # ====================================================================
-    # 🆕 (Reference Projects) — normalization + validation
+    # 🆕 (Reference Projects) — profile + normalization + validation
     # ====================================================================
+
+    def _build_current_project_profile(
+        self, watched_id: Optional[str],
+    ) -> str:
+        """ساخت یک خلاصهٔ کوتاه از پروژهٔ فعلی برای fusion text.
+
+        AI با این متن می‌تواند تفاوت‌های stack/dependency/نام‌گذاری پروژهٔ
+        فعلی با مراجع را تشخیص دهد و توصیه‌ها را تطبیق دهد (نه کپی کور).
+
+        خروجی Markdown است (یا "" اگر watched_id داده نشده/پیدا نشد).
+        """
+        if not watched_id:
+            return ""
+        watched = self._find_watched(watched_id)
+        if watched is None:
+            return ""
+        lines: List[str] = []
+        lines.append(f"- **Repo**: `{watched.repo_full_name}`")
+        if watched.language:
+            lines.append(f"- **زبان غالب**: {watched.language}")
+        if watched.default_branch and watched.default_branch != "main":
+            lines.append(f"- **branch پیش‌فرض**: `{watched.default_branch}`")
+        if watched.tags:
+            lines.append(f"- **برچسب‌ها**: {', '.join(watched.tags[:8])}")
+        if watched.user_notes and watched.user_notes.strip():
+            notes = watched.user_notes.strip()[:600]
+            lines.append(f"- **یادداشت کاربر دربارهٔ این پروژه**: {notes}")
+        # تلاش برای استخراج stack از last_scan_inventory (اگر موجود)
+        try:
+            inv = watched.last_scan_inventory or {}
+            stacks = inv.get("detected_stacks") or inv.get("tech_stack") or []
+            if isinstance(stacks, list) and stacks:
+                lines.append(f"- **Stack شناسایی‌شده**: {', '.join(map(str, stacks[:10]))}")
+            frameworks = inv.get("frameworks") or []
+            if isinstance(frameworks, list) and frameworks:
+                lines.append(f"- **Frameworkها**: {', '.join(map(str, frameworks[:10]))}")
+        except Exception:
+            pass
+        if not lines:
+            return ""
+        return "\n".join(lines)
 
     def _normalize_selected_projects(
         self,
@@ -2166,10 +2207,14 @@ class OversightService:
             if key in seen:
                 continue
             seen.add(key)
+            # 🆕 (focus_notes) — متن focus کاربر برای این پروژهٔ مرجع را حفظ کن
+            # (اگر داده شده). cap به 500 کاراکتر تا overflow نشود.
+            focus = str(raw.get("focus_notes") or "").strip()[:500]
             result.append({
                 "project_id": target.id,
                 "project_path": target.repo_full_name,
                 "is_selected": True,
+                "focus_notes": focus,
             })
         return result
 
@@ -5505,10 +5550,14 @@ class OversightService:
             try:
                 from .reference_project_service import get_reference_project_service
                 _ref_svc = get_reference_project_service()
+                # 🆕 (current_project_profile) — شناسنامهٔ پروژهٔ فعلی برای
+                # تطبیق توصیه‌ها با stack/dependency واقعی این پروژه.
+                _cur_profile = self._build_current_project_profile(watched_id)
                 _ref_ctx = await _ref_svc.build_reference_context(
                     selected_projects=_normalized_refs,
                     task_summary=idea[:500],
                     token=get_github_token() or None,
+                    current_project_profile=_cur_profile,
                 )
                 if _ref_ctx and _ref_ctx.fusion_text:
                     idea = (
