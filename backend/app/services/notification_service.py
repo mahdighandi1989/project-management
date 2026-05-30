@@ -3783,6 +3783,41 @@ class NotificationService:
         rows.append([{"text": "❌ لغو", "callback_data": "flow:cancel"}])
         return {"inline_keyboard": rows}
 
+    # 🆕 (Reference Projects) — کیبورد انتخاب چندتایی پروژه‌های مرجع.
+    # توگل‌ها به‌صورت توگل وضعیت (تیک/خالی) نمایش داده می‌شوند.
+    def _render_reference_picker(
+        self,
+        watched_list: List[Any],
+        target_watched_id: str,
+        selected_refs: List[str],
+        max_items: int = 10,
+    ) -> Dict[str, Any]:
+        """ساخت inline_keyboard برای انتخاب پروژه‌های مرجع.
+
+        - پروژهٔ مقصد (target_watched_id) از لیست حذف می‌شود.
+        - هر دکمه نشان می‌دهد آیا انتخاب شده (✅) یا نه (⬜).
+        - دو دکمهٔ نهایی: «✅ تأیید» (با تعداد) و «⏭ بدون مرجع».
+        """
+        # حذف خود پروژه + محدودیت تعداد
+        items = [w for w in watched_list if w.id != target_watched_id][:max_items]
+        rows: List[List[Dict[str, str]]] = []
+        for w in items:
+            label = (w.repo_full_name or w.id)[:32]
+            mark = "✅" if w.id in selected_refs else "⬜"
+            rows.append([{
+                "text": f"{mark} {label}",
+                "callback_data": f"refpick:tog:{w.id}",
+            }])
+        rows.append([
+            {
+                "text": f"✅ تأیید ({len(selected_refs)} مرجع)",
+                "callback_data": "refpick:done",
+            },
+            {"text": "⏭ بدون مرجع", "callback_data": "refpick:skip"},
+        ])
+        rows.append([{"text": "❌ لغو", "callback_data": "flow:cancel"}])
+        return {"inline_keyboard": rows}
+
     async def _receive_idea_text(
         self, chat_id_str: str, state: Dict[str, Any], text: str,
     ) -> Dict[str, Any]:
@@ -3797,11 +3832,15 @@ class NotificationService:
             return {"ok": True, "handled": "idea_too_short"}
 
         watched_id = state.get("watched_id")
+        # 🆕 (Reference Projects) — اگر کاربر در فاز ref-picks مرجع انتخاب کرده،
+        # آن لیست را در draft ذخیره کن تا در confirm به سرویس پاس داده شود.
+        selected_refs: List[str] = list(state.get("selected_refs") or [])
         # ساخت draft token
         token = _short_token()
         _idea_drafts[token] = {
             "watched_id": watched_id,
             "idea": text,
+            "selected_refs": selected_refs,
             "expires_at": _now_epoch() + _STATE_TTL_SECONDS,
         }
         # حذف state — کاربر در مرحلهٔ تأیید است نه awaiting_idea
@@ -3811,6 +3850,21 @@ class NotificationService:
         repo_name = state.get("repo_name") or watched_id
 
         preview = text[:300] + ("..." if len(text) > 300 else "")
+        # نمایش لیست پروژه‌های مرجع در پیام تأیید
+        refs_text = ""
+        if selected_refs:
+            try:
+                from .oversight_service import get_oversight_service
+                _ov = get_oversight_service()
+                names = []
+                for rid in selected_refs:
+                    rw = next((x for x in _ov.watched if x.id == rid), None)
+                    if rw:
+                        names.append(f"`{rw.repo_full_name}`")
+                if names:
+                    refs_text = f"📚 منابع مرجع: {', '.join(names)}\n\n"
+            except Exception:
+                pass
         kb = {
             "inline_keyboard": [
                 [
@@ -3823,6 +3877,7 @@ class NotificationService:
         await tg.send(
             f"📝 *تأیید ثبت تسک*\n\n"
             f"📁 پروژه: `{repo_name}`\n\n"
+            f"{refs_text}"
             f"💭 ایده:\n{preview}\n\n"
             f"تأیید می‌کنید؟",
             silent=True,
@@ -3883,14 +3938,42 @@ class NotificationService:
                 _oversight = get_oversight_service()
                 w = next((x for x in _oversight.watched if x.id == watched_id), None)
             except Exception:
+                _oversight = None
                 w = None
             if not w:
                 await tg.send("⚠️ پروژه یافت نشد. /new\\_task بزنید.", silent=True)
                 return {"ok": True, "handled": "pick_not_found"}
+            # 🆕 (Reference Projects) — اگر پروژهٔ دیگری برای مرجع وجود دارد،
+            # وارد فاز انتخاب چندتایی شو. اگر هیچ پروژهٔ دیگری نیست، مستقیماً
+            # به awaiting_idea برو (سازگار با رفتار قبلی).
+            other_projects = [
+                x for x in (_oversight.watched if _oversight else []) if x.id != watched_id
+            ]
+            if other_projects:
+                _chat_state[chat_id_str] = {
+                    "phase": "awaiting_ref_picks",
+                    "watched_id": watched_id,
+                    "repo_name": w.repo_full_name,
+                    "selected_refs": [],
+                    "expires_at": _now_epoch() + _STATE_TTL_SECONDS,
+                }
+                kb = self._render_reference_picker(
+                    other_projects, watched_id, [],
+                )
+                await tg.send(
+                    f"✅ پروژه: `{w.repo_full_name}`\n\n"
+                    f"📚 *پروژه‌های مرجع (اختیاری)*\n"
+                    f"اگر می‌خواهی AI از پروژه‌های دیگرت الهام بگیرد، آن‌ها را تیک بزن "
+                    f"و سپس «تأیید» را بزن. در غیر این صورت «بدون مرجع» را انتخاب کن.",
+                    silent=True,
+                    reply_markup=kb,
+                )
+                return {"ok": True, "handled": "pick_ok_ref_phase", "watched_id": watched_id}
             _chat_state[chat_id_str] = {
                 "phase": "awaiting_idea",
                 "watched_id": watched_id,
                 "repo_name": w.repo_full_name,
+                "selected_refs": [],
                 "expires_at": _now_epoch() + _STATE_TTL_SECONDS,
             }
             await tg.send(
@@ -3899,6 +3982,81 @@ class NotificationService:
                 silent=True,
             )
             return {"ok": True, "handled": "pick_ok", "watched_id": watched_id}
+
+        # 🆕 (Reference Projects) — refpick:tog:<wid> / refpick:done / refpick:skip
+        if data.startswith("refpick:"):
+            state = _chat_state.get(chat_id_str)
+            if not state or state.get("phase") != "awaiting_ref_picks":
+                await tg.send(
+                    "⚠️ این مرحله منقضی شده. /new\\_task بزنید.",
+                    silent=True,
+                )
+                return {"ok": True, "handled": "refpick_no_state"}
+            try:
+                from .oversight_service import get_oversight_service
+                _oversight = get_oversight_service()
+            except Exception:
+                _oversight = None
+            target_wid = state.get("watched_id") or ""
+            selected_refs: List[str] = list(state.get("selected_refs") or [])
+            sub = data.split(":", 2)
+            action = sub[1] if len(sub) > 1 else ""
+            if action == "tog" and len(sub) >= 3:
+                wid = sub[2]
+                if wid in selected_refs:
+                    selected_refs = [x for x in selected_refs if x != wid]
+                else:
+                    if wid != target_wid:
+                        selected_refs.append(wid)
+                state["selected_refs"] = selected_refs
+                state["expires_at"] = _now_epoch() + _STATE_TTL_SECONDS
+                # re-render همان پیام تا تغییر تیک‌ها فوراً دیده شود
+                other_projects = [
+                    x for x in (_oversight.watched if _oversight else [])
+                    if x.id != target_wid
+                ]
+                kb = self._render_reference_picker(
+                    other_projects, target_wid, selected_refs,
+                )
+                try:
+                    await tg.edit_message_text(
+                        chat_id, msg.get("message_id"),
+                        f"✅ پروژه: `{state.get('repo_name')}`\n\n"
+                        f"📚 *پروژه‌های مرجع (اختیاری)*\n"
+                        f"تعداد انتخاب فعلی: *{len(selected_refs)}*",
+                        reply_markup=kb,
+                    )
+                except Exception as _ee:
+                    logger.debug(f"refpick: edit_message failed: {_ee}")
+                return {"ok": True, "handled": "refpick_tog", "count": len(selected_refs)}
+            if action in ("done", "skip"):
+                final_refs = selected_refs if action == "done" else []
+                _chat_state[chat_id_str] = {
+                    "phase": "awaiting_idea",
+                    "watched_id": target_wid,
+                    "repo_name": state.get("repo_name"),
+                    "selected_refs": final_refs,
+                    "expires_at": _now_epoch() + _STATE_TTL_SECONDS,
+                }
+                if final_refs:
+                    names: List[str] = []
+                    for rid in final_refs:
+                        rw = next(
+                            (x for x in (_oversight.watched if _oversight else []) if x.id == rid),
+                            None,
+                        )
+                        if rw:
+                            names.append(f"`{rw.repo_full_name}`")
+                    refs_line = f"📚 منابع: {', '.join(names) if names else '—'}\n\n"
+                else:
+                    refs_line = "📚 بدون منبع مرجع.\n\n"
+                await tg.send(
+                    f"{refs_line}✏️ حالا متن ایده/مشکل را بنویسید "
+                    f"(یا /cancel برای لغو):",
+                    silent=True,
+                )
+                return {"ok": True, "handled": "refpick_done", "refs": len(final_refs)}
+            return {"ok": True, "handled": "refpick_unknown"}
 
         # edit:<token> — کاربر می‌خواهد متن را عوض کند
         if data.startswith("edit:"):
@@ -3938,6 +4096,7 @@ class NotificationService:
             try:
                 return await self._call_idea_to_prompt(
                     chat_id_str, draft["watched_id"], draft["idea"],
+                    selected_refs=draft.get("selected_refs") or [],
                 )
             finally:
                 # پس از اتمام (موفقیت یا شکست)، token را پاک کن
@@ -4457,7 +4616,12 @@ class NotificationService:
         return {"ok": True, "handled": "unknown_callback"}
 
     async def _call_idea_to_prompt(
-        self, chat_id_str: str, watched_id: str, idea: str,
+        self,
+        chat_id_str: str,
+        watched_id: str,
+        idea: str,
+        *,
+        selected_refs: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """فراخوانی idea_to_prompt و گزارش نتیجه به کاربر.
 
@@ -4527,12 +4691,27 @@ class NotificationService:
             # 🛡 (audit fix CRITICAL #1) — همهٔ مسیرهای Telegram باید
             # multi_pass_mode='always' را پاس بدهند تا چک‌لیست تضمین شود.
             # این مسیر legacy (/new_task متنی بدون compose) از قبل گم شده بود!
+            # 🆕 (Reference Projects) — تبدیل لیست id ها به ساختار مورد انتظار
+            # سرویس و فیلتر self-reference (پروژهٔ مقصد). normalize سمت سرویس
+            # نیز این کار را تکرار می‌کند ولی payload کوچک‌تر = بهتر.
+            ref_payload: List[Dict[str, Any]] = []
+            for rid in (selected_refs or []):
+                if rid == watched_id:
+                    continue
+                rw = next((x for x in _oversight.watched if x.id == rid), None)
+                if rw:
+                    ref_payload.append({
+                        "project_id": rid,
+                        "project_path": rw.repo_full_name,
+                        "is_selected": True,
+                    })
             data = await _oversight.idea_to_prompt(
                 idea=idea,
                 watched_id=watched_id,
                 type_="other",
                 priority="medium",
                 multi_pass_mode="always",
+                selected_projects=ref_payload or None,
             )
             # ایجاد تسک از طریق create_task (با force_create=True چون قبلاً
             # dedup check کردیم و قطعاً مشابه نیست)
@@ -4547,6 +4726,7 @@ class NotificationService:
                 "target_files": data.get("target_files") or [],
                 "acceptance_criteria": data.get("acceptance_criteria") or [],
                 "force_create": True,
+                "selected_projects": ref_payload,
             })
             new_task = result.get("task") or {}
 

@@ -1490,6 +1490,10 @@ export default function OversightPage() {
   // Idea inbox
   const [idea, setIdea] = useState('');
   const [ideaWatchedIds, setIdeaWatchedIds] = useState<string[]>([]);
+  // 🆕 (Reference Projects) — لیست watched.id هایی که به‌عنوان منبع الهام
+  // برای این پرامپت انتخاب شده‌اند. backend در idea_to_prompt محتوای این
+  // پروژه‌ها را scan + classify می‌کند و در fusion متن پرامپت inject می‌کند.
+  const [referenceProjectIds, setReferenceProjectIds] = useState<string[]>([]);
   // 🆕 (Stage 3 — File Attachment) — یک taskDraftId پایدار برای گروه فایل‌ها
   // در طول lifecycle این فرم. وقتی تسک ساخته می‌شود یا کاربر idea را reset کند،
   // یک id جدید تولید می‌شود.
@@ -2106,6 +2110,18 @@ export default function OversightPage() {
         validSessionIds.length && multiPassMode === 'auto'
           ? 'always'
           : multiPassMode;
+      // 🆕 (Reference Projects) — لیست پروژه‌های مرجع را برای backend بساز.
+      // پروژه‌های مقصد (ideaWatchedIds) خودبه‌خود از مرجع حذف می‌شوند.
+      const refPayload = referenceProjectIds
+        .filter((id) => !ideaWatchedIds.includes(id))
+        .map((id) => {
+          const w = watched.find((x) => x.id === id);
+          return {
+            project_id: id,
+            project_path: w?.repo_full_name || '',
+            is_selected: true,
+          };
+        });
       const res = await fetch(`${API_BASE}/api/oversight/tasks/from-idea`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2119,6 +2135,7 @@ export default function OversightPage() {
           multi_pass_mode: effectiveMultiPassMode,
           upload_session_ids: validSessionIds.length ? validSessionIds : undefined,
           progress_track_id: validSessionIds.length ? taskDraftId : undefined,
+          selected_projects: refPayload.length ? refPayload : undefined,
         }),
       });
       if (pollInterval) {
@@ -2258,6 +2275,19 @@ export default function OversightPage() {
             reminder_repeat_rule: ideaType === 'reminder' && reminderRepeat
               ? reminderRepeat
               : null,
+            // 🆕 (Reference Projects) — هر پروژه‌ای که به‌عنوان مرجع انتخاب
+            // شده، در task entity هم ذخیره می‌شود (نمایش در UI + reuse در
+            // regenerate). خود همین watched حذف می‌شود تا self-reference نباشد.
+            selected_projects: referenceProjectIds
+              .filter((id) => id !== (wid || ''))
+              .map((id) => {
+                const rw = watched.find((x) => x.id === id);
+                return {
+                  project_id: id,
+                  project_path: rw?.repo_full_name || '',
+                  is_selected: true,
+                };
+              }),
           }),
         });
         if (res.ok) {
@@ -3699,6 +3729,56 @@ export default function OversightPage() {
                   <option value="never">⚡ تک‌مرحله سریع</option>
                 </select>
               </div>
+            </div>
+
+            {/* 🆕 (Reference Projects) — انتخاب پروژه‌های مرجع به‌عنوان منبع الهام */}
+            <div className="mb-4 border rounded-lg dark:border-gray-600 p-3 bg-gray-50 dark:bg-gray-700/40">
+              <details>
+                <summary className="cursor-pointer text-sm font-semibold dark:text-gray-200 select-none">
+                  📚 پروژه‌های مرجع (الهام از پروژه‌های موجود)
+                  {referenceProjectIds.length > 0 && (
+                    <span className="mr-2 text-xs bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 px-2 py-0.5 rounded-full">
+                      {referenceProjectIds.length} انتخاب
+                    </span>
+                  )}
+                </summary>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-2 mb-2">
+                  AI ساختار/فایل‌های این پروژه‌ها را به‌عنوان الگو در نظر می‌گیرد.
+                  پروژه‌های مقصد بالا به‌صورت خودکار از این لیست حذف می‌شوند.
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 max-h-40 overflow-y-auto">
+                  {watched
+                    .filter((w) => !ideaWatchedIds.includes(w.id))
+                    .map((w) => (
+                      <label
+                        key={w.id}
+                        className="flex items-center gap-2 text-sm dark:text-gray-200 px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded cursor-pointer"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={referenceProjectIds.includes(w.id)}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setReferenceProjectIds((prev) => [...prev, w.id]);
+                            } else {
+                              setReferenceProjectIds((prev) =>
+                                prev.filter((id) => id !== w.id),
+                              );
+                            }
+                          }}
+                        />
+                        <span className="truncate" title={w.repo_full_name}>
+                          {w.repo_full_name}
+                        </span>
+                      </label>
+                    ))}
+                </div>
+                {watched.filter((w) => !ideaWatchedIds.includes(w.id)).length === 0 && (
+                  <p className="text-xs text-gray-400 italic mt-1">
+                    پروژه‌ای برای مرجع‌گیری وجود ندارد.
+                  </p>
+                )}
+              </details>
             </div>
 
             {/* 🆕 (Stage 3 — File Attachment) — drag-drop چند فایل با chunked upload */}

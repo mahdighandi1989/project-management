@@ -44,6 +44,9 @@ class Project:
     files: List[ProjectFile] = field(default_factory=list)
     structure: Dict = field(default_factory=dict)
     technologies: List[str] = field(default_factory=list)
+    # 🆕 (Reference Projects) — پروژه‌هایی که هنگام ساخت به‌عنوان منبع
+    # الهام استفاده شدند. هر آیتم: {project_id, project_path, is_selected}
+    selected_projects: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self):
         return {
@@ -56,6 +59,7 @@ class Project:
             "files": [f.to_dict() if isinstance(f, ProjectFile) else f for f in self.files],
             "structure": self.structure,
             "technologies": self.technologies,
+            "selected_projects": self.selected_projects,
         }
 
 
@@ -115,6 +119,9 @@ class SimpleProjectCreator:
                                        for f in data.get("files", [])],
                                 structure=data.get("structure", {}),
                                 technologies=data.get("technologies", []),
+                                # 🆕 (Reference Projects) — اگر در meta نبود،
+                                # default [] از dataclass استفاده می‌شود.
+                                selected_projects=data.get("selected_projects", []) or [],
                             )
                             self.projects[project.id] = project
         except Exception as e:
@@ -126,7 +133,8 @@ class SimpleProjectCreator:
         description: str,
         project_type: str,
         technologies: List[str] = None,
-        ai_generate: callable = None
+        ai_generate: callable = None,
+        selected_projects: Optional[List[Dict[str, Any]]] = None,
     ) -> Project:
         """ساخت پروژه جدید"""
 
@@ -142,6 +150,7 @@ class SimpleProjectCreator:
             description=description,
             project_type=project_type,
             technologies=technologies or [],
+            selected_projects=list(selected_projects or []),
         )
 
         self.projects[project_id] = project

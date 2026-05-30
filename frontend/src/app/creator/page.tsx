@@ -104,6 +104,13 @@ export default function CreatorPage() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
+  // 🆕 (Reference Projects) — لیست watched از /oversight + پروژه‌هایی که
+  // کاربر به‌عنوان مرجع/الهام برای این پروژهٔ جدید انتخاب کرده.
+  const [watchedRefs, setWatchedRefs] = useState<
+    Array<{ id: string; repo_full_name: string }>
+  >([]);
+  const [referenceProjectIds, setReferenceProjectIds] = useState<string[]>([]);
+
   // 🆕 GitHub push modal
   const [pushTarget, setPushTarget] = useState<Project | null>(null);
 
@@ -120,6 +127,24 @@ export default function CreatorPage() {
   useEffect(() => {
     checkStatus();
     loadProjects();
+    // 🆕 (Reference Projects) — بارگذاری watched ها برای استفاده در
+    // selector پروژه‌های مرجع. failure غیر حیاتی است.
+    (async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/oversight/watched`);
+        if (r.ok) {
+          const d = await r.json();
+          const items: Array<{ id: string; repo_full_name: string }> =
+            (d.items || []).map((w: any) => ({
+              id: w.id,
+              repo_full_name: w.repo_full_name,
+            }));
+          setWatchedRefs(items);
+        }
+      } catch (_e) {
+        // silent — feature optional
+      }
+    })();
 
     // بازیابی انتخاب مدل
     if (typeof window !== 'undefined') {
@@ -333,6 +358,15 @@ export default function CreatorPage() {
         .filter((s) => ['completed', 'extracting', 'extracted'].includes(s.status))
         .sort((a, b) => a.file_order - b.file_order)
         .map((s) => s.session_id);
+      // 🆕 (Reference Projects) — payload کلاسیک: id + path + is_selected
+      const refPayload = referenceProjectIds.map((id) => {
+        const w = watchedRefs.find((x) => x.id === id);
+        return {
+          project_id: id,
+          project_path: w?.repo_full_name || '',
+          is_selected: true,
+        };
+      });
       const res = await fetch(`${API_BASE}/api/simple/projects/idea-to-prompt`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -343,6 +377,7 @@ export default function CreatorPage() {
           technologies: technologies.split(',').map((t) => t.trim()).filter(Boolean),
           model_ids: selectedModelIds,
           upload_session_ids: validSessionIds.length ? validSessionIds : undefined,
+          selected_projects: refPayload.length ? refPayload : undefined,
         }),
       });
       const data = await res.json();
@@ -445,6 +480,16 @@ export default function CreatorPage() {
           model_ids: selectedModelIds,
           auto_detect_type: autoDetectType,
           structured_prompt: finalStructured,
+          // 🆕 (Reference Projects) — هر پروژهٔ مرجع که در preview انتخاب شد،
+          // در project meta هم ذخیره می‌شود تا قابل reuse باشد.
+          selected_projects: referenceProjectIds.map((id) => {
+            const w = watchedRefs.find((x) => x.id === id);
+            return {
+              project_id: id,
+              project_path: w?.repo_full_name || '',
+              is_selected: true,
+            };
+          }),
         }),
       });
       const data = await res.json();
@@ -777,6 +822,54 @@ export default function CreatorPage() {
                     disabled={previewLoading || creating}
                   />
                 </div>
+
+                {/* 🆕 (Reference Projects) — انتخاب پروژه‌های موجود به‌عنوان
+                    منبع الهام برای پروژهٔ جدید. این محتوا در پرامپت تولیدی
+                    به AI تزریق می‌شود تا ساختار/الگوی پروژه‌های مرجع را
+                    به‌عنوان الگو در نظر بگیرد. اگر هیچ پروژه‌ای watched نباشد،
+                    selector ظاهر نمی‌شود. */}
+                {watchedRefs.length > 0 && (
+                  <div className="mb-4 border rounded-xl border-gray-700/50 p-3 bg-gray-800/40">
+                    <details>
+                      <summary className="cursor-pointer text-sm font-semibold text-gray-200 select-none">
+                        📚 پروژه‌های مرجع (الهام از پروژه‌های موجود){' '}
+                        {referenceProjectIds.length > 0 && (
+                          <span className="mr-2 text-xs bg-blue-900/40 text-blue-300 px-2 py-0.5 rounded-full">
+                            {referenceProjectIds.length} انتخاب
+                          </span>
+                        )}
+                      </summary>
+                      <p className="text-xs text-gray-400 mt-2 mb-2">
+                        AI ساختار/فایل‌های این پروژه‌ها را به‌عنوان الگو در نظر می‌گیرد.
+                      </p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 max-h-40 overflow-y-auto">
+                        {watchedRefs.map((w) => (
+                          <label
+                            key={w.id}
+                            className="flex items-center gap-2 text-sm text-gray-200 px-2 py-1 hover:bg-gray-700/50 rounded cursor-pointer"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={referenceProjectIds.includes(w.id)}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setReferenceProjectIds((prev) => [...prev, w.id]);
+                                } else {
+                                  setReferenceProjectIds((prev) =>
+                                    prev.filter((id) => id !== w.id),
+                                  );
+                                }
+                              }}
+                            />
+                            <span className="truncate" title={w.repo_full_name}>
+                              {w.repo_full_name}
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    </details>
+                  </div>
+                )}
 
                 {/* 🆕 (Creator vision toggle) — اگر backend با 409
                     blocked_no_vision_model برگشت داد، اینجا candidate مدل‌ها
