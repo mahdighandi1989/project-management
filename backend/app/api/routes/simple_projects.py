@@ -37,6 +37,10 @@ class CreateProjectRequest(BaseModel):
     # انجام شود. در flow عادی، idea-to-prompt قبلاً extraction را انجام داده
     # و structured_prompt پرشده — این فیلد در آن حالت اختیاری است.
     upload_session_ids: Optional[List[str]] = None
+    # 🆕 (Reference Projects) — پروژه‌های مرجع برای پروژهٔ جدید. در meta
+    # ذخیره می‌شوند تا کاربر بعداً ببیند از کجا الهام گرفته. هر آیتم:
+    # {project_id, project_path, is_selected}
+    selected_projects: Optional[List[Dict[str, Any]]] = None
 
 
 class IdeaToPromptRequest(BaseModel):
@@ -51,6 +55,8 @@ class IdeaToPromptRequest(BaseModel):
     # _resolve_attachments_for_idea استفاده می‌کند تا extraction انجام شود
     # و متن استخراج‌شده با idea ادغام شود قبل از تولید پرامپت.
     upload_session_ids: Optional[List[str]] = None
+    # 🆕 (Reference Projects) — پروژه‌های انتخاب‌شده به‌عنوان منبع الهام.
+    selected_projects: Optional[List[Dict[str, Any]]] = None
 
 
 class DetectTypeRequest(BaseModel):
@@ -216,6 +222,60 @@ async def idea_to_prompt_preview(request: IdeaToPromptRequest):
             # graceful: ادامه با idea خام
             effective_idea = request.idea + f"\n\n[خطا در استخراج فایل‌ها: {str(ae)[:200]}]"
 
+    # 🆕 (Reference Projects) — اگر کاربر پروژه‌های مرجع انتخاب کرده،
+    # محتوای آن‌ها را scan/classify/fusion کن و قبل از فراخوانی AI به idea
+    # تزریق کن. AI پرامپت تولیدی را با ساختار/الگوی مراجع هم‌خوان می‌سازد.
+    # تمام failures silently ignore می‌شوند.
+    if request.selected_projects:
+        try:
+            from ...services.reference_project_service import (
+                get_reference_project_service,
+            )
+            from ...services.oversight_service import (
+                get_oversight_service, get_github_token,
+            )
+            _ovs2 = get_oversight_service()
+            valid_refs: List[Dict[str, Any]] = []
+            for raw in request.selected_projects:
+                if not isinstance(raw, dict) or not raw.get("is_selected", True):
+                    continue
+                pid = (raw.get("project_id") or "").strip()
+                ppath = (raw.get("project_path") or "").strip()
+                target = None
+                if pid:
+                    target = next((w for w in _ovs2.watched if w.id == pid), None)
+                if target is None and ppath:
+                    target = next(
+                        (w for w in _ovs2.watched
+                         if (w.repo_full_name or "").lower() == ppath.lower()),
+                        None,
+                    )
+                if target:
+                    valid_refs.append({
+                        "project_id": target.id,
+                        "project_path": target.repo_full_name,
+                        "is_selected": True,
+                    })
+            if valid_refs:
+                ref_ctx = await get_reference_project_service().build_reference_context(
+                    selected_projects=valid_refs,
+                    task_summary=effective_idea[:500],
+                    token=get_github_token() or None,
+                )
+                if ref_ctx and ref_ctx.fusion_text:
+                    effective_idea = (
+                        f"{effective_idea}\n\n---\n"
+                        f"## 📚 پروژه‌های مرجع (الهام از پیاده‌سازی‌های موجود)\n"
+                        f"_ساختار/فایل‌های زیر را به‌عنوان الگو در نظر بگیر._\n\n"
+                        f"{ref_ctx.fusion_text}\n---\n"
+                    )
+                    logger.info(
+                        f"creator idea_to_prompt: injected reference context for "
+                        f"{len(valid_refs)} project(s), {ref_ctx.total_chars} chars"
+                    )
+        except Exception as _ref_e:
+            logger.warning(f"creator idea_to_prompt: ref scan failed: {_ref_e}")
+
     try:
         result = await idea_to_strong_prompt_for_creator(
             idea=effective_idea,
@@ -225,6 +285,10 @@ async def idea_to_prompt_preview(request: IdeaToPromptRequest):
             ai_generate=_gen,
             model_ids=request.model_ids,
         )
+        # 🆕 (Reference Projects) — نتیجه را با لیست مراجع که در پرامپت
+        # استفاده شد augment کن تا UI نشان بدهد و در create persist شود.
+        if request.selected_projects:
+            result.setdefault("selected_projects", list(request.selected_projects))
         return {"success": True, **result}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -300,6 +364,37 @@ async def create_project(request: CreateProjectRequest):
     async def gen(prompt: str) -> str:
         return await ai_generate(prompt, model_ids=request.model_ids)
 
+    # 🆕 (Reference Projects) — نرمال‌سازی selected_projects برای persist:
+    # حذف self-references و آیتم‌های غیرمعتبر. (در این مرحله پروژهٔ جدید
+    # هنوز watched نیست، پس خود-ارجاع منطقی نیست — صرفاً normalize کن.)
+    normalized_selected: List[Dict[str, Any]] = []
+    if request.selected_projects:
+        try:
+            from ...services.oversight_service import get_oversight_service
+            _ovs3 = get_oversight_service()
+            for raw in request.selected_projects:
+                if not isinstance(raw, dict) or not raw.get("is_selected", True):
+                    continue
+                pid = (raw.get("project_id") or "").strip()
+                ppath = (raw.get("project_path") or "").strip()
+                target = None
+                if pid:
+                    target = next((w for w in _ovs3.watched if w.id == pid), None)
+                if target is None and ppath:
+                    target = next(
+                        (w for w in _ovs3.watched
+                         if (w.repo_full_name or "").lower() == ppath.lower()),
+                        None,
+                    )
+                if target:
+                    normalized_selected.append({
+                        "project_id": target.id,
+                        "project_path": target.repo_full_name,
+                        "is_selected": True,
+                    })
+        except Exception as _e:
+            logger.warning(f"create_project: selected_projects normalize failed: {_e}")
+
     try:
         project = await creator.create_project(
             name=request.name,
@@ -307,6 +402,7 @@ async def create_project(request: CreateProjectRequest):
             project_type=project_type,
             technologies=technologies,
             ai_generate=gen,
+            selected_projects=normalized_selected,
         )
 
         return {
