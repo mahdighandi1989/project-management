@@ -503,6 +503,21 @@ class OversightTask:
     external_attempts: int = 0
     external_last_error: Optional[str] = None
 
+    # 🆕 (Reference Projects) — پروژه‌های منتخب کاربر به‌عنوان منبع الهام
+    # کاربر در زمان نوشتن تسک می‌تواند چند پروژهٔ از قبل لود-شده (watched)
+    # را به‌عنوان مرجع تیک بزند. در زمان تولید پرامپت، سیستم به این پروژه‌ها
+    # مراجعه می‌کند، فایل‌ها و منطق آنها را استخراج/دسته‌بندی می‌کند، و در
+    # پرامپت نهایی (با شرایط پروژهٔ فعلی) ادغام می‌کند.
+    #
+    # هر آیتم: {
+    #   "project_id": str,    # watched.id یا repo_full_name
+    #   "project_path": str,  # repo_full_name (e.g., "owner/repo")
+    #   "is_selected": bool   # درست (selected toggle from UI/Telegram)
+    # }
+    #
+    # default: لیست خالی (تسک از این فیچر استفاده نمی‌کند)
+    selected_projects: List[Dict[str, Any]] = field(default_factory=list)
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
