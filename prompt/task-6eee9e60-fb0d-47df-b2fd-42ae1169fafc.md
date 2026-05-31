@@ -10,7 +10,7 @@ verification_status: partial
 watched_id: 3f34a2b1-2a8d-4ad2-904a-9835a8a5b7c9
 project: mahdighandi1989/project-management
 created_at: '2026-05-15T16:47:34.404794+00:00'
-updated_at: '2026-05-29T20:14:16.872578+00:00'
+updated_at: '2026-05-31T09:08:43.441900+00:00'
 target_files:
 - backend/app/api/routes/notifications.py
 ---
@@ -27,6 +27,11 @@ target_files:
 الگوی caption در sample 1 و sample 9 بسیار شبیه است (هر دو با ایموجی و متن ساده). این یکنواختی باعث کاهش تمایز بین event types می‌شود.
 
 🛠 پیشنهاد: {"title": "Project Created", "context": "...", "action_link": "...", "attachments": []}
+---
+[scan #3 at 2026-05-31T09:08:43.441893+00:00]
+Template message is a meta-instruction about how to write the notification, not an actual notification. Duplicate of generic pattern.
+
+🛠 پیشنهاد: notify_event('{event}', message, silent=False, priority='high', context='Acceptance criteria update', action_link='/tasks/{task_id}/criteria')
 
 ## Prompt
 
