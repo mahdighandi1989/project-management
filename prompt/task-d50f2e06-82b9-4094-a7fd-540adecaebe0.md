@@ -10,7 +10,7 @@ verification_status: pending
 watched_id: 3f34a2b1-2a8d-4ad2-904a-9835a8a5b7c9
 project: mahdighandi1989/project-management
 created_at: '2026-05-24T09:11:17.541995+00:00'
-updated_at: '2026-05-29T20:28:23.215225+00:00'
+updated_at: '2026-05-31T09:08:43.108945+00:00'
 target_files:
 - backend/app/api/routes/oversight.py
 ---
@@ -22,6 +22,11 @@ target_files:
 caption فاقد title و context و action link است. فقط subject='Backfill AC completed' دارد.
 
 🛠 پیشنهاد: {"title": "Backfill AC Completed", "context": "Backfill for acceptance criteria completed successfully.", "action_link": "/projects/{project_id}/backfill", "attachments": []}
+---
+[scan #2 at 2026-05-31T09:08:43.108939+00:00]
+Missing title, context, action link, and attachments. Only subject and priority are set.
+
+🛠 پیشنهاد: notify_event('backfill_ac_completed', 'Backfill AC completed for project {project_name}', subject='Backfill AC completed', priority=_priority, context='Backfill process finished successfully', action
 
 ## Prompt
 
