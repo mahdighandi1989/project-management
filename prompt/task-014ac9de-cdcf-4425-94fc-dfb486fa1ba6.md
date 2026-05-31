@@ -10,7 +10,7 @@ verification_status: pending
 watched_id: 3f34a2b1-2a8d-4ad2-904a-9835a8a5b7c9
 project: mahdighandi1989/project-management
 created_at: '2026-05-15T10:28:15.597981+00:00'
-updated_at: '2026-05-29T20:13:09.415754+00:00'
+updated_at: '2026-05-31T09:06:50.611569+00:00'
 target_files:
 - frontend/src/app/analysis/page.tsx
 - frontend/src/app/analysis/page.tsx
@@ -24,6 +24,9 @@ target_files:
 ---
 [scan #2 at 2026-05-24T09:09:12.258924+00:00]
 در frontend/src/app/analysis/page.tsx خط 147، تابع loadProfiles درخواست GET به /api/analysis/profiles می‌زند. اما در backend هیچ route ای با این prefix و path وجود ندارد. مسیر صحیح برای دریافت پروفایل‌ها /api/models/profiles است (که در backend/app/api/routes/models.py خط 266 تعریف شده). این باعث می‌
+---
+[scan #3 at 2026-05-31T09:06:50.611561+00:00]
+صفحه Analysis از endpoint های `/api/analysis/reports` و `/api/analysis/profiles` و `/api/models/available` استفاده می‌کند. endpoint `/api/analysis/reports` در backend وجود دارد (analysis.py line 271) اما endpoint `/api/analysis/profiles` در backend تعریف نشده است (در analysis.py وجود ندارد). endpoin
 
 ## Prompt
 
