@@ -10,7 +10,7 @@ verification_status: pending
 watched_id: 3f34a2b1-2a8d-4ad2-904a-9835a8a5b7c9
 project: mahdighandi1989/project-management
 created_at: '2026-05-31T09:08:17.003371+00:00'
-updated_at: '2026-05-31T09:08:17.003376+00:00'
+updated_at: '2026-06-01T17:08:47.833739+00:00'
 ---
 
 # [منطق] عدم تطابق بین expected_inputs و interacts_with در ai_log
@@ -467,10 +467,10 @@ _(مستقل)_
 
 ## Acceptance Criteria
 
-1. هر دو طرف ناسازگاری شناسایی + فرض‌هایشان مستند شد
-2. ground truth تعیین شد و طرف دیگر align شد
-3. integration test برای pipeline `ai_llm` بدون شکست عبور می‌کند
-4. PR description توضیح می‌دهد چرا این تصمیم گرفته شد
+1. هر دو طرف ناسازگاری شناسایی + فرض‌هایشان مستند شد _(verify: manual_only)_
+2. ground truth تعیین شد و طرف دیگر align شد _(verify: static)_
+3. integration test برای pipeline `ai_llm` بدون شکست عبور می‌کند _(verify: backend_test)_
+4. PR description توضیح می‌دهد چرا این تصمیم گرفته شد _(verify: manual_only)_
 
 ## Task Steps
 
