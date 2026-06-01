@@ -287,6 +287,50 @@ async def delete_repo_secret(
 
 
 # ----------------------------------------------------------------------
+# GitHub Actions repo-level permissions (workflow can write to repo)
+# ----------------------------------------------------------------------
+
+async def set_workflow_permissions_write(
+    owner: str, repo: str, *, gh_token: str,
+) -> Dict[str, Any]:
+    """تنظیم default workflow permissions روی «Read and write».
+
+    بدون این تنظیم، GitHub جوب‌های workflow که در YAML
+    `permissions: contents: write` می‌خواهند را روی وضعیت Pending قفل
+    می‌کند و هرگز شروع نمی‌شوند (چون سطح permission ای که می‌خواهند از
+    سقف repo بالاتر است).
+
+    پیش‌فرض GitHub برای repo های جدید (از Feb 2023) «Read only» است،
+    پس هر repo که توگل runner را روشن می‌کند باید این تنظیم را به
+    write تغییر دهیم. این endpoint با همان GitHub PAT کلاسیک با scope
+    `repo` کار می‌کند (admin روی repo شخصی خودکار).
+
+    همچنین `can_approve_pull_request_reviews=true` تنظیم می‌شود تا
+    Claude در صورت نیاز بتواند PR را approve کند (تأثیر مستقیم روی push
+    به main ندارد ولی برای completeness).
+    """
+    pr = get_github_pr_service()
+    url = (
+        f"{pr.GITHUB_API}/repos/{owner}/{repo}/actions/permissions/workflow"
+    )
+    headers = pr._get_headers(token=gh_token)  # noqa: SLF001
+    body = {
+        "default_workflow_permissions": "write",
+        "can_approve_pull_request_reviews": True,
+    }
+    res = await pr._gh_request("PUT", url, headers=headers, json_body=body)  # noqa: SLF001
+    if not res.get("ok"):
+        return {
+            "success": False,
+            "error": (
+                f"workflow_permissions_failed status={res.get('status')} "
+                f"body={(res.get('body_text') or '')[:200]}"
+            ),
+        }
+    return {"success": True}
+
+
+# ----------------------------------------------------------------------
 # High-level: install / uninstall runner
 # ----------------------------------------------------------------------
 
@@ -324,6 +368,19 @@ async def install_runner(
         }
     owner, repo, branch = resolved
     errors: list = []
+
+    # 0) Workflow permissions repo را روی «Read and write» بگذار.
+    # بدون این، GitHub جوب‌هایی که permissions: contents: write می‌خواهند را
+    # روی Pending قفل می‌کند و هرگز شروع نمی‌شوند. این تنظیم پیش‌فرض
+    # GitHub برای repo های جدید Read only است، پس برای هر repo که
+    # runner را نصب می‌کنیم باید این را به write تغییر دهیم. اگر شکست
+    # خورد، ادامه می‌دهیم (کاربر می‌تواند دستی هم تنظیم کند) ولی هشدار
+    # واضح در errors می‌گذاریم.
+    perm_res = await set_workflow_permissions_write(
+        owner, repo, gh_token=gh_token,
+    )
+    if not perm_res.get("success"):
+        errors.append(f"workflow_permissions: {perm_res.get('error')}")
 
     # 1) سه secret را نصب کن
     for secret_name, secret_value in (
