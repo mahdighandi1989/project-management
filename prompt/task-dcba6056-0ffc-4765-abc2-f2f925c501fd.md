@@ -10,7 +10,7 @@ verification_status: pending
 watched_id: 3f34a2b1-2a8d-4ad2-904a-9835a8a5b7c9
 project: mahdighandi1989/project-management
 created_at: '2026-05-31T09:07:44.676489+00:00'
-updated_at: '2026-05-31T09:07:44.676492+00:00'
+updated_at: '2026-06-01T17:07:49.955524+00:00'
 target_files:
 - backend/app/api/routes/simple_projects.py
 - backend/app/api/routes/unified_api.py
@@ -484,7 +484,7 @@ _(مستقل)_
 
 ## Acceptance Criteria
 
-1. endpoint /api/simple/projects/create و /api/unified/projects/create حذف شوند
-2. endpoint جدید /api/projects/create ایجاد شود
-3. frontend از endpoint جدید استفاده کند
-4. همه تست‌های موجود پاس شوند
+1. endpoint /api/simple/projects/create و /api/unified/projects/create حذف شوند _(verify: static)_
+2. endpoint جدید /api/projects/create ایجاد شود _(verify: api_response)_
+3. frontend از endpoint جدید استفاده کند _(verify: ui_interaction)_
+4. همه تست‌های موجود پاس شوند _(verify: backend_test)_
