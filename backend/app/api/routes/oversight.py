@@ -232,6 +232,9 @@ class SettingsUpdate(BaseModel):
     allow_auto_push_global: Optional[bool] = None
     max_parallel_runs: Optional[int] = None
     scan_interval_hours: Optional[float] = None
+    # 🆕 (Claude Auto-Runner)
+    claude_runner_auto_enable_new: Optional[bool] = None
+    claude_runner_default_args: Optional[str] = None
 
 
 # ============================================================
@@ -298,6 +301,68 @@ async def update_watched(watched_id: str, payload: WatchedUpdate):
     updates = payload.model_dump(exclude_none=True)
     result = await service.update_watched(watched_id, updates)
     if not result:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+    return result
+
+
+# ====================================================================
+# 🤖 (Claude Auto-Runner) — نصب/حذف/وضعیت workflow per watched
+# ====================================================================
+
+class ClaudeRunnerEnableRequest(BaseModel):
+    claude_args: Optional[str] = None  # override پیش‌فرض settings
+
+
+@router.post("/watched/{watched_id}/claude-runner/enable")
+async def claude_runner_enable(
+    watched_id: str,
+    payload: Optional[ClaudeRunnerEnableRequest] = None,
+):
+    """نصب workflow Claude Auto-Runner روی ریپوی این پروژه.
+
+    سه secret روی ریپو نصب می‌شود:
+      - CLAUDE_CODE_OAUTH_TOKEN
+      - OVERSIGHT_EXTERNAL_TOKEN
+      - OVERSIGHT_BACKEND_URL
+    و فایل `.github/workflows/claude-auto-task.yml` push می‌شود.
+    """
+    service = get_oversight_service()
+    args = payload.claude_args if payload else None
+    result = await service.enable_claude_runner(watched_id, claude_args=args)
+    if not result.get("success"):
+        err = result.get("error") or "; ".join(result.get("errors", []))
+        if err == "watched_not_found":
+            raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+        # 400 برای env_missing تا frontend بتواند راهنمایی نشان دهد
+        if result.get("error") == "env_missing":
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "env_missing",
+                    "missing": result.get("missing", []),
+                    "hint": result.get("hint", ""),
+                },
+            )
+        raise HTTPException(status_code=500, detail=err)
+    return result
+
+
+@router.post("/watched/{watched_id}/claude-runner/disable")
+async def claude_runner_disable(watched_id: str):
+    """حذف workflow + secret ها از ریپو."""
+    service = get_oversight_service()
+    result = await service.disable_claude_runner(watched_id)
+    if not result.get("success") and result.get("error") == "watched_not_found":
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+    return result
+
+
+@router.get("/watched/{watched_id}/claude-runner/status")
+async def claude_runner_status(watched_id: str):
+    """وضعیت Claude Runner برای این پروژه (بدون call به GitHub)."""
+    service = get_oversight_service()
+    result = service.get_claude_runner_status(watched_id)
+    if not result.get("success") and result.get("error") == "watched_not_found":
         raise HTTPException(status_code=404, detail="پروژه یافت نشد")
     return result
 

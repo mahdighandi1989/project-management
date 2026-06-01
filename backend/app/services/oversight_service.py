@@ -222,6 +222,17 @@ class WatchedProject:
     prompt_sync_enabled: bool = True
     # شاخه‌ای که فایل‌های prompt در آن نگه‌داری می‌شوند (پیش‌فرض = default_branch)
     prompt_sync_branch: Optional[str] = None
+    # 🆕 (Claude Auto-Runner) — اگر True، فایل
+    # `.github/workflows/claude-auto-task.yml` روی این ریپو نصب شده و
+    # secret های مورد نیاز ست شده‌اند. هر تغییری در prompt/_index.json یا
+    # prompt/*.md کاربر را به اجرای خودکار Claude Code (headless) می‌برد
+    # که تسک‌های pending را از /api/external/prompts/ می‌گیرد، اجرا می‌کند
+    # و مستقیماً به main commit/push می‌کند. هیچ تعامل دستی لازم نیست.
+    claude_runner_enabled: bool = False
+    claude_runner_installed_at: Optional[str] = None
+    claude_runner_last_error: Optional[str] = None
+    # workflow کجا نصب شد (مسیر در ریپو)؛ صرفاً diagnostic
+    claude_runner_workflow_path: Optional[str] = None
     # 🆕 (auto-loop) ping-pong scheduler-driven:
     # اگر فعال، پس از verify=partial scheduler خودکار:
     #   1. status تسک به pending برمی‌گردد
@@ -647,6 +658,14 @@ class OversightService:
             "allow_auto_push_global": False,
             "max_parallel_runs": 2,
             "scan_interval_hours": 24,
+            # 🆕 (Claude Auto-Runner) — وقتی True، پروژه‌های جدیدی که اضافه
+            # می‌شوند (manual یا auto-discover) خودکار با Claude Runner
+            # bootstrap می‌شوند. اگر CLAUDE_CODE_OAUTH_TOKEN و
+            # OVERSIGHT_BACKEND_URL در env نباشند، silently skip می‌شود
+            # تا setup خراب نشود.
+            "claude_runner_auto_enable_new": False,
+            # claude_args پیش‌فرض برای workflow های نصب‌شده
+            "claude_runner_default_args": "--max-turns 30 --model claude-opus-4-8",
         }
 
         # 🆕 (Dispatch Storm Prevention) — set از task_id هایی که در حال حاضر
@@ -1789,6 +1808,27 @@ class OversightService:
             asyncio.create_task(self._autodetect_and_test_runtime(w.id))
         except Exception as _e:
             logger.debug(f"autodetect schedule failed: {_e}")
+
+        # 🤖 (Claude Auto-Runner) — اگر setting سراسری روشن است و env آماده،
+        # workflow + secret ها را خودکار روی این ریپوی جدید نصب کن. این
+        # best-effort + background است: اگر شکست خورد، watched ساخته
+        # می‌ماند و کاربر می‌تواند بعداً دستی روشن کند.
+        try:
+            if self.settings.get("claude_runner_auto_enable_new", False):
+                env = self._claude_runner_env()
+                if all(env.values()):
+                    asyncio.create_task(self.enable_claude_runner(w.id))
+                    logger.info(
+                        f"add_watched: claude_runner auto-enable scheduled for {w.id}"
+                    )
+                else:
+                    missing = [k for k, v in env.items() if not v]
+                    logger.info(
+                        f"add_watched: claude_runner auto-enable skipped — "
+                        f"env_missing={missing}"
+                    )
+        except Exception as _e:
+            logger.warning(f"claude_runner auto-enable failed: {_e}")
         return w.to_dict()
 
     async def autodetect_runtime_for_all_watched(self) -> Dict[str, Any]:
@@ -1974,6 +2014,19 @@ class OversightService:
         except Exception as _e:
             logger.debug(f"autodetect schedule (auto_register) failed: {_e}")
 
+        # 🤖 (Claude Auto-Runner) — همان منطق add_watched
+        try:
+            if self.settings.get("claude_runner_auto_enable_new", False):
+                env = self._claude_runner_env()
+                if all(env.values()):
+                    asyncio.create_task(self.enable_claude_runner(w.id))
+                    logger.info(
+                        f"auto_register_watched: claude_runner auto-enable "
+                        f"scheduled for {w.id} (source={source})"
+                    )
+        except Exception as _e:
+            logger.warning(f"claude_runner auto-enable (auto_register) failed: {_e}")
+
         # notification (silent skip اگر env vars نباشد)
         try:
             from .notification_service import notification_service
@@ -2072,6 +2125,24 @@ class OversightService:
         return None
 
     async def delete_watched(self, watched_id: str) -> bool:
+        # 🤖 (Claude Auto-Runner) — اگر workflow نصب شده، **پیش از حذف
+        # watched** از ریپوی هدف uninstall کن. این کار خارج از lock انجام
+        # می‌شود (شامل HTTP) و اگر شکست خورد، حذف watched ادامه می‌یابد —
+        # کاربر می‌تواند بعداً دستی فایل را پاک کند.
+        try:
+            pre = next((w for w in self.watched if w.id == watched_id), None)
+            if pre and getattr(pre, "claude_runner_enabled", False):
+                _r = await self.disable_claude_runner(watched_id)
+                if not _r.get("success"):
+                    logger.warning(
+                        f"delete_watched: claude_runner uninstall errors: "
+                        f"{_r.get('errors')}"
+                    )
+        except Exception as _e:
+            logger.warning(
+                f"delete_watched: claude_runner uninstall raised: {_e}"
+            )
+
         async with self._lock:
             # 🆕 قبل از حذف، repo_full_name را پیدا کن تا blocklist را آپدیت کنیم
             target = next((w for w in self.watched if w.id == watched_id), None)
@@ -2102,6 +2173,124 @@ class OversightService:
             if w.id == watched_id:
                 return w
         return None
+
+    # ====================================================================
+    # 🆕 (Claude Auto-Runner) — enable/disable/status
+    # ====================================================================
+
+    def _claude_runner_env(self) -> Dict[str, str]:
+        """خواندن secret ها و config از env سرور.
+
+        برای جلوگیری از log کردن مقادیر، فقط presence/absence را برمی‌گرداند.
+        مقادیر واقعی فقط در زمان install/uninstall به sub-service پاس می‌شوند.
+        """
+        return {
+            "oauth_token": (os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or "").strip(),
+            "external_token": (os.environ.get("EXTERNAL_TOOL_TOKEN") or "").strip(),
+            "backend_url": (os.environ.get("OVERSIGHT_BACKEND_URL") or "").strip(),
+        }
+
+    async def enable_claude_runner(
+        self, watched_id: str, *, claude_args: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """نصب workflow Claude Auto-Runner روی یک پروژهٔ watched.
+
+        پیش‌نیازهای env: CLAUDE_CODE_OAUTH_TOKEN, EXTERNAL_TOOL_TOKEN,
+        OVERSIGHT_BACKEND_URL باید ست شده باشند. در غیر این صورت با خطای
+        قابل‌فهم برمی‌گردد و چیزی روی ریپو ست نمی‌کند.
+        """
+        watched = self._find_watched(watched_id)
+        if watched is None:
+            return {"success": False, "error": "watched_not_found"}
+        env = self._claude_runner_env()
+        missing = [k for k, v in env.items() if not v]
+        if missing:
+            return {
+                "success": False,
+                "error": "env_missing",
+                "missing": missing,
+                "hint": (
+                    "روی سرور Render این env varها را ست کنید: "
+                    "CLAUDE_CODE_OAUTH_TOKEN, EXTERNAL_TOOL_TOKEN, "
+                    "OVERSIGHT_BACKEND_URL"
+                ),
+            }
+        gh_token = get_github_token()
+        if not gh_token:
+            return {"success": False, "error": "no_github_token"}
+
+        from .claude_runner_bootstrap import install_runner, WORKFLOW_PATH
+
+        args = (
+            claude_args
+            or self.settings.get("claude_runner_default_args")
+            or "--max-turns 30 --model claude-opus-4-8"
+        )
+        result = await install_runner(
+            watched,
+            gh_token=gh_token,
+            oauth_token=env["oauth_token"],
+            external_token=env["external_token"],
+            backend_url=env["backend_url"],
+            claude_args=args,
+        )
+        async with self._lock:
+            watched.claude_runner_enabled = bool(result.get("success"))
+            watched.claude_runner_workflow_path = WORKFLOW_PATH if result.get("success") else None
+            watched.claude_runner_installed_at = (
+                now_iso() if result.get("success") else watched.claude_runner_installed_at
+            )
+            if result.get("success"):
+                watched.claude_runner_last_error = None
+            else:
+                watched.claude_runner_last_error = "; ".join(result.get("errors") or []) or "unknown"
+            self._save_watched()
+        return {
+            "success": bool(result.get("success")),
+            "errors": result.get("errors", []),
+            "watched": watched.to_dict(),
+        }
+
+    async def disable_claude_runner(self, watched_id: str) -> Dict[str, Any]:
+        """حذف workflow + secret ها از ریپو + خاموش کردن flag در state."""
+        watched = self._find_watched(watched_id)
+        if watched is None:
+            return {"success": False, "error": "watched_not_found"}
+        gh_token = get_github_token()
+        if not gh_token:
+            return {"success": False, "error": "no_github_token"}
+
+        from .claude_runner_bootstrap import uninstall_runner
+
+        result = await uninstall_runner(watched, gh_token=gh_token)
+        async with self._lock:
+            watched.claude_runner_enabled = False
+            watched.claude_runner_workflow_path = None
+            watched.claude_runner_last_error = (
+                None if result.get("success") else "; ".join(result.get("errors") or [])
+            )
+            self._save_watched()
+        return {
+            "success": bool(result.get("success")),
+            "errors": result.get("errors", []),
+            "watched": watched.to_dict(),
+        }
+
+    def get_claude_runner_status(self, watched_id: str) -> Dict[str, Any]:
+        """گزارش وضعیت Claude Runner برای یک watched (بدون call به GitHub)."""
+        watched = self._find_watched(watched_id)
+        if watched is None:
+            return {"success": False, "error": "watched_not_found"}
+        env = self._claude_runner_env()
+        return {
+            "success": True,
+            "enabled": bool(watched.claude_runner_enabled),
+            "installed_at": watched.claude_runner_installed_at,
+            "workflow_path": watched.claude_runner_workflow_path,
+            "last_error": watched.claude_runner_last_error,
+            "env_ready": all(env.values()),
+            "env_missing": [k for k, v in env.items() if not v],
+        }
 
     # ====================================================================
     # 🆕 (Reference Projects) — profile + normalization + validation
