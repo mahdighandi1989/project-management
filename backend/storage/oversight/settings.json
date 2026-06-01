@@ -1,8 +1,0 @@
-{
-  "default_models": [],
-  "allow_auto_push_global": false,
-  "max_parallel_runs": 2,
-  "scan_interval_hours": 24,
-  "claude_runner_auto_enable_new": false,
-  "claude_runner_default_args": "--max-turns 30 --model claude-opus-4-8"
-}

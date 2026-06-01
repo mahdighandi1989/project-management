@@ -67,3 +67,10 @@ temp/
 
 # Archive folder (old files)
 archive/
+
+# 🤖 runtime state — تولید توسط OversightService در runtime، tracked نباشد
+backend/storage/oversight/settings.json
+backend/storage/oversight/watched.json
+backend/storage/oversight/tasks.json
+backend/storage/oversight/reports.json
+backend/storage/oversight/removed_watched.json
