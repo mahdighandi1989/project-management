@@ -333,6 +333,42 @@ EVENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "default_sound": True,
         "icon": "💰",
     },
+    # 🤖 (Claude Auto-Runner) — feedback از مراحل اجرای خودکار workflow
+    "claude_runner_enable_attempt": {
+        "label": "🤖 Claude Auto-Runner نصب",
+        "help": "وقتی کاربر toggle «اجرای خودکار» روی پروژه را روشن می‌کند — تأیید نصب workflow + secret ها (یا گزارش خطا)",
+        "default_enabled": True,
+        "default_sound": False,
+        "icon": "🤖",
+    },
+    "claude_runner_disabled": {
+        "label": "🤖⏸ Claude Auto-Runner غیرفعال",
+        "help": "وقتی toggle «اجرای خودکار» خاموش می‌شود و workflow از ریپو پاک می‌شود",
+        "default_enabled": True,
+        "default_sound": False,
+        "icon": "🤖",
+    },
+    "external_runner_claimed": {
+        "label": "🏃 Claude شروع کرد",
+        "help": "وقتی Claude Auto-Runner در workflow یک تسک را برای اجرا claim کرد",
+        "default_enabled": True,
+        "default_sound": False,
+        "icon": "🏃",
+    },
+    "external_runner_completed": {
+        "label": "✅ Claude تسک را تکمیل کرد",
+        "help": "وقتی Claude Auto-Runner تسک را با موفقیت اجرا و push کرد (verify بعداً اجرا می‌شود)",
+        "default_enabled": True,
+        "default_sound": True,
+        "icon": "✅",
+    },
+    "external_runner_failed": {
+        "label": "❌ Claude شکست خورد",
+        "help": "وقتی Claude Auto-Runner نتوانست تسک را اجرا کند (با متن خطا و وضعیت retry)",
+        "default_enabled": True,
+        "default_sound": True,
+        "icon": "❌",
+    },
 }
 
 
