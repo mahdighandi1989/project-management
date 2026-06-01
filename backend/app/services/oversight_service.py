@@ -1808,6 +1808,27 @@ class OversightService:
             asyncio.create_task(self._autodetect_and_test_runtime(w.id))
         except Exception as _e:
             logger.debug(f"autodetect schedule failed: {_e}")
+
+        # 🤖 (Claude Auto-Runner) — اگر setting سراسری روشن است و env آماده،
+        # workflow + secret ها را خودکار روی این ریپوی جدید نصب کن. این
+        # best-effort + background است: اگر شکست خورد، watched ساخته
+        # می‌ماند و کاربر می‌تواند بعداً دستی روشن کند.
+        try:
+            if self.settings.get("claude_runner_auto_enable_new", False):
+                env = self._claude_runner_env()
+                if all(env.values()):
+                    asyncio.create_task(self.enable_claude_runner(w.id))
+                    logger.info(
+                        f"add_watched: claude_runner auto-enable scheduled for {w.id}"
+                    )
+                else:
+                    missing = [k for k, v in env.items() if not v]
+                    logger.info(
+                        f"add_watched: claude_runner auto-enable skipped — "
+                        f"env_missing={missing}"
+                    )
+        except Exception as _e:
+            logger.warning(f"claude_runner auto-enable failed: {_e}")
         return w.to_dict()
 
     async def autodetect_runtime_for_all_watched(self) -> Dict[str, Any]:
@@ -1993,6 +2014,19 @@ class OversightService:
         except Exception as _e:
             logger.debug(f"autodetect schedule (auto_register) failed: {_e}")
 
+        # 🤖 (Claude Auto-Runner) — همان منطق add_watched
+        try:
+            if self.settings.get("claude_runner_auto_enable_new", False):
+                env = self._claude_runner_env()
+                if all(env.values()):
+                    asyncio.create_task(self.enable_claude_runner(w.id))
+                    logger.info(
+                        f"auto_register_watched: claude_runner auto-enable "
+                        f"scheduled for {w.id} (source={source})"
+                    )
+        except Exception as _e:
+            logger.warning(f"claude_runner auto-enable (auto_register) failed: {_e}")
+
         # notification (silent skip اگر env vars نباشد)
         try:
             from .notification_service import notification_service
@@ -2091,6 +2125,24 @@ class OversightService:
         return None
 
     async def delete_watched(self, watched_id: str) -> bool:
+        # 🤖 (Claude Auto-Runner) — اگر workflow نصب شده، **پیش از حذف
+        # watched** از ریپوی هدف uninstall کن. این کار خارج از lock انجام
+        # می‌شود (شامل HTTP) و اگر شکست خورد، حذف watched ادامه می‌یابد —
+        # کاربر می‌تواند بعداً دستی فایل را پاک کند.
+        try:
+            pre = next((w for w in self.watched if w.id == watched_id), None)
+            if pre and getattr(pre, "claude_runner_enabled", False):
+                _r = await self.disable_claude_runner(watched_id)
+                if not _r.get("success"):
+                    logger.warning(
+                        f"delete_watched: claude_runner uninstall errors: "
+                        f"{_r.get('errors')}"
+                    )
+        except Exception as _e:
+            logger.warning(
+                f"delete_watched: claude_runner uninstall raised: {_e}"
+            )
+
         async with self._lock:
             # 🆕 قبل از حذف، repo_full_name را پیدا کن تا blocklist را آپدیت کنیم
             target = next((w for w in self.watched if w.id == watched_id), None)

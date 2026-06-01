@@ -139,6 +139,11 @@ interface Watched {
     login_failed_count?: number;
     last_error?: string | null;
   } | null;
+  // 🆕 (Claude Auto-Runner) — وضعیت نصب workflow اجرای خودکار با Claude Code
+  claude_runner_enabled?: boolean;
+  claude_runner_installed_at?: string | null;
+  claude_runner_last_error?: string | null;
+  claude_runner_workflow_path?: string | null;
 }
 
 // 🔬 (Runtime Verify Stage 1) — ساختار AC جدید
@@ -6024,6 +6029,65 @@ function WatchedCard({
   const [tagInput, setTagInput] = useState('');
   const [intervalH, setIntervalH] = useState(w.interval_hours);
   const [scanH, setScanH] = useState(w.scan_interval_hours ?? 168);
+  // 🤖 (Claude Auto-Runner) — لوکال state برای toggle و نمایش وضعیت/خطا
+  const [runnerEnabled, setRunnerEnabled] = useState<boolean>(
+    !!w.claude_runner_enabled,
+  );
+  const [runnerLoading, setRunnerLoading] = useState(false);
+  const [runnerError, setRunnerError] = useState<string | null>(
+    w.claude_runner_last_error || null,
+  );
+  const [runnerEnvMissing, setRunnerEnvMissing] = useState<string[]>([]);
+
+  const toggleClaudeRunner = async () => {
+    const wantOn = !runnerEnabled;
+    if (runnerLoading) return;
+    setRunnerLoading(true);
+    setRunnerError(null);
+    setRunnerEnvMissing([]);
+    try {
+      const path = wantOn ? 'enable' : 'disable';
+      const res = await fetch(
+        `${API_BASE}/api/oversight/watched/${w.id}/claude-runner/${path}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: wantOn ? JSON.stringify({}) : undefined,
+        },
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (
+          res.status === 400 &&
+          typeof data?.detail === 'object' &&
+          data.detail?.error === 'env_missing'
+        ) {
+          setRunnerEnvMissing(data.detail.missing || []);
+          setRunnerError(
+            data.detail.hint ||
+              'env varهای CLAUDE_CODE_OAUTH_TOKEN / EXTERNAL_TOOL_TOKEN / OVERSIGHT_BACKEND_URL روی سرور ست نیست.',
+          );
+        } else {
+          setRunnerError(
+            (typeof data?.detail === 'string' ? data.detail : JSON.stringify(data?.detail)) ||
+              `HTTP ${res.status}`,
+          );
+        }
+        return;
+      }
+      setRunnerEnabled(!!data.watched?.claude_runner_enabled || (wantOn && !data.errors?.length));
+      const errs: string[] = data.errors || [];
+      if (errs.length > 0) {
+        setRunnerError(errs.join('؛ '));
+      } else {
+        setRunnerError(null);
+      }
+    } catch (e: any) {
+      setRunnerError(e?.message || 'خطای شبکه');
+    } finally {
+      setRunnerLoading(false);
+    }
+  };
   // 🔬 (Runtime Verify) — collapsible section state, closed by default
   const [runtimeOpen, setRuntimeOpen] = useState(false);
   const [runtimeBusy, setRuntimeBusy] = useState(false);
@@ -8000,6 +8064,27 @@ function WatchedCard({
         >
           📊 گزارش‌ها ({reportCount})
         </button>
+        {/* 🤖 (Claude Auto-Runner) — toggle نصب workflow اجرای خودکار */}
+        <button
+          onClick={toggleClaudeRunner}
+          disabled={runnerLoading}
+          title={
+            runnerEnabled
+              ? `🤖 اجرای خودکار با Claude Code فعال است (workflow روی این ریپو نصب شده). کلیک: غیرفعال کردن و حذف workflow${runnerError ? `\n⚠️ ${runnerError}` : ''}`
+              : `اجرای خودکار با Claude Code: هر تسکی که به فولدر prompt/ این ریپو push شود، توسط Claude Code (headless) در GitHub Actions اجرا و مستقیماً به main commit/push می‌شود. کلیک: نصب workflow${runnerError ? `\n⚠️ ${runnerError}` : ''}`
+          }
+          className={`px-3 py-1.5 rounded text-sm flex items-center gap-1 ${
+            runnerEnabled
+              ? 'bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300 hover:bg-green-200'
+              : 'bg-gray-200 dark:bg-gray-700 dark:text-white hover:bg-gray-300'
+          } ${runnerLoading ? 'opacity-60 cursor-wait' : ''}`}
+        >
+          {runnerLoading ? '⏳' : runnerEnabled ? '🤖✅' : '🤖⏸'}{' '}
+          اجرای خودکار
+          {runnerError && !runnerLoading && (
+            <span className="text-amber-500 text-xs" title={runnerError}>⚠️</span>
+          )}
+        </button>
         <button
           onClick={onRemove}
           className="px-3 py-1.5 bg-red-100 dark:bg-red-900/40 text-red-600 dark:text-red-300 rounded text-sm hover:bg-red-200 mr-auto"
@@ -8007,6 +8092,14 @@ function WatchedCard({
           🗑 حذف
         </button>
       </div>
+      {/* 🤖 (Claude Auto-Runner) — نمایش جزئیات خطا اگر env_missing */}
+      {runnerEnvMissing.length > 0 && (
+        <div className="mt-2 p-2 rounded bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 text-xs text-amber-800 dark:text-amber-200">
+          ⚠️ env vars زیر روی سرور ست نیستند: <code>{runnerEnvMissing.join(', ')}</code>
+          <br />
+          روی Render → Environment این مقادیر را ست کنید سپس دوباره تلاش کنید.
+        </div>
+      )}
     </div>
   );
 }
