@@ -367,6 +367,31 @@ async def claude_runner_status(watched_id: str):
     return result
 
 
+@router.get("/watched/{watched_id}/claude-runner/runs")
+async def claude_runner_runs(
+    watched_id: str,
+    limit: int = Query(default=10, ge=1, le=50),
+):
+    """فهرست اجراهای اخیر workflow Claude Auto-Runner (proxy به GitHub Actions API).
+
+    اگر workflow نصب نشده باشد (404 از GitHub)، لیست خالی برمی‌گرداند
+    (success=True, note=workflow_not_found_or_no_runs_yet).
+    """
+    service = get_oversight_service()
+    result = await service.list_claude_runner_runs(watched_id, limit=limit)
+    if not result.get("success"):
+        err = result.get("error", "")
+        if err == "watched_not_found":
+            raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+        if err == "no_github_token":
+            raise HTTPException(
+                status_code=503,
+                detail="GitHub token در سرور تنظیم نشده — نمی‌توان لیست runs را گرفت.",
+            )
+        raise HTTPException(status_code=502, detail=err)
+    return result
+
+
 # 🔬 (Bug C6 — Verify v6 chunk 7) — verify-trace endpoint (AC #10)
 # trace کامل آخرین (یا specific report) verify v6 را برمی‌گرداند.
 @router.get("/tasks/{task_id}/verify-trace")
