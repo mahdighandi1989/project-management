@@ -2245,6 +2245,36 @@ class OversightService:
             else:
                 watched.claude_runner_last_error = "; ".join(result.get("errors") or []) or "unknown"
             self._save_watched()
+        # 🆕 Telegram feedback: نصب runner — تأیید فوری برای کاربر
+        try:
+            from .notification_service import notification_service
+            ok = bool(result.get("success"))
+            errs = result.get("errors") or []
+            if ok:
+                msg = (
+                    f"🤖 *Claude Auto-Runner فعال شد*\n\n"
+                    f"📁 `{watched.repo_full_name}`\n"
+                    f"📂 workflow: `{WORKFLOW_PATH}`\n\n"
+                    f"از این پس هر تسکی که به این پروژه اضافه شود، خودکار "
+                    f"توسط Claude Code (headless) اجرا و مستقیماً به main "
+                    f"commit و push می‌شود."
+                )
+            else:
+                msg = (
+                    f"⚠️ *نصب Claude Auto-Runner ناموفق*\n\n"
+                    f"📁 `{watched.repo_full_name}`\n"
+                    f"🔍 خطاها:\n" + "\n".join(f"  • {e}" for e in errs[:5])
+                )
+            asyncio.create_task(notification_service.notify_event(
+                "claude_runner_enable_attempt",
+                msg,
+                subject="Claude Runner",
+                priority="low",
+                project_name=watched.repo_full_name,
+                watched_id=watched.id,
+            ))
+        except Exception as _e:
+            logger.debug(f"enable_claude_runner notification skipped: {_e}")
         return {
             "success": bool(result.get("success")),
             "errors": result.get("errors", []),
@@ -2270,6 +2300,22 @@ class OversightService:
                 None if result.get("success") else "; ".join(result.get("errors") or [])
             )
             self._save_watched()
+        # 🆕 Telegram feedback: غیرفعال‌سازی runner
+        try:
+            from .notification_service import notification_service
+            asyncio.create_task(notification_service.notify_event(
+                "claude_runner_disabled",
+                f"🤖⏸ *Claude Auto-Runner غیرفعال شد*\n\n"
+                f"📁 `{watched.repo_full_name}`\n"
+                f"workflow و secret ها از ریپو حذف شدند. تسک‌های جدید "
+                f"همچنان به prompt/ push می‌شوند ولی خودکار اجرا نخواهند شد.",
+                subject="Claude Runner",
+                priority="low",
+                project_name=watched.repo_full_name,
+                watched_id=watched.id,
+            ))
+        except Exception as _e:
+            logger.debug(f"disable_claude_runner notification skipped: {_e}")
         return {
             "success": bool(result.get("success")),
             "errors": result.get("errors", []),
