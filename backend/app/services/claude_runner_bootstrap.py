@@ -132,7 +132,10 @@ def build_workflow_yaml(
 
 name: Claude Auto Task Runner
 
-on:
+# 'on' را به‌صورت string quote می‌کنیم چون در YAML 1.1، on/off/yes/no
+# مقدار boolean هستند. GitHub Actions هر دو فرم را می‌پذیرد ولی این
+# فرم با همهٔ YAML parserها سازگار است.
+"on":
   push:
     branches:
       - {branch}
@@ -408,3 +411,122 @@ async def uninstall_runner(
         "success": len(errors) == 0,
         "errors": errors,
     }
+
+
+# ----------------------------------------------------------------------
+# Recent runs viewer (Phase 4)
+# ----------------------------------------------------------------------
+
+async def list_workflow_runs(
+    watched: Any, *, gh_token: str, limit: int = 10,
+) -> Dict[str, Any]:
+    """فهرست اجراهای اخیر workflow Claude Auto-Runner برای یک ریپو.
+
+    از GitHub Actions API استفاده می‌کند:
+      GET /repos/{owner}/{repo}/actions/workflows/{workflow_file}/runs
+
+    Returns:
+      {
+        "success": bool,
+        "runs": [
+          {
+            "id": int,
+            "run_number": int,
+            "status": str,          # queued | in_progress | completed
+            "conclusion": str|null, # success | failure | cancelled | ... | null
+            "created_at": str,
+            "updated_at": str,
+            "html_url": str,        # لینک به صفحهٔ run در GitHub
+            "head_sha": str,
+            "head_commit_message": str,
+            "duration_seconds": int|null,
+          },
+          ...
+        ],
+        "html_url_workflow": str,  # لینک به صفحهٔ workflow در tab Actions
+        "total_count": int,
+      }
+    """
+    resolved = _resolve_repo_and_branch(watched)
+    if not resolved:
+        return {"success": False, "error": "repo_not_resolvable"}
+    if not gh_token:
+        return {"success": False, "error": "no_github_token"}
+    owner, repo, _branch = resolved
+
+    pr = get_github_pr_service()
+    # workflow file path (همان WORKFLOW_PATH ولی فقط نام فایل)
+    workflow_filename = WORKFLOW_PATH.split("/")[-1]
+    url = (
+        f"{pr.GITHUB_API}/repos/{owner}/{repo}/actions/workflows/"
+        f"{workflow_filename}/runs"
+    )
+    headers = pr._get_headers(token=gh_token)  # noqa: SLF001
+    params = {"per_page": max(1, min(int(limit or 10), 50))}
+    res = await pr._gh_request("GET", url, headers=headers, params=params)  # noqa: SLF001
+    if not res.get("ok"):
+        status = res.get("status")
+        # 404 یعنی workflow هرگز نصب نشده یا اجرا نشده — این خطا نیست
+        if status == 404:
+            return {
+                "success": True,
+                "runs": [],
+                "total_count": 0,
+                "html_url_workflow": (
+                    f"https://github.com/{owner}/{repo}/actions"
+                ),
+                "note": "workflow_not_found_or_no_runs_yet",
+            }
+        return {
+            "success": False,
+            "error": (
+                f"runs_list_failed status={status} "
+                f"body={(res.get('body_text') or '')[:200]}"
+            ),
+        }
+
+    body = res.get("body_json") or {}
+    raw_runs = body.get("workflow_runs") or []
+
+    def _duration_seconds(r: Dict[str, Any]) -> Optional[int]:
+        try:
+            from datetime import datetime as _dt
+            ca = r.get("run_started_at") or r.get("created_at")
+            ua = r.get("updated_at")
+            if ca and ua and (r.get("status") == "completed"):
+                t0 = _dt.fromisoformat(ca.replace("Z", "+00:00"))
+                t1 = _dt.fromisoformat(ua.replace("Z", "+00:00"))
+                return int((t1 - t0).total_seconds())
+        except Exception:
+            pass
+        return None
+
+    runs: list = []
+    for r in raw_runs:
+        head_commit = r.get("head_commit") or {}
+        runs.append({
+            "id": r.get("id"),
+            "run_number": r.get("run_number"),
+            "status": r.get("status"),
+            "conclusion": r.get("conclusion"),
+            "created_at": r.get("created_at"),
+            "updated_at": r.get("updated_at"),
+            "html_url": r.get("html_url"),
+            "head_sha": (r.get("head_sha") or "")[:8],
+            "head_commit_message": (
+                (head_commit.get("message") or "").splitlines()[0][:120]
+                if head_commit else ""
+            ),
+            "duration_seconds": _duration_seconds(r),
+        })
+
+    return {
+        "success": True,
+        "runs": runs,
+        "total_count": body.get("total_count") or len(runs),
+        "html_url_workflow": (
+            f"https://github.com/{owner}/{repo}/actions/workflows/"
+            f"{workflow_filename}"
+        ),
+    }
+

@@ -6038,6 +6038,50 @@ function WatchedCard({
     w.claude_runner_last_error || null,
   );
   const [runnerEnvMissing, setRunnerEnvMissing] = useState<string[]>([]);
+  // 🤖 (Phase 4) — پنل «اجراهای اخیر» (collapsible)
+  const [runsOpen, setRunsOpen] = useState(false);
+  const [runsLoading, setRunsLoading] = useState(false);
+  const [runsError, setRunsError] = useState<string | null>(null);
+  const [runsData, setRunsData] = useState<{
+    runs: Array<{
+      id: number;
+      run_number: number;
+      status: string;
+      conclusion: string | null;
+      created_at: string;
+      updated_at: string;
+      html_url: string;
+      head_sha: string;
+      head_commit_message: string;
+      duration_seconds: number | null;
+    }>;
+    total_count: number;
+    html_url_workflow?: string;
+    note?: string;
+  } | null>(null);
+
+  const fetchRuns = useCallback(async () => {
+    if (runsLoading) return;
+    setRunsLoading(true);
+    setRunsError(null);
+    try {
+      const r = await fetch(
+        `${API_BASE}/api/oversight/watched/${w.id}/claude-runner/runs?limit=10`,
+      );
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setRunsError(
+          typeof d?.detail === 'string' ? d.detail : `HTTP ${r.status}`,
+        );
+        return;
+      }
+      setRunsData(d);
+    } catch (e: any) {
+      setRunsError(e?.message || 'خطای شبکه');
+    } finally {
+      setRunsLoading(false);
+    }
+  }, [w.id, runsLoading]);
 
   const toggleClaudeRunner = async () => {
     const wantOn = !runnerEnabled;
@@ -8099,6 +8143,120 @@ function WatchedCard({
           <br />
           روی Render → Environment این مقادیر را ست کنید سپس دوباره تلاش کنید.
         </div>
+      )}
+      {/* 🤖 (Phase 4) — پنل اجراهای اخیر workflow (فقط اگر runner enabled) */}
+      {runnerEnabled && (
+        <details
+          className="mt-2 border border-gray-200 dark:border-gray-700 rounded p-2"
+          onToggle={(e) => {
+            const open = (e.target as HTMLDetailsElement).open;
+            setRunsOpen(open);
+            if (open && !runsData && !runsLoading) {
+              fetchRuns();
+            }
+          }}
+        >
+          <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-200 select-none flex items-center gap-2">
+            📜 اجراهای خودکار اخیر
+            {runsData && (
+              <span className="text-xs text-gray-400">
+                ({runsData.total_count})
+              </span>
+            )}
+            {runsOpen && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  fetchRuns();
+                }}
+                className="ml-auto text-xs text-blue-500 hover:text-blue-600"
+              >
+                🔄 رفرش
+              </button>
+            )}
+          </summary>
+          <div className="mt-2">
+            {runsLoading && (
+              <div className="text-xs text-gray-400">در حال بارگذاری…</div>
+            )}
+            {runsError && (
+              <div className="text-xs text-red-500">⚠️ {runsError}</div>
+            )}
+            {!runsLoading && !runsError && runsData && (
+              <>
+                {runsData.runs.length === 0 ? (
+                  <div className="text-xs text-gray-400 italic">
+                    {runsData.note === 'workflow_not_found_or_no_runs_yet'
+                      ? 'هنوز اجرایی ثبت نشده — تسک جدید بساز تا workflow فعال شود.'
+                      : 'هیچ اجرایی یافت نشد.'}
+                  </div>
+                ) : (
+                  <ul className="space-y-1 max-h-60 overflow-y-auto">
+                    {runsData.runs.map((r) => {
+                      const isDone = r.status === 'completed';
+                      const ok = r.conclusion === 'success';
+                      const failed = r.conclusion === 'failure' || r.conclusion === 'cancelled' || r.conclusion === 'timed_out';
+                      const icon = !isDone
+                        ? '⏳'
+                        : ok
+                        ? '✅'
+                        : failed
+                        ? '❌'
+                        : '⚠️';
+                      const dur =
+                        r.duration_seconds != null
+                          ? r.duration_seconds < 60
+                            ? `${r.duration_seconds}s`
+                            : `${Math.round(r.duration_seconds / 60)}m`
+                          : '';
+                      return (
+                        <li
+                          key={r.id}
+                          className="text-xs flex items-center gap-2 p-1 rounded hover:bg-gray-50 dark:hover:bg-gray-700/40"
+                        >
+                          <span title={`${r.status} / ${r.conclusion || 'in_progress'}`}>{icon}</span>
+                          <span className="text-gray-500 dark:text-gray-400">
+                            #{r.run_number}
+                          </span>
+                          <span
+                            className="truncate flex-1 text-gray-700 dark:text-gray-200"
+                            title={r.head_commit_message}
+                          >
+                            {r.head_commit_message || '(بدون پیام commit)'}
+                          </span>
+                          {dur && (
+                            <span className="text-gray-400 text-xs">{dur}</span>
+                          )}
+                          <a
+                            href={r.html_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-blue-500 hover:text-blue-600 text-xs"
+                            title="مشاهده در GitHub Actions"
+                          >
+                            ↗
+                          </a>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+                {runsData.html_url_workflow && (
+                  <a
+                    href={runsData.html_url_workflow}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="mt-2 inline-block text-xs text-blue-500 hover:text-blue-600"
+                  >
+                    🔗 مشاهدهٔ همهٔ اجراها در GitHub Actions →
+                  </a>
+                )}
+              </>
+            )}
+          </div>
+        </details>
       )}
     </div>
   );

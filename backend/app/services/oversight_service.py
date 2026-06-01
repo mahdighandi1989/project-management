@@ -2292,6 +2292,26 @@ class OversightService:
             "env_missing": [k for k, v in env.items() if not v],
         }
 
+    async def list_claude_runner_runs(
+        self, watched_id: str, *, limit: int = 10,
+    ) -> Dict[str, Any]:
+        """فهرست اجراهای اخیر workflow این پروژه (proxy به GitHub Actions API).
+
+        نتیجه برای نمایش در پنل «اجراهای خودکار اخیر» استفاده می‌شود.
+        کاربر روی هر run می‌تواند کلیک کند و مستقیماً به صفحه Actions
+        گیت‌هاب برود.
+        """
+        watched = self._find_watched(watched_id)
+        if watched is None:
+            return {"success": False, "error": "watched_not_found"}
+        gh_token = get_github_token()
+        if not gh_token:
+            return {"success": False, "error": "no_github_token"}
+        from .claude_runner_bootstrap import list_workflow_runs
+        return await list_workflow_runs(
+            watched, gh_token=gh_token, limit=limit,
+        )
+
     # ====================================================================
     # 🆕 (Reference Projects) — profile + normalization + validation
     # ====================================================================
