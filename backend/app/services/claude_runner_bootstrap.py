@@ -55,7 +55,13 @@ MASTER_PROMPT = (
     "این پرامپت را کامل بخوان (نه skim). به شاخه main برو. از endpoint "
     "$OVERSIGHT_BACKEND_URL/api/external/prompts/next?watched_id=$WATCHED_ID "
     "(header X-External-Token: $OVERSIGHT_EXTERNAL_TOKEN) لیست تسک‌های pending "
-    "را به ترتیب اولویت بگیر. برای هر تسک:\n"
+    "را به ترتیب اولویت بگیر.\n"
+    "\n"
+    "اگر لیست خالی برگشت یا API در دسترس نبود: یک خط log بنویس "
+    "'no pending tasks — exiting cleanly' و کار را با success تمام کن. "
+    "هیچ تسک خیالی نساز، هیچ commit نزن.\n"
+    "\n"
+    "برای هر تسک:\n"
     "\n"
     "1) endpoint POST /api/external/prompts/{task_id}/claim با body "
     "{\"agent\":\"claude-code-action\"} لاک تسک را بگیر. اگر 409 خوردی، "
@@ -140,8 +146,11 @@ name: Claude Auto Task Runner
     branches:
       - {branch}
     paths:
+      # فقط روی index trigger شو — markdown task files با هر تغییر prompt
+      # خودکار push می‌شوند ولی signal واقعی «تسک جدید آماده» همان آپدیت
+      # index است (backend پس از sync فایل، index را debounced رفرش می‌کند).
+      # این از trigger مضاعف (یک‌بار برای md، یک‌بار برای index) جلوگیری می‌کند.
       - 'prompt/_index.json'
-      - 'prompt/**.md'
   # امکان trigger دستی از تب Actions
   workflow_dispatch: {{}}
 
@@ -354,7 +363,22 @@ async def install_runner(
         token=gh_token,
     )
     if not upsert.get("success"):
-        errors.append(f"workflow_push_failed: {upsert.get('error')}")
+        # 🛡 تشخیص دقیق علت 403/422 برای راهنمایی کاربر
+        err_text = str(upsert.get("error") or "")
+        if (
+            "refusing to allow" in err_text.lower()
+            or "workflow" in err_text.lower()
+            or "without `workflow`" in err_text
+            or "403" in err_text
+        ):
+            errors.append(
+                "workflow_push_failed: GitHub توکن شما اجازهٔ نوشتن در "
+                ".github/workflows/ ندارد. توکن باید scope `workflow` "
+                "داشته باشد (یا fine-grained PAT با اجازهٔ 'Workflows: "
+                "write'). توکن را تنظیم مجدد کنید و دوباره تلاش کنید."
+            )
+        else:
+            errors.append(f"workflow_push_failed: {err_text}")
 
     return {
         "success": len(errors) == 0,

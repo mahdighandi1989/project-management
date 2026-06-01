@@ -34,18 +34,32 @@ PROMPT_DIR = "prompt"
 ARCHIVE_DIR = "prompt/archive"
 INDEX_PATH = "prompt/_index.json"
 
-# 🆕 (deploy-loop prevention) marker که در همهٔ commit messages قرار می‌گیرد
-# تا Render auto-deploy و GitHub Actions trigger نشوند. اگر backend خودش
-# در فهرست watched باشد، این marker از حلقه‌ی deploy جلوگیری می‌کند.
+# 🆕 (deploy-loop prevention) marker — به‌صورت conditional اعمال می‌شود.
+# - `[skip render]` همیشه (روی ریپوهای غیر-backend هم harmless است)
+# - `[skip ci]` فقط روی ریپوی self-backend (که در PROMPT_SYNC_EXCLUDE_REPOS است)
+# علت: روی ریپوهای دیگر **می‌خواهیم** GitHub Actions trigger شود (به‌خصوص
+# workflow «Claude Auto-Runner» که هدفش دقیقاً اجرا روی push تسک‌های جدید
+# به prompt/ است). اگر `[skip ci]` همه‌جا اعمال می‌شد، آن workflow هرگز
+# trigger نمی‌گرفت.
+SKIP_RENDER_MARKER = "[skip render]"
 SKIP_CI_MARKER = "[skip render][skip ci]"
 
 
-def _commit_message(verb: str, *, details: str = "") -> str:
-    """commit message یکپارچه با skip-CI marker."""
+def _commit_message(verb: str, *, details: str = "", target_repo: str = "") -> str:
+    """commit message یکپارچه با marker مناسب.
+
+    اگر `target_repo` در PROMPT_SYNC_EXCLUDE_REPOS باشد (یعنی ریپوی خودِ
+    backend)، marker کامل `[skip render][skip ci]` گذاشته می‌شود تا
+    deploy loop نشود. در غیر این صورت فقط `[skip render]` گذاشته می‌شود
+    تا Claude Auto-Runner workflow بتواند trigger شود.
+    """
     base = f"chore(prompt): {verb}"
     if details:
         base = f"{base} — {details}"
-    return f"{base}\n\n{SKIP_CI_MARKER}"
+    repo_lc = (target_repo or "").strip().lower()
+    is_self = bool(repo_lc and repo_lc in _excluded_repos())
+    marker = SKIP_CI_MARKER if is_self else SKIP_RENDER_MARKER
+    return f"{base}\n\n{marker}"
 
 
 # repo های مستثنی (مثلاً backend خودش) — از env var
@@ -279,6 +293,7 @@ async def sync_task_to_github(task: Any, watched: Any, *, token: str) -> Dict[st
                 message=_commit_message(
                     f"move task {task.id}",
                     details=("archive" if archived else "unarchive"),
+                    target_repo=watched.repo_full_name,
                 ),
                 branch=branch,
                 token=token,
@@ -298,6 +313,7 @@ async def sync_task_to_github(task: Any, watched: Any, *, token: str) -> Dict[st
             content=body,
             message=_commit_message(
                 f"sync task {task.id}", details=task.title[:80],
+                target_repo=watched.repo_full_name,
             ),
             branch=branch,
             token=token,
@@ -332,7 +348,10 @@ async def delete_task_from_github(task: Any, watched: Any, *, token: str) -> Dic
             owner=owner,
             repo=repo,
             path=path,
-            message=_commit_message(f"delete task {task.id}"),
+            message=_commit_message(
+                f"delete task {task.id}",
+                target_repo=watched.repo_full_name,
+            ),
             branch=branch,
             token=token,
             sha=getattr(task, "github_prompt_sha", None),
@@ -405,6 +424,7 @@ async def rebuild_project_index(
             content=content,
             message=_commit_message(
                 "rebuild index", details=f"{len(pickable)} tasks",
+                target_repo=watched.repo_full_name,
             ),
             branch=branch,
             token=token,
