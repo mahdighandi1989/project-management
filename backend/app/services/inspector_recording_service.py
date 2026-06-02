@@ -94,6 +94,11 @@ class RecordingSession:
     transcript_model: str = ""
     visual_summary: List[Dict[str, Any]] = field(default_factory=list)
     location_timeline: List[Dict[str, Any]] = field(default_factory=list)  # mode B
+    # 🆕 (Multimodal Unified Analysis) — وقتی analyze_recording_multimodal
+    # موفق شد، intent extracted + key references + log signals را اینجا
+    # ذخیره می‌کند تا stage_synthesize از آنها برای ساخت پرامپت قوی‌تر
+    # استفاده کند (به‌جای محاسبه دوباره از خام).
+    extra_context: Dict[str, Any] = field(default_factory=dict)
     prompt: str = ""
     prompt_model: str = ""
     final_video_path: Optional[Path] = None

@@ -184,124 +184,40 @@ def _build_telegram_caption(session, user_note: str, task_id: Optional[str] = No
 async def _send_to_telegram_video(
     file_bytes: bytes, filename: str, caption: str
 ) -> Dict[str, Any]:
-    """ارسال video به تلگرام با sendVideo API (به‌جای sendDocument).
+    """ارسال video/animation به Telegram — استفاده از TelegramChannel.send_video
+    (extended در commit audit) به‌جای direct API call.
 
-    sendVideo اجازه پخش inline در تلگرام را می‌دهد. اگر file_size > 50MB،
-    باید به sendDocument fallback کنیم چون sendVideo سختگیرتر است.
+    این روش از retry/parse_mode fallback و pattern موجود notification_service
+    استفاده می‌کند.
     """
-    import aiohttp
-
-    bot_token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
-    chat_id = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
-    if not bot_token or not chat_id:
-        return {"ok": False, "error": "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID پیکربندی نشده"}
-
-    # تشخیص content_type
-    fname_low = filename.lower()
-    if fname_low.endswith(".webm"):
-        ctype = "video/webm"
-    elif fname_low.endswith(".mp4"):
-        ctype = "video/mp4"
-    elif fname_low.endswith(".webp"):
-        ctype = "image/webp"
-    else:
-        ctype = "application/octet-stream"
-
-    # برای webp animated از sendAnimation استفاده کن
-    if ctype == "image/webp":
-        url = f"https://api.telegram.org/bot{bot_token}/sendAnimation"
-        field_name = "animation"
-    elif ctype.startswith("video/"):
-        url = f"https://api.telegram.org/bot{bot_token}/sendVideo"
-        field_name = "video"
-    else:
-        # fallback به document
-        url = f"https://api.telegram.org/bot{bot_token}/sendDocument"
-        field_name = "document"
-
-    form = aiohttp.FormData()
-    form.add_field("chat_id", chat_id)
-    if caption:
-        form.add_field("caption", caption[:MAX_CAPTION_CHARS])
-        form.add_field("parse_mode", "Markdown")
-    form.add_field(
-        field_name, file_bytes, filename=filename, content_type=ctype
-    )
-
     try:
-        timeout = aiohttp.ClientTimeout(total=120)
-        async with aiohttp.ClientSession(timeout=timeout) as session_http:
-            async with session_http.post(url, data=form) as r:
-                body = await r.text()
-                if r.status != 200:
-                    # retry بدون parse_mode اگر Markdown مشکل بود
-                    if "can't parse" in body.lower():
-                        form2 = aiohttp.FormData()
-                        form2.add_field("chat_id", chat_id)
-                        if caption:
-                            form2.add_field("caption", caption[:MAX_CAPTION_CHARS])
-                        form2.add_field(
-                            field_name, file_bytes, filename=filename, content_type=ctype
-                        )
-                        async with session_http.post(url, data=form2) as r2:
-                            if r2.status == 200:
-                                try:
-                                    j2 = json.loads(await r2.text())
-                                    return {"ok": True, "message_id": j2.get("result", {}).get("message_id")}
-                                except Exception:
-                                    return {"ok": True}
-                            body2 = await r2.text()
-                            return {"ok": False, "error": f"HTTP {r2.status}: {body2[:300]}"}
-                    return {"ok": False, "error": f"HTTP {r.status}: {body[:300]}"}
-                try:
-                    j = json.loads(body)
-                    return {
-                        "ok": True,
-                        "message_id": j.get("result", {}).get("message_id"),
-                        "file_id": (j.get("result", {}).get(field_name) or {}).get("file_id"),
-                    }
-                except Exception:
-                    return {"ok": True}
+        from .notification_service import notification_service
+        tg = notification_service._telegram()
+        is_animation = filename.lower().endswith(".webp")
+        return await tg.send_video(
+            file_bytes, filename,
+            caption=caption,
+            is_animation=is_animation,
+            silent=False,
+        )
     except Exception as e:
-        return {"ok": False, "error": f"send_video exception: {str(e)[:300]}"}
+        return {"ok": False, "error": f"send_video wrapper exception: {str(e)[:300]}"}
 
 
 async def _send_to_telegram_audio(
     file_bytes: bytes, filename: str, caption: str = ""
 ) -> Dict[str, Any]:
-    """ارسال audio به Telegram به‌صورت document. (audio با sendAudio هم
-    ممکن است ولی document قابل اطمینان‌تر است.)
-    """
-    import aiohttp
-
-    bot_token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
-    chat_id = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
-    if not bot_token or not chat_id:
-        return {"ok": False, "error": "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID پیکربندی نشده"}
-
-    url = f"https://api.telegram.org/bot{bot_token}/sendAudio"
-    form = aiohttp.FormData()
-    form.add_field("chat_id", chat_id)
-    if caption:
-        form.add_field("caption", caption[:MAX_CAPTION_CHARS])
-    form.add_field(
-        "audio", file_bytes, filename=filename, content_type="audio/webm"
-    )
-
+    """ارسال audio به Telegram — استفاده از TelegramChannel.send_audio."""
     try:
-        timeout = aiohttp.ClientTimeout(total=60)
-        async with aiohttp.ClientSession(timeout=timeout) as session_http:
-            async with session_http.post(url, data=form) as r:
-                body = await r.text()
-                if r.status != 200:
-                    return {"ok": False, "error": f"HTTP {r.status}: {body[:300]}"}
-                try:
-                    j = json.loads(body)
-                    return {"ok": True, "message_id": j.get("result", {}).get("message_id")}
-                except Exception:
-                    return {"ok": True}
+        from .notification_service import notification_service
+        tg = notification_service._telegram()
+        return await tg.send_audio(
+            file_bytes, filename,
+            caption=caption,
+            silent=False,
+        )
     except Exception as e:
-        return {"ok": False, "error": f"send_audio exception: {str(e)[:300]}"}
+        return {"ok": False, "error": f"send_audio wrapper exception: {str(e)[:300]}"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

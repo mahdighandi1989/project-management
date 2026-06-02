@@ -644,6 +644,123 @@ class TelegramChannel(NotificationChannel):
         except Exception as e:
             return {"ok": False, "channel": self.name, "error": str(e)[:300]}
 
+    async def send_video(
+        self, file_bytes: bytes, filename: str, *,
+        caption: Optional[str] = None, silent: bool = False,
+        is_animation: bool = False,
+    ) -> Dict[str, Any]:
+        """ارسال ویدئو (webm/mp4) یا anim (webp animated). از sendVideo /
+        sendAnimation API به‌جای sendDocument استفاده می‌کند تا پخش inline در
+        Telegram ممکن باشد.
+        """
+        if not self.is_configured():
+            return {"ok": False, "channel": self.name, "error": "TELEGRAM_BOT_TOKEN/CHAT_ID خالی است"}
+        fname_low = filename.lower()
+        # تشخیص content_type
+        if fname_low.endswith(".webm"):
+            ctype = "video/webm"
+        elif fname_low.endswith(".mp4"):
+            ctype = "video/mp4"
+        elif fname_low.endswith(".webp"):
+            ctype = "image/webp"
+            is_animation = True
+        else:
+            ctype = "application/octet-stream"
+        # انتخاب endpoint
+        if is_animation:
+            url = f"https://api.telegram.org/bot{self.bot_token}/sendAnimation"
+            field_name = "animation"
+        else:
+            url = f"https://api.telegram.org/bot{self.bot_token}/sendVideo"
+            field_name = "video"
+        data = aiohttp.FormData()
+        data.add_field("chat_id", str(self.chat_id))
+        if caption:
+            cap = caption[:1020] + ("…" if len(caption) > 1020 else "")
+            data.add_field("caption", cap)
+            data.add_field("parse_mode", "Markdown")
+        if silent:
+            data.add_field("disable_notification", "true")
+        data.add_field(field_name, file_bytes, filename=filename, content_type=ctype)
+        try:
+            timeout = aiohttp.ClientTimeout(total=120)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, data=data) as r:
+                    body = await r.text()
+                    if r.status != 200:
+                        # retry بدون parse_mode اگر Markdown مشکل بود
+                        if caption and "can't parse" in body.lower():
+                            retry = aiohttp.FormData()
+                            retry.add_field("chat_id", str(self.chat_id))
+                            retry.add_field("caption", caption[:1020])
+                            if silent:
+                                retry.add_field("disable_notification", "true")
+                            retry.add_field(field_name, file_bytes, filename=filename, content_type=ctype)
+                            async with session.post(url, data=retry) as r2:
+                                if r2.status == 200:
+                                    try:
+                                        import json as _json
+                                        j = _json.loads(await r2.text())
+                                        return {"ok": True, "channel": self.name, "filename": filename,
+                                                "message_id": j.get("result", {}).get("message_id")}
+                                    except Exception:
+                                        return {"ok": True, "channel": self.name, "filename": filename}
+                                body2 = await r2.text()
+                                return {"ok": False, "channel": self.name, "error": f"HTTP {r2.status}: {body2[:300]}"}
+                        return {"ok": False, "channel": self.name, "error": f"HTTP {r.status}: {body[:300]}"}
+                    try:
+                        import json as _json
+                        j = _json.loads(body)
+                        return {"ok": True, "channel": self.name, "filename": filename,
+                                "message_id": j.get("result", {}).get("message_id")}
+                    except Exception:
+                        return {"ok": True, "channel": self.name, "filename": filename}
+        except Exception as e:
+            return {"ok": False, "channel": self.name, "error": str(e)[:300]}
+
+    async def send_audio(
+        self, file_bytes: bytes, filename: str, *,
+        caption: Optional[str] = None, silent: bool = False,
+    ) -> Dict[str, Any]:
+        """ارسال فایل صوتی به Telegram via sendAudio API."""
+        if not self.is_configured():
+            return {"ok": False, "channel": self.name, "error": "TELEGRAM_BOT_TOKEN/CHAT_ID خالی است"}
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendAudio"
+        data = aiohttp.FormData()
+        data.add_field("chat_id", str(self.chat_id))
+        if caption:
+            data.add_field("caption", caption[:1020])
+            data.add_field("parse_mode", "Markdown")
+        if silent:
+            data.add_field("disable_notification", "true")
+        # detect MIME
+        fname_low = filename.lower()
+        if fname_low.endswith(".mp3"):
+            ctype = "audio/mpeg"
+        elif fname_low.endswith(".ogg"):
+            ctype = "audio/ogg"
+        elif fname_low.endswith(".m4a"):
+            ctype = "audio/mp4"
+        else:
+            ctype = "audio/webm"
+        data.add_field("audio", file_bytes, filename=filename, content_type=ctype)
+        try:
+            timeout = aiohttp.ClientTimeout(total=60)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, data=data) as r:
+                    body = await r.text()
+                    if r.status != 200:
+                        return {"ok": False, "channel": self.name, "error": f"HTTP {r.status}: {body[:300]}"}
+                    try:
+                        import json as _json
+                        j = _json.loads(body)
+                        return {"ok": True, "channel": self.name, "filename": filename,
+                                "message_id": j.get("result", {}).get("message_id")}
+                    except Exception:
+                        return {"ok": True, "channel": self.name, "filename": filename}
+        except Exception as e:
+            return {"ok": False, "channel": self.name, "error": str(e)[:300]}
+
     async def send_photo(
         self, photo_path: str, *,
         caption: Optional[str] = None, silent: bool = True,
