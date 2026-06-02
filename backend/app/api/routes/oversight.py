@@ -157,7 +157,7 @@ class FromInspectorRequest(BaseModel):
     """درخواست ساخت تسک از ویجت «بازرس ویژه»."""
     project_id: str
     project_full_name: Optional[str] = None  # hint از frontend
-    mode: str  # "chat" | "visual_debug"
+    mode: str  # "chat" | "visual_debug" | "video_record"
     user_request: str
     enhanced_prompt: Optional[str] = None
     # context
@@ -169,6 +169,13 @@ class FromInspectorRequest(BaseModel):
     frontend_url: Optional[str] = None
     backend_url: Optional[str] = None
     page_url: Optional[str] = None
+    # 🎬 (video_record) — ضبط ویدئو/صوت + transcript + تعاملات کاربر
+    audio_transcript: Optional[str] = None
+    user_interactions: Optional[List[Dict[str, Any]]] = None
+    recording_id: Optional[int] = None
+    recording_video_file_id: Optional[str] = None
+    recording_audio_file_id: Optional[str] = None
+    recording_duration_ms: Optional[int] = None
     # metadata
     priority: str = "medium"
     type: str = "bug"
@@ -1613,9 +1620,11 @@ async def create_task_from_inspector(payload: FromInspectorRequest):
     - بدون محدودیت طول prompt
     - inspector_context ذخیره می‌شود برای دسترسی بعدی به screenshots اصلی
     """
-    if payload.mode not in ("chat", "visual_debug"):
-        raise HTTPException(status_code=400, detail="mode باید 'chat' یا 'visual_debug' باشد")
-    if not (payload.user_request or "").strip():
+    if payload.mode not in ("chat", "visual_debug", "video_record"):
+        raise HTTPException(status_code=400, detail="mode باید 'chat'، 'visual_debug' یا 'video_record' باشد")
+    # در حالت video_record اگر کاربر متن تایپ نکرده باشد، transcript صوت
+    # به‌عنوان درخواست کافی است.
+    if not (payload.user_request or "").strip() and not (payload.audio_transcript or "").strip():
         raise HTTPException(status_code=400, detail="user_request خالی است")
 
     from ...services.oversight_inspector_bridge import process_from_inspector
@@ -1637,6 +1646,12 @@ async def create_task_from_inspector(payload: FromInspectorRequest):
             priority=payload.priority,
             task_type=payload.type,
             inspector_session_id=payload.inspector_session_id,
+            audio_transcript=payload.audio_transcript,
+            user_interactions=payload.user_interactions,
+            recording_id=payload.recording_id,
+            recording_video_file_id=payload.recording_video_file_id,
+            recording_audio_file_id=payload.recording_audio_file_id,
+            recording_duration_ms=payload.recording_duration_ms,
         )
         return result
     except ValueError as e:

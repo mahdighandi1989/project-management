@@ -2,8 +2,18 @@
   "version": 1,
   "project": "mahdighandi1989/project-management",
   "watched_id": "3f34a2b1-2a8d-4ad2-904a-9835a8a5b7c9",
-  "total": 119,
+  "total": 118,
   "tasks": [
+    {
+      "task_id": "178063ca-54de-49a2-b28a-be58c55ff61a",
+      "title": "🎬  ضبط دوحالته در تب بازرس ویژه با استخراج هوشمند (6 مرحله)",
+      "priority": "critical",
+      "execution_priority": 1000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-178063ca-54de-49a2-b28a-be58c55ff61a.md",
+      "external_attempts": 0
+    },
     {
       "task_id": "36036206-1416-4c2b-a01b-a77ad95ea987",
       "title": "[منطق] عدم وجود جدول User و Role در مدل‌ها",
@@ -735,16 +745,6 @@
       "external_attempts": 0
     },
     {
-      "task_id": "273eccd8-2b0d-4fa7-bc66-3507891f783b",
-      "title": "[ایدهٔ متنی همراه نیست — دستورالعمل/درخواست کاربر **داخل** محتوای فایل‌های پیوست (17 مرحله)",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-273eccd8-2b0d-4fa7-bc66-3507891f783b.md",
-      "external_attempts": 0
-    },
-    {
       "task_id": "3399ac8b-d17b-4526-b6cc-9a2a1c950891",
       "title": "[منطق] عدم validation برای extra_data در inspector_session",
       "priority": "medium",
@@ -885,16 +885,6 @@
       "external_attempts": 0
     },
     {
-      "task_id": "867aefe3-7b45-4fd0-a1d5-48aad6b1ab53",
-      "title": "[ایدهٔ متنی همراه نیست — دستورالعمل/درخواست کاربر **داخل** محتوای فایل‌های پیوست (14 مرحله)",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-867aefe3-7b45-4fd0-a1d5-48aad6b1ab53.md",
-      "external_attempts": 0
-    },
-    {
       "task_id": "877a0b58-c816-4867-beff-b1e12b1ff9ef",
       "title": "[منطق] عدم ثبت و ردیابی execution context در ai_manager",
       "priority": "medium",
@@ -945,13 +935,13 @@
       "external_attempts": 0
     },
     {
-      "task_id": "ba6d35ed-26c4-4770-99fd-0e395f92d150",
-      "title": "[ایدهٔ متنی همراه نیست — دستورالعمل/درخواست کاربر **داخل** محتوای فایل‌های پیوست (10 مرحله)",
+      "task_id": "bcde9cfa-3e1b-4a8f-84a1-13a6897c9635",
+      "title": "[ایدهٔ متنی همراه نیست — دستورالعمل/درخواست کاربر **داخل** محتوای فایل‌های پیوست (9 مرحله)",
       "priority": "medium",
       "execution_priority": 3000,
       "status": "pending",
       "external_status": "pending",
-      "path": "prompt/task-ba6d35ed-26c4-4770-99fd-0e395f92d150.md",
+      "path": "prompt/task-bcde9cfa-3e1b-4a8f-84a1-13a6897c9635.md",
       "external_attempts": 0
     },
     {

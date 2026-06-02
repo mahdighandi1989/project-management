@@ -309,6 +309,9 @@ def build_inspector_strong_prompt(
     related_urls: Optional[List[str]] = None,
     api_paths: Optional[List[str]] = None,
     screenshots_with_descriptions: Optional[List[Dict[str, Any]]] = None,
+    audio_transcript: Optional[str] = None,
+    user_interactions: Optional[List[Dict[str, Any]]] = None,
+    recording_duration_ms: Optional[int] = None,
     captured_at: Optional[str] = None,
     core_only: bool = True,
 ) -> str:
@@ -355,6 +358,54 @@ def build_inspector_strong_prompt(
             parts.append(f"- **Frontend URL**: `{frontend_url}`")
         if backend_url:
             parts.append(f"- **Backend URL**: `{backend_url}`")
+
+    # 🎙 transcript صوت ضبط‌شده — توضیحات کلامی کاربر حین ضبط ویدئو.
+    # این بخش بسیار مهم است: تمام «چی می‌خوام / چی نمی‌خوام» و اشاره به
+    # گزینه‌ها در اینجاست. هرگز خلاصه/کوتاه نشود.
+    if audio_transcript and audio_transcript.strip():
+        parts.append("")
+        parts.append("## 🎙 توضیحات صوتی کاربر (transcript ضبط ویدئو)")
+        parts.append("")
+        parts.append(
+            "*این متن، رونوشت کامل صدای کاربر در حین ضبط صفحه است. کاربر در آن "
+            "دقیقاً توضیح می‌دهد چه می‌خواهد، به کدام گزینه‌ها/بخش‌ها اشاره می‌کند، "
+            "و کجاها منظورش چیست. این بخش را عیناً و بدون خلاصه‌سازی در نظر بگیر.*"
+        )
+        parts.append("")
+        parts.append(audio_transcript.strip())
+
+    # 🖱 رویدادهای تعامل کاربر حین ضبط (کلیک/ناوبری/scroll) — مسیر دقیقی که
+    # کاربر طی کرده و «جاهایی که رفته» را نشان می‌دهد.
+    ui = [e for e in (user_interactions or []) if isinstance(e, dict)]
+    if ui:
+        ui_show = ui[:120]
+        parts.append("")
+        parts.append(
+            f"## 🖱 مسیر تعامل کاربر حین ضبط ({len(ui)} رویداد، {len(ui_show)} نمایش)"
+        )
+        parts.append("")
+        parts.append(
+            "*ترتیب اقدامات کاربر روی صفحه — برای تطبیق توضیحات صوتی با نقاطی که "
+            "کاربر در واقع روی آن‌ها کلیک/ناوبری کرده است.*"
+        )
+        parts.append("```")
+        for e in ui_show:
+            etype = e.get("type") or "event"
+            ts = e.get("timestamp") or e.get("t") or ""
+            target = e.get("target") or e.get("selector") or ""
+            page = e.get("page_url") or e.get("url") or ""
+            label = e.get("label") or e.get("text") or ""
+            bits = [f"[{etype}]"]
+            if ts:
+                bits.append(str(ts))
+            if page:
+                bits.append(f"@{page}")
+            if target:
+                bits.append(f"→ {target}")
+            if label:
+                bits.append(f'"{_truncate(str(label), 80)}"')
+            parts.append(" ".join(bits))
+        parts.append("```")
 
     # api_paths (همیشه — مفید برای کار)
     if api_paths:
@@ -545,6 +596,9 @@ def save_inspector_context(
     page_url: Optional[str],
     inspector_session_id: Optional[str],
     meta_summary: Optional[str] = None,
+    audio_transcript: Optional[str] = None,
+    user_interactions: Optional[List[Dict[str, Any]]] = None,
+    recording: Optional[Dict[str, Any]] = None,
 ) -> str:
     """ذخیرهٔ context کامل (شامل screenshots base64) در فایل جداگانه."""
     ctx_id = task_id
@@ -568,6 +622,9 @@ def save_inspector_context(
         "backend_url": backend_url,
         "page_url": page_url,
         "inspector_session_id": inspector_session_id,
+        "audio_transcript": audio_transcript or "",
+        "user_interactions": user_interactions or [],
+        "recording": recording or None,
         "captured_at": _now_iso(),
     }
     try:
@@ -644,6 +701,12 @@ async def process_from_inspector(
     priority: str,
     task_type: str,
     inspector_session_id: Optional[str],
+    audio_transcript: Optional[str] = None,
+    user_interactions: Optional[List[Dict[str, Any]]] = None,
+    recording_id: Optional[int] = None,
+    recording_video_file_id: Optional[str] = None,
+    recording_audio_file_id: Optional[str] = None,
+    recording_duration_ms: Optional[int] = None,
 ) -> Dict[str, Any]:
     """تابع اصلی — پردازش کامل request inspector و ساخت OversightTask."""
     from .oversight_service import get_oversight_service, OversightTask
@@ -676,7 +739,7 @@ async def process_from_inspector(
     # 2. vision describe (فقط visual_debug) — موازی برای جلوگیری از timeout
     screenshots_with_descriptions: List[Dict[str, Any]] = []
     vision_descriptions: List[Dict[str, Any]] = []
-    if mode == "visual_debug" and screenshots:
+    if mode in ("visual_debug", "video_record") and screenshots:
         import asyncio as _asyncio
         # فیلتر فقط screenshot هایی با base64
         valid_screenshots = [ss for ss in screenshots if ss.get("base64")]
@@ -731,6 +794,9 @@ async def process_from_inspector(
         related_urls=related_urls,
         api_paths=api_paths,
         screenshots_with_descriptions=screenshots_with_descriptions or None,
+        audio_transcript=audio_transcript,
+        user_interactions=user_interactions,
+        recording_duration_ms=recording_duration_ms,
         captured_at=captured_at,
         core_only=True,
     )
@@ -746,13 +812,17 @@ async def process_from_inspector(
         inspector_session_id=inspector_session_id,
     )
 
-    # 4. title
+    # 4. title — اگر user_request خالی است (ضبط فقط-صوتی) از transcript استفاده کن
     title_src = (user_request or "").strip()
+    if (not title_src or len(title_src) < 20) and audio_transcript and audio_transcript.strip():
+        title_src = audio_transcript.strip()
     if enhanced_prompt and len(enhanced_prompt.strip()) > 0 and len(title_src) < 20:
         title_src = enhanced_prompt.strip()
     first_line = (title_src.split("\n", 1)[0]).strip()
     title = first_line[:80] if first_line else "تسک از بازرس ویژه"
-    if mode == "visual_debug":
+    if mode == "video_record":
+        title = f"[ویدئو] {title}"
+    elif mode == "visual_debug":
         title = f"[بصری] {title}"
     elif mode == "chat":
         title = f"[چت] {title}"
@@ -768,7 +838,11 @@ async def process_from_inspector(
         type=task_type,
         priority=priority,
         status="pending",
-        source=("inspector_visual" if mode == "visual_debug" else "inspector_chat"),
+        source=(
+            "inspector_video" if mode == "video_record"
+            else "inspector_visual" if mode == "visual_debug"
+            else "inspector_chat"
+        ),
         execution_mode=getattr(watched, "default_execution_mode", "manual") or "manual",
         target_files=[],
         acceptance_criteria=[],
@@ -798,6 +872,18 @@ async def process_from_inspector(
             page_url=page_url,
             inspector_session_id=inspector_session_id,
             meta_summary=meta_summary,
+            audio_transcript=audio_transcript,
+            user_interactions=user_interactions,
+            recording=(
+                {
+                    "recording_id": recording_id,
+                    "video_file_id": recording_video_file_id,
+                    "audio_file_id": recording_audio_file_id,
+                    "duration_ms": recording_duration_ms,
+                }
+                if (recording_id or recording_video_file_id or recording_audio_file_id)
+                else None
+            ),
         )
         new_task.inspector_context_id = ctx_id
     except Exception as e:
