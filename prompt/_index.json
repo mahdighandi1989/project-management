@@ -2,7 +2,7 @@
   "version": 1,
   "project": "mahdighandi1989/project-management",
   "watched_id": "3f34a2b1-2a8d-4ad2-904a-9835a8a5b7c9",
-  "total": 117,
+  "total": 116,
   "tasks": [
     {
       "task_id": "36036206-1416-4c2b-a01b-a77ad95ea987",
@@ -732,16 +732,6 @@
       "status": "pending",
       "external_status": "pending",
       "path": "prompt/task-21586964-ea99-4c98-b56f-5fdef2a7f438.md",
-      "external_attempts": 0
-    },
-    {
-      "task_id": "273eccd8-2b0d-4fa7-bc66-3507891f783b",
-      "title": "[ایدهٔ متنی همراه نیست — دستورالعمل/درخواست کاربر **داخل** محتوای فایل‌های پیوست (17 مرحله)",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-273eccd8-2b0d-4fa7-bc66-3507891f783b.md",
       "external_attempts": 0
     },
     {
