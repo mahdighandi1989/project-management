@@ -456,6 +456,30 @@ async def rebuild_project_index(
             branch=branch,
             token=token,
         )
+
+    # 🤖 (Claude Auto-Runner) — اگر push موفق بود و runner برای این
+    # watched فعال است، workflow را با dispatch trigger بزن. این مسیر
+    # تنها مسیر شروع run است (push trigger چون toolchain
+    # claude-code-action@v1 پشتیبانی نمی‌کند، حذف شد).
+    if upsert.get("success") and getattr(watched, "claude_runner_enabled", False):
+        try:
+            from .claude_runner_bootstrap import trigger_workflow_dispatch
+            disp = await trigger_workflow_dispatch(
+                watched, gh_token=token, ref=branch,
+            )
+            if not disp.get("success") and not disp.get("skipped"):
+                logger.warning(
+                    f"workflow_dispatch trigger failed for {watched.repo_full_name}: "
+                    f"{disp.get('error')}"
+                )
+            elif disp.get("success"):
+                logger.info(
+                    f"workflow_dispatch ✓ triggered Claude Auto-Runner for "
+                    f"{watched.repo_full_name}"
+                )
+        except Exception as _e:
+            logger.warning(f"workflow_dispatch hook crashed: {_e}")
+
     return upsert
 
 

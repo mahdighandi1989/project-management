@@ -142,16 +142,10 @@ name: Claude Auto Task Runner
 # مقدار boolean هستند. GitHub Actions هر دو فرم را می‌پذیرد ولی این
 # فرم با همهٔ YAML parserها سازگار است.
 "on":
-  push:
-    branches:
-      - {branch}
-    paths:
-      # فقط روی index trigger شو — markdown task files با هر تغییر prompt
-      # خودکار push می‌شوند ولی signal واقعی «تسک جدید آماده» همان آپدیت
-      # index است (backend پس از sync فایل، index را debounced رفرش می‌کند).
-      # این از trigger مضاعف (یک‌بار برای md، یک‌بار برای index) جلوگیری می‌کند.
-      - 'prompt/_index.json'
-  # امکان trigger دستی از تب Actions
+  # claude-code-action@v1 روی push event کار نمی‌کند
+  # ("Unsupported event type: push"). فقط workflow_dispatch پشتیبانی
+  # می‌شود. backend پس از push شدن تسک به prompt/_index.json، خودکار
+  # workflow را با GitHub API trigger می‌زند (dispatches endpoint).
   workflow_dispatch: {{}}
 
 # 🛡 (workflow trigger leak fix) — strategy جدید: cancel-in-progress: true
@@ -290,6 +284,61 @@ async def delete_repo_secret(
         "success": False,
         "error": (
             f"secret_delete_failed status={status} "
+            f"body={(res.get('body_text') or '')[:200]}"
+        ),
+    }
+
+
+# ----------------------------------------------------------------------
+# workflow_dispatch trigger — backend از این برای آغاز run استفاده می‌کند
+# ----------------------------------------------------------------------
+
+async def trigger_workflow_dispatch(
+    watched: Any, *, gh_token: str, ref: str = "main",
+) -> Dict[str, Any]:
+    """trigger دستی workflow Claude Auto-Runner از طریق GitHub API.
+
+    این تابع از سوی backend بعد از push موفق `prompt/_index.json` صدا
+    زده می‌شود تا workflow اجرا شود (چون trigger روی push کار نمی‌کند).
+
+    Returns:
+      {"success": bool, "error": str, "skipped": bool}
+      skipped=True اگر runner enabled نباشد یا workflow نصب نشده باشد.
+    """
+    # فقط اگر runner برای این watched نصب شده، trigger بزن
+    if not getattr(watched, "claude_runner_enabled", False):
+        return {"success": True, "skipped": True, "reason": "runner_not_enabled"}
+
+    resolved = _resolve_repo_and_branch(watched)
+    if not resolved:
+        return {"success": False, "error": "repo_not_resolvable"}
+    owner, repo, branch = resolved
+    use_ref = ref or branch or "main"
+
+    pr = get_github_pr_service()
+    workflow_filename = WORKFLOW_PATH.split("/")[-1]
+    url = (
+        f"{pr.GITHUB_API}/repos/{owner}/{repo}/actions/workflows/"
+        f"{workflow_filename}/dispatches"
+    )
+    headers = pr._get_headers(token=gh_token)  # noqa: SLF001
+    body = {"ref": use_ref}
+    res = await pr._gh_request("POST", url, headers=headers, json_body=body)  # noqa: SLF001
+    status = res.get("status")
+    # 204 No Content = موفقیت. 404 = workflow هنوز روی GitHub index نشده
+    # (تازه نصب شد و چند ثانیه طول می‌کشد قابل dispatch شود).
+    if status == 204:
+        return {"success": True}
+    if status == 404:
+        return {
+            "success": False,
+            "error": "workflow_not_indexed_yet (try again in a few seconds)",
+            "transient": True,
+        }
+    return {
+        "success": False,
+        "error": (
+            f"dispatch_failed status={status} "
             f"body={(res.get('body_text') or '')[:200]}"
         ),
     }
