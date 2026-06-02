@@ -113,7 +113,10 @@ def build_workflow_yaml(
     watched_id: str,
     repo_full_name: str,
     branch: str = "main",
-    claude_args: str = "--max-turns 30 --model claude-opus-4-8",
+    claude_args: str = (
+        "--max-turns 30 --model claude-opus-4-8 "
+        "--dangerously-skip-permissions"
+    ),
 ) -> str:
     """ساخت محتوای فایل YAML برای workflow.
 

@@ -665,7 +665,10 @@ class OversightService:
             # تا setup خراب نشود.
             "claude_runner_auto_enable_new": False,
             # claude_args پیش‌فرض برای workflow های نصب‌شده
-            "claude_runner_default_args": "--max-turns 30 --model claude-opus-4-8",
+            "claude_runner_default_args": (
+                "--max-turns 30 --model claude-opus-4-8 "
+                "--dangerously-skip-permissions"
+            ),
         }
 
         # 🆕 (Dispatch Storm Prevention) — set از task_id هایی که در حال حاضر
@@ -2224,7 +2227,7 @@ class OversightService:
         args = (
             claude_args
             or self.settings.get("claude_runner_default_args")
-            or "--max-turns 30 --model claude-opus-4-8"
+            or "--max-turns 30 --model claude-opus-4-8 --dangerously-skip-permissions"
         )
         result = await install_runner(
             watched,
