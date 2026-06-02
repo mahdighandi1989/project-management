@@ -363,6 +363,7 @@ async def trigger_workflow_dispatch(
     gh_token: str,
     ref: str = "main",
     target_task_id: Optional[str] = None,
+    force: bool = False,
 ) -> Dict[str, Any]:
     """trigger دستی workflow Claude Auto-Runner از طریق GitHub API.
 
@@ -371,15 +372,27 @@ async def trigger_workflow_dispatch(
 
     target_task_id: اگر داده شود، در workflow inputs پاس داده می‌شود تا
     Claude همان task_id را اجرا کند (به‌جای /next). برای retry بعد از
-    verify=partial استفاده می‌شود.
+    verify=partial و trigger دستی تک‌تسک استفاده می‌شود.
+
+    force: اگر True باشد، چک claude_runner_enabled رد می‌شود.
+    برای trigger دستی تک‌تسک از UI/Telegram استفاده می‌شود — کاربر می‌خواهد
+    فقط همین یک تسک اجرا شود حتی اگر auto-runner برای پروژه روشن نباشد.
+    در این حالت workflow YAML باید قبلاً در repo نصب شده باشد (وگرنه 404).
 
     Returns:
       {"success": bool, "error": str, "skipped": bool}
       skipped=True اگر runner enabled نباشد یا workflow نصب نشده باشد.
     """
     # فقط اگر runner برای این watched نصب شده، trigger بزن
-    if not getattr(watched, "claude_runner_enabled", False):
+    # (مگر force=True که برای trigger دستی تک‌تسک استفاده می‌شود)
+    if not force and not getattr(watched, "claude_runner_enabled", False):
         return {"success": True, "skipped": True, "reason": "runner_not_enabled"}
+    # برای force trigger، حداقل workflow_path باید ست باشد (نصب قبلی)
+    if force and not getattr(watched, "claude_runner_workflow_path", None):
+        return {
+            "success": False,
+            "error": "workflow_not_installed — ابتدا runner را روی پروژه نصب کنید",
+        }
 
     # 🔒 (verify-after-complete lock) — اگر یک تسک در حال verify است،
     # نباید workflow جدید trigger کنیم. این focus را روی تسک فعلی نگه

@@ -392,6 +392,66 @@ async def claude_runner_runs(
     return result
 
 
+# 🆕 (Manual Single-Task Trigger) — اجرای دستی یک تسک خاص توسط Claude Code
+# از روی کارت تسک. کاربر می‌تواند بدون فعال‌سازی auto-runner پروژه، فقط
+# همین یک تسک را اجرا کند. workflow YAML باید قبلاً نصب شده باشد.
+@router.post("/tasks/{task_id}/run-claude-now")
+async def run_task_via_claude_now(task_id: str):
+    """trigger workflow Claude Auto-Runner برای یک تسک خاص (دستی).
+
+    - مستقل از claude_runner_enabled (فقط workflow installed لازم است)
+    - تسک با agent_id='claude-manual-trigger' claim می‌شود
+    - target_task_id به workflow پاس می‌شود تا Claude همین تسک را اجرا کند
+    - اگر یک تسک دیگر در حال verify است، با خطای 409 رد می‌شود
+    """
+    service = get_oversight_service()
+    result = await service.run_single_task_via_claude(task_id)
+    if not result.get("success"):
+        err = result.get("error", "")
+        if err == "task_not_found":
+            raise HTTPException(status_code=404, detail="تسک یافت نشد")
+        if err == "watched_not_found":
+            raise HTTPException(status_code=404, detail="پروژهٔ تسک یافت نشد")
+        if err == "task_archived":
+            raise HTTPException(status_code=409, detail="تسک آرشیو شده")
+        if err == "task_has_no_watched_project":
+            raise HTTPException(status_code=409, detail="این تسک به هیچ پروژه‌ای متصل نیست")
+        if err == "workflow_not_installed":
+            raise HTTPException(
+                status_code=409,
+                detail=result.get("hint")
+                or "Claude Runner روی این پروژه نصب نشده — ابتدا runner را روشن/نصب کنید",
+            )
+        if err == "already_claimed":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "already_claimed",
+                    "locked_by": result.get("locked_by"),
+                    "lease_until": result.get("lease_until"),
+                    "message": "این تسک هم‌اکنون توسط agent دیگری در حال اجراست",
+                },
+            )
+        if err == "no_github_token":
+            raise HTTPException(status_code=503, detail="GitHub token در سرور تنظیم نشده")
+        # dispatch_result error
+        dr = result.get("dispatch_result") or {}
+        if dr.get("reason") == "verify_in_progress":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "verify_in_progress",
+                    "locked_task_id": dr.get("locked_task_id"),
+                    "message": "یک تسک دیگر در حال verify است؛ پس از تمام شدن آن دوباره تلاش کنید",
+                },
+            )
+        raise HTTPException(status_code=502, detail=dr.get("error") or err or "dispatch failed")
+    # 📲 Telegram feedback خودبه‌خود وقتی workflow استارت شد و Claude
+    # /claim می‌زند (event="external_runner_claimed" در external_prompts.py).
+    # نیازی به pre-emit در این لایه نیست — جلوگیری از duplicate notification.
+    return result
+
+
 # 🔬 (Bug C6 — Verify v6 chunk 7) — verify-trace endpoint (AC #10)
 # trace کامل آخرین (یا specific report) verify v6 را برمی‌گرداند.
 @router.get("/tasks/{task_id}/verify-trace")

@@ -2457,6 +2457,87 @@ class OversightService:
         )
 
     # ====================================================================
+    # 🆕 (Manual Single-Task Trigger) — اجرای دستی یک تسک خاص توسط
+    # Claude Auto-Runner، مستقل از auto-runner پروژه. کاربر می‌تواند بدون
+    # روشن کردن claude_runner_enabled، فقط همین یک تسک را اجرا کند.
+    # workflow YAML باید قبلاً نصب شده باشد (claude_runner_workflow_path ست).
+    # ====================================================================
+
+    async def run_single_task_via_claude(
+        self,
+        task_id: str,
+        *,
+        agent_id: str = "claude-manual-trigger",
+        lease_minutes: int = 30,  # legacy unused (workflow self-claims with default lease)
+    ) -> Dict[str, Any]:
+        """trigger دستی Claude Auto-Runner برای یک تسک خاص.
+
+        - workflow YAML باید قبلاً در repo نصب شده باشد (با enable_claude_runner)
+        - claude_runner_enabled لازم نیست True باشد (force trigger)
+        - تسک **pre-claim نمی‌شود** — workflow وقتی شروع شد خودش با
+          agent_id='claude-code-action' (طبق MASTER_PROMPT) /claim می‌زند.
+          pre-claim با agent_id دیگر باعث 409 در /claim واقعی workflow می‌شود.
+        - فقط workflow_dispatch با target_task_id فرستاده می‌شود تا Claude
+          همان task_id را اجرا کند به‌جای /next.
+        - اگر یک تسک دیگر در حال verify است (verify-lock فعال)، rejection
+          از trigger_workflow_dispatch برمی‌گردد (skipped + reason).
+        - اگر تسک هم‌اکنون توسط agent دیگری در حال اجراست و lease فعال، باز
+          هم workflow را trigger می‌کنیم — GitHub queue آن را behind صف می‌گذارد
+          (concurrency group) و وقتی نوبت رسید، اگر هنوز locked است، Claude
+          /claim خواهد گرفت 409 و exit می‌کند. این از race بدون pre-claim
+          محافظت می‌کند.
+        - agent_id داده‌شده فقط برای logging/notification استفاده می‌شود.
+
+        Returns:
+          {"success": bool, "task_id": str, "dispatch_result": dict, "error"?: str}
+        """
+        from .claude_runner_bootstrap import trigger_workflow_dispatch
+
+        # validation سبک تحت قفل (بدون mutation)
+        async with self._lock:
+            t = next((x for x in self.tasks if x.id == task_id), None)
+            if t is None:
+                return {"success": False, "error": "task_not_found"}
+            if getattr(t, "archived", False):
+                return {"success": False, "error": "task_archived"}
+            if not getattr(t, "watched_id", None):
+                return {"success": False, "error": "task_has_no_watched_project"}
+            watched = self._find_watched(t.watched_id)
+            if watched is None:
+                return {"success": False, "error": "watched_not_found"}
+            if not getattr(watched, "claude_runner_workflow_path", None):
+                return {
+                    "success": False,
+                    "error": "workflow_not_installed",
+                    "hint": "ابتدا runner را روی پروژه نصب کنید (دکمهٔ 🤖 در صفحهٔ Oversight)",
+                }
+
+        gh_token = get_github_token()
+        if not gh_token:
+            return {"success": False, "error": "no_github_token"}
+
+        # trigger workflow با target_task_id — force=True تا قید
+        # claude_runner_enabled bypass شود (فقط workflow_path لازم است)
+        dispatch_result = await trigger_workflow_dispatch(
+            watched,
+            gh_token=gh_token,
+            target_task_id=task_id,
+            force=True,
+        )
+
+        # skipped (مثلاً verify_in_progress) یعنی trigger واقعاً ارسال نشد
+        # — برای caller باید مثل خطا رفتار کند
+        dispatch_success = bool(dispatch_result.get("success")) and not dispatch_result.get("skipped")
+        return {
+            "success": dispatch_success,
+            "task_id": task_id,
+            "watched_id": watched.id,
+            "repo": watched.repo_full_name,
+            "dispatch_result": dispatch_result,
+            "agent_id": agent_id,
+        }
+
+    # ====================================================================
     # 🆕 (Reference Projects) — profile + normalization + validation
     # ====================================================================
 

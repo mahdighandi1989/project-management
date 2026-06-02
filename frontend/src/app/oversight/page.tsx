@@ -2525,6 +2525,41 @@ export default function OversightPage() {
     }
   };
 
+  // 🆕 (Manual single-task Claude trigger) — trigger Claude Auto-Runner برای فقط
+  // همین تسک، مستقل از auto-runner پروژه. workflow YAML باید نصب شده باشد.
+  const runTaskViaClaudeNow = async (id: string) => {
+    setRunningTaskIds((prev) => new Set(prev).add(id));
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/oversight/tasks/${id}/run-claude-now`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+      );
+      if (res.ok) {
+        const data = await res.json();
+        const repo = data?.repo || 'پروژه';
+        showSuccess(`🤖 Claude شروع شد روی «${repo}» — تسک در GitHub Actions اجرا می‌شود`);
+        await reloadTasks();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        const d = err?.detail;
+        let msg = 'خطا در شروع Claude';
+        if (typeof d === 'string') msg = d;
+        else if (d && typeof d === 'object') {
+          msg = d.message || d.error || JSON.stringify(d);
+        }
+        showError(msg);
+      }
+    } catch (e: any) {
+      showError(e?.message || 'خطا در شروع Claude');
+    } finally {
+      setRunningTaskIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
+  };
+
   const runTask = async (id: string) => {
     setRunningTaskIds((prev) => new Set(prev).add(id));
     setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, status: 'running' } : t)));
@@ -4232,6 +4267,7 @@ export default function OversightPage() {
             bulkApprove={bulkApproveSuggested}
             runningTaskIds={runningTaskIds}
             onRun={runTask}
+            onRunClaudeNow={runTaskViaClaudeNow}
             onUpdate={updateTask}
             onDelete={deleteTask}
             onView={(t) => setViewingTask(t)}
@@ -8603,6 +8639,7 @@ function TasksPanel({
   bulkApprove,
   runningTaskIds,
   onRun,
+  onRunClaudeNow,
   onUpdate,
   onDelete,
   onView,
@@ -8645,6 +8682,7 @@ function TasksPanel({
   bulkApprove: () => void;
   runningTaskIds: Set<string>;
   onRun: (id: string) => void;
+  onRunClaudeNow: (id: string) => void;
   onUpdate: (id: string, u: Partial<Task>) => void;
   onDelete: (id: string) => void;
   onView: (t: Task) => void;
@@ -9107,6 +9145,17 @@ function TasksPanel({
               className="px-3 py-1 bg-green-600 text-white rounded text-xs hover:bg-green-700 disabled:opacity-50"
             >
               🚀 اجرا با AI
+            </button>
+            {/* 🆕 (Manual single-task Claude trigger) — فقط همین تسک را توسط
+                Claude Code (GitHub Actions) اجرا کن، بدون نیاز به روشن کردن
+                auto-runner پروژه. workflow YAML باید قبلاً نصب شده باشد. */}
+            <button
+              onClick={() => onRunClaudeNow(t.id)}
+              disabled={isRunning}
+              title="فقط همین تسک را توسط Claude Code در GitHub Actions اجرا کن (نیاز به نصب Claude Runner روی پروژه)"
+              className="px-3 py-1 bg-amber-600 text-white rounded text-xs hover:bg-amber-700 disabled:opacity-50"
+            >
+              {isRunning ? '⏳' : '🤖'} اجرا با Claude
             </button>
             {/* 🔗 (C7 Bridge Phase 3) — بارگذاری تسک در بازرس ویژه */}
             {t.project_full_name && (
