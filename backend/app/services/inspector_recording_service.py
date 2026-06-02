@@ -419,34 +419,62 @@ class InspectorRecordingService:
         send_to_oversight: bool,
         edited_transcript: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """ارسال به تلگرام + ساخت تسک یا چت + cleanup. در Commit 5 پیاده می‌شود."""
+        """ارسال به تلگرام + ساخت تسک یا چت + cleanup. delegate به ماژول
+        inspector_recording_finalize.
+        """
         session = self._require_session(session_id)
-        if session.phase != "ready_for_preview":
+        if session.phase not in ("ready_for_preview", "errored"):
             raise RuntimeError(
                 f"cannot finalize in phase={session.phase} (must be ready_for_preview)"
             )
+        # اگر transcript ویرایش شده، prompt را regenerate کن
+        if edited_transcript is not None and edited_transcript != session.transcript:
+            session.transcript = edited_transcript[:500_000]
+            try:
+                from .inspector_recording_processor import (
+                    stage_synthesize,
+                    build_final_prompt,
+                )
+                syn = await stage_synthesize(session, user_note=user_note)
+                ai_body = syn.get("prompt") or ""
+                session.prompt_model = syn.get("model_used") or ""
+                session.prompt = build_final_prompt(
+                    session, user_note=user_note, ai_generated_body=ai_body
+                )
+            except Exception as e:
+                logger.warning(f"finalize: pre-regenerate failed: {e}")
+
         session.phase = "finalizing"
         session.touch()
-        if edited_transcript is not None:
-            session.transcript = edited_transcript[:500_000]
-        # در Commit 1: فقط cleanup + phase=completed
-        # Commits 5 پیاده‌سازی واقعی Telegram + task creation
-        logger.info(
-            f"inspector_recording: finalize stub called "
-            f"(session={session_id}, send_to_oversight={send_to_oversight}, "
-            f"user_note_len={len(user_note)})"
-        )
-        result = {
-            "success": True,
-            "session_id": session_id,
-            "task_id": None,
-            "telegram_message_ids": [],
-            "chat_message_sent": False,
-            "note": "Commit 1 foundation — finalize stub. ارسال Telegram و ساخت تسک در commits بعدی پیاده می‌شود.",
-        }
-        session.phase = "completed"
-        session.finalized_at = time.time()
-        return result
+
+        try:
+            from .inspector_recording_finalize import finalize_recording_session
+            result = await finalize_recording_session(
+                session,
+                user_note=user_note,
+                send_to_oversight=send_to_oversight,
+            )
+            logger.info(
+                f"inspector_recording: finalize done for {session_id} — "
+                f"task_id={result.get('task_id')} "
+                f"telegram_msgs={result.get('telegram_message_ids')} "
+                f"errors={result.get('errors')}"
+            )
+            return result
+        except Exception as e:
+            logger.exception(f"finalize crashed for {session_id}: {e}")
+            session.phase = "errored"
+            session.last_error = f"finalize: {str(e)[:300]}"
+            return {
+                "success": False,
+                "session_id": session_id,
+                "task_id": None,
+                "telegram_message_ids": [],
+                "chat_message_sent": False,
+                "errors": [str(e)[:300]],
+                "warnings": [],
+                "cleanup_done": False,
+            }
 
     async def cancel_session(self, session_id: str) -> None:
         """لغو کامل + حذف disk."""
