@@ -2,8 +2,18 @@
   "version": 1,
   "project": "mahdighandi1989/project-management",
   "watched_id": "3f34a2b1-2a8d-4ad2-904a-9835a8a5b7c9",
-  "total": 116,
+  "total": 117,
   "tasks": [
+    {
+      "task_id": "178063ca-54de-49a2-b28a-be58c55ff61a",
+      "title": "🎬  ضبط دوحالته در تب بازرس ویژه با استخراج هوشمند (6 مرحله)",
+      "priority": "critical",
+      "execution_priority": 1000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-178063ca-54de-49a2-b28a-be58c55ff61a.md",
+      "external_attempts": 0
+    },
     {
       "task_id": "36036206-1416-4c2b-a01b-a77ad95ea987",
       "title": "[منطق] عدم وجود جدول User و Role در مدل‌ها",
