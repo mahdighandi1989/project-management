@@ -1,46 +1,9 @@
 {
   "version": 1,
-  "generated_at": "2026-06-01T20:58:03.690953+00:00",
   "project": "mahdighandi1989/project-management",
   "watched_id": "3f34a2b1-2a8d-4ad2-904a-9835a8a5b7c9",
   "total": 116,
   "tasks": [
-    {
-      "task_id": "daaaa7f6-f4e6-429c-83d7-f05435a955cd",
-      "title": "رفع مشکل عدم تولید چک‌لیست برای دستورات خام چندمرحله‌ای در فرانت‌اند و فیدبک نهایی تلگرام",
-      "priority": "critical",
-      "execution_priority": 1000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-daaaa7f6-f4e6-429c-83d7-f05435a955cd.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-12T13:27:48.245411+00:00",
-      "updated_at": "2026-05-29T20:08:36.909825+00:00"
-    },
-    {
-      "task_id": "8ac20f8a-8436-49a1-9e75-c6455a4ad655",
-      "title": "[منطق] عدم وجود مکانیزم احراز هویت در database.py",
-      "priority": "critical",
-      "execution_priority": 1000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-8ac20f8a-8436-49a1-9e75-c6455a4ad655.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T10:28:15.505133+00:00",
-      "updated_at": "2026-05-29T20:13:06.758994+00:00"
-    },
-    {
-      "task_id": "d380c6ac-2553-43da-8e39-c43ab7d3e702",
-      "title": "[منطق] عدم وجود permission checking در auth pipeline",
-      "priority": "critical",
-      "execution_priority": 1000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-d380c6ac-2553-43da-8e39-c43ab7d3e702.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T16:39:50.345973+00:00",
-      "updated_at": "2026-05-29T20:13:45.738405+00:00"
-    },
     {
       "task_id": "36036206-1416-4c2b-a01b-a77ad95ea987",
       "title": "[منطق] عدم وجود جدول User و Role در مدل‌ها",
@@ -49,129 +12,7 @@
       "status": "pending",
       "external_status": "pending",
       "path": "prompt/task-36036206-1416-4c2b-a01b-a77ad95ea987.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T16:40:40.415121+00:00",
-      "updated_at": "2026-05-29T20:13:47.076959+00:00"
-    },
-    {
-      "task_id": "eb08817e-88b6-444a-8dc3-4a8a6ef8bffc",
-      "title": "[منطق] عدم وجود endpoint برای احراز هویت",
-      "priority": "critical",
-      "execution_priority": 1000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-eb08817e-88b6-444a-8dc3-4a8a6ef8bffc.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T16:41:11.739570+00:00",
-      "updated_at": "2026-05-29T20:13:48.425732+00:00"
-    },
-    {
-      "task_id": "6f2d21e6-5576-4daf-a1a3-cd7e1325f267",
-      "title": "[منطق] عدم وجود مکانیزم validation بر روی خروجی AI در ai_manager",
-      "priority": "critical",
-      "execution_priority": 1000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-6f2d21e6-5576-4daf-a1a3-cd7e1325f267.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T17:35:12.685370+00:00",
-      "updated_at": "2026-05-31T09:06:15.175446+00:00"
-    },
-    {
-      "task_id": "64d50258-df0e-42d6-916e-2a8692688e0f",
-      "title": "سرویس‌های AI (ai_manager, openai_service, claude_service) بدون تست واحد",
-      "priority": "critical",
-      "execution_priority": 1000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-64d50258-df0e-42d6-916e-2a8692688e0f.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T19:15:01.688718+00:00",
-      "updated_at": "2026-05-29T20:15:04.115024+00:00"
-    },
-    {
-      "task_id": "44934623-568a-4b51-ae03-8d55dc7f959d",
-      "title": "[منطق] فقدان hallucination guards در oversight_strong_prompt.py",
-      "priority": "critical",
-      "execution_priority": 1000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-44934623-568a-4b51-ae03-8d55dc7f959d.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T19:15:38.098306+00:00",
-      "updated_at": "2026-05-29T20:15:07.030478+00:00"
-    },
-    {
-      "task_id": "7ea0a990-1652-41c2-aa97-40c7353d44ab",
-      "title": "[منطق] عدم وجود permission/authorization در pipeline",
-      "priority": "critical",
-      "execution_priority": 1000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-7ea0a990-1652-41c2-aa97-40c7353d44ab.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-17T08:01:30.613958+00:00",
-      "updated_at": "2026-05-31T09:06:42.419081+00:00"
-    },
-    {
-      "task_id": "4f245c29-3111-4e08-980d-b975935b2a48",
-      "title": "[منطق] عدم تطابق در مدیریت session_id در oversight_upload_session.py",
-      "priority": "critical",
-      "execution_priority": 1000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-4f245c29-3111-4e08-980d-b975935b2a48.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-17T08:02:06.763934+00:00",
-      "updated_at": "2026-05-29T20:16:52.463824+00:00"
-    },
-    {
-      "task_id": "task_47c564b8072d",
-      "title": "رفع باگ‌های مدیریت Session، خطا و اعتبارسنجی در API Routes بک‌اند",
-      "priority": "critical",
-      "execution_priority": 1000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-task_47c564b8072d.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-18T04:15:51.118096+00:00",
-      "updated_at": "2026-05-29T20:23:12.075435+00:00"
-    },
-    {
-      "task_id": "task_00280357092c",
-      "title": "رفع نقص‌های امنیتی و تست‌های OversightService",
-      "priority": "critical",
-      "execution_priority": 1000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-task_00280357092c.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-18T04:16:54.582937+00:00",
-      "updated_at": "2026-05-29T20:23:13.664335+00:00"
-    },
-    {
-      "task_id": "task_8b39f2e6e35d",
-      "title": "رفع آسیب‌پذیری‌های امنیتی: اعتبارسنجی JWT و رمزگذاری API Keys",
-      "priority": "critical",
-      "execution_priority": 1000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-task_8b39f2e6e35d.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-18T04:22:43.565570+00:00",
-      "updated_at": "2026-05-29T20:23:32.345874+00:00"
-    },
-    {
-      "task_id": "task_4be78aa7a649",
-      "title": "بهبود و استانداردسازی pipeline AI: validation، fallback، یکپارچگی و امنیت",
-      "priority": "critical",
-      "execution_priority": 1000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-task_4be78aa7a649.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-18T04:23:25.107129+00:00",
-      "updated_at": "2026-05-29T20:23:34.002011+00:00"
+      "external_attempts": 0
     },
     {
       "task_id": "4261e9cf-ed0c-4faf-8046-1f7ee26fe777",
@@ -181,9 +22,137 @@
       "status": "pending",
       "external_status": "pending",
       "path": "prompt/task-4261e9cf-ed0c-4faf-8046-1f7ee26fe777.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-20T10:23:21.140988+00:00",
-      "updated_at": "2026-05-29T20:26:55.282746+00:00"
+      "external_attempts": 0
+    },
+    {
+      "task_id": "44934623-568a-4b51-ae03-8d55dc7f959d",
+      "title": "[منطق] فقدان hallucination guards در oversight_strong_prompt.py",
+      "priority": "critical",
+      "execution_priority": 1000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-44934623-568a-4b51-ae03-8d55dc7f959d.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "4f245c29-3111-4e08-980d-b975935b2a48",
+      "title": "[منطق] عدم تطابق در مدیریت session_id در oversight_upload_session.py",
+      "priority": "critical",
+      "execution_priority": 1000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-4f245c29-3111-4e08-980d-b975935b2a48.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "64d50258-df0e-42d6-916e-2a8692688e0f",
+      "title": "سرویس‌های AI (ai_manager, openai_service, claude_service) بدون تست واحد",
+      "priority": "critical",
+      "execution_priority": 1000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-64d50258-df0e-42d6-916e-2a8692688e0f.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "6f2d21e6-5576-4daf-a1a3-cd7e1325f267",
+      "title": "[منطق] عدم وجود مکانیزم validation بر روی خروجی AI در ai_manager",
+      "priority": "critical",
+      "execution_priority": 1000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-6f2d21e6-5576-4daf-a1a3-cd7e1325f267.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "7ea0a990-1652-41c2-aa97-40c7353d44ab",
+      "title": "[منطق] عدم وجود permission/authorization در pipeline",
+      "priority": "critical",
+      "execution_priority": 1000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-7ea0a990-1652-41c2-aa97-40c7353d44ab.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "8ac20f8a-8436-49a1-9e75-c6455a4ad655",
+      "title": "[منطق] عدم وجود مکانیزم احراز هویت در database.py",
+      "priority": "critical",
+      "execution_priority": 1000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-8ac20f8a-8436-49a1-9e75-c6455a4ad655.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "d380c6ac-2553-43da-8e39-c43ab7d3e702",
+      "title": "[منطق] عدم وجود permission checking در auth pipeline",
+      "priority": "critical",
+      "execution_priority": 1000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-d380c6ac-2553-43da-8e39-c43ab7d3e702.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "daaaa7f6-f4e6-429c-83d7-f05435a955cd",
+      "title": "رفع مشکل عدم تولید چک‌لیست برای دستورات خام چندمرحله‌ای در فرانت‌اند و فیدبک نهایی تلگرام",
+      "priority": "critical",
+      "execution_priority": 1000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-daaaa7f6-f4e6-429c-83d7-f05435a955cd.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "eb08817e-88b6-444a-8dc3-4a8a6ef8bffc",
+      "title": "[منطق] عدم وجود endpoint برای احراز هویت",
+      "priority": "critical",
+      "execution_priority": 1000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-eb08817e-88b6-444a-8dc3-4a8a6ef8bffc.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "task_00280357092c",
+      "title": "رفع نقص‌های امنیتی و تست‌های OversightService",
+      "priority": "critical",
+      "execution_priority": 1000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-task_00280357092c.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "task_47c564b8072d",
+      "title": "رفع باگ‌های مدیریت Session، خطا و اعتبارسنجی در API Routes بک‌اند",
+      "priority": "critical",
+      "execution_priority": 1000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-task_47c564b8072d.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "task_4be78aa7a649",
+      "title": "بهبود و استانداردسازی pipeline AI: validation، fallback، یکپارچگی و امنیت",
+      "priority": "critical",
+      "execution_priority": 1000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-task_4be78aa7a649.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "task_8b39f2e6e35d",
+      "title": "رفع آسیب‌پذیری‌های امنیتی: اعتبارسنجی JWT و رمزگذاری API Keys",
+      "priority": "critical",
+      "execution_priority": 1000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-task_8b39f2e6e35d.md",
+      "external_attempts": 0
     },
     {
       "task_id": "9551830e-3a02-4e9d-8e85-46c276791dc4",
@@ -193,9 +162,7 @@
       "status": "awaiting_review",
       "external_status": "pending",
       "path": "prompt/task-9551830e-3a02-4e9d-8e85-46c276791dc4.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T05:07:49.396257+00:00",
-      "updated_at": "2026-05-29T20:09:54.476766+00:00"
+      "external_attempts": 0
     },
     {
       "task_id": "e9fedf58-7346-4175-a584-971086095696",
@@ -205,33 +172,7 @@
       "status": "awaiting_review",
       "external_status": "pending",
       "path": "prompt/task-e9fedf58-7346-4175-a584-971086095696.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T17:34:30.872482+00:00",
-      "updated_at": "2026-05-29T20:14:23.784613+00:00"
-    },
-    {
-      "task_id": "cf9400cc-7cde-4c8d-8ea7-658c2c9486a4",
-      "title": "خواستم این ربات رو روی تلگرام دیگه هم راه اندازی کنم ولی اول که ایدیش رو زدم دید (5 مرحله)",
-      "priority": "high",
-      "execution_priority": 2000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-cf9400cc-7cde-4c8d-8ea7-658c2c9486a4.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-12T15:45:03.024945+00:00",
-      "updated_at": "2026-05-29T20:08:43.823376+00:00"
-    },
-    {
-      "task_id": "4abfb7dd-5101-42d7-97a8-d8ba8a46b37a",
-      "title": "عدم وجود rate limiting روی API endpoints",
-      "priority": "high",
-      "execution_priority": 2000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-4abfb7dd-5101-42d7-97a8-d8ba8a46b37a.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-14T19:47:49.450510+00:00",
-      "updated_at": "2026-05-29T20:09:23.648567+00:00"
+      "external_attempts": 0
     },
     {
       "task_id": "014ac9de-cdcf-4425-94fc-dfb486fa1ba6",
@@ -241,9 +182,7 @@
       "status": "pending",
       "external_status": "pending",
       "path": "prompt/task-014ac9de-cdcf-4425-94fc-dfb486fa1ba6.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T10:28:15.597981+00:00",
-      "updated_at": "2026-05-31T09:06:50.611569+00:00"
+      "external_attempts": 0
     },
     {
       "task_id": "13a65aae-e9ae-417b-ae79-d094cc296d07",
@@ -253,81 +192,7 @@
       "status": "pending",
       "external_status": "pending",
       "path": "prompt/task-13a65aae-e9ae-417b-ae79-d094cc296d07.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T10:29:58.038175+00:00",
-      "updated_at": "2026-05-31T09:08:11.387170+00:00"
-    },
-    {
-      "task_id": "b9c7d40e-7e96-42c8-b65b-f0d901a4aba2",
-      "title": "[منطق] احتمال نشت اطلاعات (permission info leak) در مدل inspector_session",
-      "priority": "high",
-      "execution_priority": 2000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-b9c7d40e-7e96-42c8-b65b-f0d901a4aba2.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T10:30:33.360973+00:00",
-      "updated_at": "2026-05-29T20:13:19.412480+00:00"
-    },
-    {
-      "task_id": "ea842417-5667-48cd-bd66-ee90483aa28e",
-      "title": "[منطق] عدم وجود validation برای ورودی‌های inspector_session",
-      "priority": "high",
-      "execution_priority": 2000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-ea842417-5667-48cd-bd66-ee90483aa28e.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T10:31:05.068051+00:00",
-      "updated_at": "2026-05-29T20:13:20.760545+00:00"
-    },
-    {
-      "task_id": "fc50381c-f1a7-442c-ba51-7a41c8464742",
-      "title": "[Effectiveness] عدم وجود معیارهای سنجش عملکرد واقعی برای AI Manager",
-      "priority": "high",
-      "execution_priority": 2000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-fc50381c-f1a7-442c-ba51-7a41c8464742.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T10:31:55.153705+00:00",
-      "updated_at": "2026-05-29T20:13:22.259288+00:00"
-    },
-    {
-      "task_id": "38c6eb2b-6fb4-4274-afb2-62a9b81c32db",
-      "title": "[Effectiveness] فقدان تست‌های یکپارچگی بین AI Manager و Oversight Service",
-      "priority": "high",
-      "execution_priority": 2000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-38c6eb2b-6fb4-4274-afb2-62a9b81c32db.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T10:32:30.798115+00:00",
-      "updated_at": "2026-05-29T20:13:24.778142+00:00"
-    },
-    {
-      "task_id": "99a2efc1-8898-4668-9686-11c5ab2d4942",
-      "title": "[منطق] احتمال info leak در permission checking",
-      "priority": "high",
-      "execution_priority": 2000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-99a2efc1-8898-4668-9686-11c5ab2d4942.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T16:43:43.775525+00:00",
-      "updated_at": "2026-05-29T20:14:00.998405+00:00"
-    },
-    {
-      "task_id": "cbcd3da3-b842-4a8e-a614-f4a63bd7f78d",
-      "title": "[منطق] عدم وجود user/role context در مدل inspector_session",
-      "priority": "high",
-      "execution_priority": 2000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-cbcd3da3-b842-4a8e-a614-f4a63bd7f78d.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T16:44:18.111020+00:00",
-      "updated_at": "2026-05-29T20:14:02.369408+00:00"
+      "external_attempts": 0
     },
     {
       "task_id": "1d88ae6a-4b5b-46f0-ad0f-f516a852eeca",
@@ -337,189 +202,7 @@
       "status": "pending",
       "external_status": "pending",
       "path": "prompt/task-1d88ae6a-4b5b-46f0-ad0f-f516a852eeca.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T16:45:07.767028+00:00",
-      "updated_at": "2026-05-29T20:14:03.877251+00:00"
-    },
-    {
-      "task_id": "7f0a2060-f339-4553-bec9-25b0bb8d025a",
-      "title": "[منطق] احتمال نشت اطلاعات (Info Leak) در metadata سشن",
-      "priority": "high",
-      "execution_priority": 2000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-7f0a2060-f339-4553-bec9-25b0bb8d025a.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T17:38:13.126644+00:00",
-      "updated_at": "2026-05-29T20:14:43.023375+00:00"
-    },
-    {
-      "task_id": "fad4d787-e5c0-4ceb-b56b-67509d399630",
-      "title": "[منطق] عدم مدیریت race condition در oversight_upload_session",
-      "priority": "high",
-      "execution_priority": 2000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-fad4d787-e5c0-4ceb-b56b-67509d399630.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T17:39:14.897430+00:00",
-      "updated_at": "2026-05-29T20:14:45.952728+00:00"
-    },
-    {
-      "task_id": "393e4073-6c9d-4aa6-8857-0a257b6434e2",
-      "title": "ناسازگاری نسخه‌های وابستگی‌های فرانت‌اند (Next.js 14 با reactflow 11 و mermaid 10)",
-      "priority": "high",
-      "execution_priority": 2000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-393e4073-6c9d-4aa6-8857-0a257b6434e2.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T19:16:11.775627+00:00",
-      "updated_at": "2026-05-29T20:15:18.553759+00:00"
-    },
-    {
-      "task_id": "708bd0c0-8018-4965-8056-3f7ffed447f6",
-      "title": "[منطق] عدم وجود مکانیزم اعتبارسنجی خروجی AI در ai_manager.py",
-      "priority": "high",
-      "execution_priority": 2000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-708bd0c0-8018-4965-8056-3f7ffed447f6.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T19:16:52.969939+00:00",
-      "updated_at": "2026-05-29T20:15:19.951232+00:00"
-    },
-    {
-      "task_id": "351e6807-76c1-4d47-93c5-c860c09306b5",
-      "title": "[منطق] عدم تطابق بین prompt format و output parser در system_prompt.py",
-      "priority": "high",
-      "execution_priority": 2000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-351e6807-76c1-4d47-93c5-c860c09306b5.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T19:17:35.846689+00:00",
-      "updated_at": "2026-05-29T20:15:21.528955+00:00"
-    },
-    {
-      "task_id": "f39d4aac-23f3-4f14-88fc-852cde103930",
-      "title": "[منطق] فقدان rate limiting و retry mechanism در سرویس‌های AI",
-      "priority": "high",
-      "execution_priority": 2000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-f39d4aac-23f3-4f14-88fc-852cde103930.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T19:18:18.001016+00:00",
-      "updated_at": "2026-05-29T20:15:22.867402+00:00"
-    },
-    {
-      "task_id": "9450ac54-c2b8-48b6-ad9b-05eef6a036c3",
-      "title": "[منطق] احتمال info leak در inspector_session از طریق extra_data و checked_logs_data",
-      "priority": "high",
-      "execution_priority": 2000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-9450ac54-c2b8-48b6-ad9b-05eef6a036c3.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T19:19:20.732119+00:00",
-      "updated_at": "2026-05-29T20:15:24.558682+00:00"
-    },
-    {
-      "task_id": "6b12fb38-d250-47b1-9018-41f22989f860",
-      "title": "[منطق] عدم coherence بین database.py و oversight_upload_session در مدیریت state",
-      "priority": "high",
-      "execution_priority": 2000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-6b12fb38-d250-47b1-9018-41f22989f860.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T19:19:46.447473+00:00",
-      "updated_at": "2026-05-29T20:15:27.068713+00:00"
-    },
-    {
-      "task_id": "f1f77a59-528c-4324-a8f1-c09b7a72596a",
-      "title": "Analysis page uses hardcoded fallback data for model profiles instead of real backend data",
-      "priority": "high",
-      "execution_priority": 2000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-f1f77a59-528c-4324-a8f1-c09b7a72596a.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-17T07:09:43.797274+00:00",
-      "updated_at": "2026-05-29T20:16:33.405434+00:00"
-    },
-    {
-      "task_id": "9f98dd0a-d258-4cb1-800a-1d30208f66ec",
-      "title": "فقدان تست واحد برای سرویس‌های اصلی AI (ai_manager, ai_base, model_profiler)",
-      "priority": "high",
-      "execution_priority": 2000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-9f98dd0a-d258-4cb1-800a-1d30208f66ec.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-17T07:09:43.942197+00:00",
-      "updated_at": "2026-05-29T20:16:36.258550+00:00"
-    },
-    {
-      "task_id": "c4abbc8d-b345-4f62-819e-1bd5dc480dac",
-      "title": "[منطق] عدم تطابق نوع ورودی messages در ai_base.py با ساختار مورد انتظار",
-      "priority": "high",
-      "execution_priority": 2000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-c4abbc8d-b345-4f62-819e-1bd5dc480dac.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-17T07:13:07.628374+00:00",
-      "updated_at": "2026-05-29T20:16:37.617913+00:00"
-    },
-    {
-      "task_id": "b501fec9-c7fe-4875-b5db-16c63cb22cac",
-      "title": "[منطق] عدم تطابق schema در state machine oversight_upload_session.py",
-      "priority": "high",
-      "execution_priority": 2000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-b501fec9-c7fe-4875-b5db-16c63cb22cac.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-17T07:13:43.266989+00:00",
-      "updated_at": "2026-05-29T20:16:40.089859+00:00"
-    },
-    {
-      "task_id": "57fae7f8-ea66-4edc-9b70-c8b9b268eb3a",
-      "title": "[منطق] عدم مدیریت orphan files در صورت crash پیش از cleanup",
-      "priority": "high",
-      "execution_priority": 2000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-57fae7f8-ea66-4edc-9b70-c8b9b268eb3a.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-17T07:14:11.576665+00:00",
-      "updated_at": "2026-05-29T20:16:41.473508+00:00"
-    },
-    {
-      "task_id": "74cf61d4-b001-4069-9470-fa77775231c8",
-      "title": "mismatch بین reactflow v11 و react 18 در package.json",
-      "priority": "high",
-      "execution_priority": 2000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-74cf61d4-b001-4069-9470-fa77775231c8.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-17T08:02:38.584949+00:00",
-      "updated_at": "2026-05-29T20:16:54.104770+00:00"
-    },
-    {
-      "task_id": "626f8c3a-607d-4f2f-8525-de3c2394ce2b",
-      "title": "تضاد در مدیریت پرامپت‌های سیستم: PromptHelper.cache در system_prompts.py با PromptHelper.clear_cache در render_logs.py",
-      "priority": "high",
-      "execution_priority": 2000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-626f8c3a-607d-4f2f-8525-de3c2394ce2b.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-17T08:02:38.882146+00:00",
-      "updated_at": "2026-05-29T20:16:56.528185+00:00"
+      "external_attempts": 0
     },
     {
       "task_id": "33ac0589-cd2b-4211-bba1-dd9d85122038",
@@ -529,21 +212,107 @@
       "status": "pending",
       "external_status": "pending",
       "path": "prompt/task-33ac0589-cd2b-4211-bba1-dd9d85122038.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-17T08:07:13.461010+00:00",
-      "updated_at": "2026-05-29T20:16:58.148818+00:00"
+      "external_attempts": 0
     },
     {
-      "task_id": "81991651-9759-42ba-9517-3a5d8fbf00e3",
-      "title": "[منطق] عدم تطابق در نوع خروجی streaming در ai_base.py",
+      "task_id": "351e6807-76c1-4d47-93c5-c860c09306b5",
+      "title": "[منطق] عدم تطابق بین prompt format و output parser در system_prompt.py",
       "priority": "high",
       "execution_priority": 2000,
       "status": "pending",
       "external_status": "pending",
-      "path": "prompt/task-81991651-9759-42ba-9517-3a5d8fbf00e3.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-17T08:08:02.515279+00:00",
-      "updated_at": "2026-05-29T20:17:01.851374+00:00"
+      "path": "prompt/task-351e6807-76c1-4d47-93c5-c860c09306b5.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "38c6eb2b-6fb4-4274-afb2-62a9b81c32db",
+      "title": "[Effectiveness] فقدان تست‌های یکپارچگی بین AI Manager و Oversight Service",
+      "priority": "high",
+      "execution_priority": 2000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-38c6eb2b-6fb4-4274-afb2-62a9b81c32db.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "393e4073-6c9d-4aa6-8857-0a257b6434e2",
+      "title": "ناسازگاری نسخه‌های وابستگی‌های فرانت‌اند (Next.js 14 با reactflow 11 و mermaid 10)",
+      "priority": "high",
+      "execution_priority": 2000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-393e4073-6c9d-4aa6-8857-0a257b6434e2.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "4abfb7dd-5101-42d7-97a8-d8ba8a46b37a",
+      "title": "عدم وجود rate limiting روی API endpoints",
+      "priority": "high",
+      "execution_priority": 2000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-4abfb7dd-5101-42d7-97a8-d8ba8a46b37a.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "57fae7f8-ea66-4edc-9b70-c8b9b268eb3a",
+      "title": "[منطق] عدم مدیریت orphan files در صورت crash پیش از cleanup",
+      "priority": "high",
+      "execution_priority": 2000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-57fae7f8-ea66-4edc-9b70-c8b9b268eb3a.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "626f8c3a-607d-4f2f-8525-de3c2394ce2b",
+      "title": "تضاد در مدیریت پرامپت‌های سیستم: PromptHelper.cache در system_prompts.py با PromptHelper.clear_cache در render_logs.py",
+      "priority": "high",
+      "execution_priority": 2000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-626f8c3a-607d-4f2f-8525-de3c2394ce2b.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "6b12fb38-d250-47b1-9018-41f22989f860",
+      "title": "[منطق] عدم coherence بین database.py و oversight_upload_session در مدیریت state",
+      "priority": "high",
+      "execution_priority": 2000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-6b12fb38-d250-47b1-9018-41f22989f860.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "708bd0c0-8018-4965-8056-3f7ffed447f6",
+      "title": "[منطق] عدم وجود مکانیزم اعتبارسنجی خروجی AI در ai_manager.py",
+      "priority": "high",
+      "execution_priority": 2000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-708bd0c0-8018-4965-8056-3f7ffed447f6.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "74cf61d4-b001-4069-9470-fa77775231c8",
+      "title": "mismatch بین reactflow v11 و react 18 در package.json",
+      "priority": "high",
+      "execution_priority": 2000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-74cf61d4-b001-4069-9470-fa77775231c8.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "7f0a2060-f339-4553-bec9-25b0bb8d025a",
+      "title": "[منطق] احتمال نشت اطلاعات (Info Leak) در metadata سشن",
+      "priority": "high",
+      "execution_priority": 2000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-7f0a2060-f339-4553-bec9-25b0bb8d025a.md",
+      "external_attempts": 0
     },
     {
       "task_id": "8062ee7c-e143-4288-a867-df08adc6571b",
@@ -553,9 +322,147 @@
       "status": "pending",
       "external_status": "pending",
       "path": "prompt/task-8062ee7c-e143-4288-a867-df08adc6571b.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-17T08:09:01.954155+00:00",
-      "updated_at": "2026-05-29T20:17:03.445428+00:00"
+      "external_attempts": 0
+    },
+    {
+      "task_id": "81991651-9759-42ba-9517-3a5d8fbf00e3",
+      "title": "[منطق] عدم تطابق در نوع خروجی streaming در ai_base.py",
+      "priority": "high",
+      "execution_priority": 2000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-81991651-9759-42ba-9517-3a5d8fbf00e3.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "9450ac54-c2b8-48b6-ad9b-05eef6a036c3",
+      "title": "[منطق] احتمال info leak در inspector_session از طریق extra_data و checked_logs_data",
+      "priority": "high",
+      "execution_priority": 2000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-9450ac54-c2b8-48b6-ad9b-05eef6a036c3.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "99a2efc1-8898-4668-9686-11c5ab2d4942",
+      "title": "[منطق] احتمال info leak در permission checking",
+      "priority": "high",
+      "execution_priority": 2000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-99a2efc1-8898-4668-9686-11c5ab2d4942.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "9f98dd0a-d258-4cb1-800a-1d30208f66ec",
+      "title": "فقدان تست واحد برای سرویس‌های اصلی AI (ai_manager, ai_base, model_profiler)",
+      "priority": "high",
+      "execution_priority": 2000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-9f98dd0a-d258-4cb1-800a-1d30208f66ec.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "b501fec9-c7fe-4875-b5db-16c63cb22cac",
+      "title": "[منطق] عدم تطابق schema در state machine oversight_upload_session.py",
+      "priority": "high",
+      "execution_priority": 2000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-b501fec9-c7fe-4875-b5db-16c63cb22cac.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "b9c7d40e-7e96-42c8-b65b-f0d901a4aba2",
+      "title": "[منطق] احتمال نشت اطلاعات (permission info leak) در مدل inspector_session",
+      "priority": "high",
+      "execution_priority": 2000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-b9c7d40e-7e96-42c8-b65b-f0d901a4aba2.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "c4abbc8d-b345-4f62-819e-1bd5dc480dac",
+      "title": "[منطق] عدم تطابق نوع ورودی messages در ai_base.py با ساختار مورد انتظار",
+      "priority": "high",
+      "execution_priority": 2000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-c4abbc8d-b345-4f62-819e-1bd5dc480dac.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "cbcd3da3-b842-4a8e-a614-f4a63bd7f78d",
+      "title": "[منطق] عدم وجود user/role context در مدل inspector_session",
+      "priority": "high",
+      "execution_priority": 2000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-cbcd3da3-b842-4a8e-a614-f4a63bd7f78d.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "cf9400cc-7cde-4c8d-8ea7-658c2c9486a4",
+      "title": "خواستم این ربات رو روی تلگرام دیگه هم راه اندازی کنم ولی اول که ایدیش رو زدم دید (5 مرحله)",
+      "priority": "high",
+      "execution_priority": 2000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-cf9400cc-7cde-4c8d-8ea7-658c2c9486a4.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "ea842417-5667-48cd-bd66-ee90483aa28e",
+      "title": "[منطق] عدم وجود validation برای ورودی‌های inspector_session",
+      "priority": "high",
+      "execution_priority": 2000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-ea842417-5667-48cd-bd66-ee90483aa28e.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "f1f77a59-528c-4324-a8f1-c09b7a72596a",
+      "title": "Analysis page uses hardcoded fallback data for model profiles instead of real backend data",
+      "priority": "high",
+      "execution_priority": 2000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-f1f77a59-528c-4324-a8f1-c09b7a72596a.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "f39d4aac-23f3-4f14-88fc-852cde103930",
+      "title": "[منطق] فقدان rate limiting و retry mechanism در سرویس‌های AI",
+      "priority": "high",
+      "execution_priority": 2000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-f39d4aac-23f3-4f14-88fc-852cde103930.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "fad4d787-e5c0-4ceb-b56b-67509d399630",
+      "title": "[منطق] عدم مدیریت race condition در oversight_upload_session",
+      "priority": "high",
+      "execution_priority": 2000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-fad4d787-e5c0-4ceb-b56b-67509d399630.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "fc50381c-f1a7-442c-ba51-7a41c8464742",
+      "title": "[Effectiveness] عدم وجود معیارهای سنجش عملکرد واقعی برای AI Manager",
+      "priority": "high",
+      "execution_priority": 2000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-fc50381c-f1a7-442c-ba51-7a41c8464742.md",
+      "external_attempts": 0
     },
     {
       "task_id": "task_3f9185f87f99",
@@ -565,21 +472,7 @@
       "status": "pending",
       "external_status": "pending",
       "path": "prompt/task-task_3f9185f87f99.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-18T04:17:41.780822+00:00",
-      "updated_at": "2026-05-29T20:23:17.562820+00:00"
-    },
-    {
-      "task_id": "task_6053ef86eea5",
-      "title": "رفع Anti-patternهای Notification Service و بهبود معماری آن",
-      "priority": "high",
-      "execution_priority": 2000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-task_6053ef86eea5.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-18T04:18:37.043052+00:00",
-      "updated_at": "2026-05-29T20:23:18.964195+00:00"
+      "external_attempts": 0
     },
     {
       "task_id": "task_48a9493b4a8b",
@@ -589,21 +482,17 @@
       "status": "pending",
       "external_status": "pending",
       "path": "prompt/task-task_48a9493b4a8b.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-18T04:19:25.307719+00:00",
-      "updated_at": "2026-05-29T20:23:21.441396+00:00"
+      "external_attempts": 0
     },
     {
-      "task_id": "task_9eae2c37ae94",
-      "title": "رفع Duplicate Logic و Anti-pattern در مدیریت API Key و main.py",
+      "task_id": "task_6053ef86eea5",
+      "title": "رفع Anti-patternهای Notification Service و بهبود معماری آن",
       "priority": "high",
       "execution_priority": 2000,
       "status": "pending",
       "external_status": "pending",
-      "path": "prompt/task-task_9eae2c37ae94.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-18T04:19:54.863009+00:00",
-      "updated_at": "2026-05-29T20:23:23.028419+00:00"
+      "path": "prompt/task-task_6053ef86eea5.md",
+      "external_attempts": 0
     },
     {
       "task_id": "task_68e133fe7a97",
@@ -613,9 +502,17 @@
       "status": "pending",
       "external_status": "pending",
       "path": "prompt/task-task_68e133fe7a97.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-18T04:20:35.913368+00:00",
-      "updated_at": "2026-05-29T20:23:26.932409+00:00"
+      "external_attempts": 0
+    },
+    {
+      "task_id": "task_9eae2c37ae94",
+      "title": "رفع Duplicate Logic و Anti-pattern در مدیریت API Key و main.py",
+      "priority": "high",
+      "execution_priority": 2000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-task_9eae2c37ae94.md",
+      "external_attempts": 0
     },
     {
       "task_id": "task_e16d3af7f6e3",
@@ -625,93 +522,7 @@
       "status": "pending",
       "external_status": "pending",
       "path": "prompt/task-task_e16d3af7f6e3.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-18T04:24:59.539905+00:00",
-      "updated_at": "2026-05-31T09:09:22.977328+00:00"
-    },
-    {
-      "task_id": "779654c6-2c21-459d-9483-9dfacd1f64bd",
-      "title": "Duplicate health analysis logic in project_health.py and analysis.py",
-      "priority": "high",
-      "execution_priority": 2300,
-      "status": "awaiting_review",
-      "external_status": "pending",
-      "path": "prompt/task-779654c6-2c21-459d-9483-9dfacd1f64bd.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T04:21:36.094527+00:00",
-      "updated_at": "2026-05-29T20:09:47.583964+00:00"
-    },
-    {
-      "task_id": "47955926-66fc-4ba0-8a7d-fcb8dfe371e2",
-      "title": "Endpoint `GET /api/models/available` در فرانت‌اند با ساختار پاسخ backend ناسازگار است",
-      "priority": "high",
-      "execution_priority": 2300,
-      "status": "awaiting_review",
-      "external_status": "pending",
-      "path": "prompt/task-47955926-66fc-4ba0-8a7d-fcb8dfe371e2.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T05:07:49.484463+00:00",
-      "updated_at": "2026-05-29T20:10:03.375074+00:00"
-    },
-    {
-      "task_id": "6f638017-b4ae-4cbf-9dbe-5526a221b6d5",
-      "title": "بازنویسی مکرر و غیرضروری فایل‌های کامل در frontend/src/app/projects/[id]/page.tsx",
-      "priority": "high",
-      "execution_priority": 2300,
-      "status": "awaiting_review",
-      "external_status": "pending",
-      "path": "prompt/task-6f638017-b4ae-4cbf-9dbe-5526a221b6d5.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T05:08:31.181267+00:00",
-      "updated_at": "2026-05-29T20:10:08.276935+00:00"
-    },
-    {
-      "task_id": "f2c5bb94-e399-4297-952a-7adc1518175f",
-      "title": "تضاد default برای فیلد 'project_id'",
-      "priority": "high",
-      "execution_priority": 2300,
-      "status": "awaiting_review",
-      "external_status": "pending",
-      "path": "prompt/task-f2c5bb94-e399-4297-952a-7adc1518175f.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T06:05:54.114584+00:00",
-      "updated_at": "2026-05-31T09:07:46.089701+00:00"
-    },
-    {
-      "task_id": "2398157c-424a-4370-8265-f19a618349f2",
-      "title": "Anti-pattern: Stale assumption",
-      "priority": "high",
-      "execution_priority": 2300,
-      "status": "awaiting_review",
-      "external_status": "pending",
-      "path": "prompt/task-2398157c-424a-4370-8265-f19a618349f2.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T06:05:54.797111+00:00",
-      "updated_at": "2026-05-31T09:08:46.616889+00:00"
-    },
-    {
-      "task_id": "59981555-68f7-4832-a1f1-45feddf1e741",
-      "title": "Anti-pattern: AI بدون validation",
-      "priority": "high",
-      "execution_priority": 2300,
-      "status": "awaiting_review",
-      "external_status": "pending",
-      "path": "prompt/task-59981555-68f7-4832-a1f1-45feddf1e741.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T06:05:54.826535+00:00",
-      "updated_at": "2026-05-31T09:08:46.728276+00:00"
-    },
-    {
-      "task_id": "9b065a13-eb79-4bad-86d0-e4f9ee60700d",
-      "title": "Anti-pattern: Threshold-Outcome mismatch",
-      "priority": "high",
-      "execution_priority": 2300,
-      "status": "awaiting_review",
-      "external_status": "pending",
-      "path": "prompt/task-9b065a13-eb79-4bad-86d0-e4f9ee60700d.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T06:05:54.854586+00:00",
-      "updated_at": "2026-05-31T09:08:46.766454+00:00"
+      "external_attempts": 0
     },
     {
       "task_id": "1a76fd81-72ff-4e74-b62d-1b7015b6cfc2",
@@ -721,9 +532,17 @@
       "status": "awaiting_review",
       "external_status": "pending",
       "path": "prompt/task-1a76fd81-72ff-4e74-b62d-1b7015b6cfc2.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T06:05:54.882078+00:00",
-      "updated_at": "2026-05-31T09:08:42.810266+00:00"
+      "external_attempts": 0
+    },
+    {
+      "task_id": "2398157c-424a-4370-8265-f19a618349f2",
+      "title": "Anti-pattern: Stale assumption",
+      "priority": "high",
+      "execution_priority": 2300,
+      "status": "awaiting_review",
+      "external_status": "pending",
+      "path": "prompt/task-2398157c-424a-4370-8265-f19a618349f2.md",
+      "external_attempts": 0
     },
     {
       "task_id": "241018be-51a9-45c3-8a14-09f2be471e45",
@@ -733,21 +552,7 @@
       "status": "awaiting_review",
       "external_status": "pending",
       "path": "prompt/task-241018be-51a9-45c3-8a14-09f2be471e45.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T16:41:11.919034+00:00",
-      "updated_at": "2026-05-29T20:13:50.926859+00:00"
-    },
-    {
-      "task_id": "ca56e78a-f669-43fe-a8dc-367e8c6ed54f",
-      "title": "عدم تطابق بین endpoint‌های Health Analysis و Oversight در مهاجرت",
-      "priority": "high",
-      "execution_priority": 2300,
-      "status": "awaiting_review",
-      "external_status": "pending",
-      "path": "prompt/task-ca56e78a-f669-43fe-a8dc-367e8c6ed54f.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T17:36:09.679407+00:00",
-      "updated_at": "2026-05-29T20:14:32.090678+00:00"
+      "external_attempts": 0
     },
     {
       "task_id": "3282f661-e0d8-4805-bf79-8904e1577058",
@@ -757,9 +562,47 @@
       "status": "awaiting_review",
       "external_status": "pending",
       "path": "prompt/task-3282f661-e0d8-4805-bf79-8904e1577058.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T17:36:09.953837+00:00",
-      "updated_at": "2026-05-31T09:07:44.352501+00:00"
+      "external_attempts": 0
+    },
+    {
+      "task_id": "47955926-66fc-4ba0-8a7d-fcb8dfe371e2",
+      "title": "Endpoint `GET /api/models/available` در فرانت‌اند با ساختار پاسخ backend ناسازگار است",
+      "priority": "high",
+      "execution_priority": 2300,
+      "status": "awaiting_review",
+      "external_status": "pending",
+      "path": "prompt/task-47955926-66fc-4ba0-8a7d-fcb8dfe371e2.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "59981555-68f7-4832-a1f1-45feddf1e741",
+      "title": "Anti-pattern: AI بدون validation",
+      "priority": "high",
+      "execution_priority": 2300,
+      "status": "awaiting_review",
+      "external_status": "pending",
+      "path": "prompt/task-59981555-68f7-4832-a1f1-45feddf1e741.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "6f638017-b4ae-4cbf-9dbe-5526a221b6d5",
+      "title": "بازنویسی مکرر و غیرضروری فایل‌های کامل در frontend/src/app/projects/[id]/page.tsx",
+      "priority": "high",
+      "execution_priority": 2300,
+      "status": "awaiting_review",
+      "external_status": "pending",
+      "path": "prompt/task-6f638017-b4ae-4cbf-9dbe-5526a221b6d5.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "779654c6-2c21-459d-9483-9dfacd1f64bd",
+      "title": "Duplicate health analysis logic in project_health.py and analysis.py",
+      "priority": "high",
+      "execution_priority": 2300,
+      "status": "awaiting_review",
+      "external_status": "pending",
+      "path": "prompt/task-779654c6-2c21-459d-9483-9dfacd1f64bd.md",
+      "external_attempts": 0
     },
     {
       "task_id": "850a53ee-0a7c-4da8-9656-2818d70c0d13",
@@ -769,9 +612,37 @@
       "status": "awaiting_review",
       "external_status": "pending",
       "path": "prompt/task-850a53ee-0a7c-4da8-9656-2818d70c0d13.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T17:38:47.471680+00:00",
-      "updated_at": "2026-05-29T20:14:44.582792+00:00"
+      "external_attempts": 0
+    },
+    {
+      "task_id": "9b065a13-eb79-4bad-86d0-e4f9ee60700d",
+      "title": "Anti-pattern: Threshold-Outcome mismatch",
+      "priority": "high",
+      "execution_priority": 2300,
+      "status": "awaiting_review",
+      "external_status": "pending",
+      "path": "prompt/task-9b065a13-eb79-4bad-86d0-e4f9ee60700d.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "ca56e78a-f669-43fe-a8dc-367e8c6ed54f",
+      "title": "عدم تطابق بین endpoint‌های Health Analysis و Oversight در مهاجرت",
+      "priority": "high",
+      "execution_priority": 2300,
+      "status": "awaiting_review",
+      "external_status": "pending",
+      "path": "prompt/task-ca56e78a-f669-43fe-a8dc-367e8c6ed54f.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "f2c5bb94-e399-4297-952a-7adc1518175f",
+      "title": "تضاد default برای فیلد 'project_id'",
+      "priority": "high",
+      "execution_priority": 2300,
+      "status": "awaiting_review",
+      "external_status": "pending",
+      "path": "prompt/task-f2c5bb94-e399-4297-952a-7adc1518175f.md",
+      "external_attempts": 0
     },
     {
       "task_id": "f6485584-6ded-4396-9ade-533e29646b41",
@@ -781,261 +652,7 @@
       "status": "awaiting_review",
       "external_status": "pending",
       "path": "prompt/task-f6485584-6ded-4396-9ade-533e29646b41.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-18T05:42:40.687008+00:00",
-      "updated_at": "2026-05-29T20:24:04.571221+00:00"
-    },
-    {
-      "task_id": "c230e259-b06d-4a4e-9c1d-ae260e4faffd",
-      "title": "امکان لاگین کردن توسط جیمیل برای حفاظت از عدم دسترسی افراد دیگر به صفحات برنامه ",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-c230e259-b06d-4a4e-9c1d-ae260e4faffd.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-11T04:42:02.468113+00:00",
-      "updated_at": "2026-05-31T09:11:44.768807+00:00"
-    },
-    {
-      "task_id": "fa7bdf07-d7a6-4136-9919-fe6aeb5abee4",
-      "title": "[بصری] قابلیت اتصال صفحه مناظره، از طریق همان فرانت در خود صفحه مناظره، برای اینکه مشخص",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-fa7bdf07-d7a6-4136-9919-fe6aeb5abee4.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-11T17:10:36.204649+00:00",
-      "updated_at": "2026-05-29T20:08:25.919350+00:00"
-    },
-    {
-      "task_id": "17e16826-4cca-466f-863b-f3d514ce091e",
-      "title": "اتصال تلگرام به موتور خالق هوشمند برای ثبت ایده و دریافت فیدبک صوتی",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-17e16826-4cca-466f-863b-f3d514ce091e.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-12T04:59:26.780267+00:00",
-      "updated_at": "2026-05-29T20:08:27.557486+00:00"
-    },
-    {
-      "task_id": "587a4bed-64dd-4286-9a83-10a3167c46ec",
-      "title": "میخوام برای قسمت تسک ها، چه در تلگرام و چه در خود فرانت , و همینطور ایجاد پروژه  (5 مرحله)",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-587a4bed-64dd-4286-9a83-10a3167c46ec.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-12T11:32:06.523609+00:00",
-      "updated_at": "2026-05-30T07:16:05.164423+00:00"
-    },
-    {
-      "task_id": "ef8ce95f-a25d-4d82-b2a2-1bee2ebb3777",
-      "title": "این امکان فراهم بشه که اولا بتونم برای پروژه هایی که دارم کاری کنم که وقتی میخوا (4 مرحله)",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-ef8ce95f-a25d-4d82-b2a2-1bee2ebb3777.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-12T13:46:54.156486+00:00",
-      "updated_at": "2026-05-29T20:08:38.562111+00:00"
-    },
-    {
-      "task_id": "c3d57b4b-24c2-405d-8084-86cf2e97b959",
-      "title": "در فرانت قسمت یاداوری با گزینه لازمش ایجاد شده ولی در تلگرام وقتی میخوام ذیل یه  (9 مرحله)",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-c3d57b4b-24c2-405d-8084-86cf2e97b959.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-12T18:55:39.596715+00:00",
-      "updated_at": "2026-05-29T20:08:54.276020+00:00"
-    },
-    {
-      "task_id": "340f116c-27ff-4215-bfe9-815a5a50fb4b",
-      "title": "[ایدهٔ متنی همراه نیست — دستورالعمل/درخواست کاربر **داخل** محتوای فایل‌های پیوست",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-340f116c-27ff-4215-bfe9-815a5a50fb4b.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-13T21:47:44.317161+00:00",
-      "updated_at": "2026-05-29T20:09:02.248700+00:00"
-    },
-    {
-      "task_id": "4d1c38bb-65dc-4d1d-b37c-9bf75f1fa818",
-      "title": "[Effectiveness] فقدان معیارهای کیفی برای خروجی‌های AI در creator و analysis",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-4d1c38bb-65dc-4d1d-b37c-9bf75f1fa818.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T06:06:45.709522+00:00",
-      "updated_at": "2026-05-29T20:11:39.954802+00:00"
-    },
-    {
-      "task_id": "4317aaa2-b87e-4f3b-9782-837d960384ad",
-      "title": "استفاده از Deprecated Health Endpoints بدون مهاجرت کامل به Oversight",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-4317aaa2-b87e-4f3b-9782-837d960384ad.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T10:32:31.109146+00:00",
-      "updated_at": "2026-05-31T09:07:44.676181+00:00"
-    },
-    {
-      "task_id": "877a0b58-c816-4867-beff-b1e12b1ff9ef",
-      "title": "[منطق] عدم ثبت و ردیابی execution context در ai_manager",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-877a0b58-c816-4867-beff-b1e12b1ff9ef.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T10:33:41.427875+00:00",
-      "updated_at": "2026-05-29T20:13:34.691421+00:00"
-    },
-    {
-      "task_id": "0dc65e56-af37-45dc-8d6c-90560f7cacb4",
-      "title": "[Effectiveness] عدم پایش کیفیت نوتیفیکیشن‌های تلگرام",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-0dc65e56-af37-45dc-8d6c-90560f7cacb4.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T10:34:16.778479+00:00",
-      "updated_at": "2026-05-29T20:13:37.381686+00:00"
-    },
-    {
-      "task_id": "ab8ec3aa-b6c0-4904-8756-79c22e50ce54",
-      "title": "[Effectiveness] فقدان تست‌های یکپارچگی برای Notification Service با 12+ نوع رویداد",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-ab8ec3aa-b6c0-4904-8756-79c22e50ce54.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T16:46:56.468340+00:00",
-      "updated_at": "2026-05-29T20:14:13.731090+00:00"
-    },
-    {
-      "task_id": "a9b1c81b-2805-45df-bbd4-b87fd563b705",
-      "title": "[Effectiveness] عدم ارزیابی کیفیت پیش‌بینی‌های AI Manager در Oversight Service",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-a9b1c81b-2805-45df-bbd4-b87fd563b705.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T16:47:33.295641+00:00",
-      "updated_at": "2026-05-29T20:14:15.384810+00:00"
-    },
-    {
-      "task_id": "c558eb18-8a06-463c-a22d-962ea5b94e54",
-      "title": "[منطق] عدم وجود caching strategy برای انتخاب مدل در ai_manager",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-c558eb18-8a06-463c-a22d-962ea5b94e54.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T17:40:30.919103+00:00",
-      "updated_at": "2026-05-29T20:14:51.710972+00:00"
-    },
-    {
-      "task_id": "5ff5e14f-6da5-4338-a3f6-d45e8f832e9c",
-      "title": "[منطق] عدم پشتیبانی از streaming response در معماری فعلی",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-5ff5e14f-6da5-4338-a3f6-d45e8f832e9c.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T17:41:24.418625+00:00",
-      "updated_at": "2026-05-29T20:14:53.417044+00:00"
-    },
-    {
-      "task_id": "3399ac8b-d17b-4526-b6cc-9a2a1c950891",
-      "title": "[منطق] عدم validation برای extra_data در inspector_session",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-3399ac8b-d17b-4526-b6cc-9a2a1c950891.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T17:41:49.028928+00:00",
-      "updated_at": "2026-05-29T20:14:55.726622+00:00"
-    },
-    {
-      "task_id": "1684f3cc-5c06-428b-82d0-ba5b0617100c",
-      "title": "[منطق] عدم پشتیبانی از rollback در oversight_upload_session",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-1684f3cc-5c06-428b-82d0-ba5b0617100c.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T17:42:24.948934+00:00",
-      "updated_at": "2026-05-29T20:14:57.334581+00:00"
-    },
-    {
-      "task_id": "6da43a1d-972f-4f50-a79f-15539979017d",
-      "title": "[Effectiveness] عدم پوشش کامل eventها در Notification Service",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-6da43a1d-972f-4f50-a79f-15539979017d.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T17:43:32.831330+00:00",
-      "updated_at": "2026-05-29T20:14:58.769016+00:00"
-    },
-    {
-      "task_id": "1d12bd01-b774-4102-bfbf-ea64146c0bf7",
-      "title": "[منطق] نبود مکانیزم fallback در prompt_helper.py برای کش نامعتبر",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-1d12bd01-b774-4102-bfbf-ea64146c0bf7.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T19:20:17.165545+00:00",
-      "updated_at": "2026-05-29T20:15:32.599001+00:00"
-    },
-    {
-      "task_id": "484e1daf-d8c0-4e7b-87c2-d62322b7ecce",
-      "title": "[منطق] عدم هماهنگی بین ModelCapability در ai_manager.py و system_prompt.py",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-484e1daf-d8c0-4e7b-87c2-d62322b7ecce.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T19:20:35.642820+00:00",
-      "updated_at": "2026-05-29T20:15:34.917344+00:00"
-    },
-    {
-      "task_id": "554b9037-0df6-46d3-9b48-0b293d2fc8ee",
-      "title": "[منطق] عدم وجود rate limiting و protection در برابر chunked upload abuse",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-554b9037-0df6-46d3-9b48-0b293d2fc8ee.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T19:21:07.457192+00:00",
-      "updated_at": "2026-05-29T20:15:36.258920+00:00"
+      "external_attempts": 0
     },
     {
       "task_id": "011b41ed-2e2f-486f-938d-ee621fc79296",
@@ -1045,201 +662,17 @@
       "status": "pending",
       "external_status": "pending",
       "path": "prompt/task-011b41ed-2e2f-486f-938d-ee621fc79296.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T19:21:48.599587+00:00",
-      "updated_at": "2026-05-29T20:15:37.793972+00:00"
+      "external_attempts": 0
     },
     {
-      "task_id": "705f4681-acff-42b7-a19a-a41afa7653b4",
-      "title": "[منطق] عدم مدیریت empty result در streaming خروجی ai_base.py",
+      "task_id": "0dc65e56-af37-45dc-8d6c-90560f7cacb4",
+      "title": "[Effectiveness] عدم پایش کیفیت نوتیفیکیشن‌های تلگرام",
       "priority": "medium",
       "execution_priority": 3000,
       "status": "pending",
       "external_status": "pending",
-      "path": "prompt/task-705f4681-acff-42b7-a19a-a41afa7653b4.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-17T07:18:45.432499+00:00",
-      "updated_at": "2026-05-29T20:16:45.547601+00:00"
-    },
-    {
-      "task_id": "1c7feb42-f95f-4a8d-ab33-476a0a3cd8ec",
-      "title": "[منطق] عدم مدیریت empty chunk data در oversight_upload_session.py",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-1c7feb42-f95f-4a8d-ab33-476a0a3cd8ec.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-17T07:19:18.607203+00:00",
-      "updated_at": "2026-05-29T20:16:46.958413+00:00"
-    },
-    {
-      "task_id": "8458e2b8-519c-4c9e-b72c-204d3c49b189",
-      "title": "[منطق] عدم هماهنگی در مدیریت خطا و metadata بین دو سرویس",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-8458e2b8-519c-4c9e-b72c-204d3c49b189.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-17T07:19:59.179156+00:00",
-      "updated_at": "2026-05-29T20:16:48.555473+00:00"
-    },
-    {
-      "task_id": "c8398f0d-bfcd-40f2-86eb-7f415c83ff0c",
-      "title": "[منطق] عدم coherence در مدیریت storage path",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-c8398f0d-bfcd-40f2-86eb-7f415c83ff0c.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-17T08:11:28.862684+00:00",
-      "updated_at": "2026-05-29T20:17:12.322010+00:00"
-    },
-    {
-      "task_id": "21586964-ea99-4c98-b56f-5fdef2a7f438",
-      "title": "[منطق] عدم مدیریت empty result در ai_base.py",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-21586964-ea99-4c98-b56f-5fdef2a7f438.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-17T08:44:54.560918+00:00",
-      "updated_at": "2026-05-29T20:17:33.277040+00:00"
-    },
-    {
-      "task_id": "609064d8-8672-45d7-adf4-846863be2f27",
-      "title": "[منطق] عدم اشاره به transaction safety در عملیات هم‌زمان",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-609064d8-8672-45d7-adf4-846863be2f27.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-17T08:45:47.260952+00:00",
-      "updated_at": "2026-05-29T20:17:35.472478+00:00"
-    },
-    {
-      "task_id": "task_594ab2aa219b",
-      "title": "پاکسازی و حذف endpointها و routeهای بلااستفاده در بک‌اند و فرانت‌اند",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-task_594ab2aa219b.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-18T04:21:34.892704+00:00",
-      "updated_at": "2026-05-29T20:23:28.557129+00:00"
-    },
-    {
-      "task_id": "task_287096a4b102",
-      "title": "بهبود سیستم notification: افزودن event_type صریح و یکپارچگی با metrics",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-task_287096a4b102.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-18T04:25:54.298185+00:00",
-      "updated_at": "2026-05-29T20:23:44.363415+00:00"
-    },
-    {
-      "task_id": "task_730c90d03ea7",
-      "title": "تلفیق: mechanical:files (2 تسک)",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-task_730c90d03ea7.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-18T04:26:38.825617+00:00",
-      "updated_at": "2026-05-29T20:23:45.954881+00:00"
-    },
-    {
-      "task_id": "task_700243ecace9",
-      "title": "تلفیق: mechanical:files (2 تسک)",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-task_700243ecace9.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-18T04:27:21.527720+00:00",
-      "updated_at": "2026-05-29T20:23:47.389913+00:00"
-    },
-    {
-      "task_id": "task_8e58168d2194",
-      "title": "تلفیق: mechanical:title (2 تسک)",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-task_8e58168d2194.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-18T04:27:44.357447+00:00",
-      "updated_at": "2026-05-31T09:09:25.801213+00:00"
-    },
-    {
-      "task_id": "task_cf9cdbb08d12",
-      "title": "تلفیق: mechanical:title (2 تسک)",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-task_cf9cdbb08d12.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-18T04:28:05.215807+00:00",
-      "updated_at": "2026-05-29T20:23:53.970768+00:00"
-    },
-    {
-      "task_id": "task_e9c47d8da56b",
-      "title": "تلفیق: mechanical:title (2 تسک)",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-task_e9c47d8da56b.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-18T04:28:37.266283+00:00",
-      "updated_at": "2026-05-29T20:23:56.509341+00:00"
-    },
-    {
-      "task_id": "task_125d131a1b17",
-      "title": "تلفیق: mechanical:title (2 تسک)",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-task_125d131a1b17.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-18T04:29:09.429761+00:00",
-      "updated_at": "2026-05-29T20:23:58.142281+00:00"
-    },
-    {
-      "task_id": "task_8774b7f09f2f",
-      "title": "تلفیق: mechanical:files (2 تسک)",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-task_8774b7f09f2f.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-18T04:29:46.437938+00:00",
-      "updated_at": "2026-05-29T20:24:03.226763+00:00"
-    },
-    {
-      "task_id": "7463c9ae-2409-487c-a98f-647191ee3f2a",
-      "title": "استفاده از لاگ های پروژه ها برای بررسی مصرف دقیق مدل های غیر دیپسیک و تخمین باقی مانده موجودی",
-      "priority": "medium",
-      "execution_priority": 3000,
-      "status": "pending",
-      "external_status": "pending",
-      "path": "prompt/task-7463c9ae-2409-487c-a98f-647191ee3f2a.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-19T07:02:46.988340+00:00",
-      "updated_at": "2026-05-29T20:24:08.826253+00:00"
+      "path": "prompt/task-0dc65e56-af37-45dc-8d6c-90560f7cacb4.md",
+      "external_attempts": 0
     },
     {
       "task_id": "0e8cb457-536c-4f5e-b8aa-d109a90eb4ef",
@@ -1249,33 +682,177 @@
       "status": "pending",
       "external_status": "pending",
       "path": "prompt/task-0e8cb457-536c-4f5e-b8aa-d109a90eb4ef.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-19T10:54:37.237160+00:00",
-      "updated_at": "2026-05-29T20:24:13.878565+00:00"
+      "external_attempts": 0
     },
     {
-      "task_id": "9ff6b9fa-e494-44e6-90b1-9034150eaa1f",
-      "title": "ایجاد قابلیتی شبیه به 'Cloud Dreaming' برای بازرس ویژه",
+      "task_id": "1684f3cc-5c06-428b-82d0-ba5b0617100c",
+      "title": "[منطق] عدم پشتیبانی از rollback در oversight_upload_session",
       "priority": "medium",
       "execution_priority": 3000,
       "status": "pending",
       "external_status": "pending",
-      "path": "prompt/task-9ff6b9fa-e494-44e6-90b1-9034150eaa1f.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-20T07:48:40.944221+00:00",
-      "updated_at": "2026-05-29T20:26:51.518831+00:00"
+      "path": "prompt/task-1684f3cc-5c06-428b-82d0-ba5b0617100c.md",
+      "external_attempts": 0
     },
     {
-      "task_id": "b2fe1b56-313c-4c26-8bb8-09b54fa93bf4",
-      "title": "پیاده‌سازی ذخیره‌سازی پایدار پروژه‌های موتور خالق در بک‌اند",
+      "task_id": "17e16826-4cca-466f-863b-f3d514ce091e",
+      "title": "اتصال تلگرام به موتور خالق هوشمند برای ثبت ایده و دریافت فیدبک صوتی",
       "priority": "medium",
       "execution_priority": 3000,
       "status": "pending",
       "external_status": "pending",
-      "path": "prompt/task-b2fe1b56-313c-4c26-8bb8-09b54fa93bf4.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-23T08:27:41.145588+00:00",
-      "updated_at": "2026-05-29T20:27:46.701336+00:00"
+      "path": "prompt/task-17e16826-4cca-466f-863b-f3d514ce091e.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "1c7feb42-f95f-4a8d-ab33-476a0a3cd8ec",
+      "title": "[منطق] عدم مدیریت empty chunk data در oversight_upload_session.py",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-1c7feb42-f95f-4a8d-ab33-476a0a3cd8ec.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "1d12bd01-b774-4102-bfbf-ea64146c0bf7",
+      "title": "[منطق] نبود مکانیزم fallback در prompt_helper.py برای کش نامعتبر",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-1d12bd01-b774-4102-bfbf-ea64146c0bf7.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "21586964-ea99-4c98-b56f-5fdef2a7f438",
+      "title": "[منطق] عدم مدیریت empty result در ai_base.py",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-21586964-ea99-4c98-b56f-5fdef2a7f438.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "3399ac8b-d17b-4526-b6cc-9a2a1c950891",
+      "title": "[منطق] عدم validation برای extra_data در inspector_session",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-3399ac8b-d17b-4526-b6cc-9a2a1c950891.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "340f116c-27ff-4215-bfe9-815a5a50fb4b",
+      "title": "[ایدهٔ متنی همراه نیست — دستورالعمل/درخواست کاربر **داخل** محتوای فایل‌های پیوست",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-340f116c-27ff-4215-bfe9-815a5a50fb4b.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "4317aaa2-b87e-4f3b-9782-837d960384ad",
+      "title": "استفاده از Deprecated Health Endpoints بدون مهاجرت کامل به Oversight",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-4317aaa2-b87e-4f3b-9782-837d960384ad.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "484e1daf-d8c0-4e7b-87c2-d62322b7ecce",
+      "title": "[منطق] عدم هماهنگی بین ModelCapability در ai_manager.py و system_prompt.py",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-484e1daf-d8c0-4e7b-87c2-d62322b7ecce.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "4d1c38bb-65dc-4d1d-b37c-9bf75f1fa818",
+      "title": "[Effectiveness] فقدان معیارهای کیفی برای خروجی‌های AI در creator و analysis",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-4d1c38bb-65dc-4d1d-b37c-9bf75f1fa818.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "554b9037-0df6-46d3-9b48-0b293d2fc8ee",
+      "title": "[منطق] عدم وجود rate limiting و protection در برابر chunked upload abuse",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-554b9037-0df6-46d3-9b48-0b293d2fc8ee.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "587a4bed-64dd-4286-9a83-10a3167c46ec",
+      "title": "میخوام برای قسمت تسک ها، چه در تلگرام و چه در خود فرانت , و همینطور ایجاد پروژه  (5 مرحله)",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-587a4bed-64dd-4286-9a83-10a3167c46ec.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "5ff5e14f-6da5-4338-a3f6-d45e8f832e9c",
+      "title": "[منطق] عدم پشتیبانی از streaming response در معماری فعلی",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-5ff5e14f-6da5-4338-a3f6-d45e8f832e9c.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "609064d8-8672-45d7-adf4-846863be2f27",
+      "title": "[منطق] عدم اشاره به transaction safety در عملیات هم‌زمان",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-609064d8-8672-45d7-adf4-846863be2f27.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "6da43a1d-972f-4f50-a79f-15539979017d",
+      "title": "[Effectiveness] عدم پوشش کامل eventها در Notification Service",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-6da43a1d-972f-4f50-a79f-15539979017d.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "705f4681-acff-42b7-a19a-a41afa7653b4",
+      "title": "[منطق] عدم مدیریت empty result در streaming خروجی ai_base.py",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-705f4681-acff-42b7-a19a-a41afa7653b4.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "7463c9ae-2409-487c-a98f-647191ee3f2a",
+      "title": "استفاده از لاگ های پروژه ها برای بررسی مصرف دقیق مدل های غیر دیپسیک و تخمین باقی مانده موجودی",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-7463c9ae-2409-487c-a98f-647191ee3f2a.md",
+      "external_attempts": 0
     },
     {
       "task_id": "756c8f85-282b-4318-ac3d-442e7c0f7ee8",
@@ -1285,9 +862,217 @@
       "status": "pending",
       "external_status": "pending",
       "path": "prompt/task-756c8f85-282b-4318-ac3d-442e7c0f7ee8.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-27T22:09:00.236507+00:00",
-      "updated_at": "2026-05-29T20:35:58.718389+00:00"
+      "external_attempts": 0
+    },
+    {
+      "task_id": "8458e2b8-519c-4c9e-b72c-204d3c49b189",
+      "title": "[منطق] عدم هماهنگی در مدیریت خطا و metadata بین دو سرویس",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-8458e2b8-519c-4c9e-b72c-204d3c49b189.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "877a0b58-c816-4867-beff-b1e12b1ff9ef",
+      "title": "[منطق] عدم ثبت و ردیابی execution context در ai_manager",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-877a0b58-c816-4867-beff-b1e12b1ff9ef.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "9ff6b9fa-e494-44e6-90b1-9034150eaa1f",
+      "title": "ایجاد قابلیتی شبیه به 'Cloud Dreaming' برای بازرس ویژه",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-9ff6b9fa-e494-44e6-90b1-9034150eaa1f.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "a9b1c81b-2805-45df-bbd4-b87fd563b705",
+      "title": "[Effectiveness] عدم ارزیابی کیفیت پیش‌بینی‌های AI Manager در Oversight Service",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-a9b1c81b-2805-45df-bbd4-b87fd563b705.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "ab8ec3aa-b6c0-4904-8756-79c22e50ce54",
+      "title": "[Effectiveness] فقدان تست‌های یکپارچگی برای Notification Service با 12+ نوع رویداد",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-ab8ec3aa-b6c0-4904-8756-79c22e50ce54.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "b2fe1b56-313c-4c26-8bb8-09b54fa93bf4",
+      "title": "پیاده‌سازی ذخیره‌سازی پایدار پروژه‌های موتور خالق در بک‌اند",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-b2fe1b56-313c-4c26-8bb8-09b54fa93bf4.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "c230e259-b06d-4a4e-9c1d-ae260e4faffd",
+      "title": "امکان لاگین کردن توسط جیمیل برای حفاظت از عدم دسترسی افراد دیگر به صفحات برنامه ",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-c230e259-b06d-4a4e-9c1d-ae260e4faffd.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "c3d57b4b-24c2-405d-8084-86cf2e97b959",
+      "title": "در فرانت قسمت یاداوری با گزینه لازمش ایجاد شده ولی در تلگرام وقتی میخوام ذیل یه  (9 مرحله)",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-c3d57b4b-24c2-405d-8084-86cf2e97b959.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "c558eb18-8a06-463c-a22d-962ea5b94e54",
+      "title": "[منطق] عدم وجود caching strategy برای انتخاب مدل در ai_manager",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-c558eb18-8a06-463c-a22d-962ea5b94e54.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "c8398f0d-bfcd-40f2-86eb-7f415c83ff0c",
+      "title": "[منطق] عدم coherence در مدیریت storage path",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-c8398f0d-bfcd-40f2-86eb-7f415c83ff0c.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "ef8ce95f-a25d-4d82-b2a2-1bee2ebb3777",
+      "title": "این امکان فراهم بشه که اولا بتونم برای پروژه هایی که دارم کاری کنم که وقتی میخوا (4 مرحله)",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-ef8ce95f-a25d-4d82-b2a2-1bee2ebb3777.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "fa7bdf07-d7a6-4136-9919-fe6aeb5abee4",
+      "title": "[بصری] قابلیت اتصال صفحه مناظره، از طریق همان فرانت در خود صفحه مناظره، برای اینکه مشخص",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-fa7bdf07-d7a6-4136-9919-fe6aeb5abee4.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "task_125d131a1b17",
+      "title": "تلفیق: mechanical:title (2 تسک)",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-task_125d131a1b17.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "task_287096a4b102",
+      "title": "بهبود سیستم notification: افزودن event_type صریح و یکپارچگی با metrics",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-task_287096a4b102.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "task_594ab2aa219b",
+      "title": "پاکسازی و حذف endpointها و routeهای بلااستفاده در بک‌اند و فرانت‌اند",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-task_594ab2aa219b.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "task_700243ecace9",
+      "title": "تلفیق: mechanical:files (2 تسک)",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-task_700243ecace9.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "task_730c90d03ea7",
+      "title": "تلفیق: mechanical:files (2 تسک)",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-task_730c90d03ea7.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "task_8774b7f09f2f",
+      "title": "تلفیق: mechanical:files (2 تسک)",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-task_8774b7f09f2f.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "task_8e58168d2194",
+      "title": "تلفیق: mechanical:title (2 تسک)",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-task_8e58168d2194.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "task_cf9cdbb08d12",
+      "title": "تلفیق: mechanical:title (2 تسک)",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-task_cf9cdbb08d12.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "task_e9c47d8da56b",
+      "title": "تلفیق: mechanical:title (2 تسک)",
+      "priority": "medium",
+      "execution_priority": 3000,
+      "status": "pending",
+      "external_status": "pending",
+      "path": "prompt/task-task_e9c47d8da56b.md",
+      "external_attempts": 0
     },
     {
       "task_id": "27d94e64-8fc5-44da-a23d-fe585c584d0a",
@@ -1297,21 +1082,7 @@
       "status": "awaiting_review",
       "external_status": "pending",
       "path": "prompt/task-27d94e64-8fc5-44da-a23d-fe585c584d0a.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T05:09:14.893821+00:00",
-      "updated_at": "2026-05-29T20:10:16.624298+00:00"
-    },
-    {
-      "task_id": "8d5fff95-112c-4694-a0de-35625b785798",
-      "title": "Duplicate health check endpoints in model_profiles.py and models.py",
-      "priority": "medium",
-      "execution_priority": 3300,
-      "status": "awaiting_review",
-      "external_status": "pending",
-      "path": "prompt/task-8d5fff95-112c-4694-a0de-35625b785798.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T06:05:54.997594+00:00",
-      "updated_at": "2026-05-29T20:10:50.563292+00:00"
+      "external_attempts": 0
     },
     {
       "task_id": "49c92130-13b6-4deb-96c6-c6d9920c52cb",
@@ -1321,33 +1092,7 @@
       "status": "awaiting_review",
       "external_status": "pending",
       "path": "prompt/task-49c92130-13b6-4deb-96c6-c6d9920c52cb.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T10:32:31.309554+00:00",
-      "updated_at": "2026-05-29T20:13:29.112027+00:00"
-    },
-    {
-      "task_id": "6eee9e60-fb0d-47df-b2fd-42ae1169fafc",
-      "title": "audit notification: template_duplicate",
-      "priority": "medium",
-      "execution_priority": 3300,
-      "status": "awaiting_review",
-      "external_status": "pending",
-      "path": "prompt/task-6eee9e60-fb0d-47df-b2fd-42ae1169fafc.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T16:47:34.404794+00:00",
-      "updated_at": "2026-05-31T09:08:43.441900+00:00"
-    },
-    {
-      "task_id": "e0deec65-145a-4109-9a7d-fdc1d61fee9e",
-      "title": "عدم اعتبارسنجی ورودی در endpointهای Overs",
-      "priority": "medium",
-      "execution_priority": 3300,
-      "status": "awaiting_review",
-      "external_status": "pending",
-      "path": "prompt/task-e0deec65-145a-4109-9a7d-fdc1d61fee9e.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-17T08:43:30.052637+00:00",
-      "updated_at": "2026-05-29T20:17:23.516457+00:00"
+      "external_attempts": 0
     },
     {
       "task_id": "545a479d-b63c-4177-af99-5d9320b620c5",
@@ -1357,9 +1102,37 @@
       "status": "awaiting_review",
       "external_status": "pending",
       "path": "prompt/task-545a479d-b63c-4177-af99-5d9320b620c5.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-17T08:43:30.184309+00:00",
-      "updated_at": "2026-05-29T20:17:25.249323+00:00"
+      "external_attempts": 0
+    },
+    {
+      "task_id": "6eee9e60-fb0d-47df-b2fd-42ae1169fafc",
+      "title": "audit notification: template_duplicate",
+      "priority": "medium",
+      "execution_priority": 3300,
+      "status": "awaiting_review",
+      "external_status": "pending",
+      "path": "prompt/task-6eee9e60-fb0d-47df-b2fd-42ae1169fafc.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "8d5fff95-112c-4694-a0de-35625b785798",
+      "title": "Duplicate health check endpoints in model_profiles.py and models.py",
+      "priority": "medium",
+      "execution_priority": 3300,
+      "status": "awaiting_review",
+      "external_status": "pending",
+      "path": "prompt/task-8d5fff95-112c-4694-a0de-35625b785798.md",
+      "external_attempts": 0
+    },
+    {
+      "task_id": "e0deec65-145a-4109-9a7d-fdc1d61fee9e",
+      "title": "عدم اعتبارسنجی ورودی در endpointهای Overs",
+      "priority": "medium",
+      "execution_priority": 3300,
+      "status": "awaiting_review",
+      "external_status": "pending",
+      "path": "prompt/task-e0deec65-145a-4109-9a7d-fdc1d61fee9e.md",
+      "external_attempts": 0
     },
     {
       "task_id": "f6fa284d-ccac-4487-b56c-fbddcc10a6da",
@@ -1369,9 +1142,7 @@
       "status": "awaiting_review",
       "external_status": "pending",
       "path": "prompt/task-f6fa284d-ccac-4487-b56c-fbddcc10a6da.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-17T08:43:37.735746+00:00",
-      "updated_at": "2026-05-31T09:09:14.988223+00:00"
+      "external_attempts": 0
     },
     {
       "task_id": "task_6632b2dd3fde",
@@ -1381,9 +1152,7 @@
       "status": "pending",
       "external_status": "pending",
       "path": "prompt/task-task_6632b2dd3fde.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-18T04:24:08.813343+00:00",
-      "updated_at": "2026-05-29T20:23:39.133082+00:00"
+      "external_attempts": 0
     },
     {
       "task_id": "b673cafa-5a7b-47a7-8da7-db4772ce0b94",
@@ -1393,9 +1162,7 @@
       "status": "awaiting_review",
       "external_status": "pending",
       "path": "prompt/task-b673cafa-5a7b-47a7-8da7-db4772ce0b94.md",
-      "external_attempts": 0,
-      "created_at": "2026-05-15T10:34:17.925750+00:00",
-      "updated_at": "2026-05-29T20:13:38.746391+00:00"
+      "external_attempts": 0
     }
   ]
 }
