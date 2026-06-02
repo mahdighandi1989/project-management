@@ -182,6 +182,18 @@ class FromInspectorRequest(BaseModel):
     inspector_session_id: Optional[str] = None
 
 
+class FromInspectorRecordingRequest(BaseModel):
+    """درخواست ساخت تسک از یک جلسهٔ ضبط بازرس ویژه — پرامپت قوی از قبل آماده
+    است (توسط inspector_recording_processor ساخته شده) و اینجا هیچ پردازش
+    دوبارهٔ AI انجام نمی‌شود؛ فقط تسک با حفظ raw_idea و prompt ساخته می‌شود.
+    """
+    project_id: str
+    user_request: str = ""          # یادداشت اولیه کاربر (raw_idea)
+    pre_built_prompt: str           # پرامپت قوی آماده — بدون پردازش جدید
+    project_full_name: Optional[str] = None
+    recording_metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
 class TaskUpdate(BaseModel):
     title: Optional[str] = None
     prompt: Optional[str] = None
@@ -1658,6 +1670,78 @@ async def create_task_from_inspector(payload: FromInspectorRequest):
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"خطا: {str(e)[:300]}")
+
+
+# 🎬 (Inspector Recording → Oversight) ساخت تسک از ضبط بازرس ویژه با پرامپت آماده
+@router.post("/tasks/from-inspector-recording")
+async def create_task_from_inspector_recording(payload: FromInspectorRecordingRequest):
+    """ساخت تسک از یک جلسهٔ ضبط بازرس ویژه (حالت A یا B).
+
+    بر خلاف /tasks/from-inspector که خودش پرامپت می‌سازد، اینجا پرامپت قوی
+    از قبل توسط inspector_recording_processor تولید شده و آماده است. وظیفهٔ
+    این endpoint فقط ساخت تسک با حفظ:
+      - raw_idea = user_request (یادداشت اولیه کاربر، دست‌نخورده)
+      - prompt   = pre_built_prompt (پرامپت قوی، بدون truncation/پردازش جدید)
+    است. این مسیر معادل HTTP همان منطقی است که finalize ضبط مستقیماً صدا
+    می‌زند — برای مصرف‌کنندگانی که می‌خواهند خارج از flow finalize تسک بسازند.
+    """
+    if not (payload.pre_built_prompt or "").strip():
+        raise HTTPException(status_code=400, detail="pre_built_prompt خالی است")
+
+    service = get_oversight_service()
+    # resolve watched — frontend می‌تواند watched_id را در project_id بفرستد،
+    # یا با project_full_name تطبیق داده شود.
+    watched = service._find_watched(payload.project_id) if payload.project_id else None
+    if watched is None and payload.project_full_name:
+        watched = next(
+            (
+                w for w in service.watched
+                if (w.repo_full_name or "").lower() == payload.project_full_name.lower()
+            ),
+            None,
+        )
+    if watched is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"watched پروژه با id='{payload.project_id}' و repo="
+                f"'{payload.project_full_name}' یافت نشد"
+            ),
+        )
+
+    # تولید title از اولین خط یادداشت اولیه (یا fallback)
+    title_src = (payload.user_request or "").strip()
+    if title_src:
+        first_line = title_src.splitlines()[0].strip()
+        title = first_line if len(first_line) <= 100 else first_line[:100] + "…"
+    else:
+        title = "ضبط بازرس ویژه"
+
+    task_payload = {
+        "watched_id": watched.id,
+        "project_full_name": watched.repo_full_name,
+        "title": title,
+        "prompt": payload.pre_built_prompt,
+        "raw_idea": payload.user_request or "",
+        "type": "feature_request",
+        "priority": "medium",
+        "source": "inspector_recording",
+        "force_create": True,
+    }
+    try:
+        result = await service.create_task(task_payload)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"create_task failed: {str(e)[:300]}")
+
+    task = result.get("task") if isinstance(result, dict) else None
+    task_id = None
+    if task:
+        task_id = task.get("id") if isinstance(task, dict) else getattr(task, "id", None)
+    return {
+        "task_id": task_id,
+        "watched_id": watched.id,
+        "status": result.get("status") if isinstance(result, dict) else None,
+    }
 
 
 @router.get("/tasks/{task_id}/inspector-context")
