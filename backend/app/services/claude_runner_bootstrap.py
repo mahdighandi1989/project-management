@@ -126,6 +126,17 @@ MASTER_PROMPT = (
     "- اگر تسک نیاز به credential دارد → /fail با reason \"needs user credential\".\n"
     "- مستقیم به main commit و push (no PR، no branch).\n"
     "- فقط **یک تسک** را در این run اجرا کن، سپس exit. هرگز loop نکن.\n"
+    "\n"
+    "## ⏰ مدیریت بودجهٔ turn\n"
+    "\n"
+    "max-turns = 100. **اگر بعد از ~80 turn هنوز کار تمام نشده**:\n"
+    "1. فوراً commit کن آنچه تا الان انجام داده‌ای (partial progress)\n"
+    "2. push کن به main\n"
+    "3. POST /fail با reason \"partial: completed N of M ACs, needs retry\"\n"
+    "4. exit کن\n"
+    "\n"
+    "این بهتر از hit کردن max-turns است (که هیچ تسک complete یا fail نمی‌شود).\n"
+    "backend بعداً این تسک را دوباره retry می‌کند.\n"
 )
 
 
@@ -139,7 +150,7 @@ def build_workflow_yaml(
     repo_full_name: str,
     branch: str = "main",
     claude_args: str = (
-        "--max-turns 30 --model claude-opus-4-8 "
+        "--max-turns 100 --model claude-opus-4-8 "
         "--dangerously-skip-permissions"
     ),
 ) -> str:
