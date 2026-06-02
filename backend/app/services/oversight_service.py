@@ -2420,6 +2420,62 @@ class OversightService:
             return False
         return True
 
+    async def repair_claude_runner_permissions(
+        self, watched_id: str,
+    ) -> Dict[str, Any]:
+        """دوباره تنظیمات لازم را روی GitHub repo اعمال می‌کند بدون reinstall.
+
+        برای وقتی کار می‌کند که workflow نصب است ولی run ها در Queued
+        گیر می‌کنند (معمولاً به‌دلیل Workflow permissions روی Read-only).
+
+        کارهایی که انجام می‌دهد:
+        1. PUT actions/permissions/workflow → Read and write
+        2. اعتبار GitHub token را چک می‌کند
+
+        برمی‌گرداند: {success, permissions_result, hints}
+        """
+        watched = self._find_watched(watched_id)
+        if watched is None:
+            return {"success": False, "error": "watched_not_found"}
+        if not getattr(watched, "claude_runner_workflow_path", None):
+            return {
+                "success": False,
+                "error": "workflow_not_installed",
+                "hint": "ابتدا runner را نصب کنید (دکمهٔ اجرا با Claude روی یک تسک یا توگل 🤖 watched)",
+            }
+        gh_token = get_github_token()
+        if not gh_token:
+            return {"success": False, "error": "no_github_token"}
+        from .claude_runner_bootstrap import set_workflow_permissions_write
+        from .prompt_github_sync import _resolve_repo_and_branch
+
+        resolved = _resolve_repo_and_branch(watched)
+        if not resolved:
+            return {"success": False, "error": "repo_not_resolvable"}
+        owner, repo, _branch = resolved
+        perm_res = await set_workflow_permissions_write(
+            owner, repo, gh_token=gh_token,
+        )
+        hints: List[str] = []
+        if not perm_res.get("success"):
+            hints.append(
+                "set_workflow_permissions_write خطا داد. احتمالاً GitHub PAT "
+                "اجازهٔ admin روی repo را ندارد. در GitHub repo settings → "
+                "Actions → General → 'Workflow permissions' را دستی روی "
+                "'Read and write permissions' بگذارید."
+            )
+        else:
+            hints.append(
+                "تنظیمات اعمال شد. run های Queued باید ظرف ۱-۲ دقیقه شروع "
+                "شوند. اگر هنوز گیر بود، در GitHub UI run را cancel کنید و "
+                "از دکمهٔ '🤖 اجرا با Claude' دوباره trigger بزنید."
+            )
+        return {
+            "success": bool(perm_res.get("success")),
+            "permissions_result": perm_res,
+            "hints": hints,
+        }
+
     def get_claude_runner_status(self, watched_id: str) -> Dict[str, Any]:
         """گزارش وضعیت Claude Runner برای یک watched (بدون call به GitHub)."""
         watched = self._find_watched(watched_id)

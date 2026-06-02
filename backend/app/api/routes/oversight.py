@@ -367,6 +367,39 @@ async def claude_runner_status(watched_id: str):
     return result
 
 
+@router.post("/watched/{watched_id}/claude-runner/repair")
+async def claude_runner_repair(watched_id: str):
+    """re-apply کردن Workflow permissions روی GitHub repo.
+
+    وقتی workflow run ها در Queued گیر می‌کنند ولی workflow YAML نصب است،
+    معمولاً علتش Read-only بودن Workflow permissions در repo است. این
+    endpoint بدون نیاز به uninstall/reinstall، فقط permissions را تصحیح
+    می‌کند.
+    """
+    service = get_oversight_service()
+    result = await service.repair_claude_runner_permissions(watched_id)
+    if not result.get("success"):
+        err = result.get("error", "")
+        if err == "watched_not_found":
+            raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+        if err == "workflow_not_installed":
+            raise HTTPException(
+                status_code=409,
+                detail=result.get("hint") or "Claude Runner نصب نشده",
+            )
+        if err == "no_github_token":
+            raise HTTPException(status_code=503, detail="GitHub token در سرور تنظیم نشده")
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": err or "repair_failed",
+                "permissions_result": result.get("permissions_result"),
+                "hints": result.get("hints"),
+            },
+        )
+    return result
+
+
 @router.get("/watched/{watched_id}/claude-runner/runs")
 async def claude_runner_runs(
     watched_id: str,
