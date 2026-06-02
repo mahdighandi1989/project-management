@@ -103,6 +103,13 @@ class RecordingSession:
     prompt_model: str = ""
     final_video_path: Optional[Path] = None
     final_video_size_bytes: int = 0
+    # 🆕 (Playwright screencast) — برای حالت A، یک Playwright session که در
+    # background screenshot می‌گیرد. اگر None باشد، frontend polling fallback
+    # استفاده می‌شود.
+    screencast_task: Optional[Any] = field(default=None, repr=False)
+    screencast_browser: Optional[Any] = field(default=None, repr=False)
+    screencast_active: bool = False
+    screencast_method: str = "frontend_polling"  # "playwright_backend" | "frontend_polling"
     # logs snapshot (در فاز stop گرفته می‌شود)
     console_logs: List[Dict[str, Any]] = field(default_factory=list)
     backend_logs: List[Dict[str, Any]] = field(default_factory=list)
@@ -249,6 +256,155 @@ class InspectorRecordingService:
         session.audio_chunks_count += 1
         session.touch()
 
+    # ------------------------------------------------------------------
+    # 🆕 Playwright backend screencast (حالت A — جایگزین polling frontend)
+    # ------------------------------------------------------------------
+
+    async def start_playwright_screencast(
+        self,
+        session_id: str,
+        *,
+        target_url: str,
+        viewport_width: int = 1280,
+        viewport_height: int = 720,
+    ) -> Dict[str, Any]:
+        """شروع Playwright session که در background هر 1/fps ثانیه screenshot
+        می‌گیرد و در session.frames_dir ذخیره می‌کند.
+
+        این روش بهینه‌تر از polling سمت frontend است (یک browser instance
+        به‌جای N call مستقل). فقط برای mode A استفاده می‌شود.
+
+        اگر Playwright یا کافی memory نیست، graceful fallback به polling
+        frontend (با برگرداندن method='frontend_polling'). در این حالت
+        کلاینت باید خودش screenshot polling انجام دهد و /frame upload کند.
+        """
+        session = self._require_session(session_id)
+        if session.mode != "A":
+            return {
+                "success": False,
+                "method": "frontend_polling",
+                "error": "Playwright screencast فقط در حالت A قابل استفاده است",
+            }
+        if session.screencast_active:
+            return {
+                "success": True,
+                "method": session.screencast_method,
+                "note": "screencast از قبل فعال است",
+            }
+
+        # سعی در شروع Playwright
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            return {
+                "success": False,
+                "method": "frontend_polling",
+                "error": "Playwright در دسترس نیست — frontend polling fallback",
+            }
+
+        try:
+            pw = await async_playwright().start()
+            browser = await pw.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-gpu"],
+            )
+            context = await browser.new_context(
+                viewport={"width": viewport_width, "height": viewport_height},
+                user_agent=(
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) HeadlessChrome/120.0.0.0 Safari/537.36"
+                ),
+            )
+            page = await context.new_page()
+            # navigation با timeout — اگر صفحه load نشد، ادامه می‌دهیم
+            try:
+                await page.goto(target_url, wait_until="domcontentloaded", timeout=15_000)
+            except Exception as nav_err:
+                logger.warning(
+                    f"start_playwright_screencast: page.goto failed for {target_url}: {nav_err}"
+                )
+        except Exception as e:
+            logger.exception(f"start_playwright_screencast: browser launch failed: {e}")
+            return {
+                "success": False,
+                "method": "frontend_polling",
+                "error": (
+                    f"Playwright browser launch failed ({str(e)[:200]}) — "
+                    "frontend polling fallback"
+                ),
+            }
+
+        # وضعیت session را به‌روزرسانی کن
+        session.screencast_browser = (pw, browser, context, page)
+        session.screencast_active = True
+        session.screencast_method = "playwright_backend"
+
+        # background task که screenshot می‌گیرد
+        interval_sec = max(0.2, 1.0 / max(1, session.target_fps))
+        async def _loop():
+            seq = 0
+            while session.screencast_active and session.phase in ("recording", "stopping"):
+                try:
+                    png_bytes = await page.screenshot(type="png", full_page=False)
+                    out_path = session.frames_dir / f"frame_{seq:06d}.png"
+                    out_path.write_bytes(png_bytes)
+                    session.frames_count += 1
+                    seq += 1
+                    session.touch()
+                except Exception as e:
+                    # یک شکست تک‌فریم نباید کل screencast را قطع کند
+                    logger.debug(f"screencast frame {seq} failed: {e}")
+                await asyncio.sleep(interval_sec)
+            logger.info(
+                f"screencast loop ended for {session_id}: "
+                f"frames={session.frames_count}, phase={session.phase}"
+            )
+
+        session.screencast_task = asyncio.create_task(_loop())
+        logger.info(
+            f"start_playwright_screencast: started for {session_id} — "
+            f"url={target_url} viewport={viewport_width}x{viewport_height} "
+            f"interval={interval_sec:.2f}s"
+        )
+        return {
+            "success": True,
+            "method": "playwright_backend",
+            "interval_sec": interval_sec,
+        }
+
+    async def stop_playwright_screencast(self, session_id: str) -> None:
+        """توقف Playwright screencast (اگر فعال است) + cleanup browser."""
+        session = self._sessions.get(session_id)
+        if session is None or not session.screencast_active:
+            return
+        session.screencast_active = False
+        # صبر کن تا loop خودش از while خارج شود (1 cycle)
+        if session.screencast_task:
+            try:
+                await asyncio.wait_for(session.screencast_task, timeout=3.0)
+            except asyncio.TimeoutError:
+                session.screencast_task.cancel()
+            except Exception:
+                pass
+        # cleanup browser
+        if session.screencast_browser:
+            pw, browser, context, page = session.screencast_browser
+            try:
+                await context.close()
+            except Exception:
+                pass
+            try:
+                await browser.close()
+            except Exception:
+                pass
+            try:
+                await pw.stop()
+            except Exception:
+                pass
+        session.screencast_browser = None
+        session.screencast_task = None
+        logger.info(f"stop_playwright_screencast: cleaned up {session_id}")
+
     async def append_frame(
         self, session_id: str, seq: int, frame_bytes: bytes, ext: str = "png"
     ) -> None:
@@ -348,6 +504,12 @@ class InspectorRecordingService:
             return session
         session.phase = "stopping"
         session.touch()
+
+        # 🆕 توقف Playwright screencast (اگر فعال است) قبل از processing
+        try:
+            await self.stop_playwright_screencast(session_id)
+        except Exception as e:
+            logger.warning(f"stop_playwright_screencast failed: {e}")
 
         if not run_processing:
             session.phase = "ready_for_preview"
@@ -486,6 +648,11 @@ class InspectorRecordingService:
         session = self._sessions.get(session_id)
         if session is None:
             return
+        # 🆕 توقف Playwright screencast (اگر فعال است)
+        try:
+            await self.stop_playwright_screencast(session_id)
+        except Exception as e:
+            logger.warning(f"cancel_session: stop_playwright failed: {e}")
         session.phase = "cancelled"
         session.touch()
         self._cleanup_disk(session)

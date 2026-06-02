@@ -261,8 +261,30 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
         vrec.start(15_000); // هر 15 ثانیه chunk
         videoRecorderRef.current = vrec;
       } else {
-        // mode A: screenshot polling از endpoint موجود
-        startScreenshotPolling(sid);
+        // mode A: ابتدا تلاش به Playwright backend screencast (بهینه‌تر)،
+        // اگر در دسترس نبود → fallback به polling سمت client
+        const iframeUrl = inspectorIframeRef?.current?.contentWindow?.location?.href || '';
+        let useFrontendPolling = true;
+        if (iframeUrl) {
+          try {
+            const scRes = await apiPost(`/${sid}/start-screencast`, {
+              target_url: iframeUrl,
+              viewport_width: 1280,
+              viewport_height: 720,
+            });
+            if (scRes?.success && scRes?.method === 'playwright_backend') {
+              useFrontendPolling = false;
+              console.log('🎬 Playwright backend screencast active');
+            } else {
+              console.log('🎬 Playwright unavailable, falling back to polling:', scRes?.error);
+            }
+          } catch (e) {
+            console.warn('start-screencast call failed, falling back to polling:', e);
+          }
+        }
+        if (useFrontendPolling) {
+          startScreenshotPolling(sid);
+        }
         // postMessage bridge برای interactions
         attachPostMessageBridge();
       }
