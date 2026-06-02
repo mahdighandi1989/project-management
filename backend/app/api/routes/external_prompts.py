@@ -44,6 +44,7 @@ def _emit_runner_notification(
     if (agent_id or "").lower() not in (
         "claude-code-action", "claude-runner", "claude-auto-task",
         "claude-manual-trigger", "claude-telegram-trigger",
+        "claude-runner-sweeper", "claude-runner-recovery",
     ):
         return
     try:

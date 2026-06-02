@@ -2420,6 +2420,140 @@ class OversightService:
             return False
         return True
 
+    # ====================================================================
+    # 🆕 (External Pending Verify Sweeper) — recovery برای تسک‌هایی که
+    # /complete رسیده ولی verify-after-complete اجرا نشده.
+    # ====================================================================
+
+    # تسک‌ها که verification_status=applied_externally_pending_verify اند
+    # و حداقل این مقدار از mark زمان گذشته باشد، تازه پردازش می‌شوند.
+    # این فاصله به verify-after-complete اصلی فرصت می‌دهد start بزند.
+    EXTERNAL_VERIFY_SWEEP_GRACE_SECONDS: int = 120  # 2 دقیقه
+    # حداکثر تسک در هر تیک — جلوگیری از overload
+    EXTERNAL_VERIFY_SWEEP_MAX_PER_TICK: int = 2
+    # اگر lock بیش از این مدت قدیمی است، فرض می‌کنیم verify در پس‌زمینه
+    # کشته شده (مثلاً Render instance reboot). آزاد + retry می‌کنیم.
+    EXTERNAL_VERIFY_FORCE_RELEASE_MINUTES: int = 15
+
+    async def _sweep_pending_external_verifies(self) -> None:
+        """پیدا کردن تسک‌های applied_externally_pending_verify و trigger
+        مجدد _verify_then_chain روی آنها — اگر verify-after-complete زنده
+        نمانده باشد.
+
+        قواعد:
+        - فقط تسک‌های مرتبط با watched که claude_runner_workflow_path دارند
+        - حداقل 2 دقیقه از manually_marked_applied_at گذشته باشد
+        - حداکثر 2 تسک در هر تیک
+        - اگر verify-lock روی watched فعال است:
+          * اگر <15 دقیقه: skip (در حال اجراست)
+          * اگر >=15 دقیقه: assume killed، force release، retry
+        """
+        from datetime import datetime, timezone, timedelta
+
+        # late import — جلوگیری از circular
+        try:
+            from ..api.routes.external_prompts import _verify_then_chain
+        except Exception as _e:
+            logger.debug(f"sweeper: cannot import _verify_then_chain: {_e}")
+            return
+
+        now = datetime.now(timezone.utc)
+        grace = timedelta(seconds=self.EXTERNAL_VERIFY_SWEEP_GRACE_SECONDS)
+        force_release = timedelta(minutes=self.EXTERNAL_VERIFY_FORCE_RELEASE_MINUTES)
+
+        # کاندیدها
+        candidates: List[Tuple[Any, Any]] = []
+        for t in self.tasks:
+            if t.verification_status != "applied_externally_pending_verify":
+                continue
+            if getattr(t, "archived", False):
+                continue
+            if not getattr(t, "watched_id", None):
+                continue
+            watched = self._find_watched(t.watched_id)
+            if watched is None:
+                continue
+            if not getattr(watched, "claude_runner_workflow_path", None):
+                continue
+            # mark time check
+            mark = getattr(t, "manually_marked_applied_at", None) or t.updated_at
+            if not mark:
+                continue
+            try:
+                mark_dt = datetime.fromisoformat(mark.replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if (now - mark_dt) < grace:
+                continue  # خیلی تازه — verify-after-complete اصلی فرصت داشته باشد
+            candidates.append((t, watched))
+
+        if not candidates:
+            return
+
+        # اولویت: قدیمی‌تر اول
+        candidates.sort(key=lambda pr: pr[0].updated_at or "")
+
+        processed = 0
+        spawned: List[str] = []
+        for t, watched in candidates:
+            if processed >= self.EXTERNAL_VERIFY_SWEEP_MAX_PER_TICK:
+                break
+            # وضعیت lock روی watched
+            cur_lock_task = getattr(watched, "claude_runner_verifying_task_id", None)
+            cur_lock_started = getattr(watched, "claude_runner_verifying_started_at", None)
+            lock_age_ok = True  # یعنی lock زیر آستانهٔ force_release است (احتمالاً زنده)
+            if cur_lock_task and cur_lock_started:
+                try:
+                    s_dt = datetime.fromisoformat(cur_lock_started.replace("Z", "+00:00"))
+                    lock_age_ok = (now - s_dt) < force_release
+                except Exception:
+                    lock_age_ok = False  # نتوانستیم parse کنیم — کهنه فرض می‌کنیم
+
+            if cur_lock_task:
+                if cur_lock_task != t.id:
+                    # یک تسک دیگر در حال verify است — صبر می‌کنیم
+                    continue
+                # lock روی همین تسک
+                if lock_age_ok:
+                    # کم سن — احتمالاً verify-after-complete اصلی هنوز در حال
+                    # اجراست. صبر می‌کنیم تا یا تمام شود یا به آستانه برسد.
+                    continue
+                # کهنه — assume verify در پس‌زمینه کشته شده. آزاد و retry می‌کنیم.
+                logger.warning(
+                    f"sweeper: force-releasing stale verify-lock on watched={watched.id} "
+                    f"task={t.id} (started {cur_lock_started}, age >= "
+                    f"{self.EXTERNAL_VERIFY_FORCE_RELEASE_MINUTES} min)"
+                )
+                async with self._lock:
+                    self._release_verify_lock(watched.id)
+                    self._save_watched()
+
+            # acquire lock + spawn (now lock is either None or on same task & released)
+            async with self._lock:
+                if not self._acquire_verify_lock(watched.id, t.id):
+                    continue
+                self._save_watched()
+
+            logger.info(
+                f"sweeper: triggering verify-then-chain for task={t.id} "
+                f"watched={watched.id} (recovery — no lock or stale lock cleared)"
+            )
+            asyncio.create_task(
+                _verify_then_chain(
+                    task_id=t.id,
+                    watched_id=watched.id,
+                    agent_id="claude-runner-sweeper",
+                )
+            )
+            spawned.append(t.id)
+            processed += 1
+
+        if spawned:
+            logger.info(
+                f"sweeper: spawned verify-then-chain for {len(spawned)} pending "
+                f"external verifies: {spawned}"
+            )
+
     async def repair_claude_runner_permissions(
         self, watched_id: str,
     ) -> Dict[str, Any]:
@@ -9404,6 +9538,16 @@ AC = «طراحی شیک‌تر باشد»:
             await _asyncio_lc.to_thread(cleanup_orphan_runtime_screenshots, 3)
         except Exception:
             pass
+
+        # 🆕 (External Pending Verify Sweeper) — هر تیک scheduler چک می‌کنیم
+        # که آیا تسک‌هایی هستند که Claude /complete کرد ولی verify-after-complete
+        # روی آنها اجرا نشده (مثلاً Render instance خوابیده، background task
+        # کشته شده). این sweeper آن تسک‌ها را پیدا و verify-then-chain را
+        # دوباره trigger می‌کند تا تسک‌ها گیر نکنند.
+        try:
+            await self._sweep_pending_external_verifies()
+        except Exception as _sw_e:
+            logger.warning(f"sweep_pending_external_verifies failed: {_sw_e}")
 
         for w in list(self.watched):
             # ----- 1) Scan دوره‌ای -----
