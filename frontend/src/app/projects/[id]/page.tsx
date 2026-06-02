@@ -6,7 +6,8 @@ import { useParams, useSearchParams } from 'next/navigation';
 // ProjectHealthPanel در commit 3.3a حذف شد — همهٔ قابلیت‌ها در /oversight
 import PromptManager from '@/components/PromptManager';
 import ExecutingPromptsPanel from '@/components/ExecutingPromptsPanel';
-import ScreenRecorder, { type ScreenRecordingPayload } from '@/components/ScreenRecorder';
+import InspectorRecordingPanel from '@/components/InspectorRecordingPanel';  // 🆕 🎬 ضبط بازرس ویژه دوحالته (A + B)
+import ScreenRecorder, { type ScreenRecordingPayload } from '@/components/ScreenRecorder';  // legacy — حفظ می‌شود طبق درخواست کاربر
 import ReactFlow, {
   Node,
   Edge,
@@ -13831,6 +13832,21 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                                   <span className="bg-white text-purple-600 text-[9px] rounded-full px-1 font-bold">{visualDebugScreenshots.length}</span>
                                 )}
                               </button>
+                              {/* 🆕 🎬 دکمه ضبط ویدئو (دوحالته) — کنار دکمه screenshot */}
+                              <InspectorRecordingPanel
+                                projectId={projectId || ''}
+                                projectFullName={(project as any)?.repo_full_name || project?.name || ''}
+                                enabled={!inspectorOpLock}
+                                inspectorIframeRef={inspectorIframeRef}
+                                getConsoleLogsSnapshot={() => importedProjectConsoleLogs}
+                                getBackendLogsSnapshot={() => inspectorBackendLogs || []}
+                                onComplete={(res) => {
+                                  if (res?.task_id) {
+                                    console.log('🎬 recording → task created:', res.task_id);
+                                  }
+                                }}
+                              />
+
                               {/* دکمه لاگ‌های کنسول پروژه ایمپورت شده */}
                               <button
                                 onClick={() => setShowImportedConsoleLogs(!showImportedConsoleLogs)}

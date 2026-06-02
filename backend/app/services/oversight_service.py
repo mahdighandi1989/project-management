@@ -9549,6 +9549,16 @@ AC = «طراحی شیک‌تر باشد»:
         except Exception as _sw_e:
             logger.warning(f"sweep_pending_external_verifies failed: {_sw_e}")
 
+        # 🆕 🎬 (Inspector Recording Sweeper) — جلسات ضبط که >120m idle بوده‌اند
+        # auto-cancel + cleanup disk می‌شوند تا /tmp انباشته نشود.
+        try:
+            from .inspector_recording_service import get_inspector_recording_service
+            _expired = await get_inspector_recording_service().sweep_stale()
+            if _expired:
+                logger.info(f"inspector_recording sweeper: expired {_expired} stale sessions")
+        except Exception as _rec_e:
+            logger.warning(f"inspector_recording sweeper failed: {_rec_e}")
+
         for w in list(self.watched):
             # ----- 1) Scan دوره‌ای -----
             try:
