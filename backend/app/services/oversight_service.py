@@ -233,6 +233,17 @@ class WatchedProject:
     claude_runner_last_error: Optional[str] = None
     # workflow کجا نصب شد (مسیر در ریپو)؛ صرفاً diagnostic
     claude_runner_workflow_path: Optional[str] = None
+    # 🆕 (verify-after-complete lock) — وقتی Claude یک تسک را /complete می‌زند،
+    # تسک وارد فاز verify می‌شود. در این مدت، **هیچ workflow_dispatch جدیدی
+    # برای این watched نباید trigger شود** حتی اگر فولدر prompt/ تغییر کند
+    # (تسک جدید، حذف، sync). این lock تمرکز روی همان تسک را تضمین می‌کند.
+    # وقتی verify تمام شد (done/partial→retry/failed), lock پاک می‌شود.
+    # stale-detection: اگر lock بیش از 30 دقیقه قدیمی شد، خودکار پاک می‌شود
+    # (در صورت crash backend در میانه verify).
+    claude_runner_verifying_task_id: Optional[str] = None
+    claude_runner_verifying_started_at: Optional[str] = None
+    # شمارش retry های auto-runner برای رسیدن به max
+    claude_runner_max_retries_per_task: int = 3
     # 🆕 (auto-loop) ping-pong scheduler-driven:
     # اگر فعال، پس از verify=partial scheduler خودکار:
     #   1. status تسک به pending برمی‌گردد
@@ -2324,6 +2335,90 @@ class OversightService:
             "errors": result.get("errors", []),
             "watched": watched.to_dict(),
         }
+
+    # ------------------------------------------------------------------
+    # 🔒 (verify-after-complete lock) — تمرکز روی تسک در حال verify
+    # ------------------------------------------------------------------
+    # وقتی Claude /complete می‌زند، تسک وارد فاز verify می‌شود. تا تمام
+    # شدن verify، هیچ workflow_dispatch دیگر برای همان watched trigger
+    # نمی‌شود. این lock تضمین می‌کند تغییرات فولدر prompt/ (تسک جدید،
+    # حذف، sync) باعث انحراف تمرکز از این تسک نشود.
+
+    VERIFY_LOCK_STALE_MINUTES: int = 30
+
+    def _acquire_verify_lock(self, watched_id: str, task_id: str) -> bool:
+        """قفل کردن watched روی task مشخص. caller باید _save_watched() بزند.
+
+        Returns True اگر lock گرفته شد (بدون رقیب). False اگر watched
+        قبلاً روی تسک دیگری lock شده (نباید overwrite کنیم).
+        """
+        watched = self._find_watched(watched_id)
+        if watched is None:
+            return False
+        existing = getattr(watched, "claude_runner_verifying_task_id", None)
+        if existing and existing != task_id:
+            # اگر stale است، آزادش کن
+            started = getattr(watched, "claude_runner_verifying_started_at", None)
+            if not self._is_verify_lock_stale(started):
+                logger.warning(
+                    f"_acquire_verify_lock: watched {watched_id} already locked "
+                    f"on task {existing}, cannot acquire for {task_id}"
+                )
+                return False
+            logger.info(
+                f"_acquire_verify_lock: stale lock on {watched_id} cleared "
+                f"(was task {existing}, started {started})"
+            )
+        watched.claude_runner_verifying_task_id = task_id
+        watched.claude_runner_verifying_started_at = now_iso()
+        return True
+
+    def _release_verify_lock(self, watched_id: str) -> None:
+        """آزاد کردن lock. caller باید _save_watched() بزند."""
+        watched = self._find_watched(watched_id)
+        if watched is None:
+            return
+        watched.claude_runner_verifying_task_id = None
+        watched.claude_runner_verifying_started_at = None
+
+    @classmethod
+    def _is_verify_lock_stale(cls, started_at: Optional[str]) -> bool:
+        """آیا lock بیش از VERIFY_LOCK_STALE_MINUTES دقیقه است؟"""
+        if not started_at:
+            return True
+        try:
+            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+            ts = _dt.fromisoformat(started_at.replace("Z", "+00:00"))
+            return (_dt.now(_tz.utc) - ts) > _td(minutes=cls.VERIFY_LOCK_STALE_MINUTES)
+        except Exception:
+            return True  # parse fail → consider stale (safer)
+
+    def is_watched_verify_locked(self, watched_id: str) -> bool:
+        """آیا این watched الان در فاز verify-after-complete است؟
+
+        خودش stale check را انجام می‌دهد. اگر stale بود، lock را پاک
+        می‌کند و False برمی‌گرداند.
+        """
+        watched = self._find_watched(watched_id)
+        if watched is None:
+            return False
+        task_id = getattr(watched, "claude_runner_verifying_task_id", None)
+        if not task_id:
+            return False
+        started = getattr(watched, "claude_runner_verifying_started_at", None)
+        if self._is_verify_lock_stale(started):
+            logger.info(
+                f"is_watched_verify_locked: stale lock cleared for {watched_id} "
+                f"(task {task_id}, started {started})"
+            )
+            watched.claude_runner_verifying_task_id = None
+            watched.claude_runner_verifying_started_at = None
+            try:
+                self._save_watched()
+            except Exception:
+                pass
+            return False
+        return True
 
     def get_claude_runner_status(self, watched_id: str) -> Dict[str, Any]:
         """گزارش وضعیت Claude Runner برای یک watched (بدون call به GitHub)."""

@@ -353,6 +353,27 @@ async def trigger_workflow_dispatch(
     if not getattr(watched, "claude_runner_enabled", False):
         return {"success": True, "skipped": True, "reason": "runner_not_enabled"}
 
+    # 🔒 (verify-after-complete lock) — اگر یک تسک در حال verify است،
+    # نباید workflow جدید trigger کنیم. این focus را روی تسک فعلی نگه
+    # می‌دارد حتی اگر فولدر prompt/ تغییر کند (تسک جدید، sync، …).
+    try:
+        from .oversight_service import get_oversight_service
+        _ovs = get_oversight_service()
+        if _ovs.is_watched_verify_locked(getattr(watched, "id", "")):
+            locked_task = getattr(watched, "claude_runner_verifying_task_id", "?")
+            logger.info(
+                f"trigger_workflow_dispatch: skipping for {getattr(watched, 'repo_full_name', '?')} "
+                f"— verify-after-complete lock active (task {locked_task})"
+            )
+            return {
+                "success": True,
+                "skipped": True,
+                "reason": "verify_in_progress",
+                "locked_task_id": locked_task,
+            }
+    except Exception as _lock_e:
+        logger.debug(f"verify-lock check failed (proceeding): {_lock_e}")
+
     resolved = _resolve_repo_and_branch(watched)
     if not resolved:
         return {"success": False, "error": "repo_not_resolvable"}

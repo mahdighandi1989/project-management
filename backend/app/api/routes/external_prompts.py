@@ -382,11 +382,13 @@ async def complete_prompt(task_id: str, payload: CompleteRequest):
         agent_id=payload.agent_id,
         extra=(payload.summary or "")[:500],
     )
-    # 🤖 (Claude Auto-Runner — chain next task) — اگر تسک‌های pending باقی
-    # مانده برای همان watched و runner enabled است، فوراً workflow بعدی را
-    # trigger کن (بدون انتظار 60s debounce). master prompt تنها یک تسک per
-    # run را اجرا می‌کند، پس نیاز است که برای هر تسک یک workflow جداگانه
-    # شروع شود.
+    # 🤖🔬 (Claude Auto-Runner — verify-then-chain) — به‌جای chain-next مستقیم،
+    # **اول verify می‌زنیم** روی همین تسک. تا تمام شدن verify، lock فعال
+    # می‌شود تا هیچ workflow دیگری برای این watched trigger نشود (حتی اگر
+    # فولدر prompt/ تغییر کند). بعد از verify، بسته به نتیجه:
+    #   - done → auto-archive (در خود verifier) + chain-next
+    #   - partial و retries مانده → re-trigger همان تسک (auto-loop)
+    #   - max retries → TODO file + chain-next
     if (
         (payload.agent_id or "").lower() in (
             "claude-code-action", "claude-runner", "claude-auto-task"
@@ -394,37 +396,237 @@ async def complete_prompt(task_id: str, payload: CompleteRequest):
         and getattr(t, "watched_id", None)
     ):
         try:
-            from ...services.oversight_service import get_github_token
             watched = service._find_watched(t.watched_id)
             if (
                 watched is not None
                 and getattr(watched, "claude_runner_enabled", False)
             ):
-                # تنها اگر تسک pickable دیگری هست
-                pending_others = [
-                    other for other in service.tasks
-                    if other.id != t.id
-                    and getattr(other, "watched_id", None) == t.watched_id
-                    and not getattr(other, "archived", False)
-                    and getattr(other, "status", "") in PICKABLE_STATUSES
-                    and getattr(other, "external_status", "pending") in PICKABLE_EXTERNAL_STATUSES
-                ]
-                if pending_others:
-                    from ...services.claude_runner_bootstrap import trigger_workflow_dispatch
-                    gh_token = get_github_token()
-                    if gh_token:
-                        asyncio.create_task(
-                            trigger_workflow_dispatch(
-                                watched, gh_token=gh_token,
-                            )
+                # acquire verify lock — تا تمام شدن verify، تسک بعدی شروع نشود
+                if service._acquire_verify_lock(watched.id, t.id):
+                    service._save_watched()
+                    logger.info(
+                        f"verify-after-complete: locked watched={watched.id} "
+                        f"on task={t.id} — scheduling verify"
+                    )
+                    asyncio.create_task(
+                        _verify_then_chain(
+                            task_id=t.id,
+                            watched_id=watched.id,
+                            agent_id=payload.agent_id,
                         )
-                        logger.info(
-                            f"chain-next: triggered workflow for next task in "
-                            f"{watched.repo_full_name} ({len(pending_others)} pending)"
-                        )
-        except Exception as _chain_e:
-            logger.debug(f"chain-next trigger skipped: {_chain_e}")
+                    )
+                else:
+                    logger.warning(
+                        f"verify-after-complete: could not acquire lock for "
+                        f"watched={watched.id} task={t.id} (already locked)"
+                    )
+        except Exception as _vfy_e:
+            logger.warning(
+                f"verify-after-complete scheduling failed for task {t.id}: "
+                f"{_vfy_e}"
+            )
     return {"success": True, "task": _task_summary(t)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🔬 (verify-then-chain) — background flow بعد از /complete توسط Claude
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _verify_then_chain(
+    *, task_id: str, watched_id: str, agent_id: str,
+) -> None:
+    """جریان کامل پس از تکمیل تسک توسط Claude Auto-Runner.
+
+    1) verify_task() را اجرا می‌کند (deep verify در پس‌زمینه)
+    2) بر اساس verification_status تسک:
+       - done: lock آزاد + workflow بعدی trigger (chain-next)
+       - partial/needs_clarification + retries < max:
+         تسک به pending برگردانده می‌شود (با followup_prompt),
+         lock آزاد + workflow trigger (که این تسک را دوباره می‌گیرد)
+       - regressed یا max retries: TODO file + lock آزاد + chain-next
+    """
+    service = get_oversight_service()
+    watched = service._find_watched(watched_id)
+    if watched is None:
+        logger.warning(f"_verify_then_chain: watched {watched_id} not found")
+        return
+
+    # 1) verify
+    verify_result: Dict[str, Any] = {}
+    try:
+        from ...services.oversight_verifier import verify_task
+        # include_runtime=True یعنی verify عمیق (با probe و Playwright)
+        verify_result = await verify_task(
+            task_id,
+            triggered_by="claude_auto_runner_post_complete",
+            include_runtime=True,
+            verify_v6=True,
+        )
+        logger.info(
+            f"_verify_then_chain: verify done for task={task_id} → "
+            f"status={verify_result.get('verification_status', '?')}"
+        )
+    except Exception as _e:
+        logger.exception(f"_verify_then_chain: verify_task crashed: {_e}")
+        # هرچند verify crash کرد، باید lock را آزاد کنیم و chain-next بزنیم
+        verify_result = {"verification_status": "error", "_crash": str(_e)}
+
+    # 2) decide next action — تسک ممکن است در verifier mutate شده باشد
+    task = next((x for x in service.tasks if x.id == task_id), None)
+    if task is None:
+        logger.warning(f"_verify_then_chain: task {task_id} not found post-verify")
+        # release lock
+        async with service._lock:
+            service._release_verify_lock(watched_id)
+            service._save_watched()
+        return
+
+    vstatus = getattr(task, "verification_status", None)
+    max_retries = int(
+        getattr(watched, "claude_runner_max_retries_per_task", 3) or 3
+    )
+    retries_done = int(getattr(task, "followup_round", 0) or 0)
+
+    action = "chain_next"  # default
+    if vstatus == "done":
+        action = "chain_next"
+    elif vstatus in ("partial", "needs_clarification"):
+        if retries_done < max_retries:
+            action = "retry_same"
+        else:
+            action = "max_retries_todo"
+    elif vstatus == "regressed":
+        action = "regressed_todo"
+    elif vstatus == "error" or "_crash" in verify_result:
+        action = "chain_next"  # verify crash → keep going (manual review)
+
+    logger.info(
+        f"_verify_then_chain: task={task_id} vstatus={vstatus} "
+        f"retries={retries_done}/{max_retries} → action={action}"
+    )
+
+    # 3) apply action
+    if action == "retry_same":
+        # تسک را به pending برگردان تا workflow بعدی همین را بگیرد
+        async with service._lock:
+            task.external_status = "pending"
+            task.status = "pending"
+            task.external_locked_by = None
+            task.external_lease_until = None
+            task.updated_at = now_iso()
+            service._save_tasks()
+            service._recompute_execution_priorities(task)
+            # release lock
+            service._release_verify_lock(watched_id)
+            service._save_watched()
+        _emit_runner_notification(
+            event="external_runner_retry_after_partial_verify",
+            task=task,
+            agent_id=agent_id,
+            extra=f"verify={vstatus}. retry {retries_done + 1}/{max_retries}.",
+        )
+    elif action in ("max_retries_todo", "regressed_todo"):
+        # TODO file + chain-next
+        await _write_todo_for_task(
+            task=task, watched=watched, verify_result=verify_result,
+        )
+        async with service._lock:
+            service._release_verify_lock(watched_id)
+            service._save_watched()
+        _emit_runner_notification(
+            event="external_runner_max_retries_or_regressed",
+            task=task,
+            agent_id=agent_id,
+            extra=(
+                f"verify={vstatus}, retries={retries_done}/{max_retries}.\n"
+                f"تسک در TO-DO/ ثبت شد. سراغ تسک بعدی می‌رویم."
+            ),
+        )
+    else:
+        # chain_next (default + done)
+        async with service._lock:
+            service._release_verify_lock(watched_id)
+            service._save_watched()
+
+    # 4) trigger workflow بعدی (همان تسک اگر retry، یا تسک بعدی اگر chain-next)
+    try:
+        from ...services.oversight_service import get_github_token
+        from ...services.claude_runner_bootstrap import trigger_workflow_dispatch
+        gh_token = get_github_token()
+        if gh_token:
+            disp = await trigger_workflow_dispatch(watched, gh_token=gh_token)
+            logger.info(
+                f"_verify_then_chain: dispatched workflow after action={action} "
+                f"→ {disp}"
+            )
+    except Exception as _disp_e:
+        logger.warning(f"_verify_then_chain: dispatch failed: {_disp_e}")
+
+
+async def _write_todo_for_task(
+    *, task: Any, watched: Any, verify_result: Dict[str, Any],
+) -> None:
+    """نوشتن فایل TO-DO/todo-task-{id}.md به ریپوی watched.
+
+    این مسیر فقط برای تسک‌هایی است که Claude نتوانست در سقف retry تمام کند.
+    کاربر بعداً این TODO file ها را در پنل می‌بیند یا روی GitHub نگاه می‌کند.
+    """
+    try:
+        from ...services.github_pr_service import get_github_pr_service
+        from ...services.prompt_github_sync import (
+            _resolve_repo_and_branch, _commit_message,
+        )
+        from ...services.oversight_service import get_github_token
+        resolved = _resolve_repo_and_branch(watched)
+        if not resolved:
+            return
+        owner, repo, branch = resolved
+        token = get_github_token()
+        if not token:
+            return
+        short_id = (task.id or "")[:8]
+        path = f"TO-DO/todo-task-{short_id}.md"
+        # محتوای فایل TODO
+        vstatus = getattr(task, "verification_status", "?")
+        retries = getattr(task, "followup_round", 0) or 0
+        lines = [
+            f"# TODO — Task {short_id} (manual completion needed)",
+            "",
+            f"- **task_id**: `{task.id}`",
+            f"- **title**: {task.title}",
+            f"- **verification_status**: `{vstatus}`",
+            f"- **retries_done**: {retries}",
+            f"- **created_at**: {now_iso()}",
+            "",
+            "## چرا در TO-DO قرار گرفت",
+            "",
+            f"Claude Auto-Runner نتوانست این تسک را در سقف retry به verify=done"
+            f" برساند (verification_status={vstatus}). برای ادامه نیاز به",
+            "بازنگری انسانی است.",
+            "",
+            "## آخرین خطا/خلاصه",
+            "",
+            "```",
+            str(verify_result.get("verification_status") or "")[:500],
+            "```",
+        ]
+        content = "\n".join(lines)
+        pr = get_github_pr_service()
+        await pr.create_or_update_file(
+            owner=owner,
+            repo=repo,
+            path=path,
+            content=content,
+            message=_commit_message(
+                f"todo: task {short_id} needs manual completion",
+                target_repo=watched.repo_full_name,
+            ),
+            branch=branch,
+            token=token,
+        )
+        logger.info(f"_write_todo_for_task: wrote {path} for task {task.id}")
+    except Exception as _e:
+        logger.warning(f"_write_todo_for_task failed: {_e}")
 
 
 @router.post("/{task_id}/fail", dependencies=[Depends(require_external_token)])
