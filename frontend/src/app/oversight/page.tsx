@@ -2537,7 +2537,13 @@ export default function OversightPage() {
       if (res.ok) {
         const data = await res.json();
         const repo = data?.repo || 'پروژه';
-        showSuccess(`🤖 Claude شروع شد روی «${repo}» — تسک در GitHub Actions اجرا می‌شود`);
+        if (data?.outdated_workflow) {
+          showError(
+            `⚠️ workflow پروژه قدیمی است. trigger انجام شد ولی Claude ممکن است تسک دیگری را بردارد. runner را غیرفعال و دوباره نصب کنید.`,
+          );
+        } else {
+          showSuccess(`🤖 Claude شروع شد روی «${repo}» — تسک در GitHub Actions اجرا می‌شود`);
+        }
         await reloadTasks();
       } else {
         const err = await res.json().catch(() => ({}));

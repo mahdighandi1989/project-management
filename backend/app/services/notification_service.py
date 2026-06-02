@@ -3974,13 +3974,21 @@ class NotificationService:
             return {"ok": True, "handled": "run_claude_exception"}
         if result.get("success"):
             repo = result.get("repo", "?")
+            warn = ""
+            if result.get("outdated_workflow"):
+                warn = (
+                    "\n\n⚠️ *هشدار:* workflow YAML پروژه قدیمی است و"
+                    " `target_task_id` را پشتیبانی نمی‌کند. Claude `/next`"
+                    " می‌زند و ممکن است تسک دیگری را بردارد. در پنل وب،"
+                    " runner را غیرفعال و دوباره فعال کنید."
+                )
             await tg.send(
                 f"🤖 *Claude شروع شد!*\n\n"
                 f"📌 تسک: «{title}»\n"
                 f"📁 پروژه: `{repo}`\n"
                 f"🆔 `{task_id[:8]}`\n\n"
                 f"اجرای workflow در GitHub Actions شروع شد. نتیجه را در"
-                f" نوتیفیکیشن‌های بعدی خواهید دید.",
+                f" نوتیفیکیشن‌های بعدی خواهید دید." + warn,
                 silent=False,
             )
             return {"ok": True, "handled": "run_claude_ok"}
@@ -4000,11 +4008,6 @@ class NotificationService:
             )
         elif dispatch.get("error"):
             msg_parts.append(f"جزئیات: {str(dispatch.get('error'))[:200]}")
-        if err == "already_claimed":
-            msg_parts.append(
-                f"locked_by={result.get('locked_by','?')}, "
-                f"lease_until={result.get('lease_until','?')}"
-            )
         await tg.send("\n\n".join(msg_parts), silent=True)
         return {"ok": True, "handled": "run_claude_failed"}
 

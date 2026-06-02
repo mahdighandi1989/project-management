@@ -2502,6 +2502,20 @@ class OversightService:
                 return {"success": False, "error": "task_archived"}
             if not getattr(t, "watched_id", None):
                 return {"success": False, "error": "task_has_no_watched_project"}
+            # وضعیت تسک باید pickable باشد (pending یا awaiting_review). اگر
+            # تسک قبلاً done/failed/running است، workflow /claim می‌کند 409 و
+            # هیچ کاری نمی‌شود — بهتر است در همین لایه نگه داریم.
+            from .prompt_github_sync import PICKABLE_STATUSES as _PICKABLE
+            if t.status not in _PICKABLE:
+                return {
+                    "success": False,
+                    "error": "task_not_pickable",
+                    "task_status": t.status,
+                    "hint": (
+                        f"وضعیت تسک «{t.status}» قابل اجرا نیست. "
+                        f"فقط تسک‌های pending یا awaiting_review قابل trigger هستند."
+                    ),
+                }
             watched = self._find_watched(t.watched_id)
             if watched is None:
                 return {"success": False, "error": "watched_not_found"}
@@ -2528,7 +2542,7 @@ class OversightService:
         # skipped (مثلاً verify_in_progress) یعنی trigger واقعاً ارسال نشد
         # — برای caller باید مثل خطا رفتار کند
         dispatch_success = bool(dispatch_result.get("success")) and not dispatch_result.get("skipped")
-        return {
+        out: Dict[str, Any] = {
             "success": dispatch_success,
             "task_id": task_id,
             "watched_id": watched.id,
@@ -2536,6 +2550,14 @@ class OversightService:
             "dispatch_result": dispatch_result,
             "agent_id": agent_id,
         }
+        # سرفصل وقتی YAML قدیمی است و auto-retry بدون inputs موفق شد —
+        # کاربر باید بداند که target_task_id اعمال نشد
+        if dispatch_result.get("outdated_workflow"):
+            out["outdated_workflow"] = True
+            out["warning"] = dispatch_result.get("warning") or (
+                "workflow YAML قدیمی است؛ runner را غیرفعال و دوباره نصب کنید."
+            )
+        return out
 
     # ====================================================================
     # 🆕 (Reference Projects) — profile + normalization + validation
