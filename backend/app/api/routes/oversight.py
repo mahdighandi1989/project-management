@@ -400,7 +400,8 @@ async def run_task_via_claude_now(task_id: str):
     """trigger workflow Claude Auto-Runner برای یک تسک خاص (دستی).
 
     - مستقل از claude_runner_enabled (فقط workflow installed لازم است)
-    - تسک با agent_id='claude-manual-trigger' claim می‌شود
+    - تسک pre-claim نمی‌شود — workflow وقتی شروع شد خودش با
+      agent_id='claude-code-action' /claim می‌زند (طبق MASTER_PROMPT).
     - target_task_id به workflow پاس می‌شود تا Claude همین تسک را اجرا کند
     - اگر یک تسک دیگر در حال verify است، با خطای 409 رد می‌شود
     """
@@ -416,21 +417,17 @@ async def run_task_via_claude_now(task_id: str):
             raise HTTPException(status_code=409, detail="تسک آرشیو شده")
         if err == "task_has_no_watched_project":
             raise HTTPException(status_code=409, detail="این تسک به هیچ پروژه‌ای متصل نیست")
+        if err == "task_not_pickable":
+            raise HTTPException(
+                status_code=409,
+                detail=result.get("hint")
+                or f"وضعیت تسک «{result.get('task_status','?')}» قابل اجرا نیست",
+            )
         if err == "workflow_not_installed":
             raise HTTPException(
                 status_code=409,
                 detail=result.get("hint")
                 or "Claude Runner روی این پروژه نصب نشده — ابتدا runner را روشن/نصب کنید",
-            )
-        if err == "already_claimed":
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": "already_claimed",
-                    "locked_by": result.get("locked_by"),
-                    "lease_until": result.get("lease_until"),
-                    "message": "این تسک هم‌اکنون توسط agent دیگری در حال اجراست",
-                },
             )
         if err == "no_github_token":
             raise HTTPException(status_code=503, detail="GitHub token در سرور تنظیم نشده")

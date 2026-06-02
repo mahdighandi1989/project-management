@@ -433,6 +433,7 @@ async def trigger_workflow_dispatch(
         body["inputs"] = {"target_task_id": str(target_task_id)}
     res = await pr._gh_request("POST", url, headers=headers, json_body=body)  # noqa: SLF001
     status = res.get("status")
+    body_text = (res.get("body_text") or "")
     # 204 No Content = موفقیت. 404 = workflow هنوز روی GitHub index نشده
     # (تازه نصب شد و چند ثانیه طول می‌کشد قابل dispatch شود).
     if status == 204:
@@ -443,11 +444,40 @@ async def trigger_workflow_dispatch(
             "error": "workflow_not_indexed_yet (try again in a few seconds)",
             "transient": True,
         }
+    # 422 با پیام "Unexpected inputs" یعنی YAML قدیمی است و
+    # target_task_id input را declare نکرده. اگر target_task_id داشتیم،
+    # دوباره بدون آن تلاش کنیم (auto-retry). caller را با outdated_workflow
+    # علامت می‌زنیم تا بتواند به کاربر اطلاع دهد.
+    outdated = (
+        status == 422
+        and target_task_id
+        and ("unexpected inputs" in body_text.lower() or "no input" in body_text.lower())
+    )
+    if outdated:
+        logger.warning(
+            f"trigger_workflow_dispatch: workflow YAML قدیمی است (target_task_id "
+            f"undeclared) برای {owner}/{repo}. retry بدون inputs."
+        )
+        body2 = {"ref": use_ref}
+        res2 = await pr._gh_request("POST", url, headers=headers, json_body=body2)  # noqa: SLF001
+        status2 = res2.get("status")
+        if status2 == 204:
+            return {
+                "success": True,
+                "outdated_workflow": True,
+                "warning": (
+                    "workflow YAML این پروژه قدیمی است و target_task_id را "
+                    "پشتیبانی نمی‌کند. Claude /next می‌زند و ممکن است تسک "
+                    "دیگری را بردارد. برای رفع، runner را غیرفعال و دوباره "
+                    "نصب کنید."
+                ),
+            }
+        # حتی retry هم شکست خورد — همان خطای اولیه را برگردانیم
     return {
         "success": False,
         "error": (
             f"dispatch_failed status={status} "
-            f"body={(res.get('body_text') or '')[:200]}"
+            f"body={body_text[:200]}"
         ),
     }
 
