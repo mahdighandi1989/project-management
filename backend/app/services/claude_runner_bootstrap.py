@@ -127,16 +127,20 @@ MASTER_PROMPT = (
     "- مستقیم به main commit و push (no PR، no branch).\n"
     "- فقط **یک تسک** را در این run اجرا کن، سپس exit. هرگز loop نکن.\n"
     "\n"
-    "## ⏰ مدیریت بودجهٔ turn\n"
+    "## ⏰ بودجهٔ turn\n"
     "\n"
-    "max-turns = 100. **اگر بعد از ~80 turn هنوز کار تمام نشده**:\n"
-    "1. فوراً commit کن آنچه تا الان انجام داده‌ای (partial progress)\n"
-    "2. push کن به main\n"
-    "3. POST /fail با reason \"partial: completed N of M ACs, needs retry\"\n"
-    "4. exit کن\n"
+    "max-turns = **250** (فضای کافی برای بزرگترین تسک‌ها). از تمام بودجه\n"
+    "استفاده کن تا تسک را **کامل و درست** تمام کنی. هرگز عجله نکن، هرگز\n"
+    "AC را skip نکن.\n"
     "\n"
-    "این بهتر از hit کردن max-turns است (که هیچ تسک complete یا fail نمی‌شود).\n"
-    "backend بعداً این تسک را دوباره retry می‌کند.\n"
+    "**فقط در حالت اضطراری** (اگر بعد از ~220 turn هنوز کار تمام نشده،\n"
+    "یعنی تسک واقعاً غیرعادی بزرگ است):\n"
+    "1. commit + push آنچه تا الان انجام شده\n"
+    "2. POST /fail با reason \"task too large: completed N of M ACs\"\n"
+    "3. exit\n"
+    "\n"
+    "این فقط emergency است. برای تسک عادی، از همه بودجه استفاده کن تا\n"
+    "complete واقعی بزنی.\n"
 )
 
 
@@ -150,7 +154,7 @@ def build_workflow_yaml(
     repo_full_name: str,
     branch: str = "main",
     claude_args: str = (
-        "--max-turns 100 --model claude-opus-4-8 "
+        "--max-turns 250 --model claude-opus-4-8 "
         "--dangerously-skip-permissions"
     ),
 ) -> str:
@@ -204,7 +208,9 @@ concurrency:
 jobs:
   run-task:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # ⏰ کافی برای بزرگ‌ترین تسک‌ها (max-turns 250 × ~5 sec/turn = ~21 min
+    # + setup + overhead). 90 دقیقه buffer امن دارد.
+    timeout-minutes: 90
     permissions:
       contents: write       # برای commit + push به main
       pull-requests: write  # ذخیره برای آینده (الان استفاده نمی‌کنیم)

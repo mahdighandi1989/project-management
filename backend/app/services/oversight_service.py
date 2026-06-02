@@ -666,7 +666,7 @@ class OversightService:
             "claude_runner_auto_enable_new": False,
             # claude_args پیش‌فرض برای workflow های نصب‌شده
             "claude_runner_default_args": (
-                "--max-turns 100 --model claude-opus-4-8 "
+                "--max-turns 250 --model claude-opus-4-8 "
                 "--dangerously-skip-permissions"
             ),
         }
@@ -2227,7 +2227,7 @@ class OversightService:
         args = (
             claude_args
             or self.settings.get("claude_runner_default_args")
-            or "--max-turns 100 --model claude-opus-4-8 --dangerously-skip-permissions"
+            or "--max-turns 250 --model claude-opus-4-8 --dangerously-skip-permissions"
         )
         result = await install_runner(
             watched,
