@@ -154,11 +154,20 @@ name: Claude Auto Task Runner
   # امکان trigger دستی از تب Actions
   workflow_dispatch: {{}}
 
-# 🛡 جلوگیری از race: هم‌زمان فقط یک run می‌تواند اجرا شود.
-# اگر run جدیدی trigger شد و قبلی هنوز کار می‌کند، در صف قرار می‌گیرد.
+# 🛡 (workflow trigger leak fix) — strategy جدید: cancel-in-progress: true
+# قبلاً cancel-in-progress: false بود → یعنی runی که در حال اجرا بود
+# نگه‌داری می‌شد ولی runهای صف از سوی GitHub خودکار cancel می‌شدند
+# (هر بار یک trigger جدید بیاید). نتیجه: runها ۷-۸ دقیقه setup می‌کردند
+# سپس cancel می‌شدند بدون اینکه کاری کنند → سهمیه ماهانه را در یک
+# روز می‌سوزاند.
+#
+# با cancel-in-progress: true، run قبلی فوراً (در چند ثانیه) cancel
+# می‌شود وقتی triger جدیدی بیاید → setup time هدر نمی‌رود → فقط آخرین
+# run کامل اجرا می‌شود. این هم‌خوان با master prompt است که می‌گوید
+# Claude **همهٔ** تسک‌های pending را در یک run می‌گیرد، نه فقط آخرین.
 concurrency:
   group: claude-auto-task-{watched_id}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   run-task:

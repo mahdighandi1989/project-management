@@ -107,7 +107,11 @@ def _parse_repo(repo_full_name: str) -> Tuple[str, str]:
 # asyncio.Lock مخصوص همان repo سریالیزه می‌کنیم.
 _repo_locks: Dict[str, asyncio.Lock] = {}
 _index_debounce_tasks: Dict[str, asyncio.Task] = {}
-INDEX_DEBOUNCE_SECONDS = 2.0
+INDEX_DEBOUNCE_SECONDS = 60.0  # 🛡 (workflow trigger leak fix) — افزایش از 2 به 60
+# بدون این، هر تغییر کوچک تسک یک commit/push روی _index.json تولید می‌کرد
+# و چون workflow Claude Auto-Runner روی همین trigger می‌شود، در یک روز
+# 2000 دقیقهٔ سهمیهٔ ماهانهٔ GitHub Actions تمام می‌شد (بدون اینکه حتی یک
+# تسک واقعاً اجرا شود — هر run توسط run بعدی cancel می‌شد).
 
 
 def _get_repo_lock(owner: str, repo: str, branch: str) -> asyncio.Lock:
@@ -401,14 +405,19 @@ async def rebuild_project_index(
             "external_status": ext_status,
             "path": getattr(t, "github_prompt_path", _file_path(t.id)),
             "external_attempts": getattr(t, "external_attempts", 0),
-            "created_at": getattr(t, "created_at", ""),
-            "updated_at": getattr(t, "updated_at", ""),
+            # 🛡 (workflow trigger leak fix) — `created_at` و `updated_at`
+            # از index حذف شدند چون با هر تغییر کوچک تسک (verifier،
+            # AC enrichment، …) عوض می‌شدند و content-hash فایل را
+            # متفاوت می‌کردند → commit جدید → workflow trigger هدررو.
         })
 
-    pickable.sort(key=lambda x: (x["execution_priority"], x["created_at"]))
+    pickable.sort(key=lambda x: (x["execution_priority"], x["task_id"]))
     index_body = {
         "version": 1,
-        "generated_at": now_iso(),
+        # 🛡 `generated_at` حذف شد — قبلاً each rebuild یک timestamp
+        # جدید می‌گرفت، حتی اگر هیچ تسکی واقعاً تغییر نکرده بود. این
+        # باعث می‌شد content فایل همیشه متفاوت باشد → commit جدید →
+        # workflow trigger بی‌جا.
         "project": getattr(watched, "repo_full_name", ""),
         "watched_id": watched.id,
         "total": len(pickable),
@@ -417,6 +426,24 @@ async def rebuild_project_index(
     content = json.dumps(index_body, ensure_ascii=False, indent=2)
     pr = get_github_pr_service()
     async with _get_repo_lock(owner, repo, branch):
+        # 🛡 (workflow trigger leak fix) — قبل از push، محتوای فعلی فایل
+        # را بخوان و فقط در صورت تغییر واقعی push کن. این جلوی هر
+        # commit بی‌فایده (و در نتیجه workflow trigger بی‌فایده) را می‌گیرد.
+        try:
+            current = await pr.get_file_content(
+                owner=owner, repo=repo, path=INDEX_PATH,
+                branch=branch, token=token,
+            )
+            if current.get("success") and current.get("content") == content:
+                logger.debug(
+                    f"rebuild_project_index: skip push for {owner}/{repo} — "
+                    f"content unchanged ({len(pickable)} tasks)"
+                )
+                return {"success": True, "skipped": True, "reason": "no_change"}
+        except Exception as _diff_e:
+            # اگر چک diff fail شد، ادامه بده و push کن — بهتر از crash
+            logger.debug(f"rebuild_project_index: diff check failed: {_diff_e}")
+
         upsert = await pr.create_or_update_file(
             owner=owner,
             repo=repo,
