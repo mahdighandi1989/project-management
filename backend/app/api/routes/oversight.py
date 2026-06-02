@@ -2365,6 +2365,12 @@ async def recover_after_claude_run(task_id: str):
         service._recompute_execution_priorities(t)
         service._schedule_prompt_sync(t, rebuild_index=True)
 
+        # 🆕 force-release lock اگر روی این تسک قبلاً held بود — recovery
+        # endpoint با intent صریح کاربر صدا می‌شود، پس می‌توانیم lock قبلی را
+        # که احتمالاً متعلق به verify-after-complete مرده است، پاک کنیم.
+        cur_lock = getattr(watched, "claude_runner_verifying_task_id", None)
+        if cur_lock == t.id:
+            service._release_verify_lock(watched.id)
         # acquire verify-lock — مثل complete_prompt
         locked = service._acquire_verify_lock(watched.id, t.id)
         if locked:
