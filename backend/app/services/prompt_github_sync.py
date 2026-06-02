@@ -429,6 +429,7 @@ async def rebuild_project_index(
         # 🛡 (workflow trigger leak fix) — قبل از push، محتوای فعلی فایل
         # را بخوان و فقط در صورت تغییر واقعی push کن. این جلوی هر
         # commit بی‌فایده (و در نتیجه workflow trigger بی‌فایده) را می‌گیرد.
+        push_skipped = False
         try:
             current = await pr.get_file_content(
                 owner=owner, repo=repo, path=INDEX_PATH,
@@ -439,28 +440,38 @@ async def rebuild_project_index(
                     f"rebuild_project_index: skip push for {owner}/{repo} — "
                     f"content unchanged ({len(pickable)} tasks)"
                 )
-                return {"success": True, "skipped": True, "reason": "no_change"}
+                push_skipped = True
         except Exception as _diff_e:
             # اگر چک diff fail شد، ادامه بده و push کن — بهتر از crash
             logger.debug(f"rebuild_project_index: diff check failed: {_diff_e}")
 
-        upsert = await pr.create_or_update_file(
-            owner=owner,
-            repo=repo,
-            path=INDEX_PATH,
-            content=content,
-            message=_commit_message(
-                "rebuild index", details=f"{len(pickable)} tasks",
-                target_repo=watched.repo_full_name,
-            ),
-            branch=branch,
-            token=token,
-        )
+        if push_skipped:
+            # محتوای index یکی است ولی rebuild صدا زده شده، یعنی **چیزی**
+            # دربارهٔ تسک‌ها تغییر کرده (مثلاً regenerate که فقط MD را عوض
+            # می‌کند). نمی‌خواهیم commit بی‌فایده بزنیم، ولی **باید
+            # workflow_dispatch trigger بشود** تا Claude تسک‌های pending را
+            # دوباره بررسی کند. این پایین حالت push_skipped را در upsert
+            # شبیه‌سازی می‌کنیم.
+            upsert = {"success": True, "skipped": True, "reason": "no_change"}
+        else:
+            upsert = await pr.create_or_update_file(
+                owner=owner,
+                repo=repo,
+                path=INDEX_PATH,
+                content=content,
+                message=_commit_message(
+                    "rebuild index", details=f"{len(pickable)} tasks",
+                    target_repo=watched.repo_full_name,
+                ),
+                branch=branch,
+                token=token,
+            )
 
-    # 🤖 (Claude Auto-Runner) — اگر push موفق بود و runner برای این
-    # watched فعال است، workflow را با dispatch trigger بزن. این مسیر
-    # تنها مسیر شروع run است (push trigger چون toolchain
-    # claude-code-action@v1 پشتیبانی نمی‌کند، حذف شد).
+    # 🤖 (Claude Auto-Runner) — اگر push موفق بود **یا** skip شد چون content
+    # یکی بود، workflow را با dispatch trigger بزن. علت skip-but-trigger:
+    # rebuild صدا زده شدن یعنی state task‌ها تغییر کرده (مثلاً regenerate
+    # که فقط task-{id}.md را عوض می‌کند، نه _index.json را). Claude باید
+    # بیدار شود حتی اگر فهرست index ثابت مانده.
     if upsert.get("success") and getattr(watched, "claude_runner_enabled", False):
         try:
             from .claude_runner_bootstrap import trigger_workflow_dispatch
