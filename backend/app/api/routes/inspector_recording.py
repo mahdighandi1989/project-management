@@ -59,6 +59,17 @@ class InteractionsRequest(BaseModel):
     events: List[Dict[str, Any]] = Field(default_factory=list)
 
 
+class StartScreencastRequest(BaseModel):
+    """payload برای شروع Playwright backend screencast در حالت A.
+
+    target_url: URL واقعی iframe که Playwright باز کند و screenshot بگیرد
+    viewport_width/height: اختیاری — برای شبیه‌سازی resolution کلاینت
+    """
+    target_url: str
+    viewport_width: int = 1280
+    viewport_height: int = 720
+
+
 class StopRequest(BaseModel):
     """payload اختیاری برای stop — اگر frontend می‌خواهد user_note و logs را
     در همان لحظه ارسال کند تا processing بلافاصله با context کامل شروع شود.
@@ -151,6 +162,43 @@ async def append_video_chunk(
         raise HTTPException(status_code=404, detail="session_not_found")
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.post("/{session_id}/start-screencast")
+async def start_playwright_screencast(
+    session_id: str, payload: StartScreencastRequest
+):
+    """شروع Playwright headless backend که هر 1/fps ثانیه screenshot می‌گیرد
+    و در /tmp/inspector_recordings/{sid}/frames/ ذخیره می‌کند.
+
+    این روش به‌جای polling از frontend استفاده می‌شود — بهینه‌تر چون فقط
+    یک browser instance در سرور دارد. اگر Playwright در دسترس نیست یا
+    memory کافی نیست، method='frontend_polling' برمی‌گرداند و کلاینت باید
+    خودش polling کند.
+
+    این endpoint فقط در حالت A معتبر است. در حالت B، client خودش
+    getDisplayMedia + MediaRecorder می‌کند و chunks را به /video-chunk می‌فرستد.
+    """
+    svc = get_inspector_recording_service()
+    try:
+        result = await svc.start_playwright_screencast(
+            session_id,
+            target_url=payload.target_url,
+            viewport_width=payload.viewport_width,
+            viewport_height=payload.viewport_height,
+        )
+        return result
+    except KeyError:
+        raise HTTPException(status_code=404, detail="session_not_found")
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        logger.exception(f"start-screencast crashed for {session_id}")
+        return {
+            "success": False,
+            "method": "frontend_polling",
+            "error": f"unexpected: {str(e)[:200]}",
+        }
 
 
 @router.post("/{session_id}/frame")
