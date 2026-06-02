@@ -244,6 +244,43 @@ class InspectorRecordingService:
         session.audio_chunks_count += 1
         session.touch()
 
+    async def append_frame(
+        self, session_id: str, seq: int, frame_bytes: bytes, ext: str = "png"
+    ) -> None:
+        """آپلود یک frame (فقط در حالت A — frontend از /api/render/inspector/screenshot
+        می‌گیرد و به اینجا می‌فرستد).
+        """
+        session = self._require_session(session_id)
+        if session.mode != "A":
+            raise RuntimeError("frames فقط در حالت A پذیرفته می‌شوند")
+        if session.phase not in ("recording", "stopping"):
+            raise RuntimeError(
+                f"cannot append frame in phase={session.phase}"
+            )
+        if ext not in ("png", "jpg", "jpeg", "webp"):
+            ext = "png"
+        path = session.frames_dir / f"frame_{seq:06d}.{ext}"
+        path.write_bytes(frame_bytes)
+        session.frames_count += 1
+        session.touch()
+
+    async def attach_logs_snapshot(
+        self,
+        session_id: str,
+        *,
+        console_logs: Optional[List[Dict[str, Any]]] = None,
+        backend_logs: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """frontend در /stop می‌تواند snapshot لاگ‌ها را پاس بدهد. این تابع
+        آن‌ها را در session ذخیره می‌کند تا در processing استفاده شوند.
+        """
+        session = self._require_session(session_id)
+        if console_logs:
+            session.console_logs = list(console_logs)
+        if backend_logs:
+            session.backend_logs = list(backend_logs)
+        session.touch()
+
     async def append_video_chunk(
         self, session_id: str, seq: int, chunk_bytes: bytes
     ) -> None:
@@ -284,8 +321,20 @@ class InspectorRecordingService:
     # Transition methods
     # ------------------------------------------------------------------
 
-    async def stop_session(self, session_id: str) -> RecordingSession:
-        """گذار از recording → stopping → processing (در commit 3+5 آماده‌سازی واقعی)."""
+    async def stop_session(
+        self,
+        session_id: str,
+        *,
+        user_note: str = "",
+        run_processing: bool = True,
+    ) -> RecordingSession:
+        """گذار از recording → stopping → processing → ready_for_preview.
+
+        Args:
+          user_note: یادداشت اولیه کاربر — برای synthesis استفاده می‌شود
+          run_processing: اگر False، فقط phase به ready_for_preview می‌رود
+                          بدون اجرای vision/transcribe (برای تست‌ها)
+        """
         session = self._require_session(session_id)
         if session.phase not in ("recording", "stopping"):
             logger.warning(
@@ -294,25 +343,72 @@ class InspectorRecordingService:
             return session
         session.phase = "stopping"
         session.touch()
-        # در فاز Foundation (Commit 1): فقط transition به ready_for_preview بدون processing
-        # واقعی. commits بعدی این بخش را با processing واقعی جایگزین می‌کنند.
-        session.phase = "ready_for_preview"
+
+        if not run_processing:
+            session.phase = "ready_for_preview"
+            logger.info(f"inspector_recording: session {session_id} stopped (no processing)")
+            return session
+
+        # وارد phase processing شو و pipeline را در پس‌زمینه trigger کن
+        session.phase = "processing"
         logger.info(
-            f"inspector_recording: session {session_id} stopped "
+            f"inspector_recording: session {session_id} processing started "
             f"(duration={session.duration_sec():.1f}s, audio_chunks={session.audio_chunks_count}, "
-            f"video_chunks={session.video_chunks_count}, interactions={len(session.interactions)})"
+            f"frames={session.frames_count}, video_chunks={session.video_chunks_count}, "
+            f"interactions={len(session.interactions)})"
         )
+
+        # processing را sync انجام می‌دهیم چون frontend منتظر است
+        # (نمی‌خواهیم با background task روی Render free tier ریسک کنیم)
+        try:
+            from .inspector_recording_processor import process_session
+            summary = await process_session(session, user_note=user_note)
+            logger.info(
+                f"inspector_recording: processing done for {session_id} — "
+                f"{summary}"
+            )
+            session.phase = "ready_for_preview"
+        except Exception as e:
+            logger.exception(f"processing failed for {session_id}: {e}")
+            session.phase = "errored"
+            session.last_error = str(e)[:500]
+        session.touch()
         return session
 
     async def regenerate_prompt(
-        self, session_id: str, edited_transcript: Optional[str] = None
+        self,
+        session_id: str,
+        *,
+        edited_transcript: Optional[str] = None,
+        user_note: str = "",
     ) -> RecordingSession:
-        """دوباره پرامپت تولید کن — اگر کاربر transcript را اصلاح کرد. در Commit 1 stub."""
+        """دوباره پرامپت تولید کن — اگر کاربر transcript را اصلاح کرد یا
+        یادداشت اولیه را تغییر داد.
+        """
         session = self._require_session(session_id)
+        if session.phase not in ("ready_for_preview", "errored"):
+            raise RuntimeError(
+                f"regenerate_prompt در phase={session.phase} مجاز نیست"
+            )
         if edited_transcript is not None:
             session.transcript = edited_transcript[:500_000]  # safety cap
         session.touch()
-        # در commits بعدی: synth_prompt دوباره صدا زده می‌شود
+        # Re-run فقط مرحله synthesis (transcribe و vision قبلاً انجام شده)
+        try:
+            from .inspector_recording_processor import stage_synthesize, build_final_prompt
+            syn = await stage_synthesize(session, user_note=user_note)
+            ai_body = syn.get("prompt") or ""
+            session.prompt_model = syn.get("model_used") or ""
+            session.prompt = build_final_prompt(
+                session, user_note=user_note, ai_generated_body=ai_body
+            )
+            logger.info(
+                f"inspector_recording: regenerated prompt for {session_id} "
+                f"({len(session.prompt)} chars, fallback={syn.get('fallback')})"
+            )
+        except Exception as e:
+            logger.exception(f"regenerate_prompt failed for {session_id}: {e}")
+            session.last_error = f"regenerate: {str(e)[:300]}"
         return session
 
     async def finalize(

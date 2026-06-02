@@ -1,0 +1,581 @@
+"""
+🎬 Inspector Recording Processor — pipeline پردازش پس از stop.
+
+ورودی: یک RecordingSession با فایل‌های frames/audio/interactions ذخیره‌شده
+خروجی: session.transcript, session.visual_summary, session.prompt پر می‌شوند
+
+Stages:
+  1. assemble audio   → یک فایل واحد از audio_chunks/
+  2. transcribe       → audio_transcribe.transcribe_audio()
+  3. pick keyframes   → 6-12 frame از frames/ (mode A) یا extract از video (mode B)
+  4. vision per frame → describe_screenshot_with_vision() (parallel)
+  5. fetch logs       → /api/render/logs برای آن watched + console logs از payload
+  6. synthesize       → AI text model با system prompt اختصاصی
+  7. assemble final   → ساختار section 4.5 طراحی + ذخیره در session.prompt
+
+این ماژول stateless است — همه state در RecordingSession.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import math
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _assemble_audio(audio_dir: Path) -> Optional[bytes]:
+    """تمام audio chunks را پشت سر هم concat می‌کند. webm clusters متوالی
+    در یک فایل به‌صورت native قابل پخش هستند، پس به ffmpeg نیاز نداریم.
+    """
+    if not audio_dir.exists():
+        return None
+    chunks = sorted(audio_dir.glob("chunk_*.webm"))
+    if not chunks:
+        return None
+    parts: List[bytes] = []
+    for c in chunks:
+        try:
+            parts.append(c.read_bytes())
+        except Exception as e:
+            logger.warning(f"failed to read audio chunk {c.name}: {e}")
+    if not parts:
+        return None
+    return b"".join(parts)
+
+
+def _pick_keyframes(
+    frames_dir: Path, target_count: int = 8, min_count: int = 6, max_count: int = 12
+) -> List[Path]:
+    """N keyframe با فاصله مساوی از frames موجود انتخاب می‌کند.
+
+    اگر کل frames کمتر از min_count باشد، همه را برمی‌گرداند.
+    """
+    if not frames_dir.exists():
+        return []
+    all_frames = sorted(frames_dir.glob("frame_*.png")) + sorted(frames_dir.glob("frame_*.jpg"))
+    n = len(all_frames)
+    if n == 0:
+        return []
+    if n <= min_count:
+        return all_frames
+    pick_n = max(min_count, min(target_count, max_count, n))
+    # spaced sampling: indexها در فاصله مساوی
+    step = (n - 1) / (pick_n - 1) if pick_n > 1 else 1
+    indices = [int(round(i * step)) for i in range(pick_n)]
+    return [all_frames[i] for i in indices]
+
+
+def _read_image_base64(path: Path) -> str:
+    import base64
+    data = path.read_bytes()
+    return base64.b64encode(data).decode("ascii")
+
+
+def _format_timestamp(ms: int) -> str:
+    s = ms // 1000
+    m, s = divmod(s, 60)
+    return f"[{m:02d}:{s:02d}]"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1+2: Audio + Transcribe
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def stage_transcribe(session) -> Dict[str, Any]:
+    """audio chunks را assemble و transcribe می‌کند.
+
+    Returns:
+      {text, language, duration_sec, model_used, provider, success, fallback_reason}
+    """
+    audio_bytes = _assemble_audio(session.audio_dir)
+    if audio_bytes is None or len(audio_bytes) < 1024:  # <1KB = empty
+        return {
+            "text": "",
+            "language": "",
+            "duration_sec": 0.0,
+            "model_used": None,
+            "provider": None,
+            "success": False,
+            "fallback_reason": "هیچ chunk صدای معتبری دریافت نشد",
+        }
+    from .audio_transcribe import transcribe_audio
+    return await transcribe_audio(audio_bytes, mime_type="audio/webm", filename="recording.webm")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 3+4: Vision per keyframe
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def stage_vision(session) -> List[Dict[str, Any]]:
+    """vision را روی keyframeهای انتخاب‌شده اجرا می‌کند (parallel).
+
+    در حالت A: page_url = URL واقعی iframe (در recording_metadata)
+    در حالت B: page_url = "" چون چندصفحه‌ای است
+
+    Returns: لیست {timestamp_ms, frame_path, scene, ocr_text, ui_elements,
+                  error_signals, layout_hints, vision_model_used, …}
+    """
+    keyframes = _pick_keyframes(session.frames_dir)
+    if not keyframes:
+        return []
+
+    from .oversight_inspector_bridge import describe_screenshot_with_vision
+
+    duration_ms = int(session.duration_sec() * 1000)
+    n = len(keyframes)
+    # timestamp تقریبی هر keyframe بر اساس index و duration کل
+    timestamps = [int(i * duration_ms / max(1, n - 1)) for i in range(n)]
+
+    # user_context: راهنمای کوتاه برای vision
+    user_context = (
+        f"این یک فریم از ضبط در تب بازرس ویژه است "
+        f"(حالت {session.mode}، پروژه {session.project_full_name or session.project_id}). "
+        "محتوای صفحه را با ocr_text و ui_elements توصیف کن. اگر خطایی روی صفحه دیده "
+        "می‌شود در error_signals بنویس."
+    )
+    page_url_hint = ""
+    if session.mode == "A":
+        # برای حالت A این بعداً از recording_metadata پر می‌شود
+        page_url_hint = ""  # اختیاری
+
+    async def _analyze_one(idx: int, frame_path: Path) -> Dict[str, Any]:
+        try:
+            b64 = _read_image_base64(frame_path)
+            result = await describe_screenshot_with_vision(
+                base64_img=b64,
+                user_context=user_context,
+                page_url=page_url_hint,
+                dom_text="",
+            )
+            return {
+                "timestamp_ms": timestamps[idx],
+                "frame_path": str(frame_path.name),
+                **result,
+            }
+        except Exception as e:
+            logger.warning(f"vision failed for {frame_path.name}: {e}")
+            return {
+                "timestamp_ms": timestamps[idx],
+                "frame_path": str(frame_path.name),
+                "scene": f"(vision call failed: {str(e)[:120]})",
+                "ocr_text": "",
+                "ui_elements": "",
+                "error_signals": "",
+                "layout_hints": "",
+                "vision_model_used": None,
+            }
+
+    # parallel با gather — limit نداریم چون keyframeها حداکثر ۱۲ تاست
+    tasks = [_analyze_one(i, fp) for i, fp in enumerate(keyframes)]
+    results = await asyncio.gather(*tasks, return_exceptions=False)
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 5: Fetch backend logs
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def stage_fetch_backend_logs(session) -> List[Dict[str, Any]]:
+    """اگر در inspector logs.console قبلاً sync شده بودند، آن‌ها در
+    session.console_logs و session.backend_logs ذخیره شده‌اند (توسط client
+    در /stop). اینجا یک fetch نهایی هم از Render API می‌زنیم برای ثبت لاگ‌های
+    آخرین لحظات (اگر هنوز sync نشده).
+
+    Returns: لیست backend logs مرتبط با مدت ضبط
+    """
+    # session_dir را برای resolve watched نیاز نداریم — backend logs مستقیماً
+    # از Render service ID خوانده می‌شوند. این مرحله اختیاری است — اگر در
+    # سمت client قبلاً sync شده بود، فقط همان را برمی‌گرداند.
+    # برای سادگی commit 3، فقط آنچه که قبلاً در session.backend_logs هست را
+    # برمی‌گرداند. در commit 6 (UI) frontend می‌تواند logs را در /stop ارسال
+    # کند یا backend مستقیم Render API را صدا بزند.
+    return list(session.backend_logs)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 6: AI synthesis — strong prompt builder
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+SYNTHESIS_SYSTEM_PROMPT_MODE_A = """تو یک پرامپت‌نویس قوی و دقیق هستی. کاربر یک ضبط ویدئویی از تب بازرس ویژه گرفته که محتوای داخل iframe پروژه‌اش را نشان می‌دهد. ورودی‌های زیر را دریافت می‌کنی:
+
+1. یادداشت اولیه کاربر (دست‌نخورده — این نقطه شروع است)
+2. Transcript صدای کاربر در حین ضبط
+3. خلاصه‌های بصری هر keyframe (با timestamp)
+4. لیست تعاملات کاربر در iframe (کلیک، اسکرول، navigation)
+5. console logs frontend iframe
+6. backend logs (Render) در همان دوره
+7. نام پروژه و repo
+
+**وظیفه تو:**
+
+الف) **استخراج intent**: دقیقاً کاربر چه می‌گوید، چه می‌خواهد، چه را رد می‌کند، کجاها منظورش است. این مهم‌ترین بخش است — نه فقط transcribe خام، بلکه فهم منظور.
+
+ب) **فیلتر بی‌ربط**: کاربر فقط داخل iframe بود — اگر در صدا به چیزی **خارج از iframe** اشاره کرد (مثلاً «این تب IMDB رو ببین»)، آن را **بی‌ربط** تشخیص بده و در پرامپت لحاظ نکن. این یک قاعدهٔ مطلق است.
+
+ج) **تولید پرامپت قوی**: خروجی نهایی باید:
+   - شامل intent اصلی کاربر باشد در یک پاراگراف بالای متن
+   - فایل‌ها/URLs/کامپوننت‌هایی که کاربر به آن‌ها اشاره کرده یا در logs دیده شده را در یک لیست بدهد
+   - خطاهای مهم از logs را نقل قول کند
+   - تعاملات کاربر را به زبان طبیعی توصیف کند («کاربر روی دکمهٔ X کلیک کرد و سپس اسکرول کرد به ...»)
+   - actionable باشد: یک agent دیگر باید بتواند با فقط این پرامپت کار را پیش ببرد
+   - **بدون محدودیت طول** — هر اندازه‌ای که نیاز است
+
+خروجی فقط متن Markdown ساختاریافته. هیچ کد JSON یا code-block بیرونی نده. ساختار:
+
+# 🎯 خواستهٔ اصلی کاربر
+{یک پاراگراف کوتاه و دقیق}
+
+# 🔍 جزئیات و context
+{چند پاراگراف}
+
+# 🖱 تعاملات کلیدی
+{لیست با bullet}
+
+# 📋 خطاها/پیام‌های log مرتبط
+{اگر هست — code block با خطاها}
+
+# 🔗 منابع شناسایی‌شده
+{لیست با bullet — files, URLs, components}
+
+# 💡 پرامپت قابل اجرا برای agent
+{متن کامل جامع}
+"""
+
+SYNTHESIS_SYSTEM_PROMPT_MODE_B = """تو یک پرامپت‌نویس قوی هستی. کاربر یک ضبط آزاد چندصفحه‌ای گرفته که می‌تواند شامل: تب‌های مختلف کروم، برنامه‌های دیگر دسکتاپ، یا دسکتاپ خام باشد.
+
+ورودی‌ها:
+1. یادداشت اولیه کاربر
+2. Transcript صدای کاربر
+3. خلاصه‌های بصری هر keyframe — شامل تشخیص محل (chrome_tab / other_app / desktop) و related_to_project (bool)
+4. لاگ‌های پروژهٔ inspector (در صورت موجود)
+5. نام پروژهٔ inspector که کاربر در ضبط ممکن است به آن اشاره کرده باشد
+
+**وظیفه:**
+
+الف) **استخراج intent** — مثل حالت A.
+
+ب) **رفتار با محتوای خارج از پروژه**:
+   - اگر کاربر به جایی خارج از پروژه رفت ولی در صدا به آن **اشاره نکرد** → از بدنهٔ پرامپت **حذف** کن (بی‌ربط)
+   - اگر کاربر به جایی خارج رفت **و در صدا به آن اشاره کرد** (مثل «این UI رو می‌خوام مثل این بسازم») → آن را به‌عنوان «مرجع/الهام» در پرامپت **نگه دار**
+
+ج) **توالی زمانی** — ترتیب جابجایی کاربر بین صفحات را در پرامپت به زبان طبیعی توصیف کن.
+
+خروجی Markdown با همان ساختار حالت A، با یک بخش اضافه:
+
+# 🌐 توالی فعالیت کاربر
+{جدول یا لیست با timestampهای جابجایی}
+"""
+
+
+async def stage_synthesize(session, *, user_note: str = "") -> Dict[str, Any]:
+    """ورودی‌های stage 1-5 را به AI text model می‌دهد و پرامپت قوی می‌سازد.
+
+    Returns: {prompt: str, model_used: str | None, fallback: bool}
+    """
+    from .ai_manager import get_ai_manager
+    from .ai_base import Message
+    from ..core.models_registry import get_enabled_models, ModelProvider
+    import os as _os
+
+    # ساخت ورودی ساختاریافته برای AI
+    sections: List[str] = []
+    if user_note:
+        sections.append(f"## یادداشت اولیه کاربر\n{user_note.strip()}")
+    sections.append(
+        f"## context پروژه\n"
+        f"- repo: {session.project_full_name or '?'}\n"
+        f"- watched_id: {session.project_id}\n"
+        f"- مدت ضبط: {session.duration_sec():.1f}s\n"
+        f"- حالت: {session.mode}"
+    )
+    if session.transcript:
+        sections.append(f"## Transcript صدای کاربر\n{session.transcript}")
+    if session.visual_summary:
+        vs_lines = []
+        for v in session.visual_summary:
+            ts = _format_timestamp(v.get("timestamp_ms", 0))
+            scene = v.get("scene") or ""
+            ocr = (v.get("ocr_text") or "")[:500]
+            ui = (v.get("ui_elements") or "")[:300]
+            err = (v.get("error_signals") or "")[:300]
+            vs_lines.append(
+                f"{ts}\n  - scene: {scene}\n  - ocr: {ocr}\n  - ui: {ui}\n  - errors: {err}"
+            )
+        sections.append("## خلاصه‌های بصری keyframes\n" + "\n\n".join(vs_lines))
+    if session.interactions:
+        int_lines = []
+        for ev in session.interactions:
+            ts = _format_timestamp(ev.ts_ms)
+            int_lines.append(f"{ts} {ev.type} — {json.dumps(ev.details, ensure_ascii=False)[:200]}")
+        sections.append("## تعاملات کاربر\n" + "\n".join(int_lines[:200]))  # cap at 200
+    if session.console_logs:
+        cl_lines = [
+            f"[{l.get('level','log')}] {l.get('message','')[:200]}"
+            for l in session.console_logs[-50:]  # آخرین ۵۰
+        ]
+        sections.append("## Console logs frontend\n" + "\n".join(cl_lines))
+    if session.backend_logs:
+        bl_lines = [
+            f"[{l.get('level','info')}] {l.get('message','')[:200]}"
+            for l in session.backend_logs[-50:]
+        ]
+        sections.append("## Backend logs\n" + "\n".join(bl_lines))
+    if session.mode == "B" and session.location_timeline:
+        lt = [
+            f"{_format_timestamp(item.get('ts_ms',0))} {item.get('category','?')}: "
+            f"{item.get('url_or_app_name','?')} — {'مرتبط' if item.get('related_to_project') else 'خارج'}"
+            for item in session.location_timeline
+        ]
+        sections.append("## نقشهٔ زمانی فعالیت\n" + "\n".join(lt))
+
+    structured_input = "\n\n".join(sections)
+    system_prompt = (
+        SYNTHESIS_SYSTEM_PROMPT_MODE_A if session.mode == "A"
+        else SYNTHESIS_SYSTEM_PROMPT_MODE_B
+    )
+
+    # انتخاب مدل: اولین مدل enabled با provider که env key دارد
+    env_keys = {
+        "openai": ["OPENAI_API_KEY"],
+        "claude": ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"],
+        "anthropic": ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"],
+        "gemini": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        "google": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        "deepseek": ["DEEPSEEK_API_KEY"],
+        "groq": ["GROQ_API_KEY"],
+        "openrouter": ["OPENROUTER_API_KEY"],
+    }
+    with_key = set()
+    for p, ks in env_keys.items():
+        if any((_os.environ.get(k) or "").strip() for k in ks):
+            with_key.add(p.lower())
+    enabled = get_enabled_models()
+    picked = None
+    # ترجیح: مدل‌های context-طولانی (Claude، Gemini) → text-only
+    preferred_order = ["anthropic", "claude", "gemini", "google", "openai", "deepseek", "groq", "openrouter"]
+    for target_prov in preferred_order:
+        if target_prov not in with_key:
+            continue
+        for m in enabled:
+            prov = m.provider
+            prov_str = (prov.value if hasattr(prov, "value") else str(prov)).lower()
+            if prov_str == target_prov:
+                picked = m
+                break
+        if picked:
+            break
+
+    if not picked:
+        # fallback: template-only assembly بدون AI
+        return {
+            "prompt": _template_only_fallback(session, user_note, structured_input),
+            "model_used": None,
+            "fallback": True,
+            "fallback_reason": (
+                "هیچ مدل AI متنی برای سنتز پرامپت در دسترس نبود — "
+                "از template ساده استفاده شد. می‌توانید ANTHROPIC_API_KEY یا "
+                "OPENAI_API_KEY در Render env اضافه کنید."
+            ),
+        }
+
+    ai_mgr = get_ai_manager()
+    msg_user = (
+        f"{system_prompt}\n\n"
+        f"---\n\n"
+        f"# ورودی‌های ساختاریافته\n\n"
+        f"{structured_input}\n\n"
+        f"---\n\n"
+        "حالا خروجی Markdown قوی را تولید کن:"
+    )
+    try:
+        response = await ai_mgr.generate(
+            model_id=picked.id,
+            messages=[Message(role="user", content=msg_user)],
+            max_tokens=8000,  # بزرگ برای پرامپت قوی، ولی بدون truncation در ذخیره
+            temperature=0.3,
+        )
+        ai_text = (response.content or "").strip()
+        if not ai_text:
+            raise RuntimeError("AI returned empty text")
+        return {
+            "prompt": ai_text,
+            "model_used": picked.id,
+            "fallback": False,
+            "fallback_reason": "",
+        }
+    except Exception as e:
+        logger.exception(f"prompt synthesis failed with {picked.id}: {e}")
+        return {
+            "prompt": _template_only_fallback(session, user_note, structured_input),
+            "model_used": None,
+            "fallback": True,
+            "fallback_reason": f"AI synthesis failed ({str(e)[:150]}) — استفاده از template ساده",
+        }
+
+
+def _template_only_fallback(session, user_note: str, structured_input: str) -> str:
+    """اگر AI fail کرد، یک پرامپت template-only تولید می‌کند که حداقل
+    ورودی‌ها را به‌صورت ساختاریافته نگه می‌دارد.
+    """
+    return (
+        f"# 🎯 یادداشت اولیه کاربر\n\n{user_note.strip() or '(یادداشت اولیه‌ای ارائه نشد)'}\n\n"
+        f"---\n\n"
+        f"# 📦 ورودی‌های خام (AI synthesis در دسترس نبود — این متن template-only است)\n\n"
+        f"{structured_input}\n\n"
+        f"---\n\n"
+        f"# 💡 توصیه\n\n"
+        f"برای دریافت پرامپت قوی AI، یکی از این env varها را پیکربندی کنید:\n"
+        f"- ANTHROPIC_API_KEY (پیشنهادی برای پرامپت‌های طولانی)\n"
+        f"- OPENAI_API_KEY\n"
+        f"- GEMINI_API_KEY\n"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Final structured prompt — راپر template + AI output + source attribution
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def build_final_prompt(
+    session,
+    *,
+    user_note: str,
+    ai_generated_body: str,
+    telegram_info: Optional[str] = None,
+) -> str:
+    """ساختار نهایی طبق طراحی section 4.5:
+       یادداشت اولیه (در heading اول) → بلوک منشأ → AI-generated body
+    """
+    mode_label = "🎯 A — iframe-focused" if session.mode == "A" else "🌐 B — free-multi-screen"
+    now_iso = datetime.now(timezone.utc).isoformat()
+    duration = session.duration_sec()
+    m_int, s_int = int(duration // 60), int(duration % 60)
+
+    parts = []
+    # 1) یادداشت اولیه — heading اول
+    parts.append("# " + (user_note.strip() or "ضبط بازرس ویژه"))
+    parts.append("")
+    parts.append("---")
+    parts.append("")
+    # 2) بلوک منشأ
+    parts.append("## 📍 منشأ این پرامپت")
+    parts.append("")
+    parts.append(f"- **منبع**: ضبط در تب بازرس ویژه — حالت {mode_label}")
+    parts.append(f"- **پروژه**: `{session.project_full_name or session.project_id}`")
+    parts.append(f"- **تاریخ ضبط**: {now_iso}")
+    parts.append(f"- **مدت**: {m_int}m {s_int}s")
+    if telegram_info:
+        parts.append(f"- **ویدئو**: {telegram_info}")
+    else:
+        parts.append("- **ویدئو**: (در حال آماده‌سازی — در commit آینده ارسال به تلگرام)")
+    parts.append(f"- **session_id**: `{session.session_id}` (موقت — حذف می‌شود)")
+    parts.append("")
+    parts.append("---")
+    parts.append("")
+    # 3) AI-generated body
+    parts.append(ai_generated_body)
+    return "\n".join(parts)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Orchestrator: تمام stages با progress callback
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def process_session(
+    session,
+    *,
+    user_note: str = "",
+    progress_callback: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """اجرای تمام stages روی session. خروجی‌ها در session ذخیره می‌شوند.
+
+    Args:
+      session: RecordingSession
+      user_note: یادداشت اولیه کاربر (raw_idea)
+      progress_callback: تابع اختیاری(stage, percent, message)
+
+    Returns: dict خلاصه‌ای از نتیجه
+    """
+    async def _emit(stage: str, pct: int, msg: str = ""):
+        if progress_callback:
+            try:
+                if asyncio.iscoroutinefunction(progress_callback):
+                    await progress_callback(stage, pct, msg)
+                else:
+                    progress_callback(stage, pct, msg)
+            except Exception:
+                pass
+
+    started = time.time()
+    summary = {
+        "session_id": session.session_id,
+        "transcribe": None,
+        "vision_count": 0,
+        "logs_count": 0,
+        "synthesize": None,
+        "elapsed_sec": 0.0,
+    }
+
+    # Stage 1+2: Transcribe
+    await _emit("transcribe", 0, "در حال آماده‌سازی صدا...")
+    tr = await stage_transcribe(session)
+    session.transcript = tr.get("text", "")
+    session.transcript_language = tr.get("language", "")
+    session.transcript_model = tr.get("model_used") or ""
+    summary["transcribe"] = {
+        "success": tr.get("success"),
+        "chars": len(session.transcript),
+        "language": session.transcript_language,
+        "model": session.transcript_model,
+        "fallback_reason": tr.get("fallback_reason", ""),
+    }
+    await _emit("transcribe", 100, f"{len(session.transcript)} char transcribed")
+
+    # Stage 3+4: Vision per keyframe
+    await _emit("vision", 0, "در حال تحلیل بصری keyframes...")
+    visual = await stage_vision(session)
+    session.visual_summary = visual
+    summary["vision_count"] = len(visual)
+    await _emit("vision", 100, f"{len(visual)} keyframe analyzed")
+
+    # Stage 5: Logs (sync if not already)
+    await _emit("logs", 0, "جمع‌آوری لاگ‌ها...")
+    logs = await stage_fetch_backend_logs(session)
+    summary["logs_count"] = len(logs)
+    await _emit("logs", 100, "")
+
+    # Stage 6: AI synthesis
+    await _emit("synthesize", 0, "سنتز پرامپت قوی توسط AI...")
+    syn = await stage_synthesize(session, user_note=user_note)
+    ai_body = syn.get("prompt") or ""
+    session.prompt_model = syn.get("model_used") or ""
+    summary["synthesize"] = {
+        "model": session.prompt_model,
+        "fallback": syn.get("fallback"),
+        "fallback_reason": syn.get("fallback_reason", ""),
+    }
+    await _emit("synthesize", 80, "ترکیب نهایی...")
+
+    # Stage 7: Final prompt assembly
+    session.prompt = build_final_prompt(session, user_note=user_note, ai_generated_body=ai_body)
+    await _emit("synthesize", 100, f"prompt: {len(session.prompt)} chars")
+
+    summary["elapsed_sec"] = round(time.time() - started, 2)
+    summary["prompt_chars"] = len(session.prompt)
+    return summary

@@ -59,8 +59,18 @@ class InteractionsRequest(BaseModel):
     events: List[Dict[str, Any]] = Field(default_factory=list)
 
 
+class StopRequest(BaseModel):
+    """payload اختیاری برای stop — اگر frontend می‌خواهد user_note و logs را
+    در همان لحظه ارسال کند تا processing بلافاصله با context کامل شروع شود.
+    """
+    user_note: str = ""
+    console_logs: Optional[List[Dict[str, Any]]] = None
+    backend_logs: Optional[List[Dict[str, Any]]] = None
+
+
 class RegeneratePromptRequest(BaseModel):
     edited_transcript: Optional[str] = None
+    user_note: str = ""
 
 
 class FinalizeRequest(BaseModel):
@@ -143,6 +153,30 @@ async def append_video_chunk(
         raise HTTPException(status_code=409, detail=str(e))
 
 
+@router.post("/{session_id}/frame")
+async def append_frame(
+    session_id: str,
+    seq: int = Form(...),
+    ext: str = Form("png"),
+    frame: UploadFile = File(...),
+):
+    """آپلود یک frame تصویری (فقط در حالت A). frontend از endpoint موجود
+    /api/render/inspector/screenshot هر ~۵۰۰ms یک frame می‌گیرد و به اینجا
+    می‌فرستد.
+    """
+    svc = get_inspector_recording_service()
+    try:
+        frame_bytes = await frame.read()
+        if not frame_bytes:
+            raise HTTPException(status_code=400, detail="frame خالی است")
+        await svc.append_frame(session_id, seq=seq, frame_bytes=frame_bytes, ext=ext)
+        return {"ok": True, "seq": seq, "size": len(frame_bytes)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="session_not_found")
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
 @router.post("/{session_id}/interactions")
 async def append_interactions(session_id: str, payload: InteractionsRequest):
     """ارسال یک batch از events تعاملات کاربر (postMessage bridge یا inferred)."""
@@ -155,13 +189,23 @@ async def append_interactions(session_id: str, payload: InteractionsRequest):
 
 
 @router.post("/{session_id}/stop")
-async def stop_recording(session_id: str):
-    """گذار از recording → processing. کاربر منتظر می‌ماند تا preview آماده
-    شود.
+async def stop_recording(session_id: str, payload: Optional[StopRequest] = None):
+    """گذار از recording → processing → ready_for_preview.
+
+    اگر payload با user_note و logs بفرستد، processing با context کامل شروع
+    می‌شود. در غیر این صورت processing با context خالی شروع می‌کند و
+    regenerate-prompt برای اصلاح در دسترس است.
     """
     svc = get_inspector_recording_service()
     try:
-        session = await svc.stop_session(session_id)
+        if payload:
+            await svc.attach_logs_snapshot(
+                session_id,
+                console_logs=payload.console_logs,
+                backend_logs=payload.backend_logs,
+            )
+        user_note = payload.user_note if payload else ""
+        session = await svc.stop_session(session_id, user_note=user_note)
         return {"ok": True, "session": session.to_status_dict()}
     except KeyError:
         raise HTTPException(status_code=404, detail="session_not_found")
@@ -212,15 +256,27 @@ async def get_preview(session_id: str):
 
 @router.post("/{session_id}/regenerate-prompt")
 async def regenerate_prompt(session_id: str, payload: RegeneratePromptRequest):
-    """دوباره پرامپت تولید کن (پس از اصلاح transcript توسط کاربر)."""
+    """دوباره پرامپت تولید کن (پس از اصلاح transcript یا یادداشت اولیه توسط
+    کاربر). فقط مرحله synthesis دوباره اجرا می‌شود — transcribe و vision
+    نتایج قبلی را استفاده می‌کنند.
+    """
     svc = get_inspector_recording_service()
     try:
         session = await svc.regenerate_prompt(
-            session_id, edited_transcript=payload.edited_transcript
+            session_id,
+            edited_transcript=payload.edited_transcript,
+            user_note=payload.user_note,
         )
-        return {"ok": True, "prompt": session.prompt}
+        return {
+            "ok": True,
+            "prompt": session.prompt,
+            "prompt_chars": len(session.prompt),
+            "model_used": session.prompt_model,
+        }
     except KeyError:
         raise HTTPException(status_code=404, detail="session_not_found")
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 @router.post("/{session_id}/finalize")
