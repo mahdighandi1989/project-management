@@ -453,6 +453,15 @@ async def run_task_via_claude_now(task_id: str):
                     "message": "یک تسک دیگر در حال verify است؛ پس از تمام شدن آن دوباره تلاش کنید",
                 },
             )
+        # workflow_not_indexed_yet — حتی پس از retry، GitHub هنوز index نکرده
+        if dr.get("transient"):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "workflow تازه نصب شد ولی GitHub هنوز آن را index نکرده. "
+                    "چند ثانیه صبر کنید و دوباره روی دکمه کلیک کنید."
+                ),
+            )
         raise HTTPException(status_code=502, detail=dr.get("error") or err or "dispatch failed")
     # 📲 Telegram feedback خودبه‌خود وقتی workflow استارت شد و Claude
     # /claim می‌زند (event="external_runner_claimed" در external_prompts.py).

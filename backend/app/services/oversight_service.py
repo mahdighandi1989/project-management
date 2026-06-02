@@ -2622,12 +2622,31 @@ class OversightService:
 
         # trigger workflow با target_task_id — force=True تا قید
         # claude_runner_enabled bypass شود (فقط workflow_path لازم است)
-        dispatch_result = await trigger_workflow_dispatch(
-            watched,
-            gh_token=gh_token,
-            target_task_id=task_id,
-            force=True,
-        )
+        # 🆕 retry برای 404 transient (workflow_not_indexed_yet): اگر workflow
+        # تازه نصب شده، GitHub چند ثانیه طول می‌کشد تا index کند. با backoff
+        # تا ۴ بار تلاش می‌کنیم (مجموع ~۲۰ ثانیه) برای اولین trigger بعد
+        # auto-install. برای dispatch روی workflow از قبل موجود، فقط یک تلاش.
+        max_attempts = 4 if auto_installed else 1
+        delays = [3.0, 5.0, 8.0]
+        dispatch_result: Dict[str, Any] = {}
+        for attempt in range(max_attempts):
+            dispatch_result = await trigger_workflow_dispatch(
+                watched,
+                gh_token=gh_token,
+                target_task_id=task_id,
+                force=True,
+            )
+            # موفقیت یا خطای غیر-transient → بیرون
+            if dispatch_result.get("success") or not dispatch_result.get("transient"):
+                break
+            # transient (workflow_not_indexed_yet) → صبر و retry
+            if attempt < max_attempts - 1:
+                wait = delays[min(attempt, len(delays) - 1)]
+                logger.info(
+                    f"run_single_task_via_claude: workflow not indexed yet for "
+                    f"{watched.repo_full_name}, retry #{attempt + 1} in {wait}s"
+                )
+                await asyncio.sleep(wait)
 
         # skipped (مثلاً verify_in_progress) یعنی trigger واقعاً ارسال نشد
         # — برای caller باید مثل خطا رفتار کند
