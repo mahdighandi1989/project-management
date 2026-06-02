@@ -1,6 +1,6 @@
 ---
 task_id: 867aefe3-7b45-4fd0-a1d5-48aad6b1ab53
-title: '[ایدهٔ متنی همراه نیست — دستورالعمل/درخواست کاربر **داخل** محتوای فایل‌های پیوست (14 مرحله)'
+title: پیاده‌سازی اجرای دستی تسک با کلادپورت
 type: other
 priority: medium
 execution_priority: 3000
@@ -10,7 +10,7 @@ verification_status: done
 watched_id: 3f34a2b1-2a8d-4ad2-904a-9835a8a5b7c9
 project: mahdighandi1989/project-management
 created_at: '2026-06-02T12:10:56.594947+00:00'
-updated_at: '2026-06-02T15:55:40.112315+00:00'
+updated_at: '2026-06-02T15:55:52.630345+00:00'
 archived: true
 archived_at: '2026-06-02T15:55:40.112311+00:00'
 target_files:
@@ -36,7 +36,7 @@ target_files:
 - backend/app/services/telegram_bot_service.py
 ---
 
-# [ایدهٔ متنی همراه نیست — دستورالعمل/درخواست کاربر **داخل** محتوای فایل‌های پیوست (14 مرحله)
+# پیاده‌سازی اجرای دستی تسک با کلادپورت
 
 ## Raw Idea
 
