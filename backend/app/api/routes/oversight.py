@@ -2317,6 +2317,90 @@ async def get_bulk_verify_status(watched_id: str):
     return {**_BULK_VERIFY_STATE}
 
 
+@router.post("/tasks/{task_id}/recover-after-claude-run")
+async def recover_after_claude_run(task_id: str):
+    """recovery برای وقتی Claude کار را انجام داد + commit/push زد ولی /complete
+    موفق نبود (مثلاً Render free tier sleep یا network timeout). تسک در
+    backend هنوز "pending" یا "claimed" مانده.
+
+    این endpoint:
+    1. تسک را به وضعیت "applied_externally_pending_verify" می‌برد
+    2. verify-lock می‌گیرد روی watched
+    3. _verify_then_chain را در پس‌زمینه اجرا می‌کند (verify → archive/retry/TODO)
+
+    رفتار = همان رفتاری که اگر /complete موفق می‌بود.
+    """
+    from ...api.routes.external_prompts import (
+        _verify_then_chain, _emit_runner_notification,
+    )
+    service = get_oversight_service()
+    t = next((x for x in service.tasks if x.id == task_id), None)
+    if t is None:
+        raise HTTPException(status_code=404, detail="تسک یافت نشد")
+    if not getattr(t, "watched_id", None):
+        raise HTTPException(status_code=409, detail="این تسک به پروژه‌ای متصل نیست")
+    watched = service._find_watched(t.watched_id)
+    if watched is None:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+    if not getattr(watched, "claude_runner_workflow_path", None):
+        raise HTTPException(
+            status_code=409,
+            detail="Claude Runner روی این پروژه نصب نشده — recovery معنا ندارد",
+        )
+
+    from datetime import datetime, timezone
+    async with service._lock:
+        t.external_status = "done"
+        t.external_locked_by = None
+        t.external_lease_until = None
+        t.external_last_error = None
+        t.verification_status = "applied_externally_pending_verify"
+        t.manually_marked_applied_at = datetime.now(timezone.utc).isoformat()
+        t.last_summary = (t.last_summary or "")[:5000] or (
+            "recovered manually — Claude کار را انجام داد ولی /complete fail شد"
+        )
+        from ...services.oversight_service import now_iso
+        t.updated_at = now_iso()
+        service._save_tasks()
+        service._recompute_execution_priorities(t)
+        service._schedule_prompt_sync(t, rebuild_index=True)
+
+        # acquire verify-lock — مثل complete_prompt
+        locked = service._acquire_verify_lock(watched.id, t.id)
+        if locked:
+            service._save_watched()
+
+    # notification — مشابه /complete
+    _emit_runner_notification(
+        event="external_runner_completed",
+        task=t,
+        agent_id="claude-code-action",
+        extra="🛠 recovery دستی — Claude کار را انجام داده بود ولی /complete fail شد",
+    )
+
+    if locked:
+        import asyncio as _asyncio
+        _asyncio.create_task(
+            _verify_then_chain(
+                task_id=t.id,
+                watched_id=watched.id,
+                agent_id="claude-code-action",
+            )
+        )
+        return {
+            "success": True,
+            "task_id": t.id,
+            "verify_scheduled": True,
+            "message": "تسک به وضعیت applied_externally_pending_verify رفت و verify در پس‌زمینه شروع شد. نتیجه را در نوتیفیکیشن‌های بعدی خواهید دید.",
+        }
+    return {
+        "success": True,
+        "task_id": t.id,
+        "verify_scheduled": False,
+        "message": "تسک علامت‌گذاری شد ولی verify-lock قابل گرفتن نبود (یک verify دیگر در حال اجراست). با /verify-now دستی verify بزنید.",
+    }
+
+
 @router.post("/tasks/{task_id}/mark-applied-externally")
 async def mark_applied_externally(task_id: str):
     """کاربر صریحاً می‌گوید این تسک را بیرون از سیستم اعمال کردم."""
