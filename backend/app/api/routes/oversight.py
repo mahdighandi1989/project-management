@@ -400,6 +400,47 @@ async def claude_runner_repair(watched_id: str):
     return result
 
 
+# 🆕 (Refresh YAML) — آپدیت محتوای workflow YAML روی repo بدون تغییر
+# claude_runner_enabled. مناسب وقتی master prompt یا workflow YAML
+# آپدیت شده ولی نمی‌خواهیم auto-trigger on push را روشن کنیم.
+@router.post("/watched/{watched_id}/claude-runner/refresh-yaml")
+async def claude_runner_refresh_yaml(watched_id: str):
+    """آپدیت محتوای workflow YAML (و secrets + permissions) روی repo
+    بدون تغییر claude_runner_enabled. برای زمانی که master prompt یا
+    YAML در backend آپدیت شده و می‌خواهیم نسخهٔ repo همگام شود.
+    """
+    service = get_oversight_service()
+    result = await service.install_claude_runner_manual_only(watched_id)
+    if not result.get("success"):
+        err = result.get("error", "")
+        if err == "watched_not_found":
+            raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+        if err == "env_missing":
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "env_missing",
+                    "missing": result.get("missing", []),
+                    "hint": result.get("hint"),
+                },
+            )
+        if err == "no_github_token":
+            raise HTTPException(status_code=503, detail="GitHub token در سرور تنظیم نشده")
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": err or "refresh_failed",
+                "errors": result.get("errors", []),
+            },
+        )
+    return {
+        "success": True,
+        "message": "workflow YAML با نسخهٔ جدید (master prompt به‌روز) refresh شد. auto-trigger on push بدون تغییر باقی ماند.",
+        "mode": result.get("mode", "manual_only"),
+        "watched": result.get("watched"),
+    }
+
+
 @router.get("/watched/{watched_id}/claude-runner/runs")
 async def claude_runner_runs(
     watched_id: str,
