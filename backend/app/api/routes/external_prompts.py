@@ -462,9 +462,10 @@ async def _verify_then_chain(
             include_runtime=True,
             verify_v6=True,
         )
+        # verify_task return shape: {"task": <dict>, "report": ..., "final": ..., ...}
+        _vs = (verify_result.get("task") or {}).get("verification_status", "?")
         logger.info(
-            f"_verify_then_chain: verify done for task={task_id} → "
-            f"status={verify_result.get('verification_status', '?')}"
+            f"_verify_then_chain: verify done for task={task_id} → status={_vs}"
         )
     except Exception as _e:
         logger.exception(f"_verify_then_chain: verify_task crashed: {_e}")
@@ -548,16 +549,24 @@ async def _verify_then_chain(
             service._release_verify_lock(watched_id)
             service._save_watched()
 
-    # 4) trigger workflow بعدی (همان تسک اگر retry، یا تسک بعدی اگر chain-next)
+    # 4) trigger workflow بعدی
+    #    - retry_same: target_task_id=task_id → Claude همین تسک را اجرا کند
+    #    - chain_next/max_retries_todo/regressed_todo: target_task_id=None →
+    #      Claude /next می‌زند و اولین تسک pickable را برمی‌دارد
+    target_for_dispatch = task_id if action == "retry_same" else None
     try:
         from ...services.oversight_service import get_github_token
         from ...services.claude_runner_bootstrap import trigger_workflow_dispatch
         gh_token = get_github_token()
         if gh_token:
-            disp = await trigger_workflow_dispatch(watched, gh_token=gh_token)
+            disp = await trigger_workflow_dispatch(
+                watched,
+                gh_token=gh_token,
+                target_task_id=target_for_dispatch,
+            )
             logger.info(
-                f"_verify_then_chain: dispatched workflow after action={action} "
-                f"→ {disp}"
+                f"_verify_then_chain: dispatched workflow after action={action}, "
+                f"target={target_for_dispatch or 'next'} → {disp}"
             )
     except Exception as _disp_e:
         logger.warning(f"_verify_then_chain: dispatch failed: {_disp_e}")

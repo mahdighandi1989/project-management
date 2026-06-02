@@ -369,6 +369,20 @@ EVENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "default_sound": True,
         "icon": "❌",
     },
+    "external_runner_retry_after_partial_verify": {
+        "label": "🔁 Claude در حال retry (verify ناقص)",
+        "help": "وقتی deep verify بعد از تکمیل توسط Claude نتیجهٔ partial داد و سیستم در حال retry روی همان تسک است",
+        "default_enabled": True,
+        "default_sound": False,
+        "icon": "🔁",
+    },
+    "external_runner_max_retries_or_regressed": {
+        "label": "⚠️ Claude به سقف retry رسید (نیاز به اقدام دستی)",
+        "help": "وقتی Claude نتوانست در سقف retry به verify=done برسد یا verify regression پیدا کرد. فایل TO-DO در ریپو ساخته شد.",
+        "default_enabled": True,
+        "default_sound": True,
+        "icon": "⚠️",
+    },
 }
 
 

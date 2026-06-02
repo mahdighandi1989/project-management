@@ -59,14 +59,20 @@ SECRET_BACKEND_URL = "OVERSIGHT_BACKEND_URL"
 MASTER_PROMPT = (
     "وظیفه‌ات: **فقط یک تسک** را اجرا کن سپس exit کن.\n"
     "\n"
-    "## مرحله ۱ — لیست تسک‌ها را بگیر\n"
+    "## مرحله ۱ — تعیین task_id\n"
+    "\n"
+    "**اگر $TARGET_TASK_ID خالی نیست** (یعنی backend در حال retry روی یک تسک\n"
+    "خاص است): همان task_id را استفاده کن. برو مستقیم به مرحله ۲.\n"
+    "\n"
+    "**اگر $TARGET_TASK_ID خالی است** (chain-next نرمال): لیست را بگیر:\n"
     "\n"
     "```bash\n"
     "curl -s -H \"X-External-Token: $OVERSIGHT_EXTERNAL_TOKEN\" \\\n"
     "  \"$OVERSIGHT_BACKEND_URL/api/external/prompts/next?watched_id=$WATCHED_ID&limit=1\"\n"
     "```\n"
     "\n"
-    "اگر لیست خالی است → `echo 'no pending tasks'` و موفق exit کن.\n"
+    "اولین task_id را بردار. اگر لیست خالی است → `echo 'no pending tasks'`\n"
+    "و موفق exit کن.\n"
     "\n"
     "## مرحله ۲ — اولین تسک را claim کن\n"
     "\n"
@@ -189,7 +195,16 @@ name: Claude Auto Task Runner
   # ("Unsupported event type: push"). فقط workflow_dispatch پشتیبانی
   # می‌شود. backend پس از push شدن تسک به prompt/_index.json، خودکار
   # workflow را با GitHub API trigger می‌زند (dispatches endpoint).
-  workflow_dispatch: {{}}
+  #
+  # 🆕 (target_task_id) — اگر backend در حال retry روی یک تسک خاص است
+  # (بعد از verify=partial)، task_id را در inputs می‌گذارد تا Claude
+  # **همان** تسک را بگیرد، نه /next.
+  workflow_dispatch:
+    inputs:
+      target_task_id:
+        description: 'task_id خاص برای اجرا (اختیاری). اگر خالی، از /next گرفته می‌شود.'
+        required: false
+        type: string
 
 # 🛡 (concurrency strategy) — cancel-in-progress: false
 # قبلاً true بود ولی یافتیم که runهای در حال اجرا را مید-اجرا cancel
@@ -236,6 +251,11 @@ jobs:
           OVERSIGHT_EXTERNAL_TOKEN: ${{{{ secrets.{SECRET_EXTERNAL} }}}}
           WATCHED_ID: "{watched_id}"
           REPO_FULL_NAME: "{repo_full_name}"
+          # 🆕 (target_task_id) — اگر backend در حال retry روی یک تسک خاص است
+          # (بعد از verify=partial)، این مقدار task_id را به master prompt
+          # می‌رساند تا Claude همان تسک را بگیرد به‌جای صدا زدن /next.
+          # وقتی خالی است (chain-next نرمال)، Claude از /next استفاده می‌کند.
+          TARGET_TASK_ID: ${{{{ github.event.inputs.target_task_id }}}}
 """
     return yaml
 
@@ -338,12 +358,20 @@ async def delete_repo_secret(
 # ----------------------------------------------------------------------
 
 async def trigger_workflow_dispatch(
-    watched: Any, *, gh_token: str, ref: str = "main",
+    watched: Any,
+    *,
+    gh_token: str,
+    ref: str = "main",
+    target_task_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """trigger دستی workflow Claude Auto-Runner از طریق GitHub API.
 
     این تابع از سوی backend بعد از push موفق `prompt/_index.json` صدا
     زده می‌شود تا workflow اجرا شود (چون trigger روی push کار نمی‌کند).
+
+    target_task_id: اگر داده شود، در workflow inputs پاس داده می‌شود تا
+    Claude همان task_id را اجرا کند (به‌جای /next). برای retry بعد از
+    verify=partial استفاده می‌شود.
 
     Returns:
       {"success": bool, "error": str, "skipped": bool}
@@ -387,7 +415,9 @@ async def trigger_workflow_dispatch(
         f"{workflow_filename}/dispatches"
     )
     headers = pr._get_headers(token=gh_token)  # noqa: SLF001
-    body = {"ref": use_ref}
+    body: Dict[str, Any] = {"ref": use_ref}
+    if target_task_id:
+        body["inputs"] = {"target_task_id": str(target_task_id)}
     res = await pr._gh_request("POST", url, headers=headers, json_body=body)  # noqa: SLF001
     status = res.get("status")
     # 204 No Content = موفقیت. 404 = workflow هنوز روی GitHub index نشده
