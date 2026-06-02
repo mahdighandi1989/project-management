@@ -151,20 +151,19 @@ name: Claude Auto Task Runner
   # workflow را با GitHub API trigger می‌زند (dispatches endpoint).
   workflow_dispatch: {{}}
 
-# 🛡 (workflow trigger leak fix) — strategy جدید: cancel-in-progress: true
-# قبلاً cancel-in-progress: false بود → یعنی runی که در حال اجرا بود
-# نگه‌داری می‌شد ولی runهای صف از سوی GitHub خودکار cancel می‌شدند
-# (هر بار یک trigger جدید بیاید). نتیجه: runها ۷-۸ دقیقه setup می‌کردند
-# سپس cancel می‌شدند بدون اینکه کاری کنند → سهمیه ماهانه را در یک
-# روز می‌سوزاند.
+# 🛡 (concurrency strategy) — cancel-in-progress: false
+# قبلاً true بود ولی یافتیم که runهای در حال اجرا را مید-اجرا cancel
+# می‌کرد (Run #10 بعد از ۳ دقیقه اجرای واقعی، توسط Run #11 قطع شد).
 #
-# با cancel-in-progress: true، run قبلی فوراً (در چند ثانیه) cancel
-# می‌شود وقتی triger جدیدی بیاید → setup time هدر نمی‌رود → فقط آخرین
-# run کامل اجرا می‌شود. این هم‌خوان با master prompt است که می‌گوید
-# Claude **همهٔ** تسک‌های pending را در یک run می‌گیرد، نه فقط آخرین.
+# با false:
+#   - in-progress run ادامه می‌دهد تا کاملاً تمام شود (Claude زمان دارد)
+#   - queued runs اگر newer بیاید، جایگزین می‌شوند (فقط آخرین queued می‌ماند)
+#
+# combined با debounce 60s در backend و content-diff check، تعداد trigger
+# های بی‌فایده به حداقل می‌رسد، پس setup-then-cancel نخواهیم داشت.
 concurrency:
   group: claude-auto-task-{watched_id}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   run-task:
