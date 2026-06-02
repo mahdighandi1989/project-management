@@ -6,6 +6,7 @@ import { useParams, useSearchParams } from 'next/navigation';
 // ProjectHealthPanel در commit 3.3a حذف شد — همهٔ قابلیت‌ها در /oversight
 import PromptManager from '@/components/PromptManager';
 import ExecutingPromptsPanel from '@/components/ExecutingPromptsPanel';
+import ScreenRecorder, { type ScreenRecordingPayload } from '@/components/ScreenRecorder';
 import ReactFlow, {
   Node,
   Edge,
@@ -5367,6 +5368,133 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
       setSendToOversightLoading(false);
       return false;
     }
+  };
+
+  // 🎥 (Screen Recording) — ساخت تسک از ضبط ویدئو و ارسال به مرکز نظارت
+  // مسیر مشابه sendToOversight اما با mode='video_record' و فیلدهای رکورد.
+  const sendRecordingTaskFromInspector = async (
+    payload: ScreenRecordingPayload,
+    typedText: string,
+  ): Promise<boolean> => {
+    setSendToOversightLoading(true);
+    setInspectorChatMessages(prev => [...prev, {
+      id: `sending_oversight_${Date.now()}`,
+      role: 'system' as const,
+      content: '⏳ در حال ساخت پرامپت غنی از ضبط ویدئو (transcript + لاگ‌ها + تعاملات) و ارسال به مرکز نظارت...',
+      timestamp: new Date(),
+    }]);
+
+    const reqPayload = {
+      project_id: projectId,
+      project_full_name: oversightBridgeSummary?.project_full_name || null,
+      mode: 'video_record',
+      user_request: typedText || payload.transcript || 'درخواست صوتی کاربر از ضبط ویدئوی صفحه',
+      enhanced_prompt: null,
+      screenshots: null,
+      console_logs: (payload.console_logs || []).slice(-80),
+      backend_logs: inspectorBackendLogs.slice(-30).map(l => ({
+        level: l.level, message: l.message, timestamp: l.timestamp, service_id: l.service_name,
+      })),
+      related_urls: null,
+      api_paths: null,
+      frontend_url: inspectorFrontendUrl || null,
+      backend_url: inspectorBaseUrl || null,
+      page_url: (typeof window !== 'undefined' ? window.location.href : null),
+      priority: 'medium',
+      type: 'other',
+      inspector_session_id: inspectorSessionIdRef.current ? String(inspectorSessionIdRef.current) : null,
+      audio_transcript: payload.transcript || null,
+      user_interactions: payload.user_interactions || [],
+      recording_id: payload.recording_id,
+      recording_video_file_id: payload.recording_video_file_id,
+      recording_audio_file_id: payload.recording_audio_file_id,
+      recording_duration_ms: payload.recording_duration_ms,
+    };
+
+    try {
+      const res = await fetch(`${API_BASE}/api/oversight/tasks/from-inspector`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(reqPayload),
+      });
+      setInspectorChatMessages(prev => prev.filter(m => !m.id.startsWith('sending_oversight_')));
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        const errMsg = errData.detail || `HTTP ${res.status}`;
+        setInspectorChatMessages(prev => [...prev, {
+          id: `oversight_err_${Date.now()}`,
+          role: 'system' as const,
+          content: `❌ خطا در ساخت تسک از ضبط ویدئو: ${errMsg}`,
+          timestamp: new Date(),
+        }]);
+        setSendToOversightLoading(false);
+        return false;
+      }
+      const data = await res.json();
+      const taskExcerpt = data.prompt_excerpt
+        ? `\n\n📝 _پیش‌نمایش پرامپت (${data.prompt_length} char):_\n> ${data.prompt_excerpt.slice(0, 200)}…`
+        : '';
+      setInspectorChatMessages(prev => [...prev, {
+        id: `oversight_ack_${Date.now()}`,
+        role: 'system' as const,
+        content: `✅ *تسک از ضبط ویدئو در مرکز نظارت ساخته شد*\n\n📁 ${data.project_full_name}\n📋 تسک ID: \`${data.task_id?.slice(0, 8) || '?'}…\`${taskExcerpt}\n\n🔗 [📋 مشاهدهٔ تسک در مرکز نظارت](${data.oversight_url})`,
+        timestamp: new Date(),
+        oversight_task_id: data.task_id,
+      } as any]);
+      try {
+        await loadProjectTasksPanel();
+        if (!projectTasksPanelOpen) setProjectTasksPanelOpen(true);
+        showToast('✅ تسک جدید از ضبط ویدئو در پنل تسک‌های پروژه ثبت شد', 4000);
+      } catch (_refErr) {
+        console.warn('panel refresh after recording task failed:', _refErr);
+      }
+      setSendToOversightLoading(false);
+      return true;
+    } catch (e: any) {
+      setInspectorChatMessages(prev => prev.filter(m => !m.id.startsWith('sending_oversight_')));
+      setInspectorChatMessages(prev => [...prev, {
+        id: `oversight_err_${Date.now()}`,
+        role: 'system' as const,
+        content: `❌ خطای شبکه در ساخت تسک از ضبط ویدئو: ${e.message || e}`,
+        timestamp: new Date(),
+      }]);
+      setSendToOversightLoading(false);
+      return false;
+    }
+  };
+
+  // 🎥 (Screen Recording) — هندلر پایان ضبط: همیشه رکورد را در چت نشان می‌دهد،
+  // سپس بر اساس تیک «ارسال به مرکز نظارت» یا تسک می‌سازد یا در inspector تحلیل می‌کند.
+  const handleRecordingComplete = async (payload: ScreenRecordingPayload) => {
+    const durSec = Math.round((payload.recording_duration_ms || 0) / 1000);
+    const videoLink = payload.video_url
+      ? `\n\n🎬 [مشاهدهٔ ویدئوی ضبط‌شده](${payload.video_url})`
+      : '';
+    const transcriptBlock = payload.transcript
+      ? `\n\n🎙 *transcript صوت:*\n> ${payload.transcript.slice(0, 500)}${payload.transcript.length > 500 ? '…' : ''}`
+      : (payload.transcription_error
+        ? `\n\n⚠️ خطای تبدیل گفتار به متن: ${payload.transcription_error}`
+        : '');
+    setInspectorChatMessages(prev => [...prev, {
+      id: `screen_rec_${Date.now()}`,
+      role: 'user' as const,
+      content: `🎥 ضبط ویدئوی صفحه (${durSec}s) — ${payload.console_logs?.length || 0} لاگ کنسول، ${payload.user_interactions?.length || 0} تعامل کاربر.${videoLink}${transcriptBlock}`,
+      timestamp: new Date(),
+    } as any]);
+
+    const typedText = inspectorChatInput.trim();
+
+    if (sendToOversightChat) {
+      setInspectorChatInput('');
+      await sendRecordingTaskFromInspector(payload, typedText);
+      return;
+    }
+
+    // تحلیل در inspector: transcript صوت + متن تایپی به مدل ارسال می‌شود.
+    const combined = [typedText, payload.transcript].filter(Boolean).join('\n\n');
+    const msg = `[ضبط ویدئو] درخواست کاربر بر اساس ضبط صفحه (${durSec}s):\n\n${combined || '(بدون متن — به ویدئو، لاگ‌ها و تعاملات ضبط‌شده رجوع کن)'}`;
+    setInspectorChatInput('');
+    sendInspectorChat(msg, false);
   };
 
   // 🆕 (clarify-first) — ارسال پاسخ کاربر به سوال ask_user به‌عنوان پیام بعدی
@@ -16582,6 +16710,23 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                       درخواست به پرامپت غنی (با URLs و لاگ‌ها) تبدیل و ذخیره می‌شود — بعداً می‌توانید روی «🔍 بررسی همین پرامپت در چت» کلیک کنید.
                     </span>
                   </label>
+
+                  {/* 🎥 (Screen Recording) — دکمهٔ ضبط ویدئوی صفحه کنار ورودی چت.
+                      با تیک «ارسال به مرکز نظارت» تسک می‌سازد، وگرنه در inspector تحلیل می‌شود. */}
+                  <div className="flex items-center gap-2 mb-1.5" dir="rtl">
+                    <ScreenRecorder
+                      apiBase={API_BASE}
+                      projectId={String(projectId)}
+                      inspectorSessionId={inspectorSessionIdRef.current ? String(inspectorSessionIdRef.current) : null}
+                      onComplete={handleRecordingComplete}
+                      getBackendLogs={() => inspectorBackendLogs.slice(-30).map(l => ({
+                        level: l.level, message: l.message, timestamp: l.timestamp, service_id: l.service_name,
+                      }))}
+                    />
+                    <span className="text-[10px] text-gray-400">
+                      ضبط ویدئو + صدا + لاگ‌ها — مثل اسکرین‌شات اما ویدئویی
+                    </span>
+                  </div>
 
                   <div className="flex gap-2 items-end">
                     <textarea
