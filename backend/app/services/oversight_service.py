@@ -2463,6 +2463,75 @@ class OversightService:
     # workflow YAML باید قبلاً نصب شده باشد (claude_runner_workflow_path ست).
     # ====================================================================
 
+    async def install_claude_runner_manual_only(
+        self, watched_id: str, *, claude_args: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """نصب workflow YAML بدون فعال‌سازی auto-trigger on push.
+
+        تفاوت با enable_claude_runner:
+        - YAML + secret ها نصب می‌شوند (مثل enable)
+        - `claude_runner_enabled` همچنان False باقی می‌ماند (مثل پیش‌فرض)
+        - یعنی push تسک‌های جدید به prompt/ هیچ workflow ای را trigger نمی‌کند
+        - فقط manual trigger (force=True) کار می‌کند
+
+        برای موقعی است که کاربر می‌خواهد یک تسک خاص را با Claude اجرا کند
+        ولی نمی‌خواهد همهٔ تسک‌های پروژه خودکار اجرا شوند.
+        """
+        watched = self._find_watched(watched_id)
+        if watched is None:
+            return {"success": False, "error": "watched_not_found"}
+        env = self._claude_runner_env()
+        missing = [k for k, v in env.items() if not v]
+        if missing:
+            return {
+                "success": False,
+                "error": "env_missing",
+                "missing": missing,
+                "hint": (
+                    "روی سرور Render این env varها را ست کنید: "
+                    "CLAUDE_CODE_OAUTH_TOKEN, EXTERNAL_TOOL_TOKEN, "
+                    "OVERSIGHT_BACKEND_URL"
+                ),
+            }
+        gh_token = get_github_token()
+        if not gh_token:
+            return {"success": False, "error": "no_github_token"}
+
+        from .claude_runner_bootstrap import install_runner, WORKFLOW_PATH
+
+        args = (
+            claude_args
+            or self.settings.get("claude_runner_default_args")
+            or "--max-turns 250 --model claude-opus-4-8 --dangerously-skip-permissions"
+        )
+        result = await install_runner(
+            watched,
+            gh_token=gh_token,
+            oauth_token=env["oauth_token"],
+            external_token=env["external_token"],
+            backend_url=env["backend_url"],
+            claude_args=args,
+        )
+        async with self._lock:
+            # ⚠️ مهم: claude_runner_enabled را تغییر نمی‌دهیم. اگر کاربر
+            # قبلاً enable کرده بود، همان طور True می‌ماند. اگر False بود
+            # (پیش‌فرض)، False می‌ماند — یعنی auto-trigger on push خاموش.
+            watched.claude_runner_workflow_path = WORKFLOW_PATH if result.get("success") else None
+            watched.claude_runner_installed_at = (
+                now_iso() if result.get("success") else watched.claude_runner_installed_at
+            )
+            if result.get("success"):
+                watched.claude_runner_last_error = None
+            else:
+                watched.claude_runner_last_error = "; ".join(result.get("errors") or []) or "unknown"
+            self._save_watched()
+        return {
+            "success": bool(result.get("success")),
+            "errors": result.get("errors", []),
+            "mode": "manual_only",
+            "watched": watched.to_dict(),
+        }
+
     async def run_single_task_via_claude(
         self,
         task_id: str,
@@ -2519,12 +2588,33 @@ class OversightService:
             watched = self._find_watched(t.watched_id)
             if watched is None:
                 return {"success": False, "error": "watched_not_found"}
-            if not getattr(watched, "claude_runner_workflow_path", None):
-                return {
-                    "success": False,
-                    "error": "workflow_not_installed",
-                    "hint": "ابتدا runner را روی پروژه نصب کنید (دکمهٔ 🤖 در صفحهٔ Oversight)",
-                }
+
+        # 🆕 (Auto-install manual-only) — اگر workflow هنوز نصب نیست، آن را
+        # در حالت manual-only نصب کن (workflow_path ست می‌شود، enabled همچنان
+        # False می‌ماند). این یعنی auto-trigger on push روشن نمی‌شود — کاربر
+        # باید explicitly از panel "اجرای خودکار" را روشن کند اگر بخواهد.
+        auto_installed: bool = False
+        install_error: Optional[Dict[str, Any]] = None
+        if not getattr(watched, "claude_runner_workflow_path", None):
+            install_res = await self.install_claude_runner_manual_only(watched.id)
+            if not install_res.get("success"):
+                # نصب شکست خورد — خطای install را به caller پاس بده
+                install_error = install_res
+            else:
+                auto_installed = True
+                # workflow_path تازه در DB ست شد ولی reference local باید refresh شود
+                watched = self._find_watched(t.watched_id)  # type: ignore[assignment]
+
+        if install_error is not None:
+            err = install_error.get("error", "install_failed")
+            return {
+                "success": False,
+                "error": "workflow_install_failed",
+                "install_error": err,
+                "install_detail": install_error,
+                "hint": install_error.get("hint")
+                or "نصب workflow Claude Runner روی پروژه شکست خورد",
+            }
 
         gh_token = get_github_token()
         if not gh_token:
@@ -2550,6 +2640,10 @@ class OversightService:
             "dispatch_result": dispatch_result,
             "agent_id": agent_id,
         }
+        # علامت‌گذاری اگر runner تازه auto-install شد (manual-only mode)
+        if auto_installed:
+            out["auto_installed"] = True
+            out["install_mode"] = "manual_only"
         # سرفصل وقتی YAML قدیمی است و auto-retry بدون inputs موفق شد —
         # کاربر باید بداند که target_task_id اعمال نشد
         if dispatch_result.get("outdated_workflow"):

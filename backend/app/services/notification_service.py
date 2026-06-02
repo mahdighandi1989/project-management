@@ -3974,9 +3974,17 @@ class NotificationService:
             return {"ok": True, "handled": "run_claude_exception"}
         if result.get("success"):
             repo = result.get("repo", "?")
-            warn = ""
+            extra = ""
+            if result.get("auto_installed"):
+                extra += (
+                    "\n\n🆕 Claude Runner برای این پروژه برای اولین بار نصب شد"
+                    " (حالت *manual-only*). یعنی push تسک‌های جدید به prompt/"
+                    " خودکار اجرا نمی‌شوند — فقط با دکمهٔ /run_claude. برای"
+                    " روشن‌کردن اجرای خودکار، از پنل وب روی دکمهٔ 🤖 watched"
+                    " کلیک کنید."
+                )
             if result.get("outdated_workflow"):
-                warn = (
+                extra += (
                     "\n\n⚠️ *هشدار:* workflow YAML پروژه قدیمی است و"
                     " `target_task_id` را پشتیبانی نمی‌کند. Claude `/next`"
                     " می‌زند و ممکن است تسک دیگری را بردارد. در پنل وب،"
@@ -3988,7 +3996,7 @@ class NotificationService:
                 f"📁 پروژه: `{repo}`\n"
                 f"🆔 `{task_id[:8]}`\n\n"
                 f"اجرای workflow در GitHub Actions شروع شد. نتیجه را در"
-                f" نوتیفیکیشن‌های بعدی خواهید دید." + warn,
+                f" نوتیفیکیشن‌های بعدی خواهید دید." + extra,
                 silent=False,
             )
             return {"ok": True, "handled": "run_claude_ok"}
