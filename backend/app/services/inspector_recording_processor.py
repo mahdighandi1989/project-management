@@ -530,6 +530,22 @@ async def stage_synthesize(session, *, user_note: str = "") -> Dict[str, Any]:
         ]
         sections.append("## نقشهٔ زمانی فعالیت\n" + "\n".join(lt))
 
+    # 🆕 (Multimodal context) — اگر multimodal call قبلاً intent extracted،
+    # key references، و log signals را برگردانده، آن‌ها را prepend کن.
+    # این کار جلوگیری می‌کند که AI text model دوباره کار analyzer را تکرار کند
+    # و کیفیت پرامپت نهایی را بالا می‌برد.
+    extra = getattr(session, "extra_context", None) or {}
+    if extra.get("intent_extracted"):
+        sections.insert(0, "## intent استخراج‌شده (از multimodal analysis)\n" + str(extra["intent_extracted"])[:5000])
+    if extra.get("key_references"):
+        refs = extra["key_references"]
+        if isinstance(refs, list) and refs:
+            sections.append("## منابع شناسایی‌شده توسط AI\n" + "\n".join(f"- {r}" for r in refs[:30]))
+    if extra.get("important_log_signals"):
+        sigs = extra["important_log_signals"]
+        if isinstance(sigs, list) and sigs:
+            sections.append("## سیگنال‌های مهم از logs (به‌انتخاب AI)\n" + "\n".join(f"- {s}" for s in sigs[:30]))
+
     structured_input = "\n\n".join(sections)
     system_prompt = (
         SYNTHESIS_SYSTEM_PROMPT_MODE_A if session.mode == "A"
@@ -712,6 +728,7 @@ async def process_session(
     started = time.time()
     summary = {
         "session_id": session.session_id,
+        "multimodal": None,
         "transcribe": None,
         "vision_count": 0,
         "logs_count": 0,
@@ -719,35 +736,91 @@ async def process_session(
         "elapsed_sec": 0.0,
     }
 
-    # Stage 1+2: Transcribe
-    await _emit("transcribe", 0, "در حال آماده‌سازی صدا...")
-    tr = await stage_transcribe(session)
-    session.transcript = tr.get("text", "")
-    session.transcript_language = tr.get("language", "")
-    session.transcript_model = tr.get("model_used") or ""
-    summary["transcribe"] = {
-        "success": tr.get("success"),
-        "chars": len(session.transcript),
-        "language": session.transcript_language,
-        "model": session.transcript_model,
-        "fallback_reason": tr.get("fallback_reason", ""),
-    }
-    await _emit("transcribe", 100, f"{len(session.transcript)} char transcribed")
+    # 🆕 (Unified Multimodal) — اولویت اول: یک call واحد به Gemini Flash 2.5
+    # که هم transcribe صوت + هم visual analysis + (mode B) location را همزمان
+    # برمی‌گرداند. این روش کاربر صریحاً درخواست کرد ("همون مدلی که دیباگ
+    # بصری انجام می‌دهد خودش کار صوتی هم انجام بدهد").
+    # اگر multimodal model در دسترس نبود یا payload بزرگ بود، به legacy
+    # pipeline (Whisper جدا + vision per frame) fallback می‌کنیم.
+    await _emit("multimodal", 0, "تلاش برای آنالیز یکپارچه با Gemini...")
+    multimodal_used = False
+    try:
+        from .inspector_recording_multimodal import analyze_recording_multimodal
+        mm = await analyze_recording_multimodal(session, user_note=user_note)
+        if mm.get("success"):
+            multimodal_used = True
+            session.transcript = mm.get("transcript", "")
+            session.transcript_language = mm.get("transcript_language", "")
+            session.transcript_model = mm.get("model_used") or ""
+            session.visual_summary = mm.get("visual_summary") or []
+            if session.mode == "B":
+                session.location_timeline = mm.get("location_timeline") or []
+            summary["multimodal"] = {
+                "success": True,
+                "model": mm.get("model_used"),
+                "provider": mm.get("provider"),
+                "transcript_chars": len(session.transcript),
+                "visual_items": len(session.visual_summary),
+                "location_items": len(session.location_timeline),
+                "intent_chars": len(mm.get("intent_extracted", "")),
+            }
+            # intent_extracted را در session بگذار تا stage_synthesize از آن
+            # به‌عنوان context استفاده کند
+            session.extra_context = {
+                "intent_extracted": mm.get("intent_extracted", ""),
+                "key_references": mm.get("key_references", []),
+                "important_log_signals": mm.get("important_log_signals", []),
+            }
+            await _emit(
+                "multimodal", 100,
+                f"unified با {mm.get('model_used')}: "
+                f"{len(session.transcript)} char transcript + "
+                f"{len(session.visual_summary)} visual"
+            )
+        else:
+            summary["multimodal"] = {
+                "success": False,
+                "fallback_reason": mm.get("fallback_reason", ""),
+            }
+            logger.info(
+                f"multimodal not used for {session.session_id}: "
+                f"{mm.get('fallback_reason')}"
+            )
+    except Exception as e:
+        logger.warning(f"multimodal call crashed (will fallback to legacy): {e}")
+        summary["multimodal"] = {"success": False, "fallback_reason": f"crashed: {str(e)[:200]}"}
 
-    # Stage 3+4: Vision per keyframe
-    await _emit("vision", 0, "در حال تحلیل بصری keyframes...")
-    visual = await stage_vision(session)
-    session.visual_summary = visual
-    summary["vision_count"] = len(visual)
-    await _emit("vision", 100, f"{len(visual)} keyframe analyzed")
+    # ───── Legacy pipeline fallback (separate transcribe + vision per frame)
+    if not multimodal_used:
+        # Stage 1+2: Transcribe (Whisper-style separate call)
+        await _emit("transcribe", 0, "آنالیز جداگانه — transcribe صوت با Whisper...")
+        tr = await stage_transcribe(session)
+        session.transcript = tr.get("text", "")
+        session.transcript_language = tr.get("language", "")
+        session.transcript_model = tr.get("model_used") or ""
+        summary["transcribe"] = {
+            "success": tr.get("success"),
+            "chars": len(session.transcript),
+            "language": session.transcript_language,
+            "model": session.transcript_model,
+            "fallback_reason": tr.get("fallback_reason", ""),
+        }
+        await _emit("transcribe", 100, f"{len(session.transcript)} char transcribed")
 
-    # Stage 4b (mode B only): Location classifier
-    if session.mode == "B":
-        await _emit("location", 0, "تشخیص محل و فعالیت در فریم‌ها...")
-        timeline = await stage_location_timeline(session)
-        session.location_timeline = timeline
-        summary["location_timeline_count"] = len(timeline)
-        await _emit("location", 100, f"{len(timeline)} location frame analyzed")
+        # Stage 3+4: Vision per keyframe
+        await _emit("vision", 0, "آنالیز جداگانه — vision per keyframe...")
+        visual = await stage_vision(session)
+        session.visual_summary = visual
+        summary["vision_count"] = len(visual)
+        await _emit("vision", 100, f"{len(visual)} keyframe analyzed")
+
+        # Stage 4b (mode B only): Location classifier
+        if session.mode == "B":
+            await _emit("location", 0, "تشخیص محل و فعالیت در فریم‌ها...")
+            timeline = await stage_location_timeline(session)
+            session.location_timeline = timeline
+            summary["location_timeline_count"] = len(timeline)
+            await _emit("location", 100, f"{len(timeline)} location frame analyzed")
 
     # Stage 5: Logs (sync if not already)
     await _emit("logs", 0, "جمع‌آوری لاگ‌ها...")
