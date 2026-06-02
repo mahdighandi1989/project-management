@@ -185,6 +185,193 @@ async def stage_vision(session) -> List[Dict[str, Any]]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Stage 4b: Location classifier — فقط برای حالت B
+# تشخیص chrome_tab / other_app / desktop + related_to_project
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _build_location_classifier_prompt(project_full_name: str) -> str:
+    """system prompt مخصوص تشخیص محل برای حالت B."""
+    repo_hint = project_full_name or "(پروژهٔ inspector)"
+    return f"""این یک فریم از ضبط آزاد چندصفحه‌ای است. ضبط یک کاربر در حال
+inspect پروژه‌ی '{repo_hint}' است ولی ممکن است بین صفحات/برنامه‌های مختلف
+جابجا شود. تشخیص بده در این فریم کاربر دقیقاً کجاست.
+
+سه دستهٔ ممکن:
+
+1. **chrome_tab** — اگر نوار آدرس مرورگر در فریم دیده می‌شود (URL/domain)
+2. **other_app** — اگر یک پنجرهٔ برنامه دیگر دیده می‌شود (IDE، Slack، Terminal،
+   FileManager، …) با title bar یا UI خاص
+3. **desktop** — اگر فقط دسکتاپ خام دیده می‌شود (icons + wallpaper، یا
+   جابجایی پنجره‌ها)
+
+برای دستهٔ chrome_tab، URL را از نوار آدرس استخراج کن. اگر domain یا path
+شامل '{repo_hint}' یا 'render.com' / 'onrender.com' است → related_to_project=true،
+وگرنه → false.
+
+برای دستهٔ other_app، نام برنامه را تشخیص بده. اگر در پنجره فایل‌های پروژه
+(مثل '{repo_hint}.py' یا نام‌های مشابه) دیده می‌شود → related_to_project=true.
+
+برای دستهٔ desktop، related_to_project=false.
+
+همچنین activity کاربر را در یک جمله توصیف کن (مثلاً «در حال خواندن
+ReadMe در github» یا «در حال ویرایش auth.py در VS Code»).
+
+خروجی فقط JSON خالص (بدون ``` یا توضیح اضافی):
+{{
+  "category": "chrome_tab" | "other_app" | "desktop",
+  "url_or_app_name": "string — URL کامل یا نام برنامه",
+  "related_to_project": true | false,
+  "activity_description": "یک جمله — چه می‌کند",
+  "confidence": 0.0 to 1.0
+}}
+
+اگر مطمئن نیستی، confidence پایین بده ولی همیشه یک category انتخاب کن."""
+
+
+async def _call_vision_with_custom_prompt(
+    base64_img: str, prompt_text: str, max_tokens: int = 800
+) -> Dict[str, Any]:
+    """vision call با system prompt اختصاصی — همان pattern auto-select از
+    describe_screenshot_with_vision (بدون modify کردن آن تابع).
+    """
+    from .ai_manager import get_ai_manager
+    from .ai_base import Message
+    from ..core.models_registry import get_vision_models
+    import os as _os
+
+    vision_models = get_vision_models() or []
+    env_keys = {
+        "openai": ["OPENAI_API_KEY"],
+        "claude": ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"],
+        "anthropic": ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"],
+        "gemini": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        "google": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+    }
+    with_key = set()
+    for p, ks in env_keys.items():
+        if any((_os.environ.get(k) or "").strip() for k in ks):
+            with_key.add(p.lower())
+
+    picked = None
+    for m in vision_models:
+        prov = m.provider
+        prov_str = (prov.value if hasattr(prov, "value") else str(prov)).lower()
+        if prov_str in with_key:
+            picked = m
+            break
+
+    if not picked:
+        return {
+            "category": "unknown",
+            "url_or_app_name": "",
+            "related_to_project": False,
+            "activity_description": "(vision model در دسترس نیست)",
+            "confidence": 0.0,
+        }
+
+    ai_mgr = get_ai_manager()
+    msg = Message(role="user", content=prompt_text, images=[base64_img])
+    try:
+        response = await ai_mgr.generate(
+            model_id=picked.id,
+            messages=[msg],
+            max_tokens=max_tokens,
+            temperature=0.1,  # خیلی پایین برای classification
+        )
+        txt = (response.content or "").strip()
+        if txt.startswith("```"):
+            txt = txt.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        start = txt.find("{")
+        end = txt.rfind("}")
+        if start != -1 and end > start:
+            try:
+                parsed = json.loads(txt[start:end + 1])
+                cat = str(parsed.get("category", "unknown")).strip().lower()
+                if cat not in ("chrome_tab", "other_app", "desktop"):
+                    cat = "unknown"
+                return {
+                    "category": cat,
+                    "url_or_app_name": str(parsed.get("url_or_app_name", ""))[:300],
+                    "related_to_project": bool(parsed.get("related_to_project", False)),
+                    "activity_description": str(parsed.get("activity_description", ""))[:300],
+                    "confidence": float(parsed.get("confidence", 0.5)),
+                    "vision_model_used": picked.id,
+                }
+            except Exception as _je:
+                logger.debug(f"classify_location: JSON parse failed: {_je}")
+        # JSON parse fail
+        return {
+            "category": "unknown",
+            "url_or_app_name": "",
+            "related_to_project": False,
+            "activity_description": txt[:300],
+            "confidence": 0.3,
+            "vision_model_used": picked.id,
+        }
+    except Exception as e:
+        logger.warning(f"classify_location vision call failed: {e}")
+        return {
+            "category": "unknown",
+            "url_or_app_name": "",
+            "related_to_project": False,
+            "activity_description": f"(error: {str(e)[:120]})",
+            "confidence": 0.0,
+        }
+
+
+async def stage_location_timeline(session) -> List[Dict[str, Any]]:
+    """فقط برای حالت B — تحلیل location هر keyframe.
+
+    Returns: لیست {ts_ms, category, url_or_app_name, related_to_project,
+                  activity_description, confidence}
+    """
+    if session.mode != "B":
+        return []
+    keyframes = _pick_keyframes(session.frames_dir, target_count=12)
+    # در حالت B، frontend احتمالاً frames را در /frame upload نمی‌کند بلکه
+    # video chunks می‌فرستد. اگر frames خالی است، از video chunks
+    # extract نمی‌کنیم در commit 4 (نیازمند ffmpeg). در commit 5/6 frontend
+    # یا keyframes را خودش extract می‌کند و آپلود می‌کند، یا ffmpeg در
+    # backend اضافه می‌شود.
+    if not keyframes:
+        # video_dir را چک می‌کنیم — اگر chunk هست، یک placeholder timeline
+        # برمی‌گردانیم تا synthesis بداند اطلاعات ناقص است
+        if session.video_dir.exists() and any(session.video_dir.iterdir()):
+            return [{
+                "ts_ms": 0,
+                "category": "unknown",
+                "url_or_app_name": "",
+                "related_to_project": False,
+                "activity_description": (
+                    "(keyframes برای حالت B از frontend extract نشده — "
+                    "video chunks موجود است ولی frame extraction در commit 6 "
+                    "اضافه می‌شود. در این فاز فقط transcript + interactions "
+                    "برای synthesis استفاده می‌شود.)"
+                ),
+                "confidence": 0.0,
+            }]
+        return []
+
+    duration_ms = int(session.duration_sec() * 1000)
+    n = len(keyframes)
+    timestamps = [int(i * duration_ms / max(1, n - 1)) for i in range(n)]
+    classifier_prompt = _build_location_classifier_prompt(
+        session.project_full_name or ""
+    )
+
+    async def _classify_one(idx: int, fp: Path) -> Dict[str, Any]:
+        b64 = _read_image_base64(fp)
+        result = await _call_vision_with_custom_prompt(b64, classifier_prompt)
+        result["ts_ms"] = timestamps[idx]
+        result["frame_path"] = str(fp.name)
+        return result
+
+    tasks = [_classify_one(i, fp) for i, fp in enumerate(keyframes)]
+    return await asyncio.gather(*tasks, return_exceptions=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Stage 5: Fetch backend logs
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -553,6 +740,14 @@ async def process_session(
     session.visual_summary = visual
     summary["vision_count"] = len(visual)
     await _emit("vision", 100, f"{len(visual)} keyframe analyzed")
+
+    # Stage 4b (mode B only): Location classifier
+    if session.mode == "B":
+        await _emit("location", 0, "تشخیص محل و فعالیت در فریم‌ها...")
+        timeline = await stage_location_timeline(session)
+        session.location_timeline = timeline
+        summary["location_timeline_count"] = len(timeline)
+        await _emit("location", 100, f"{len(timeline)} location frame analyzed")
 
     # Stage 5: Logs (sync if not already)
     await _emit("logs", 0, "جمع‌آوری لاگ‌ها...")
