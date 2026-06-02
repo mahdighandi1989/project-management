@@ -423,11 +423,22 @@ async def run_task_via_claude_now(task_id: str):
                 detail=result.get("hint")
                 or f"وضعیت تسک «{result.get('task_status','?')}» قابل اجرا نیست",
             )
-        if err == "workflow_not_installed":
+        if err == "workflow_install_failed":
+            ie = result.get("install_detail") or {}
+            # تشخیص env_missing برای پیام کاربردی‌تر
+            if ie.get("error") == "env_missing":
+                missing = ie.get("missing") or []
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        f"env vars لازم برای نصب runner تنظیم نشده‌اند: "
+                        f"{', '.join(missing)}. روی سرور Render اضافه کنید."
+                    ),
+                )
             raise HTTPException(
-                status_code=409,
+                status_code=502,
                 detail=result.get("hint")
-                or "Claude Runner روی این پروژه نصب نشده — ابتدا runner را روشن/نصب کنید",
+                or "نصب workflow Claude Runner روی پروژه شکست خورد",
             )
         if err == "no_github_token":
             raise HTTPException(status_code=503, detail="GitHub token در سرور تنظیم نشده")

@@ -2541,6 +2541,18 @@ export default function OversightPage() {
           showError(
             `⚠️ workflow پروژه قدیمی است. trigger انجام شد ولی Claude ممکن است تسک دیگری را بردارد. runner را غیرفعال و دوباره نصب کنید.`,
           );
+        } else if (data?.auto_installed) {
+          showSuccess(
+            `🤖 Claude Runner برای «${repo}» نصب شد (manual-only) و تسک شروع شد. اجرای خودکار خاموش است — برای روشن‌کردن آن از پنل watched روی 🤖 کلیک کنید.`,
+          );
+          // refresh watched list to show new installed state
+          try {
+            const wRes = await fetch(`${API_BASE}/api/oversight/watched`);
+            if (wRes.ok) {
+              const wData = await wRes.json();
+              setWatched(wData.items || []);
+            }
+          } catch {}
         } else {
           showSuccess(`🤖 Claude شروع شد روی «${repo}» — تسک در GitHub Actions اجرا می‌شود`);
         }
