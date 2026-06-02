@@ -382,6 +382,48 @@ async def complete_prompt(task_id: str, payload: CompleteRequest):
         agent_id=payload.agent_id,
         extra=(payload.summary or "")[:500],
     )
+    # 🤖 (Claude Auto-Runner — chain next task) — اگر تسک‌های pending باقی
+    # مانده برای همان watched و runner enabled است، فوراً workflow بعدی را
+    # trigger کن (بدون انتظار 60s debounce). master prompt تنها یک تسک per
+    # run را اجرا می‌کند، پس نیاز است که برای هر تسک یک workflow جداگانه
+    # شروع شود.
+    if (
+        (payload.agent_id or "").lower() in (
+            "claude-code-action", "claude-runner", "claude-auto-task"
+        )
+        and getattr(t, "watched_id", None)
+    ):
+        try:
+            from ...services.oversight_service import get_github_token
+            watched = service._find_watched(t.watched_id)
+            if (
+                watched is not None
+                and getattr(watched, "claude_runner_enabled", False)
+            ):
+                # تنها اگر تسک pickable دیگری هست
+                pending_others = [
+                    other for other in service.tasks
+                    if other.id != t.id
+                    and getattr(other, "watched_id", None) == t.watched_id
+                    and not getattr(other, "archived", False)
+                    and getattr(other, "status", "") in PICKABLE_STATUSES
+                    and getattr(other, "external_status", "pending") in PICKABLE_EXTERNAL_STATUSES
+                ]
+                if pending_others:
+                    from ...services.claude_runner_bootstrap import trigger_workflow_dispatch
+                    gh_token = get_github_token()
+                    if gh_token:
+                        asyncio.create_task(
+                            trigger_workflow_dispatch(
+                                watched, gh_token=gh_token,
+                            )
+                        )
+                        logger.info(
+                            f"chain-next: triggered workflow for next task in "
+                            f"{watched.repo_full_name} ({len(pending_others)} pending)"
+                        )
+        except Exception as _chain_e:
+            logger.debug(f"chain-next trigger skipped: {_chain_e}")
     return {"success": True, "task": _task_summary(t)}
 
 
