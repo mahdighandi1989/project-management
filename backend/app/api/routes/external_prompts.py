@@ -43,6 +43,7 @@ def _emit_runner_notification(
     مطابقت نداشته باشد (مثلاً ابزار خارجی دیگر)، رد می‌شود."""
     if (agent_id or "").lower() not in (
         "claude-code-action", "claude-runner", "claude-auto-task",
+        "claude-manual-trigger", "claude-telegram-trigger",
     ):
         return
     try:
@@ -397,9 +398,13 @@ async def complete_prompt(task_id: str, payload: CompleteRequest):
     ):
         try:
             watched = service._find_watched(t.watched_id)
+            # 🆕 (manual single-task) — verify بعد از complete باید بدون توجه به
+            # claude_runner_enabled اجرا شود (تنها شرط: workflow نصب شده باشد).
+            # اگر کاربر manual single-task trigger زده، انتظار دارد همان موقع
+            # verify شود و در صورت partial، Claude دوباره روی همان تسک کار کند.
             if (
                 watched is not None
-                and getattr(watched, "claude_runner_enabled", False)
+                and getattr(watched, "claude_runner_workflow_path", None)
             ):
                 # acquire verify lock — تا تمام شدن verify، تسک بعدی شروع نشود
                 if service._acquire_verify_lock(watched.id, t.id):
@@ -554,6 +559,12 @@ async def _verify_then_chain(
     #    - chain_next/max_retries_todo/regressed_todo: target_task_id=None →
     #      Claude /next می‌زند و اولین تسک pickable را برمی‌دارد
     target_for_dispatch = task_id if action == "retry_same" else None
+    # 🆕 (manual single-task) — برای retry روی همان تسک، force=True بزنیم تا
+    # حتی اگر claude_runner_enabled=False باشد (سناریوی manual single-task
+    # trigger)، بتوانیم همان تسک را دوباره اجرا کنیم. برای chain-next این کار
+    # را نمی‌کنیم — اگر کاربر auto-runner را روشن نکرده، نباید تسک‌های دیگر را
+    # خودبه‌خود اجرا کنیم.
+    force_dispatch = action == "retry_same"
     try:
         from ...services.oversight_service import get_github_token
         from ...services.claude_runner_bootstrap import trigger_workflow_dispatch
@@ -563,10 +574,11 @@ async def _verify_then_chain(
                 watched,
                 gh_token=gh_token,
                 target_task_id=target_for_dispatch,
+                force=force_dispatch,
             )
             logger.info(
                 f"_verify_then_chain: dispatched workflow after action={action}, "
-                f"target={target_for_dispatch or 'next'} → {disp}"
+                f"target={target_for_dispatch or 'next'} force={force_dispatch} → {disp}"
             )
     except Exception as _disp_e:
         logger.warning(f"_verify_then_chain: dispatch failed: {_disp_e}")

@@ -2184,6 +2184,9 @@ class NotificationService:
                 "• /my\\_projects — 📦 لیست پروژه‌های ساخته‌شدهٔ شما (با push و حذف)\n"
                 "• /codex — 📚 شناسنامهٔ پروژه (مشاهده یا ساخت با AI)\n"
                 "• /usage یا /balance — 💰 مصرف توکن AI و موجودی provider ها\n"
+                "• /claude\\_repos — 🤖 لیست پروژه‌های با Claude Runner نصب‌شده\n"
+                "• /claude\\_tasks <repo\\_id> — 📋 تسک‌های یک پروژه (برای اجرا با Claude)\n"
+                "• /run\\_claude <task\\_id> — 🚀 اجرای فقط همین تسک توسط Claude در GitHub Actions\n"
                 "• /menu — منوی دسترسی سریع\n"
                 "• /status — وضعیت نوتیفیکیشن\n"
                 "• /cancel — لغو flow فعلی\n"
@@ -2271,6 +2274,17 @@ class NotificationService:
                 reply_markup=PERSISTENT_REPLY_KEYBOARD,
             )
             return {"ok": True, "handled": "menu"}
+
+        # 🆕 (Manual Claude single-task triggers via Telegram)
+        # /claude_repos — لیست پروژه‌های watched که Claude Runner روی آنها نصب است
+        if text in ("/claude_repos", "/claude_projects"):
+            return await self._tg_claude_repos(chat_id_str)
+        # /claude_tasks <watched_id|N> — لیست تسک‌های قابل اجرا برای آن پروژه
+        if text.startswith("/claude_tasks"):
+            return await self._tg_claude_tasks(chat_id_str, text)
+        # /run_claude <task_id|N> — trigger Claude برای یک تسک خاص
+        if text.startswith("/run_claude"):
+            return await self._tg_run_claude(chat_id_str, text)
 
         if text == "/status":
             enabled_events = sum(1 for v in prefs.get("events", {}).values() if v)
@@ -3780,6 +3794,219 @@ class NotificationService:
             reply_markup=kb,
         )
         return {"ok": True, "handled": "new_task_picker", "count": len(watched_list)}
+
+    # ------------------------------------------------------------------
+    # 🆕 (Manual Claude single-task trigger via Telegram)
+    # دستورات: /claude_repos، /claude_tasks <id>، /run_claude <id>
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_short_or_full_id(arg: str, all_ids: List[str]) -> Optional[str]:
+        """تطبیق shortcut (اولین ۸ کاراکتر) یا full id. اگر چند تطبیق پیدا
+        شود، None برمی‌گرداند (ambiguous).
+        """
+        arg = (arg or "").strip()
+        if not arg:
+            return None
+        # تطابق دقیق
+        if arg in all_ids:
+            return arg
+        # تطابق prefix (حداقل ۴ کاراکتر)
+        if len(arg) >= 4:
+            matches = [x for x in all_ids if x.startswith(arg)]
+            if len(matches) == 1:
+                return matches[0]
+        return None
+
+    async def _tg_claude_repos(self, chat_id_str: str) -> Dict[str, Any]:
+        """لیست پروژه‌های watched که Claude Runner روی آنها نصب شده."""
+        tg = self._telegram()
+        try:
+            from .oversight_service import get_oversight_service
+            ovs = get_oversight_service()
+        except Exception as e:
+            await tg.send(f"❌ خطا: {e}", silent=True)
+            return {"ok": True, "handled": "claude_repos_err"}
+        # فقط پروژه‌هایی که workflow YAML روی آنها نصب شده (دکمهٔ runner زده شده)
+        installed = [
+            w for w in (ovs.watched or [])
+            if getattr(w, "claude_runner_workflow_path", None)
+        ]
+        if not installed:
+            await tg.send(
+                "⚠️ هیچ پروژه‌ای با Claude Runner نصب‌شده وجود ندارد.\n\n"
+                "در پنل /oversight روی پروژه دکمهٔ 🤖 را بزنید تا runner نصب شود.",
+                silent=True,
+            )
+            return {"ok": True, "handled": "claude_repos_empty"}
+        lines = ["🤖 *پروژه‌های با Claude Runner نصب‌شده:*", ""]
+        for w in installed[:20]:
+            short = (w.id or "")[:8]
+            on = "✅" if getattr(w, "claude_runner_enabled", False) else "⏸"
+            lines.append(f"{on} `{short}` — {w.repo_full_name}")
+        lines.extend([
+            "",
+            "📋 برای دیدن تسک‌های یک پروژه:",
+            "`/claude_tasks <id>`  (مثال: `/claude_tasks " + (installed[0].id or "")[:8] + "`)",
+        ])
+        await tg.send("\n".join(lines), silent=True)
+        return {
+            "ok": True,
+            "handled": "claude_repos",
+            "count": len(installed),
+        }
+
+    async def _tg_claude_tasks(
+        self, chat_id_str: str, text: str,
+    ) -> Dict[str, Any]:
+        """لیست تسک‌های قابل اجرا برای یک پروژه‌ی watched."""
+        tg = self._telegram()
+        # parse arg
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            await tg.send(
+                "📋 *دستور:* `/claude_tasks <watched_id>`\n\n"
+                "اول /claude\\_repos را بزنید تا id پروژه‌ها را ببینید.",
+                silent=True,
+            )
+            return {"ok": True, "handled": "claude_tasks_no_arg"}
+        arg = parts[1].strip()
+        try:
+            from .oversight_service import get_oversight_service
+            ovs = get_oversight_service()
+        except Exception as e:
+            await tg.send(f"❌ خطا: {e}", silent=True)
+            return {"ok": True, "handled": "claude_tasks_err"}
+        all_w_ids = [w.id for w in (ovs.watched or [])]
+        watched_id = self._parse_short_or_full_id(arg, all_w_ids)
+        if not watched_id:
+            await tg.send(
+                f"❌ پروژه‌ای با id `{arg}` پیدا نشد یا چندین مورد تطبیق دارد.\n"
+                f"اول /claude\\_repos را بزنید.",
+                silent=True,
+            )
+            return {"ok": True, "handled": "claude_tasks_bad_id"}
+        watched = next((w for w in ovs.watched if w.id == watched_id), None)
+        if watched is None:
+            await tg.send(f"❌ پروژه با id `{watched_id[:8]}` یافت نشد.", silent=True)
+            return {"ok": True, "handled": "claude_tasks_not_found"}
+        # تسک‌های pickable برای این watched
+        from .prompt_github_sync import PICKABLE_STATUSES
+        pickable = [
+            t for t in (ovs.tasks or [])
+            if t.watched_id == watched_id
+            and not getattr(t, "archived", False)
+            and t.status in PICKABLE_STATUSES
+        ]
+        pickable.sort(key=lambda x: getattr(x, "execution_priority", 100))
+        if not pickable:
+            await tg.send(
+                f"✅ همه‌ی تسک‌های `{watched.repo_full_name}` آرشیو شده‌اند یا"
+                f" تسک قابل اجرایی نیست.",
+                silent=True,
+            )
+            return {"ok": True, "handled": "claude_tasks_empty"}
+        lines = [
+            f"📋 *تسک‌های قابل اجرای* `{watched.repo_full_name}`:",
+            "",
+        ]
+        for t in pickable[:15]:
+            short = (t.id or "")[:8]
+            title = (t.title or "")[:60]
+            prio = getattr(t, "execution_priority", 100)
+            est = getattr(t, "external_status", "pending") or "pending"
+            est_emoji = {
+                "pending": "⏳", "claimed": "🏃", "in_progress": "⚙️",
+                "done": "✅", "failed": "❌",
+            }.get(est, "❔")
+            lines.append(f"{est_emoji} `{short}` (p={prio}) — {title}")
+        lines.extend([
+            "",
+            "🤖 برای اجرا یک تسک:",
+            f"`/run_claude <task_id>`  (مثال: `/run_claude {(pickable[0].id or '')[:8]}`)",
+        ])
+        if len(pickable) > 15:
+            lines.append(f"\n_(فقط ۱۵ تسک اول از {len(pickable)} نمایش داده شد)_")
+        await tg.send("\n".join(lines), silent=True)
+        return {
+            "ok": True,
+            "handled": "claude_tasks",
+            "count": len(pickable),
+        }
+
+    async def _tg_run_claude(
+        self, chat_id_str: str, text: str,
+    ) -> Dict[str, Any]:
+        """trigger Claude برای یک تسک خاص."""
+        tg = self._telegram()
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            await tg.send(
+                "🤖 *دستور:* `/run_claude <task_id>`\n\n"
+                "اول /claude\\_tasks <watched\\_id> را بزنید تا تسک‌ها را ببینید.",
+                silent=True,
+            )
+            return {"ok": True, "handled": "run_claude_no_arg"}
+        arg = parts[1].strip()
+        try:
+            from .oversight_service import get_oversight_service
+            ovs = get_oversight_service()
+        except Exception as e:
+            await tg.send(f"❌ خطا: {e}", silent=True)
+            return {"ok": True, "handled": "run_claude_err"}
+        all_t_ids = [t.id for t in (ovs.tasks or [])]
+        task_id = self._parse_short_or_full_id(arg, all_t_ids)
+        if not task_id:
+            await tg.send(
+                f"❌ تسکی با id `{arg}` پیدا نشد یا چندین مورد تطبیق دارد.\n"
+                f"اول /claude\\_tasks <watched\\_id> را بزنید.",
+                silent=True,
+            )
+            return {"ok": True, "handled": "run_claude_bad_id"}
+        t = next((x for x in ovs.tasks if x.id == task_id), None)
+        title = (getattr(t, "title", "") or "")[:80] if t else "?"
+        try:
+            result = await ovs.run_single_task_via_claude(
+                task_id, agent_id="claude-telegram-trigger",
+            )
+        except Exception as e:
+            await tg.send(f"❌ خطا در trigger: {e}", silent=True)
+            return {"ok": True, "handled": "run_claude_exception"}
+        if result.get("success"):
+            repo = result.get("repo", "?")
+            await tg.send(
+                f"🤖 *Claude شروع شد!*\n\n"
+                f"📌 تسک: «{title}»\n"
+                f"📁 پروژه: `{repo}`\n"
+                f"🆔 `{task_id[:8]}`\n\n"
+                f"اجرای workflow در GitHub Actions شروع شد. نتیجه را در"
+                f" نوتیفیکیشن‌های بعدی خواهید دید.",
+                silent=False,
+            )
+            return {"ok": True, "handled": "run_claude_ok"}
+        # خطا
+        err = result.get("error", "") or ""
+        hint = result.get("hint") or ""
+        dispatch = result.get("dispatch_result") or {}
+        # اگر خطای بالا-لایه نیست، احتمالاً skipped توسط dispatch است
+        primary = err if err else (dispatch.get("reason") or "trigger_skipped")
+        msg_parts = [f"❌ *trigger شکست خورد:* `{primary}`"]
+        if hint:
+            msg_parts.append(hint)
+        if dispatch.get("reason") == "verify_in_progress":
+            locked = (dispatch.get("locked_task_id") or "?")[:8]
+            msg_parts.append(
+                f"یک تسک دیگر (`{locked}`) در حال verify است. صبر کنید تا تمام شود."
+            )
+        elif dispatch.get("error"):
+            msg_parts.append(f"جزئیات: {str(dispatch.get('error'))[:200]}")
+        if err == "already_claimed":
+            msg_parts.append(
+                f"locked_by={result.get('locked_by','?')}, "
+                f"lease_until={result.get('lease_until','?')}"
+            )
+        await tg.send("\n\n".join(msg_parts), silent=True)
+        return {"ok": True, "handled": "run_claude_failed"}
 
     async def _start_reminder_flow(self, chat_id_str: str) -> Dict[str, Any]:
         """🔔 شروع compose با force_type=reminder.
