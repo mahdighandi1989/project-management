@@ -1082,9 +1082,14 @@ async def _run_backfill_ac_classification(
             _summary = _BACKFILL_STATE.get("summary") or {}
             _err = _BACKFILL_STATE.get("error")
             _force_flag = _BACKFILL_STATE.get("force")
-            _mode_label = " (force)" if _force_flag else ""
+            _trig = _BACKFILL_STATE.get("triggered_by") or "manual"
+            _mode_label = " (force/Phase3)" if _force_flag else ""
+            _trig_label = " — 🤖 auto" if _trig == "auto_scheduler" else ""
             if _err:
-                _msg_text = f"❌ backfill AC{_mode_label} با خطا تمام شد:\n```\n{_err[:400]}\n```"
+                _msg_text = (
+                    f"❌ backfill AC{_mode_label}{_trig_label} با خطا تمام شد:\n"
+                    f"```\n{_err[:400]}\n```"
+                )
                 _event = "backfill_ac_completed"
                 _priority = "high"
             else:
@@ -1096,7 +1101,7 @@ async def _run_backfill_ac_classification(
                     f"{k}: {v}" for k, v in _method.items() if v > 0
                 ) or "—"
                 _msg_text = (
-                    f"✅ *backfill AC{_mode_label} تمام شد*\n\n"
+                    f"✅ *backfill AC{_mode_label}{_trig_label} تمام شد*\n\n"
                     f"📊 آمار:\n"
                     f"• enrich شد: {_enriched}\n"
                     f"• از قبل classified: {_already}\n"
@@ -1143,6 +1148,7 @@ async def start_backfill_ac_classification(
     _BACKFILL_STATE["summary"] = None
     _BACKFILL_STATE["error"] = None
     _BACKFILL_STATE["force"] = bool(force)
+    _BACKFILL_STATE["triggered_by"] = "manual"
 
     _asyncio.create_task(_run_backfill_ac_classification(model_id, force=force))
     return {"status": "started", **_BACKFILL_STATE}

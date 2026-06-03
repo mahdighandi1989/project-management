@@ -3370,7 +3370,7 @@ export default function OversightPage() {
               >
                 {backfillState?.running
                   ? `🔬 backfill ${backfillState.current_index}/${backfillState.total}…`
-                  : `⚠️ backfill AC ها (${backfillNeeded?.task_count ?? 0} تسک نیاز دارد)`}
+                  : `⚠️ backfill AC ها (${backfillNeeded?.task_count ?? 0} تسک) 🤖 auto`}
               </button>
             )}
             {/* 🆕 (Phase 3) — Force backfill برای upgrade AC plans به recipe ۳-۸ مرحله‌ای
@@ -3378,10 +3378,10 @@ export default function OversightPage() {
             {!backfillState?.running && backfillNeeded && backfillNeeded.phase3_ac_count > 0 && (
               <button
                 onClick={() => runBackfillACClassification(true)}
-                title={`${backfillNeeded.phase3_task_count} تسک شامل ${backfillNeeded.phase3_ac_count} AC با plan ناقص هستن (Phase 2 style — فقط navigate). Force re-enrich این‌ها رو به Phase 3 (recipe ۳-۸ مرحله‌ای) upgrade می‌کنه تا probe ها واقعاً interaction انجام بدن.`}
+                title={`${backfillNeeded.phase3_task_count} تسک شامل ${backfillNeeded.phase3_ac_count} AC با plan ناقص هستن (Phase 2 style — فقط navigate). Force re-enrich این‌ها رو به Phase 3 (recipe ۳-۸ مرحله‌ای) upgrade می‌کنه تا probe ها واقعاً interaction انجام بدن.\n\n🤖 این کار خودکار توسط scheduler هر ۶ ساعت یک بار اجرا می‌شود و نتیجه در تلگرام اعلام می‌شود — کلیک دستی فقط برای اجرای فوری لازم است.`}
                 className="px-3 py-2 bg-purple-50 dark:bg-purple-900/40 text-purple-700 dark:text-purple-200 border border-purple-300 dark:border-purple-700 rounded-lg text-sm hover:bg-purple-100 dark:hover:bg-purple-900/60"
               >
-                🔬 Force re-enrich (Phase 3) — {backfillNeeded.phase3_task_count} تسک
+                🔬 Force re-enrich (Phase 3) — {backfillNeeded.phase3_task_count} تسک 🤖 auto
               </button>
             )}
             <Link
