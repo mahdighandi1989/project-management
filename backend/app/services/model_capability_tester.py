@@ -341,6 +341,34 @@ class ModelCapabilityTester:
 
     async def _run_single_test(self, model_id: str, prompt: str) -> str:
         """اجرای یک تست"""
+        # 🆕 (Cloud Code centralization) — مدل cloud_code از مسیر OAuth
+        # کار می‌کند و در ai_manager._services ثبت نشده. اگر اینجا از
+        # ai_manager.generate(model_id="cloud_code") استفاده می‌کردیم،
+        # تست fail می‌شد و همهٔ امتیازها 0 برمی‌گشت (کاربر اینها رو
+        # در UI به‌عنوان "صفر برای همه" می‌دید). برای cloud_code مسیر
+        # جداگانه از طریق cloud_code_complete اجرا می‌کنیم.
+        if model_id == "cloud_code":
+            try:
+                from .cloud_code_service import (
+                    cloud_code_complete,
+                    cloud_code_is_configured,
+                )
+            except Exception as e:
+                raise ValueError(f"cloud_code service import failed: {e}")
+            if not cloud_code_is_configured():
+                raise ValueError(
+                    "CLAUDE_CODE_OAUTH_TOKEN ست نشده — قبل از تست توانایی "
+                    "cloud_code باید token را در env قرار دهید."
+                )
+            return await cloud_code_complete(
+                messages=[{"role": "user", "content": prompt}],
+                system_prompt="تو یک دستیار هوشمند هستی. فقط خروجی JSON برگردان.",
+                model="auto",  # tier picker خودش haiku/sonnet/opus را انتخاب می‌کند
+                max_tokens=2000,
+                temperature=0.3,
+            )
+
+        # legacy path — هر مدل دیگر از طریق ai_manager
         if not self.ai_manager:
             raise ValueError("AI Manager not available")
 
