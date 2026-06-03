@@ -877,6 +877,21 @@ class OversightService:
         # تمام نشده re-dispatch نکن
         if getattr(t, "id", None) in self._inflight_sync_tasks:
             return False
+        # 🚨 (backend overload fix) — تسک‌های archived که یک بار به فولدر
+        # archive/ پوش شده‌اند، نباید با هر updated_at جدید (که verifier
+        # housekeeping یا state reconciliation ممکن است ایجاد کند) دوباره
+        # push شوند. این کار به‌خصوص پس از bypass streak guard مشکل‌ساز شد:
+        # موج archive شد و کل backlog به GitHub flood شد → /health 9s
+        # طول می‌کشید → Render shutdown.
+        # archive یک‌بار = کافی. اگر نیاز به re-sync archived task داشتیم
+        # (مثلاً un-archive)، طرف-call باید github_prompt_synced_at=None
+        # یا github_prompt_archived=False ست کند تا dirty بشود.
+        if (
+            getattr(t, "archived", False)
+            and getattr(t, "github_prompt_archived", False)
+            and getattr(t, "github_prompt_synced_at", None)
+        ):
+            return False
         synced = getattr(t, "github_prompt_synced_at", None)
         if not synced:
             return True
@@ -932,6 +947,24 @@ class OversightService:
                     t.execution_priority = compute_execution_priority(t)
             except Exception:
                 continue
+
+        # 🚨 (backend overload fix) — حداکثر N تسک per save dispatch تا از
+        # flood GitHub API و saturate شدن CPU/network روی Render free tier
+        # جلوگیری شود. بقیه در save بعدی pickup می‌شوند. priority بالاتر
+        # (عدد کمتر) اولویت دارد.
+        _MAX_DISPATCH_PER_TICK = 5
+        if len(dirty) > _MAX_DISPATCH_PER_TICK:
+            dirty.sort(
+                key=lambda t: (
+                    getattr(t, "execution_priority", 100),
+                    getattr(t, "updated_at", "") or "",
+                )
+            )
+            logger.info(
+                f"prompt-sync: throttling — {len(dirty)} dirty tasks, "
+                f"dispatching top {_MAX_DISPATCH_PER_TICK} this cycle"
+            )
+            dirty = dirty[:_MAX_DISPATCH_PER_TICK]
 
         dispatched = 0
         skipped_disabled = 0
