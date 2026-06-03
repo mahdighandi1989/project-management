@@ -754,9 +754,16 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
                   ضبط آزاد (تب/پنجره/دسکتاپ)
                 </div>
                 <div className="text-xs text-gray-600 dark:text-gray-300 mt-1 leading-relaxed">
-                  مرورگر می‌پرسد کدام تب یا پنجره را ضبط کند. می‌توانید آزادانه بین
-                  صفحات سیر کنید. AI با تحلیل بصری متوجه می‌شود کجا هستید (تب
-                  کروم/برنامه/دسکتاپ) و چه می‌کنید.
+                  مرورگر یک دیالوگ باز می‌کند با <b>سه گزینه بالا</b>:
+                  <br />
+                  • <b>Microsoft Edge Tab / Chrome Tab</b> — فقط تب‌های مرورگر
+                  <br />
+                  • <b>Window</b> — پنجرهٔ یک برنامه (File Explorer برای فولدر، VS Code، WhatsApp، …)
+                  <br />
+                  • <b>Entire Screen</b> — کل دسکتاپ + هر چیزی که روی صفحه می‌بینید (taskbar، چند برنامه با هم، فولدرها)
+                  <br />
+                  می‌توانید آزادانه بین صفحات/برنامه‌ها/فولدرها سیر کنید. AI با تحلیل
+                  بصری متوجه می‌شود کجا هستید و چه می‌کنید.
                 </div>
               </button>
             </div>
