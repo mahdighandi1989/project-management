@@ -3169,6 +3169,16 @@ class NotificationService:
             await compose_svc.mark_submitting(chat_id_str, False)
             return await self._compose_pick_project(chat_id_str, buf)
 
+        # 🚨 (Reference Projects — bug fix) — اگر هنوز ref-picker به کاربر
+        # نشان داده نشده، الان نشان بده و submit را تا done/skip متوقف کن.
+        # برای reminder ها skip — مرجع منطقی برای reminder وجود ندارد.
+        if (
+            not getattr(buf, "refs_asked", False)
+            and getattr(buf, "force_type", None) != "reminder"
+        ):
+            await compose_svc.mark_submitting(chat_id_str, False)
+            return await self._compose_pick_refs(chat_id_str, buf)
+
         # remove ReplyKeyboard
         await tg.remove_reply_keyboard("⏳ شروع پردازش...")
 
@@ -3674,6 +3684,63 @@ class NotificationService:
         )
         return {"ok": True, "handled": "compose_picker_shown"}
 
+    async def _compose_pick_refs(
+        self, chat_id_str: str, buf: Any,
+    ) -> Dict[str, Any]:
+        """🚨 (Reference Projects — bug fix) — قبل از submit، ref-picker
+        نشان بده تا کاربر بتواند پروژه‌های دیگرش را به‌عنوان مرجع/الهام
+        انتخاب کند. این متد فقط وقتی صدا زده می‌شود که buf.refs_asked
+        هنوز False باشد. callback های آن: compose_refpick:tog:<wid>،
+        compose_refpick:done، compose_refpick:skip.
+
+        اگر پروژهٔ دیگری در watched نباشد، silently refs_asked را True
+        می‌کند و submit را re-trigger می‌کند (هیچ ref وجود ندارد، پس
+        نباید مزاحم کاربر شد).
+        """
+        from .oversight_service import get_oversight_service
+        from .oversight_telegram_compose import get_compose_service
+        tg = self._telegram()
+        try:
+            _ov = get_oversight_service()
+            watched = list(getattr(_ov, "watched", []) or [])
+        except Exception as e:
+            logger.warning(f"_compose_pick_refs: load watched failed: {e}")
+            watched = []
+
+        other_projects = [w for w in watched if w.id != buf.watched_id]
+        if not other_projects:
+            # هیچ پروژهٔ دیگری برای ارجاع نیست — silently skip ref-picker
+            cs = get_compose_service()
+            await cs.set_selected_refs(chat_id_str, [], mark_asked=True)
+            return await self._compose_submit(chat_id_str, mode=buf.mode)
+
+        rows: List[List[Dict[str, str]]] = []
+        sel = set(buf.selected_refs or [])
+        for w in other_projects[:20]:
+            mark = "✅" if w.id in sel else "⬜"
+            rows.append([{
+                "text": f"{mark} {w.repo_full_name[:60]}",
+                "callback_data": f"compose_refpick:tog:{w.id}",
+            }])
+        rows.append([
+            {
+                "text": f"✅ تأیید ({len(sel)} مرجع)",
+                "callback_data": "compose_refpick:done",
+            },
+            {"text": "⏭ بدون مرجع", "callback_data": "compose_refpick:skip"},
+        ])
+        await tg.send(
+            f"📚 *پروژه‌های مرجع (اختیاری)*\n\n"
+            f"اگر می‌خواهی AI از پروژه‌های دیگرت الهام بگیرد (مثلاً برای یک "
+            f"الگو یا feature که قبلاً در یکی از آن‌ها پیاده‌سازی شده)، آن‌ها "
+            f"را تیک بزن و سپس «تأیید» را بزن.\n\n"
+            f"اگر نمی‌خواهی، «بدون مرجع» را انتخاب کن.",
+            silent=False,
+            reply_markup={"inline_keyboard": rows},
+        )
+        return {"ok": True, "handled": "compose_refpicker_shown"}
+
+
     async def _compose_run_pipeline_task(
         self, chat_id_str: str, buf: Any,
     ) -> Dict[str, Any]:
@@ -3810,6 +3877,23 @@ class NotificationService:
             throttle_sec=2.0,
         )
 
+        # 🚨 (Reference Projects — bug fix) — قبلاً compose pipeline اصلاً
+        # selected_projects را به idea_to_prompt پاس نمی‌داد. در نتیجه برای
+        # تسک‌های voice/file/multimedia، پروژه‌های مرجع scan نمی‌شدند و
+        # fusion_text + reference_block هرگز در پرامپت تزریق نمی‌شد. حالا
+        # buf.selected_refs را به ساختار مورد انتظار سرویس تبدیل می‌کنیم.
+        ref_payload: List[Dict[str, Any]] = []
+        for rid in (getattr(buf, "selected_refs", None) or []):
+            if rid == buf.watched_id:
+                continue
+            rw = next((x for x in _ov.watched if x.id == rid), None)
+            if rw:
+                ref_payload.append({
+                    "project_id": rid,
+                    "project_path": rw.repo_full_name,
+                    "is_selected": True,
+                })
+
         try:
             # 🛡 (audit fix #3) — Telegram compose **همیشه** multi-pass تا
             # checklist تولید شود. تسک‌های Telegram اغلب فایل‌محور هستند یا
@@ -3826,6 +3910,7 @@ class NotificationService:
                 upload_session_ids=session_ids or None,
                 progress_track_id=buf.task_draft_id,
                 multi_pass_mode="always",
+                selected_projects=ref_payload or None,
             )
         except ValueError as e:
             # 🛡 (audit fix) — اگر blocked_no_vision_model است، toggle UI
@@ -3953,6 +4038,9 @@ class NotificationService:
             "overall_completion_pct": preview.get("overall_completion_pct"),
             "upload_session_ids": session_ids,
             "force_create": True,  # dedup را خود پایپ‌لاین خاص anjam داده
+            # 🚨 (Reference Projects — bug fix) — برای regenerate/dup ها هم
+            # ref ها در task ذخیره می‌شوند.
+            "selected_projects": ref_payload,
         }
         if (preview.get("type") or "").lower() == "reminder":
             _rem_at = preview.get("reminder_at")
@@ -5113,6 +5201,89 @@ class NotificationService:
         if data == "compose_cancel_picker":
             await tg.send("⏸ انتخاب پروژه لغو شد — می‌توانی همچنان آیتم بفرستی یا با ❌ لغو همه ببندی.", silent=True)
             return {"ok": True, "handled": "compose_picker_cancelled"}
+
+        # 🚨 (Reference Projects — bug fix) — compose ref-picker callbacks.
+        # قبلاً compose flow هیچ ref-picker ای نداشت و selected_projects
+        # هیچ‌گاه به idea_to_prompt پاس داده نمی‌شد. سه action:
+        #   tog:<wid> → toggle یک ref و redraw keyboard
+        #   done     → mark refs_asked=True و submit را trigger کن
+        #   skip     → refs را clear کن و submit را trigger کن
+        if data.startswith("compose_refpick:"):
+            from .oversight_telegram_compose import get_compose_service
+            from .oversight_service import get_oversight_service
+            cs = get_compose_service()
+            buf = cs.get(chat_id_str)
+            if buf is None:
+                await tg.send("⚠️ compose منقضی شد.", silent=True)
+                return {"ok": True, "handled": "compose_refpick_expired"}
+            sub = data.split(":", 2)
+            action = sub[1] if len(sub) > 1 else ""
+            if action == "tog" and len(sub) >= 3:
+                wid = sub[2]
+                buf = await cs.toggle_selected_ref(chat_id_str, wid)
+                if buf is None:
+                    return {"ok": True, "handled": "compose_refpick_tog_no_buf"}
+                # redraw inline keyboard روی همان پیام
+                try:
+                    _ov = get_oversight_service()
+                    watched = list(getattr(_ov, "watched", []) or [])
+                except Exception:
+                    watched = []
+                other_projects = [w for w in watched if w.id != buf.watched_id]
+                sel = set(buf.selected_refs or [])
+                rows: List[List[Dict[str, str]]] = []
+                for w in other_projects[:20]:
+                    mark = "✅" if w.id in sel else "⬜"
+                    rows.append([{
+                        "text": f"{mark} {w.repo_full_name[:60]}",
+                        "callback_data": f"compose_refpick:tog:{w.id}",
+                    }])
+                rows.append([
+                    {
+                        "text": f"✅ تأیید ({len(sel)} مرجع)",
+                        "callback_data": "compose_refpick:done",
+                    },
+                    {"text": "⏭ بدون مرجع", "callback_data": "compose_refpick:skip"},
+                ])
+                try:
+                    await tg.edit_message_text(
+                        chat_id, msg.get("message_id"),
+                        f"📚 *پروژه‌های مرجع (اختیاری)*\n\n"
+                        f"تعداد انتخاب فعلی: *{len(sel)}*",
+                        reply_markup={"inline_keyboard": rows},
+                    )
+                except Exception as _ee:
+                    logger.debug(f"compose_refpick: edit failed: {_ee}")
+                return {"ok": True, "handled": "compose_refpick_tog", "count": len(sel)}
+            if action in ("done", "skip"):
+                final_refs: List[str] = (
+                    list(buf.selected_refs or []) if action == "done" else []
+                )
+                await cs.set_selected_refs(
+                    chat_id_str, final_refs, mark_asked=True,
+                )
+                # پیام تأیید کوتاه
+                if final_refs:
+                    try:
+                        _ov = get_oversight_service()
+                        watched = list(getattr(_ov, "watched", []) or [])
+                    except Exception:
+                        watched = []
+                    names = [
+                        f"`{w.repo_full_name}`"
+                        for w in watched
+                        if w.id in final_refs
+                    ]
+                    await tg.send(
+                        f"📚 منابع انتخاب‌شده: {', '.join(names) or '—'}",
+                        silent=True,
+                    )
+                else:
+                    await tg.send("📚 بدون منبع مرجع — ادامه بدون reference.", silent=True)
+                # حالا submit را trigger کن — این بار refs_asked=True است
+                # پس ref-picker دوباره نمایش داده نمی‌شود.
+                return await self._compose_submit(chat_id_str, mode=buf.mode)
+            return {"ok": True, "handled": "compose_refpick_unknown"}
 
         # 🛡 (audit fix) — Telegram معادل modal toggle:
         # compose_temp_activate:<model_id> → temp-activate + retry submit

@@ -111,6 +111,14 @@ class ComposeBuffer:
     # AI به‌جای پایپ‌لاین code-grounded، مسیر اختصاصی reminder را می‌رود
     # (با استخراج datetime از متن). None یعنی compose عادی (type=other).
     force_type: Optional[str] = None
+    # 🚨 (Reference Projects — bug fix) — قبلاً compose flow هیچ ref-picker
+    # ای نداشت و الگوی پروژه‌های مرجع که در text-only flow اضافه شده بود،
+    # برای تسک‌های voice/file/multimedia کاملاً نادیده گرفته می‌شد. حالا
+    # buffer این انتخاب‌ها را نگه می‌دارد و submit آن‌ها را به idea_to_prompt
+    # پاس می‌دهد. refs_asked تشخیص می‌دهد که ref-picker یک‌بار به کاربر
+    # نمایش داده شده تا دوباره نپرسد.
+    selected_refs: List[str] = field(default_factory=list)
+    refs_asked: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -284,6 +292,39 @@ class ComposeService:
             if b is not None:
                 b.reply_keyboard_active = active
                 self._save()
+
+    async def set_selected_refs(
+        self, chat_id: str, refs: List[str], *, mark_asked: bool = True,
+    ) -> Optional[ComposeBuffer]:
+        """🚨 (Reference Projects — bug fix) — ذخیرهٔ لیست watched_id های
+        پروژه‌های مرجع برای این compose. اگر mark_asked=True، refs_asked
+        فلگ هم True می‌شود تا submit دوباره ref-picker نشان ندهد.
+        """
+        async with self._lock:
+            b = self._buffers.get(chat_id)
+            if b is None:
+                return None
+            b.selected_refs = list(refs or [])
+            if mark_asked:
+                b.refs_asked = True
+            b.touch()
+            self._save()
+            return b
+
+    async def toggle_selected_ref(self, chat_id: str, ref_id: str) -> Optional[ComposeBuffer]:
+        """🚨 toggle یک ref در buffer (برای callback های compose_refpick:tog:)."""
+        async with self._lock:
+            b = self._buffers.get(chat_id)
+            if b is None:
+                return None
+            if ref_id in b.selected_refs:
+                b.selected_refs = [x for x in b.selected_refs if x != ref_id]
+            else:
+                if ref_id != b.watched_id:
+                    b.selected_refs.append(ref_id)
+            b.touch()
+            self._save()
+            return b
 
     async def set_temp_activated_model(self, chat_id: str, model_id: Optional[str]) -> None:
         """🆕 (audit fix) — ثبت/پاک کردن model_id که موقتاً برای این session فعال شد."""
