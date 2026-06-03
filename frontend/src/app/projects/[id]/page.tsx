@@ -5567,12 +5567,23 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
                     m.id === asstMsgId ? { ...m, content: asstBuffer } as any : m
                   ));
                 } else if (eventType === 'done' && data.actual_model) {
-                  // 🌥️ مدل واقعی که Anthropic سرو کرد — برای جلوگیری از
-                  // سردرگمی (Claude مدل‌ها خودشان را اغلب اشتباه معرفی
-                  // می‌کنند، مثلاً Sonnet 4.x می‌گوید "Claude 3.5 Sonnet").
+                  // 🌥️ مدل واقعی + tier + reason ای که picker انتخاب کرد.
+                  // Claude خودش را در متن اغلب اشتباه معرفی می‌کند، پس
+                  // actual_model از event message_start خود Anthropic می‌آید.
+                  const tierEmoji =
+                    data.picked_tier === 'opus' ? '🧠'
+                    : data.picked_tier === 'haiku' ? '⚡'
+                    : '⚖️';
+                  const badge =
+                    `${tierEmoji} ${data.picked_tier || '?'} · ${data.actual_model}`
+                    + (data.pick_reason ? `\n   ↳ ${data.pick_reason}` : '');
                   setInspectorChatMessages(prev => prev.map(m =>
                     m.id === asstMsgId
-                      ? { ...m, modelUsed: `cloud_code:${data.actual_model}` } as any
+                      ? {
+                          ...m,
+                          modelUsed: `cloud_code:${data.actual_model}`,
+                          routingInfo: badge,
+                        } as any
                       : m
                   ));
                 } else if (eventType === 'error') {

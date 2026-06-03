@@ -403,8 +403,11 @@ async def test_inspector_agent_service_chat_non_stream(monkeypatch):
 def test_classify_tier_default_sonnet():
     from app.services.cloud_code_service import _classify_tier
 
-    assert _classify_tier([{"role": "user", "content": "این کد را برام بنویس"}]) == "sonnet"
-    assert _classify_tier([]) == "sonnet"
+    tier, reason = _classify_tier([{"role": "user", "content": "این کد را برام بنویس"}])
+    assert tier == "sonnet"
+    assert "sonnet" in reason
+    tier, _ = _classify_tier([])
+    assert tier == "sonnet"
 
 
 def test_classify_tier_heavy_keywords_route_to_opus():
@@ -416,22 +419,85 @@ def test_classify_tier_heavy_keywords_route_to_opus():
         "audit کن همه ماژول‌ها را",
         "investigate the failing test suite end-to-end",
         "معماری پروژه را بازطراحی کن",
+        "optimize performance of the scheduler",
+        "security audit on the auth flow",
+        "race condition در worker queue",
+        "بهینه‌سازی کلی پروژه",
+        "تحلیل عمیق این سیستم",
     ]:
-        assert _classify_tier([{"role": "user", "content": txt}]) == "opus", txt
+        tier, reason = _classify_tier([{"role": "user", "content": txt}])
+        assert tier == "opus", f"{txt!r} → {tier} (reason: {reason})"
+        assert reason  # human-readable reason populated
 
 
 def test_classify_tier_very_long_routes_to_opus():
     from app.services.cloud_code_service import _classify_tier
 
-    long_msg = "x" * 5000
-    assert _classify_tier([{"role": "user", "content": long_msg}]) == "opus"
+    long_msg = "x" * 4000
+    tier, reason = _classify_tier([{"role": "user", "content": long_msg}])
+    assert tier == "opus"
+    assert "long message" in reason
+
+
+def test_classify_tier_deep_ongoing_convo_routes_to_opus():
+    from app.services.cloud_code_service import _classify_tier
+
+    # 6 turns, lots of code context → opus
+    messages = []
+    for i in range(6):
+        messages.append({"role": "user", "content": "fix the error in def foo(): " + ("x" * 1500)})
+        messages.append({"role": "assistant", "content": "ok"})
+    tier, reason = _classify_tier(messages)
+    assert tier == "opus"
+    assert "ongoing" in reason or "deep" in reason
 
 
 def test_classify_tier_greeting_routes_to_haiku():
     from app.services.cloud_code_service import _classify_tier
 
-    for txt in ["سلام", "hi", "خودت رو معرفی کن", "ممنون", "yes"]:
-        assert _classify_tier([{"role": "user", "content": txt}]) == "haiku", txt
+    for txt in ["سلام", "hi", "ممنون", "yes", "ok", "thanks", "خداحافظ", "مرسی"]:
+        tier, reason = _classify_tier([{"role": "user", "content": txt}])
+        assert tier == "haiku", f"{txt!r} → {tier} (reason: {reason})"
+
+
+def test_classify_tier_short_factual_question_routes_to_haiku():
+    from app.services.cloud_code_service import _classify_tier
+
+    # short question, no code keywords → haiku (saves Sonnet/Opus for real work)
+    tier, _ = _classify_tier([{"role": "user", "content": "نسخهٔ پایتون پروژه چنده؟"}])
+    assert tier == "haiku"
+    tier, _ = _classify_tier([{"role": "user", "content": "آخرین commit کی بود"}])
+    assert tier == "haiku"
+
+
+def test_classify_tier_code_keyword_stays_sonnet_not_haiku():
+    """short message ولی شامل کد → نباید به haiku افت کند."""
+    from app.services.cloud_code_service import _classify_tier
+
+    tier, _ = _classify_tier([{"role": "user", "content": "fix this bug"}])
+    assert tier == "sonnet"
+    tier, _ = _classify_tier([{"role": "user", "content": "این error را درست کن"}])
+    assert tier == "sonnet"
+    tier, _ = _classify_tier([{"role": "user", "content": "endpoint /foo اضافه کن"}])
+    assert tier == "sonnet"
+
+
+def test_classify_tier_distributes_across_all_three_tiers():
+    """مهم‌ترین تست — اطمینان از اینکه هر سه tier در زمان مناسب انتخاب می‌شوند."""
+    from app.services.cloud_code_service import _classify_tier
+
+    cases = [
+        ("سلام", "haiku"),
+        ("نسخه فعلی چیه", "haiku"),
+        ("fix the login bug", "sonnet"),
+        ("این component رو refactor کن سراسری", "opus"),
+        ("performance رو بهینه کن", "opus"),
+    ]
+    seen = {tier for _, tier in cases}
+    assert seen == {"haiku", "sonnet", "opus"}
+    for msg, expected in cases:
+        tier, _ = _classify_tier([{"role": "user", "content": msg}])
+        assert tier == expected, f"{msg!r} → {tier}, expected {expected}"
 
 
 def test_infer_tier_from_model_id():
@@ -469,7 +535,7 @@ async def test_pick_best_model_uses_tier_hint(monkeypatch):
     monkeypatch.setattr(ccs, "list_available_models", fake_list)
 
     # tier_hint=opus → باید جدیدترین opus را برگرداند
-    model_id, tier = await ccs.pick_best_model(
+    model_id, tier, _reason = await ccs.pick_best_model(
         [{"role": "user", "content": "سلام"}],  # خودش haiku می‌داد
         tier_hint="opus",
     )
@@ -491,7 +557,7 @@ async def test_pick_best_model_auto_routes_heavy_to_opus(monkeypatch):
 
     monkeypatch.setattr(ccs, "list_available_models", fake_list)
 
-    model_id, tier = await ccs.pick_best_model(
+    model_id, tier, _reason = await ccs.pick_best_model(
         [{"role": "user", "content": "refactor کل architecture این پروژه"}],
     )
     assert tier == "opus"
@@ -509,7 +575,7 @@ async def test_pick_best_model_falls_back_when_discovery_empty(monkeypatch):
         return []
 
     monkeypatch.setattr(ccs, "list_available_models", fake_list)
-    model_id, tier = await ccs.pick_best_model(
+    model_id, tier, _reason = await ccs.pick_best_model(
         [{"role": "user", "content": "hello"}],
         tier_hint="sonnet",
     )
@@ -587,7 +653,7 @@ async def test_stream_chat_auto_picks_model_and_reports_in_sink(monkeypatch):
     monkeypatch.setattr(ccs.httpx, "AsyncClient", _patched_client)
 
     async def fake_pick(messages, tier_hint=None):
-        return "claude-opus-4-5-20251101", "opus"
+        return "claude-opus-4-5-20251101", "opus", "heavy keyword → opus"
 
     monkeypatch.setattr(ccs, "pick_best_model", fake_pick)
 
@@ -604,6 +670,7 @@ async def test_stream_chat_auto_picks_model_and_reports_in_sink(monkeypatch):
     assert sink["requested_model"] == "auto"
     assert sink["picked_model"] == "claude-opus-4-5-20251101"
     assert sink["picked_tier"] == "opus"
+    assert sink["pick_reason"]  # human-readable reason populated
     # درخواست واقعی به Anthropic باید مدل picked را داشته باشد
     assert captured_payload["model"] == "claude-opus-4-5-20251101"
 

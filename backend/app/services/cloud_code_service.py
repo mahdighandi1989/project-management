@@ -150,28 +150,84 @@ def _build_system_blocks(user_system_prompt: Optional[str]) -> List[Dict[str, st
 
 
 _TIER_HEAVY_PATTERNS = re.compile(
-    r"\b("
-    r"refactor|architecture|architect|design|audit|review|analyze|investigate|"
-    r"معماری|بازنگری|بازآرایی|بررسی\s*عمیق|طراحی|بازطراحی|بازنویسی|"
-    r"درست\s*کن.*کل|تمام\s*پروژه|سراسری|debug\s*end[- ]?to[- ]?end"
-    r")\b",
+    r"("
+    # Architecture & deep refactors
+    r"\brefactor\b|\barchitect(ure|ural)?\b|\bredesign\b|\bre-?write\b|"
+    r"\baudit\b|\binvestigate\b|\bdebug\s*end[- ]?to[- ]?end\b|"
+    r"\bsystem[- ]?design\b|\bcode[- ]?review\b|\bdeep\s*dive\b|"
+    # Persian heavy signals
+    r"معماری|بازنگری|بازآرایی|بازنویسی|بازطراحی|بررسی\s*عمیق|طراحی|"
+    r"تحلیل\s*کامل|تحلیل\s*عمیق|سراسری|تمام\s*پروژه|درست\s*کن.*کل|"
+    r"بازبینی\s*کامل|ساختار\s*کلی|"
+    # Multi-file / multi-step requests
+    r"\bmulti[- ]?(file|step|module)\b|\bmigration\b|\bport(ing)?\s+from\b|"
+    r"چند\s*فایل|چند\s*مرحله|مهاجرت|انتقال\s*از|"
+    # Performance / security / scale
+    r"\boptim(ize|ization|isation)\b|\bperformance\b|\bscal(e|ing|ability)\b|"
+    r"\bsecurity\b|\bvuln(erability)?\b|\brace\s*condition\b|\bdeadlock\b|"
+    r"بهینه[‌ ]?سازی|عملکرد|مقیاس|امنیت|آسیب[‌ ]?پذیر|"
+    # Complex algorithms / proofs
+    r"\balgorithm\b|\bcomplexity\b|\bcorrectness\b|\bproof\b|"
+    r"الگوریتم|اثبات|پیچیدگی"
+    r")",
     re.IGNORECASE,
 )
+
 _TIER_LIGHT_PATTERNS = re.compile(
     r"^("
-    r"hi|hello|hey|thanks|thank you|yes|no|ok|"
-    r"سلام|درود|ممنون|بله|خیر|آره|نه|باشه|"
-    r"خودت\s*رو\s*معرفی|introduce\s*yourself"
-    r")\b",
+    # Greetings & social
+    r"hi|hello|hey|thanks|thank\s*you|cheers|bye|"
+    r"سلام|درود|ممنون|مرسی|تشکر|خداحافظ|بدرود|"
+    # Simple yes/no / acknowledgement
+    r"yes|no|ok|okay|sure|nope|yep|right|wrong|true|false|"
+    r"بله|خیر|آره|نه|باشه|اوهوم|نه[‌ ]?نه|درسته|اشتباهه|"
+    # Trivial requests
+    r"خودت\s*رو\s*معرفی|introduce\s*yourself|who\s*are\s*you|what\s*model|"
+    r"how\s*are\s*you|چطوری|چه\s*خبر|"
+    # Short clarifications
+    r"why|how|when|where|what|"
+    r"چرا|چطور|کِی|کجا|چی|چیست"
+    r")[\s\?\.!،]*$",
+    re.IGNORECASE,
+)
+
+# Signals that bias toward Sonnet (default coding work) — used to keep
+# short coding requests on Sonnet rather than dropping them to Haiku.
+_TIER_CODE_PATTERNS = re.compile(
+    r"("
+    # Code fences / language tokens
+    r"```|\bdef\s|\bclass\s|\bimport\s|\bfunction\s|\bconst\s|\blet\s|\bvar\s|"
+    r"\basync\s|\bawait\b|\breturn\b|"
+    # English coding verbs
+    r"\bfix\s+(this|the|that|my|it)?\b|\berror\b|\bbug\b|\bfail(ing|ed)?\b|"
+    r"\bimplement\b|\badd\s+(a|the|this|new)?\b|\bcreate\s+(a|the|this|new)?\b|"
+    r"\bwrite\s+(a|the|this|some)?\b|\bcode\b|\brefactor\b|\bdebug\b|"
+    # Persian coding verbs / nouns
+    r"کد|بنویس|بنوس|بساز|بسازی|اضافه\s*کن|اضافش?\s*کن|"
+    r"خطا|باگ|پیاده[‌ ]?سازی|اصلاح\s*کن|درست\s*کن|تعمیر|"
+    r"تابع|کلاس|متد|ماژول|فایل|تست|"
+    # Project nouns
+    r"\bendpoint\b|\bapi\b|\broute\b|\bcomponent\b|\bhook\b|\bstate\b|"
+    r"\bdatabase\b|\bquery\b|\bsql\b|\bschema\b|\bmigration\b"
+    r")",
     re.IGNORECASE,
 )
 
 
-def _classify_tier(messages: List[Dict[str, str]]) -> str:
-    """Return one of 'opus' | 'sonnet' | 'haiku' based on the user's last
-    message. Default is 'sonnet' — the right balance for inspector chat.
-    Heavy keywords (architecture/refactor/...) bump to opus.
-    Light/greeting messages drop to haiku.
+def _classify_tier(messages: List[Dict[str, str]]) -> Tuple[str, str]:
+    """Return `(tier, reason)` — tier is one of opus/sonnet/haiku and reason
+    is a short human-readable explanation so the UI can show *why* a tier
+    was picked.
+
+    Multi-signal routing:
+      1. Heavy keywords (refactor / architecture / audit / security / ...)
+         OR very long single message (>3500 chars) → opus
+      2. Long ongoing conversation with code (≥6 turns + code present) → opus
+      3. Pure greeting / yes-no / short trivial question (≤120 chars and
+         matches light pattern, with no code fences) → haiku
+      4. Short factual question without code (≤200 chars, no code keywords,
+         not a coding action) → haiku
+      5. Everything else (code work, debugging, mid-complexity asks) → sonnet
     """
     last_user = ""
     for m in reversed(messages or []):
@@ -179,17 +235,46 @@ def _classify_tier(messages: List[Dict[str, str]]) -> str:
             last_user = str(m.get("content") or "").strip()
             break
     if not last_user:
-        return "sonnet"
-    # Heavy first — explicit signal wins over length.
-    if _TIER_HEAVY_PATTERNS.search(last_user):
-        return "opus"
-    # Very long context likely needs deeper reasoning.
-    if len(last_user) > 4000:
-        return "opus"
-    # Light: short greetings / yes-no.
-    if len(last_user) <= 80 and _TIER_LIGHT_PATTERNS.search(last_user):
-        return "haiku"
-    return "sonnet"
+        return "sonnet", "default (no user message)"
+
+    has_code_signal = bool(_TIER_CODE_PATTERNS.search(last_user))
+    msg_len = len(last_user)
+    turn_count = sum(1 for m in (messages or []) if (m.get("role") or "").lower() == "user")
+    history_chars = sum(
+        len(str(m.get("content") or ""))
+        for m in (messages or [])
+    )
+
+    # 1) Heavy keywords win unconditionally
+    heavy_match = _TIER_HEAVY_PATTERNS.search(last_user)
+    if heavy_match:
+        return "opus", f"heavy keyword '{heavy_match.group(0)[:30]}' → opus"
+
+    # 2) Very long single message
+    if msg_len > 3500:
+        return "opus", f"long message ({msg_len} chars) → opus"
+
+    # 3) Long ongoing technical convo
+    if turn_count >= 6 and history_chars > 8000 and has_code_signal:
+        return "opus", (
+            f"deep ongoing convo ({turn_count} turns, "
+            f"{history_chars//1000}k chars, code-heavy) → opus"
+        )
+
+    # 4) Greeting / yes-no / short trivial — only if no code and short
+    if msg_len <= 120 and _TIER_LIGHT_PATTERNS.match(last_user) and not has_code_signal:
+        return "haiku", f"short trivial ({msg_len} chars) → haiku"
+
+    # 5) Short factual question
+    if msg_len <= 200 and not has_code_signal:
+        return "haiku", f"short Q&A ({msg_len} chars, no code) → haiku"
+
+    # 6) Default — Sonnet for normal coding/debugging
+    return "sonnet", (
+        f"balanced ({msg_len} chars"
+        + (", code present" if has_code_signal else "")
+        + ") → sonnet"
+    )
 
 
 def _infer_tier_from_model_id(model_id: str) -> Optional[str]:
@@ -275,28 +360,36 @@ async def pick_best_model(
     messages: List[Dict[str, str]],
     *,
     tier_hint: Optional[str] = None,
-) -> Tuple[str, str]:
-    """Return `(model_id, picked_tier)` based on dynamic discovery.
+) -> Tuple[str, str, str]:
+    """Return `(model_id, picked_tier, reason)`.
 
     - `tier_hint` (optional): "opus" | "sonnet" | "haiku" to force a tier.
-      When omitted, the tier is inferred from the user's last message via
-      `_classify_tier`.
+      When omitted, `_classify_tier` chooses + supplies a human-readable
+      reason that the UI can display.
     - Within the chosen tier, the newest available revision wins.
     - Falls back to `CLOUD_CODE_TIER_FALLBACKS[tier]` when discovery
-      returns nothing for that tier.
+      returns nothing for that tier; logs and reports the fallback path
+      so callers know the model wasn't the first choice.
     """
-    tier = (tier_hint or _classify_tier(messages)).lower()
+    if tier_hint:
+        tier = tier_hint.lower()
+        reason = f"tier hint forced → {tier}"
+    else:
+        tier, reason = _classify_tier(messages)
     if tier not in CLOUD_CODE_TIER_FALLBACKS:
         tier = "sonnet"
+        reason = f"unknown tier requested, defaulted to sonnet"
 
     models = await list_available_models()
     in_tier = [m for m in models if _infer_tier_from_model_id(m.get("id", "")) == tier]
     if in_tier:
         in_tier.sort(key=_model_sort_key, reverse=True)
-        return in_tier[0]["id"], tier
+        return in_tier[0]["id"], tier, reason
 
-    # Tier empty in plan → try sonnet → opus → haiku as a graceful chain.
-    for alt in ("sonnet", "opus", "haiku"):
+    # Tier empty in plan → walk a graceful chain. Opus is the smartest
+    # so try it first when sonnet is missing; otherwise prefer sonnet.
+    fallback_order = ["sonnet", "opus", "haiku"] if tier != "sonnet" else ["opus", "haiku"]
+    for alt in fallback_order:
         if alt == tier:
             continue
         alt_in = [m for m in models if _infer_tier_from_model_id(m.get("id", "")) == alt]
@@ -306,10 +399,14 @@ async def pick_best_model(
                 "cloud_code: tier '%s' empty in plan, falling back to '%s'",
                 tier, alt,
             )
-            return alt_in[0]["id"], alt
+            return alt_in[0]["id"], alt, f"{reason}; plan lacks {tier}, fell back to {alt}"
 
     # /v1/models unreachable and cache empty → hard-coded default.
-    return CLOUD_CODE_TIER_FALLBACKS[tier], tier
+    return (
+        CLOUD_CODE_TIER_FALLBACKS[tier],
+        tier,
+        f"{reason}; discovery empty, using hard-coded fallback",
+    )
 
 
 async def cloud_code_stream_chat(
@@ -350,7 +447,7 @@ async def cloud_code_stream_chat(
     picked_tier: Optional[str] = None
     requested_model = model
     if model == "auto" or tier_hint is not None:
-        chosen_id, picked_tier = await pick_best_model(
+        chosen_id, picked_tier, pick_reason = await pick_best_model(
             messages, tier_hint=tier_hint
         )
         model = chosen_id
@@ -358,6 +455,7 @@ async def cloud_code_stream_chat(
             metadata_sink["requested_model"] = requested_model
             metadata_sink["picked_model"] = chosen_id
             metadata_sink["picked_tier"] = picked_tier
+            metadata_sink["pick_reason"] = pick_reason
 
     payload: Dict[str, object] = {
         "model": model,
