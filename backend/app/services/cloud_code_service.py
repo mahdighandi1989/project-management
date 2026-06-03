@@ -96,6 +96,66 @@ def cloud_code_is_configured() -> bool:
 # Cloud Code به‌عنوان یک ردیف در صفحهٔ مدل‌ها (stage 1)، کاربر می‌تواند
 # enabled آن را خاموش کند یا preferred_for را به subset از 4 مصرف‌کننده
 # محدود کند. این helper آن وضعیت را برای consumer ها در یک نقطه می‌خواند.
+#
+# ════════════════════════════════════════════════════════════════════════
+# 🧭 EXTENSIBILITY GUIDE — اضافه کردن یک consumer جدید
+# ════════════════════════════════════════════════════════════════════════
+#
+# می‌خواهید Cloud Code را به یک قسمت جدید برنامه وصل کنید (مثلاً
+# `report_generator`)؟ این الگو را دنبال کنید — کل کار ۳ فایل + ۱ خط
+# در نقطهٔ مصرف است.
+#
+# گام ۱ — Backend: ثبت consumer جدید (یک فایل، دو خط)
+#     File: backend/app/models/ai_profile.py
+#
+#     a) به AVAILABLE_TASK_TYPES اضافه کن:
+#        {
+#            "id": "report_generator",
+#            "name": "تولیدکنندهٔ گزارش",
+#            "description": "ساخت گزارش‌های هفتگی با Cloud Code",
+#        },
+#
+#     b) به CLOUD_CODE_PREFERRED_FOR_KEYS اضافه کن:
+#        "report_generator",
+#
+# گام ۲ — Frontend: ثبت در set مرکزی (یک فایل، یک خط)
+#     File: frontend/src/app/models/page.tsx
+#     در CLOUD_CODE_TASK_KEYS اضافه کن: 'report_generator',
+#
+# گام ۳ — Consumer: یک خط در نقطهٔ مصرف
+#     در فایل consumer جدید:
+#
+#         from app.services.cloud_code_service import (
+#             cloud_code_setting_is_enabled_for,
+#             cloud_code_message,  # یا cloud_code_complete یا stream
+#         )
+#
+#         if cloud_code_setting_is_enabled_for("report_generator"):
+#             # کاربر این consumer را برای Cloud Code فعال کرده
+#             result = await cloud_code_message(
+#                 messages=[...],
+#                 system_prompt=...,
+#                 model="auto",  # tier picker خودش انتخاب می‌کند
+#             )
+#         else:
+#             # fallback به مسیر معمول (ai_manager، gemini، ...)
+#             ...
+#
+# همین! بدون تغییر helper، بدون UI کد جدید. UI خودکار گزینهٔ تازه را
+# در «ترجیحی برای» edit modal صفحهٔ مدل‌ها نشان می‌دهد چون از
+# `/api/models/task-types` می‌خواند (که خود از AVAILABLE_TASK_TYPES
+# می‌آید).
+#
+# نکته‌های مهم:
+#   - default = True: اگر کاربر هیچ تنظیمی نکرده، consumer جدید روشن
+#     است — همان رفتار "سازگاری با قبل" که سایر consumer ها دارند.
+#   - اگر env token خالی است، helper بی‌قید و شرط False برمی‌گرداند.
+#   - DB error → True (legacy fallback). کاربر هیچ outage نمی‌بیند.
+#   - برای OAuth-driven models آینده (مثلاً Gemini OAuth)، الگوی
+#     identical: یک special-case در _run_single_test و یک بخش در
+#     pick_best_extraction_model.
+#
+# ════════════════════════════════════════════════════════════════════════
 
 _CLOUD_CODE_MODEL_ID = "cloud_code"
 
