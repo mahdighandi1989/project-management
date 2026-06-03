@@ -29,17 +29,20 @@ logger = logging.getLogger(__name__)
 
 # Tools currently wired through to real backends. Anything else is
 # politely declined; the model has the chance to retry without it.
+# 🆕 (audit fix) — فقط ابزارهایی که واقعاً به backend متد دارند یا با
+# direct REST پیاده‌سازی شده‌اند. render_get_service و render_get_deploys
+# هنوز در RenderAPIService نیستند — اگر model اون‌ها را در request ببیند
+# و بزند، fail می‌شود. کاربر تجربهٔ "tool not shipped" را نمی‌خواهد دید،
+# پس از set حذف شدند تا اصلاً به مدل نشان داده نشوند.
 SUPPORTED_TOOLS_PHASE_3 = {
     "read_file",
     "list_files",
     "list_branches",
     "read_file_from_branch",
     "render_list_services",
-    "render_get_service",
     "render_get_env_vars",
     "render_set_env_var",
     "render_trigger_deploy",
-    "render_get_deploys",
     "submit_action_plan",
     "preflight_check",
 }
@@ -138,13 +141,26 @@ def build_inspector_executor(
                 return _ok(txt or "موردی یافت نشد")
 
             if name == "list_branches":
-                if not hasattr(github_svc, "list_branches"):
-                    return _err("github service این تابع را ندارد.")
-                res = await github_svc.list_branches(owner, repo, token=github_token)
-                if not res.get("success"):
-                    return _err(f"خطا: {res.get('error', 'unknown')}")
-                names = [b.get("name") for b in (res.get("branches") or []) if b.get("name")]
-                return _ok("\n".join(names) or "(no branches)")
+                # 🆕 (audit fix) — github_pr_service متد list_branches ندارد،
+                # پس direct REST call به /repos/{owner}/{repo}/branches می‌زنیم.
+                if not github_token:
+                    return _err("توکن GitHub ست نشده.")
+                try:
+                    import httpx as _httpx_lb
+                    async with _httpx_lb.AsyncClient(timeout=15.0) as _cli:
+                        r = await _cli.get(
+                            f"https://api.github.com/repos/{owner}/{repo}/branches?per_page=100",
+                            headers={
+                                "Authorization": f"token {github_token}",
+                                "Accept": "application/vnd.github+json",
+                            },
+                        )
+                    if r.status_code != 200:
+                        return _err(f"GitHub branches API HTTP {r.status_code}")
+                    names = [b.get("name") for b in r.json() if b.get("name")]
+                    return _ok("\n".join(names) or "(no branches)")
+                except Exception as e:
+                    return _err(f"خطا در فراخوانی GitHub branches: {str(e)[:200]}")
 
             if name == "read_file_from_branch":
                 path = (args.get("path") or "").strip().lstrip("/")
@@ -179,18 +195,6 @@ def build_inspector_executor(
                     tp = s.get("type") or s.get("service", {}).get("type")
                     lines.append(f"- `{sid}` — {nm} ({tp})")
                 return _ok("\n".join(lines))
-
-            if name == "render_get_service":
-                guard = _need_render()
-                if guard:
-                    return guard
-                sid = args.get("service_id") or ""
-                if not sid:
-                    return _err("service_id لازم است.")
-                if not hasattr(render_service, "get_service"):
-                    return _err("RenderAPIService.get_service پیاده‌سازی نشده.")
-                res = await render_service.get_service(sid)
-                return _ok(str(res)[:3000])
 
             if name == "render_get_env_vars":
                 guard = _need_render()
@@ -239,18 +243,6 @@ def build_inspector_executor(
                     return _err(f"Render خطا: {res.get('error')}")
                 return _ok(f"🚀 deploy روی سرویس `{sid}` شروع شد"
                            + (" (با clear cache)" if clear_cache else "") + ".")
-
-            if name == "render_get_deploys":
-                guard = _need_render()
-                if guard:
-                    return guard
-                sid = args.get("service_id") or ""
-                if not sid:
-                    return _err("service_id لازم است.")
-                if not hasattr(render_service, "get_deploys"):
-                    return _err("RenderAPIService.get_deploys پیاده‌سازی نشده.")
-                res = await render_service.get_deploys(sid, limit=int(args.get("limit") or 10))
-                return _ok(str(res)[:3000])
 
             # ---------- Action plan ----------
             if name == "submit_action_plan":

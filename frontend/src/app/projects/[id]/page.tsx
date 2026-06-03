@@ -14696,18 +14696,18 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                         {inspectorEngine === 'cloud_code' && cloudCodeAvailable !== false && (
                           <>
                             <div className="text-[10px] mt-1.5 p-1.5 rounded bg-emerald-500/20 border border-emerald-300/40">
-                              <p className="font-bold mb-0.5">🛠️ Cloud Code + ابزارها (Phase 3)</p>
+                              <p className="font-bold mb-0.5">🛠️ Cloud Code + ابزارها</p>
                               <p className="opacity-90 leading-relaxed">
-                                موتور Cloud Code حالا ۱۲ ابزار در دسترس دارد:
+                                موتور Cloud Code حالا ۱۰ ابزار در دسترس دارد:
                                 <br/>
                                 • <b>فایل/گیت:</b> read_file، list_files، list_branches، read_file_from_branch
                                 <br/>
-                                • <b>Render:</b> list_services، get_service، get_env_vars، <b>set_env_var</b>، trigger_deploy، get_deploys
+                                • <b>Render:</b> list_services، get_env_vars، <b>set_env_var</b>، trigger_deploy
                                 <br/>
                                 • <b>سایر:</b> submit_action_plan، preflight_check
                                 <br/>
                                 مثلاً «این env vars را روی سرویس Render ست کن» مستقیم اجرا می‌شود.
-                                برای ابزارهای سنگین‌تر (postgres provisioning، scan، apply-action عمیق) Local AI همچنان توصیه می‌شود.
+                                برای ابزارهای سنگین‌تر (postgres provisioning، scan عمیق، apply-action کامل) Local AI همچنان توصیه می‌شود.
                               </p>
                             </div>
                             <div className="mt-2">
