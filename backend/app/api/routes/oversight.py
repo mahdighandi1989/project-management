@@ -4,6 +4,7 @@ Oversight API
 API routes برای مرکز نظارت و مدیریت پروژه‌های گیت‌هاب.
 """
 
+import json
 import logging
 from fastapi import APIRouter, HTTPException, Query, Depends, Body
 from pydantic import BaseModel, Field
@@ -3905,6 +3906,168 @@ async def extraction_full_text(extraction_id: str):
         "status": fe.status,
         "full_text": repo.full_text(extraction_id),
     }
+
+
+# ============================================================
+# Inspector chat — Cloud Code (Claude OAuth) engine
+# Spec-mandated alias path under /oversight (در کنار مسیر اصلی
+# /api/render/inspector/chat-cloud-code که برای سازگاری با سایر
+# endpointهای inspector نگه داشته شده). هر دو path به همان
+# InspectorAgentService.chat_with_cloud_code تفویض می‌شوند.
+# ============================================================
+
+
+class InspectorChatCloudCodeMessage(BaseModel):
+    role: str  # user | assistant
+    content: str
+
+
+class InspectorChatCloudCodeRequest(BaseModel):
+    project_id: Optional[str] = None
+    message: str
+    chat_history: Optional[List[InspectorChatCloudCodeMessage]] = None
+    system_prompt: Optional[str] = None
+    session_id: Optional[int] = None
+    max_tokens: int = 4096
+    temperature: float = 0.7
+
+
+@router.get("/inspector/cloud-code/status")
+async def oversight_inspector_cloud_code_status():
+    """در دسترس بودن موتور Cloud Code (alias از /api/render/inspector/cloud-code/status)."""
+    from ...services.inspector_agent_service import InspectorAgentService
+    return {"available": InspectorAgentService.cloud_code_available()}
+
+
+@router.post("/inspector/chat-cloud-code")
+async def oversight_inspector_chat_cloud_code(
+    request: InspectorChatCloudCodeRequest,
+):
+    """🆕 endpoint مستقل (spec) — چت بازرس ویژه با موتور Cloud Code.
+
+    این path در spec کاربر صریحاً ذکر شده بود (`POST /oversight/inspector/
+    chat-cloud-code`). همان جریان کاری `/api/render/inspector/chat-cloud-code`
+    را اجرا می‌کند ولی schema ساده‌تر و بدون قید به render_logs.
+    """
+    from fastapi.responses import StreamingResponse
+    from ...services.inspector_agent_service import InspectorAgentService
+    from ...core.database import SessionLocal
+    from ...models.inspector_session import InspectorMessage, InspectorSession
+
+    if not InspectorAgentService.cloud_code_available():
+        async def _missing():
+            payload = {
+                "kind": "cloud_code_unavailable",
+                "message": (
+                    "⚠️ توکن `CLAUDE_CODE_OAUTH_TOKEN` روی سرور تنظیم نشده."
+                ),
+            }
+            yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            yield f"event: done\ndata: {json.dumps({'success': False, 'reason': 'env_missing'})}\n\n"
+        return StreamingResponse(_missing(), media_type="text/event-stream")
+
+    history: List[Dict[str, str]] = []
+    if request.chat_history:
+        for m in request.chat_history[-20:]:
+            history.append({"role": m.role, "content": m.content})
+    history.append({"role": "user", "content": request.message})
+
+    # ذخیرهٔ پیام user اگر session دارد
+    db_user_id = None
+    if request.session_id:
+        with SessionLocal() as _db:
+            try:
+                if _db.query(InspectorSession).filter(
+                    InspectorSession.id == request.session_id
+                ).first():
+                    row = InspectorMessage(
+                        session_id=request.session_id,
+                        role="user",
+                        content=request.message,
+                        model_id="cloud_code",
+                    )
+                    _db.add(row)
+                    _db.commit()
+                    db_user_id = row.id
+            except Exception:
+                _db.rollback()
+
+    async def _gen():
+        assembled: List[str] = []
+        try:
+            yield (
+                "event: progress\ndata: "
+                + json.dumps(
+                    {"message": "🌥️ اتصال به Claude Code OAuth..."},
+                    ensure_ascii=False,
+                )
+                + "\n\n"
+            )
+            stream_gen = await InspectorAgentService.chat_with_cloud_code(
+                history,
+                system_prompt=request.system_prompt,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+                stream=True,
+            )
+            async for chunk in stream_gen:
+                assembled.append(chunk)
+                yield (
+                    "event: chunk\ndata: "
+                    + json.dumps({"text": chunk}, ensure_ascii=False)
+                    + "\n\n"
+                )
+
+            full_text = "".join(assembled).strip()
+            assistant_id = None
+            if request.session_id and full_text:
+                with SessionLocal() as _db:
+                    try:
+                        row = InspectorMessage(
+                            session_id=request.session_id,
+                            role="assistant",
+                            content=full_text,
+                            model_id="cloud_code",
+                        )
+                        _db.add(row)
+                        _db.commit()
+                        assistant_id = row.id
+                    except Exception:
+                        _db.rollback()
+
+            yield (
+                "event: done\ndata: "
+                + json.dumps(
+                    {
+                        "success": True,
+                        "engine": "cloud_code",
+                        "message_id": assistant_id,
+                        "user_message_id": db_user_id,
+                        "content": full_text,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n\n"
+            )
+        except Exception as e:
+            yield (
+                "event: error\ndata: "
+                + json.dumps(
+                    {
+                        "kind": "cloud_code_stream_error",
+                        "message": f"خطا در ارتباط با Claude Code: {str(e)[:300]}",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n\n"
+            )
+            yield (
+                "event: done\ndata: "
+                + json.dumps({"success": False, "reason": "stream_error"})
+                + "\n\n"
+            )
+
+    return StreamingResponse(_gen(), media_type="text/event-stream")
 
 
 # ============================================================

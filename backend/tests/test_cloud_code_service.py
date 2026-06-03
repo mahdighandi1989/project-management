@@ -215,3 +215,95 @@ async def test_stream_chat_raises_on_http_error(monkeypatch):
             [{"role": "user", "content": "hi"}],
         ):
             pass
+
+
+# ---------------------------------------------------------------------------
+# InspectorAgentService façade
+# ---------------------------------------------------------------------------
+
+
+def test_inspector_agent_service_availability_reflects_env(monkeypatch):
+    from app.services.inspector_agent_service import InspectorAgentService
+
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    assert InspectorAgentService.cloud_code_available() is False
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test")
+    assert InspectorAgentService.cloud_code_available() is True
+
+
+@pytest.mark.asyncio
+async def test_inspector_agent_service_chat_streams(monkeypatch):
+    from app.services.inspector_agent_service import InspectorAgentService
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test")
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=_make_sse_body(["یک ", "دو ", "سه"]),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    transport = httpx.MockTransport(_handler)
+    real_client_cls = httpx.AsyncClient
+
+    def _patched_client(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client_cls(*args, **kwargs)
+
+    monkeypatch.setattr("app.services.cloud_code_service.httpx.AsyncClient", _patched_client)
+
+    stream_gen = await InspectorAgentService.chat_with_cloud_code(
+        [{"role": "user", "content": "hi"}],
+        system_prompt="be terse",
+        stream=True,
+    )
+    pieces = [p async for p in stream_gen]
+    assert "".join(pieces) == "یک دو سه"
+
+
+@pytest.mark.asyncio
+async def test_inspector_agent_service_chat_non_stream(monkeypatch):
+    from app.services.inspector_agent_service import InspectorAgentService
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test")
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=_make_sse_body(["پاسخ ", "کامل"]),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    transport = httpx.MockTransport(_handler)
+    real_client_cls = httpx.AsyncClient
+
+    def _patched_client(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client_cls(*args, **kwargs)
+
+    monkeypatch.setattr("app.services.cloud_code_service.httpx.AsyncClient", _patched_client)
+
+    text = await InspectorAgentService.chat_with_cloud_code(
+        [{"role": "user", "content": "hi"}],
+        stream=False,
+    )
+    assert text == "پاسخ کامل"
+
+
+# ---------------------------------------------------------------------------
+# Settings integration
+# ---------------------------------------------------------------------------
+
+
+def test_settings_exposes_cloud_code_token_field(monkeypatch):
+    """Settings class باید CLAUDE_CODE_OAUTH_TOKEN را به‌عنوان field رسمی داشته باشد
+    (نه فقط reads مستقیم از os.environ) — این requirement spec کاربر بود."""
+    from app.core.config import Settings
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-from-settings")
+    fresh = Settings()
+    assert fresh.CLAUDE_CODE_OAUTH_TOKEN == "sk-ant-oat01-from-settings"
+    # EXTERNAL_TOOL_TOKEN هم باید باشد
+    assert hasattr(fresh, "EXTERNAL_TOOL_TOKEN")

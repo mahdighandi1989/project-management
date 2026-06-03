@@ -33,6 +33,24 @@ class Settings(BaseSettings):
     PERPLEXITY_API_KEY: Optional[str] = Field(default=None, description="کلید Perplexity AI")  # 🆕
 
     # ===========================================
+    # Cloud Code (Claude Code OAuth) — موتور پردازش پرامپت بازرس ویژه
+    # ===========================================
+    # توکن اشتراک Claude Code که با `claude setup-token` ساخته می‌شود.
+    # همین توکن در claude_runner و GitHub Actions هم استفاده می‌شود تا
+    # چت بازرس از سهمیهٔ Claude Pro/Max کاربر مصرف کند نه از API metered.
+    CLAUDE_CODE_OAUTH_TOKEN: Optional[str] = Field(
+        default=None,
+        description="توکن OAuth اشتراک Claude Code برای موتور Cloud Code بازرس ویژه",
+    )
+    # توکنی که endpoint های external-tool (مثل claude_runner workflow) برای
+    # احراز هویت با /external/* استفاده می‌کنند. همین value باید در
+    # `EXTERNAL_TOOL_TOKEN` secret در GitHub repo هم گذاشته شود.
+    EXTERNAL_TOOL_TOKEN: Optional[str] = Field(
+        default=None,
+        description="توکن external-tool برای write-back به oversight از workflow",
+    )
+
+    # ===========================================
     # تنظیمات سرور
     # ===========================================
     HOST: str = Field(default="0.0.0.0", description="آدرس سرور")
