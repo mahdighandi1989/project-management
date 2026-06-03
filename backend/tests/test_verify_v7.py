@@ -138,12 +138,49 @@ def test_weights_fallback_for_unknown():
 
 
 def test_resolver_removes_contradicting_remaining():
+    """🆕 (Verify v8 Tighten) — resolver حالا conservative است. Jaccard
+    threshold از 0.5 → 0.7 رفته (در commit fc19d4a، برای فیکس باگ کاربر
+    که 9/9 done ولی 11 آیتم در remaining داشت). آیتم‌هایی که فقط چند
+    کلمه مشترک دارند (Jaccard 0.5-0.7) دیگر merge نمی‌شوند — به‌جایش
+    consistency guard در سطح بالاتر (verify_task) جلوی auto-archive
+    کاذب را می‌گیرد.
+
+    برای مرج کردن: Jaccard ≥ 0.7 یا substring ≥ 40 char لازم است.
+    """
+    from app.services.oversight_verifier import (
+        _resolve_done_remaining_contradictions_v7,
+        _jaccard_word_similarity,
+    )
+    # حالت ۱: شباهت متوسط (Jaccard ~0.55) — دیگر merge نمی‌شود
+    done_mid = ["فاز 0 — بازرسی کیفیت و باگ‌یابی بازرس ویژه پیاده‌سازی شد"]
+    remaining_mid = ["فاز 0: بازرسی کیفیت بازرس ویژه انجام نشده"]
+    sim = _jaccard_word_similarity(done_mid[0].lower(), remaining_mid[0].lower())
+    assert 0.5 <= sim < 0.7  # exactly the case we DON'T merge anymore
+    out = _resolve_done_remaining_contradictions_v7(done_mid, remaining_mid)
+    assert len(out) == 1  # safety guard wins
+
+    # حالت ۲: شباهت قوی (Jaccard ≥ 0.7) — همچنان merge می‌شود
+    done_high = ["فاز ۳ اتصال مرکز نظارت بازرس انجام شد"]
+    remaining_high = ["فاز ۳ اتصال مرکز نظارت بازرس انجام نشده"]
+    sim_high = _jaccard_word_similarity(done_high[0].lower(), remaining_high[0].lower())
+    assert sim_high >= 0.7
+    out_high = _resolve_done_remaining_contradictions_v7(done_high, remaining_high)
+    assert len(out_high) == 0
+
+
+def test_resolver_does_not_merge_distinct_features_sharing_words():
+    """Regression for the original user-reported bug: 9/9 checklist done
+    but 11 distinct items left in remaining were getting silently merged
+    by the loose Jaccard threshold. Two items that talk about *different*
+    features but share common words (endpoint, اضافه, پروژه) must STAY
+    separate now."""
     from app.services.oversight_verifier import _resolve_done_remaining_contradictions_v7
-    done = ["فاز 0 — بازرسی کیفیت و باگ‌یابی بازرس ویژه پیاده‌سازی شد"]
-    remaining = ["فاز 0: بازرسی کیفیت بازرس ویژه انجام نشده"]
+    done = ["endpoint /chat-stream اضافه شد به پروژه backend"]
+    remaining = ["endpoint /chat-cloud-code اضافه نشده به پروژه backend"]
     out = _resolve_done_remaining_contradictions_v7(done, remaining)
-    # هر دو متن کلمات مشترک زیاد دارند (Jaccard ≥ 0.5) → remaining خالی شود
-    assert len(out) == 0
+    # کلمات مشترک زیادند ولی موضوع متفاوت است — نباید merge شود
+    assert len(out) == 1
+    assert "cloud-code" in out[0]
 
 
 def test_resolver_preserves_truly_remaining_items():
