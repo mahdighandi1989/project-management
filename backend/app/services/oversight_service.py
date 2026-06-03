@@ -9390,11 +9390,20 @@ AC = «طراحی شیک‌تر باشد»:
         return dict(self.settings)
 
     async def status_summary(self) -> Dict[str, Any]:
+        # 🆕 (active vs archived split) — کاربر در dashboard می‌خواست بداند
+        # عدد روی کارت «تسک‌ها» چقدر تسک واقعاً در جریان است (نه ارشیوشده‌ها).
+        # tasks_count (legacy، کل) را برای سازگاری نگه می‌داریم؛
+        # tasks_active_count و tasks_archived_count دو شمارش تفکیک‌شده هستند.
+        _archived = sum(1 for t in self.tasks if getattr(t, "archived", False))
+        _total = len(self.tasks)
         return {
             "github_token": bool(get_github_token()),
             "render_token": bool(get_render_token()),
             "watched_count": len(self.watched),
-            "tasks_count": len(self.tasks),
+            "tasks_count": _total,  # legacy alias: total of everything
+            "tasks_total_count": _total,
+            "tasks_active_count": _total - _archived,
+            "tasks_archived_count": _archived,
             "reports_count": len(self.reports),
             "tasks_by_status": {
                 s: sum(1 for t in self.tasks if t.status == s)

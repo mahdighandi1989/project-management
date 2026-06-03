@@ -332,6 +332,10 @@ interface Status {
   render_token: boolean;
   watched_count: number;
   tasks_count: number;
+  // 🆕 (active vs archived split) — backend دو شمارش جدید برمی‌گرداند
+  tasks_total_count?: number;
+  tasks_active_count?: number;
+  tasks_archived_count?: number;
   reports_count: number;
   tasks_by_status: Record<string, number>;
   settings: any;
@@ -3394,7 +3398,21 @@ export default function OversightPage() {
           <StatusCard label="GitHub" ok={status?.github_token} okLabel="متصل" failLabel="توکن ندارد" />
           <StatusCard label="Render" ok={status?.render_token} okLabel="متصل" failLabel="توکن ندارد" />
           <StatusCard label="پروژه‌های تحت نظارت" ok okLabel={`${status?.watched_count ?? 0} پروژه`} isCount />
-          <StatusCard label="تسک‌ها" ok okLabel={`${status?.tasks_count ?? 0} تسک`} isCount />
+          {/* 🆕 (active vs archived) — عدد بزرگ = تسک‌های فعال (غیر آرشیوی).
+              زیرش مجموع و تعداد آرشیوشده نمایش داده می‌شود تا کاربر تصویر
+              کامل را داشته باشد. اگر backend هنوز فیلدهای جدید را برنگرداند
+              (deploy قدیمی)، fallback به tasks_count برای backward compat. */}
+          <StatusCard
+            label="تسک‌های فعال"
+            ok
+            isCount
+            okLabel={`${status?.tasks_active_count ?? status?.tasks_count ?? 0} تسک`}
+            subtext={
+              status?.tasks_total_count !== undefined
+                ? `از مجموع ${status.tasks_total_count} (${status.tasks_archived_count ?? 0} آرشیو)`
+                : undefined
+            }
+          />
           <StatusCard label="گزارش‌ها" ok okLabel={`${status?.reports_count ?? 0} گزارش`} isCount />
         </div>
 
@@ -5651,12 +5669,16 @@ function StatusCard({
   okLabel,
   failLabel,
   isCount,
+  subtext,
 }: {
   label: string;
   ok?: boolean;
   okLabel: string;
   failLabel?: string;
   isCount?: boolean;
+  // 🆕 (subtext) — یک خط متن کوچک زیر مقدار اصلی. برای کارت «تسک‌ها» که
+  // می‌خواهیم هم تعداد فعال و هم مجموع را نمایش دهیم استفاده می‌شود.
+  subtext?: string;
 }) {
   const ng = !isCount && !ok;
   return (
@@ -5681,6 +5703,11 @@ function StatusCard({
       >
         {ok ? okLabel : failLabel || okLabel}
       </p>
+      {subtext && (
+        <p className="text-[10px] text-gray-500 dark:text-gray-400 mt-0.5 leading-tight">
+          {subtext}
+        </p>
+      )}
     </div>
   );
 }
