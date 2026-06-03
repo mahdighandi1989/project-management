@@ -193,7 +193,13 @@ def build_workflow_yaml(
     repo_full_name: str,
     branch: str = "main",
     claude_args: str = (
-        "--max-turns 250 --model claude-opus-4-8 "
+        # 🆕 (dynamic model selection) — مدل به‌صورت ${{ inputs.claude_model }}
+        # در workflow ذکر می‌شود تا backend در زمان dispatch، آخرین Opus/Sonnet/
+        # Haiku را بر اساس نوع تسک بفرستد. اگر input ندهد (مثل trigger دستی از
+        # GitHub UI)، fallback به alias `sonnet` که خود Claude Code CLI آن را
+        # به آخرین Sonnet موجود route می‌کند — هیچ model id ثابتی هاردکد نیست.
+        "--max-turns 250 --model "
+        "${{ github.event.inputs.claude_model || 'sonnet' }} "
         "--dangerously-skip-permissions"
     ),
 ) -> str:
@@ -238,6 +244,18 @@ name: Claude Auto Task Runner
         description: 'task_id خاص برای اجرا (اختیاری). اگر خالی، از /next گرفته می‌شود.'
         required: false
         type: string
+      # 🆕 (dynamic model) — backend در زمان dispatch، آخرین مدل Opus/Sonnet/
+      # Haiku را بر اساس tier تشخیص داده‌شده از prompt تسک می‌فرستد. این
+      # یعنی هرگاه Anthropic مدل جدید بدهد (مثلاً claude-opus-5-0-...)، حداکثر
+      # ۱ ساعت بعد (cache /v1/models) خودکار استفاده می‌شود — بدون redeploy و
+      # بدون refresh YAML. اگر input خالی باشد (مثل dispatch دستی از GitHub
+      # UI بدون پر کردن این فیلد)، fallback به alias `sonnet` که Claude Code
+      # CLI خودش به آخرین Sonnet route می‌کند.
+      claude_model:
+        description: 'model id کامل یا alias (opus/sonnet/haiku). اگر خالی → sonnet.'
+        required: false
+        type: string
+        default: ''
 
 # 🛡 (concurrency strategy) — cancel-in-progress: false
 # قبلاً true بود ولی یافتیم که runهای در حال اجرا را مید-اجرا cancel
@@ -390,6 +408,55 @@ async def delete_repo_secret(
 # workflow_dispatch trigger — backend از این برای آغاز run استفاده می‌کند
 # ----------------------------------------------------------------------
 
+async def pick_model_for_task(task: Any) -> Optional[str]:
+    """انتخاب آخرین مدل Claude متناسب با محتوای تسک.
+
+    منطق: prompt تسک + raw_idea + title را به‌عنوان "پیام کاربر" به
+    cloud_code_service.pick_best_model می‌دهیم. همان classifier ای که برای
+    چت بازرس ویژه (Cloud Code engine) ساخته‌ایم: کلمات سنگین (refactor /
+    architecture / security / معماری / بازنویسی / ...) → آخرین Opus،
+    پرامپت‌های ساده/کوتاه → Haiku، بقیه → Sonnet. در هر tier جدیدترین
+    revision از /v1/models (cache یک‌ساعته) برنده است، پس اگر Anthropic
+    فردا Opus 5 بدهد، حداکثر ۱ ساعت بعد خودکار استفاده می‌شود.
+
+    Returns: model id (e.g., "claude-opus-4-5-20251101") یا None اگر
+    OAuth token نباشد. None یعنی workflow از default خودش (alias `sonnet`)
+    استفاده می‌کند که Claude Code CLI آن را به آخرین Sonnet route می‌کند.
+    """
+    try:
+        from .cloud_code_service import cloud_code_is_configured, pick_best_model
+    except Exception as e:
+        logger.debug(f"pick_model_for_task: cloud_code import failed: {e}")
+        return None
+    if not cloud_code_is_configured():
+        return None
+    parts = []
+    title = (getattr(task, "title", "") or "").strip()
+    raw_idea = (getattr(task, "raw_idea", "") or "").strip()
+    prompt_text = (getattr(task, "prompt", "") or "").strip()
+    if title:
+        parts.append(title)
+    if raw_idea and raw_idea != title:
+        parts.append(raw_idea)
+    if prompt_text:
+        parts.append(prompt_text[:6000])  # cap classifier input
+    combined = "\n\n".join(parts).strip()
+    if not combined:
+        return None
+    try:
+        model_id, tier, reason = await pick_best_model(
+            [{"role": "user", "content": combined}],
+        )
+        logger.info(
+            f"pick_model_for_task: task={getattr(task, 'id', '?')} → "
+            f"{tier}/{model_id} ({reason})"
+        )
+        return model_id
+    except Exception as e:
+        logger.warning(f"pick_model_for_task failed for {getattr(task, 'id', '?')}: {e}")
+        return None
+
+
 async def trigger_workflow_dispatch(
     watched: Any,
     *,
@@ -397,6 +464,7 @@ async def trigger_workflow_dispatch(
     ref: str = "main",
     target_task_id: Optional[str] = None,
     force: bool = False,
+    claude_model: Optional[str] = None,
 ) -> Dict[str, Any]:
     """trigger دستی workflow Claude Auto-Runner از طریق GitHub API.
 
@@ -462,8 +530,13 @@ async def trigger_workflow_dispatch(
     )
     headers = pr._get_headers(token=gh_token)  # noqa: SLF001
     body: Dict[str, Any] = {"ref": use_ref}
+    inputs: Dict[str, str] = {}
     if target_task_id:
-        body["inputs"] = {"target_task_id": str(target_task_id)}
+        inputs["target_task_id"] = str(target_task_id)
+    if claude_model:
+        inputs["claude_model"] = str(claude_model)
+    if inputs:
+        body["inputs"] = inputs
     res = await pr._gh_request("POST", url, headers=headers, json_body=body)  # noqa: SLF001
     status = res.get("status")
     body_text = (res.get("body_text") or "")
@@ -477,32 +550,56 @@ async def trigger_workflow_dispatch(
             "error": "workflow_not_indexed_yet (try again in a few seconds)",
             "transient": True,
         }
-    # 422 با پیام "Unexpected inputs" یعنی YAML قدیمی است و
-    # target_task_id input را declare نکرده. اگر target_task_id داشتیم،
-    # دوباره بدون آن تلاش کنیم (auto-retry). caller را با outdated_workflow
-    # علامت می‌زنیم تا بتواند به کاربر اطلاع دهد.
-    outdated = (
+    # 422 با پیام "Unexpected inputs" یعنی YAML قدیمی است و input تازه‌ای
+    # (target_task_id یا claude_model) را declare نکرده. retry با حذف input
+    # ناشناخته. اگر فقط claude_model مشکل‌ساز است، با target_task_id بمانیم.
+    has_unexpected = (
         status == 422
-        and target_task_id
+        and inputs
         and ("unexpected inputs" in body_text.lower() or "no input" in body_text.lower())
     )
-    if outdated:
+    if has_unexpected:
+        # تشخیص دقیق: کدام input ناشناخته است؟
+        body_lower = body_text.lower()
+        cm_unknown = "claude_model" in body_lower
+        tt_unknown = "target_task_id" in body_lower
+
+        # تلاش با حذف input ناشناخته (نه همه)
+        retry_inputs: Dict[str, str] = {}
+        if not tt_unknown and target_task_id:
+            retry_inputs["target_task_id"] = str(target_task_id)
+        if not cm_unknown and claude_model:
+            retry_inputs["claude_model"] = str(claude_model)
+
+        body2: Dict[str, Any] = {"ref": use_ref}
+        if retry_inputs:
+            body2["inputs"] = retry_inputs
+
         logger.warning(
-            f"trigger_workflow_dispatch: workflow YAML قدیمی است (target_task_id "
-            f"undeclared) برای {owner}/{repo}. retry بدون inputs."
+            f"trigger_workflow_dispatch: workflow YAML قدیمی برای {owner}/{repo} "
+            f"— retry با حذف unknown inputs "
+            f"(cm_unknown={cm_unknown}, tt_unknown={tt_unknown})"
         )
-        body2 = {"ref": use_ref}
         res2 = await pr._gh_request("POST", url, headers=headers, json_body=body2)  # noqa: SLF001
         status2 = res2.get("status")
         if status2 == 204:
+            warnings = []
+            if cm_unknown and claude_model:
+                warnings.append(
+                    "workflow YAML قدیمی است و claude_model input ندارد — "
+                    "Claude مدل YAML را استفاده می‌کند (نه آنچه backend انتخاب کرد). "
+                    "برای رفع، runner را refresh کنید."
+                )
+            if tt_unknown and target_task_id:
+                warnings.append(
+                    "workflow YAML قدیمی است و target_task_id input ندارد — "
+                    "Claude /next می‌زند نه تسک خاص. برای رفع، runner را refresh کنید."
+                )
             return {
                 "success": True,
                 "outdated_workflow": True,
-                "warning": (
-                    "workflow YAML این پروژه قدیمی است و target_task_id را "
-                    "پشتیبانی نمی‌کند. Claude /next می‌زند و ممکن است تسک "
-                    "دیگری را بردارد. برای رفع، runner را غیرفعال و دوباره "
-                    "نصب کنید."
+                "warning": " | ".join(warnings) if warnings else (
+                    "workflow YAML قدیمی است — لطفاً refresh کنید."
                 ),
             }
         # حتی retry هم شکست خورد — همان خطای اولیه را برگردانیم
@@ -570,7 +667,7 @@ async def install_runner(
     oauth_token: str,
     external_token: str,
     backend_url: str,
-    claude_args: str = "--max-turns 30 --model claude-opus-4-8",
+    claude_args: Optional[str] = None,
 ) -> Dict[str, Any]:
     """نصب workflow + سه secret روی ریپوی watched.
 
@@ -629,12 +726,18 @@ async def install_runner(
     # 2) workflow file را push کن (حتی اگر secret ها fail شدند، تا کاربر
     # ببیند چه خبر است. اگر workflow بدون secret اجرا شود، fail می‌کند
     # ولی این بهتر از نصب نکردن است.)
-    yaml_content = build_workflow_yaml(
-        watched_id=watched.id,
-        repo_full_name=watched.repo_full_name,
-        branch=branch,
-        claude_args=claude_args,
-    )
+    # claude_args=None → از default داینامیک build_workflow_yaml استفاده می‌کند
+    # (--model ${{ inputs.claude_model || 'sonnet' }}). هیچ model id ثابتی
+    # هاردکد نمی‌شود — backend در زمان dispatch، آخرین مدل tier درست را
+    # می‌فرستد. caller می‌تواند با پاس‌دادن claude_args دستی، override کند.
+    _build_kwargs: Dict[str, Any] = {
+        "watched_id": watched.id,
+        "repo_full_name": watched.repo_full_name,
+        "branch": branch,
+    }
+    if claude_args is not None:
+        _build_kwargs["claude_args"] = claude_args
+    yaml_content = build_workflow_yaml(**_build_kwargs)
     pr = get_github_pr_service()
     upsert = await pr.create_or_update_file(
         owner=owner,
