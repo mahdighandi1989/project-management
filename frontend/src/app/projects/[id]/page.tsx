@@ -5535,6 +5535,15 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
                   setInspectorChatMessages(prev => prev.map(m =>
                     m.id === asstMsgId ? { ...m, content: asstBuffer } as any : m
                   ));
+                } else if (eventType === 'done' && data.actual_model) {
+                  // 🌥️ مدل واقعی که Anthropic سرو کرد — برای جلوگیری از
+                  // سردرگمی (Claude مدل‌ها خودشان را اغلب اشتباه معرفی
+                  // می‌کنند، مثلاً Sonnet 4.x می‌گوید "Claude 3.5 Sonnet").
+                  setInspectorChatMessages(prev => prev.map(m =>
+                    m.id === asstMsgId
+                      ? { ...m, modelUsed: `cloud_code:${data.actual_model}` } as any
+                      : m
+                  ));
                 } else if (eventType === 'error') {
                   setInspectorChatMessages(prev => prev.map(m =>
                     m.id === asstMsgId

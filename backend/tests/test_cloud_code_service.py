@@ -237,6 +237,67 @@ async def test_stream_chat_yields_text_chunks(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stream_chat_captures_actual_model_in_metadata(monkeypatch):
+    """message_start.message.model را در metadata_sink بریزد تا UI بتواند
+    مدل واقعی Anthropic (نه self-id آن) را نشان دهد."""
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test")
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        body_parts = [
+            'data: ' + json.dumps({
+                "type": "message_start",
+                "message": {
+                    "id": "msg_abc",
+                    "model": "claude-sonnet-4-5-20250929",
+                    "usage": {"input_tokens": 12},
+                },
+            }),
+            "",
+            'data: ' + json.dumps({
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "hi"},
+            }),
+            "",
+            'data: ' + json.dumps({
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"output_tokens": 3},
+            }),
+            "",
+            "data: [DONE]",
+            "",
+        ]
+        return httpx.Response(
+            200,
+            content=("\n".join(body_parts) + "\n").encode("utf-8"),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    transport = httpx.MockTransport(_handler)
+    real_client_cls = httpx.AsyncClient
+
+    def _patched_client(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client_cls(*args, **kwargs)
+
+    monkeypatch.setattr("app.services.cloud_code_service.httpx.AsyncClient", _patched_client)
+
+    sink: dict = {}
+    pieces = []
+    async for c in cloud_code_stream_chat(
+        [{"role": "user", "content": "hi"}],
+        metadata_sink=sink,
+    ):
+        pieces.append(c)
+
+    assert "".join(pieces) == "hi"
+    assert sink["actual_model"] == "claude-sonnet-4-5-20250929"
+    assert sink["message_id"] == "msg_abc"
+    assert sink["usage"]["output_tokens"] == 3
+    assert sink["stop_reason"] == "end_turn"
+
+
+@pytest.mark.asyncio
 async def test_stream_chat_raises_on_http_error(monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test")
 
