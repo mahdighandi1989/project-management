@@ -396,6 +396,219 @@ async def test_inspector_agent_service_chat_non_stream(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Dynamic model discovery + intelligent picker
+# ---------------------------------------------------------------------------
+
+
+def test_classify_tier_default_sonnet():
+    from app.services.cloud_code_service import _classify_tier
+
+    assert _classify_tier([{"role": "user", "content": "این کد را برام بنویس"}]) == "sonnet"
+    assert _classify_tier([]) == "sonnet"
+
+
+def test_classify_tier_heavy_keywords_route_to_opus():
+    from app.services.cloud_code_service import _classify_tier
+
+    for txt in [
+        "refactor کل پروژه را",
+        "architecture این سیستم را بازنگری کن",
+        "audit کن همه ماژول‌ها را",
+        "investigate the failing test suite end-to-end",
+        "معماری پروژه را بازطراحی کن",
+    ]:
+        assert _classify_tier([{"role": "user", "content": txt}]) == "opus", txt
+
+
+def test_classify_tier_very_long_routes_to_opus():
+    from app.services.cloud_code_service import _classify_tier
+
+    long_msg = "x" * 5000
+    assert _classify_tier([{"role": "user", "content": long_msg}]) == "opus"
+
+
+def test_classify_tier_greeting_routes_to_haiku():
+    from app.services.cloud_code_service import _classify_tier
+
+    for txt in ["سلام", "hi", "خودت رو معرفی کن", "ممنون", "yes"]:
+        assert _classify_tier([{"role": "user", "content": txt}]) == "haiku", txt
+
+
+def test_infer_tier_from_model_id():
+    from app.services.cloud_code_service import _infer_tier_from_model_id
+
+    assert _infer_tier_from_model_id("claude-opus-4-5-20251101") == "opus"
+    assert _infer_tier_from_model_id("claude-sonnet-4-5-20250929") == "sonnet"
+    assert _infer_tier_from_model_id("claude-haiku-4-5-20251001") == "haiku"
+    assert _infer_tier_from_model_id("unknown-model") is None
+
+
+def test_model_sort_key_prefers_newer_date():
+    from app.services.cloud_code_service import _model_sort_key
+
+    older = {"id": "claude-sonnet-4-5-20250929", "created_at": "2025-09-29"}
+    newer = {"id": "claude-sonnet-4-6-20251115", "created_at": "2025-11-15"}
+    sorted_ids = sorted([older, newer], key=_model_sort_key, reverse=True)
+    assert sorted_ids[0]["id"] == "claude-sonnet-4-6-20251115"
+
+
+@pytest.mark.asyncio
+async def test_pick_best_model_uses_tier_hint(monkeypatch):
+    """tier_hint should override message-based classification."""
+    from app.services import cloud_code_service as ccs
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test")
+
+    async def fake_list(force_refresh=False):
+        return [
+            {"id": "claude-opus-4-5-20251101", "created_at": "2025-11-01"},
+            {"id": "claude-opus-5-0-20260301", "created_at": "2026-03-01"},
+            {"id": "claude-sonnet-4-5-20250929", "created_at": "2025-09-29"},
+        ]
+
+    monkeypatch.setattr(ccs, "list_available_models", fake_list)
+
+    # tier_hint=opus → باید جدیدترین opus را برگرداند
+    model_id, tier = await ccs.pick_best_model(
+        [{"role": "user", "content": "سلام"}],  # خودش haiku می‌داد
+        tier_hint="opus",
+    )
+    assert tier == "opus"
+    assert model_id == "claude-opus-5-0-20260301"
+
+
+@pytest.mark.asyncio
+async def test_pick_best_model_auto_routes_heavy_to_opus(monkeypatch):
+    from app.services import cloud_code_service as ccs
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test")
+
+    async def fake_list(force_refresh=False):
+        return [
+            {"id": "claude-opus-4-5-20251101", "created_at": "2025-11-01"},
+            {"id": "claude-sonnet-4-5-20250929", "created_at": "2025-09-29"},
+        ]
+
+    monkeypatch.setattr(ccs, "list_available_models", fake_list)
+
+    model_id, tier = await ccs.pick_best_model(
+        [{"role": "user", "content": "refactor کل architecture این پروژه"}],
+    )
+    assert tier == "opus"
+    assert model_id == "claude-opus-4-5-20251101"
+
+
+@pytest.mark.asyncio
+async def test_pick_best_model_falls_back_when_discovery_empty(monkeypatch):
+    """وقتی /v1/models هیچ مدلی برنگرداند، باید به CLOUD_CODE_TIER_FALLBACKS برگردد."""
+    from app.services import cloud_code_service as ccs
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test")
+
+    async def fake_list(force_refresh=False):
+        return []
+
+    monkeypatch.setattr(ccs, "list_available_models", fake_list)
+    model_id, tier = await ccs.pick_best_model(
+        [{"role": "user", "content": "hello"}],
+        tier_hint="sonnet",
+    )
+    assert tier == "sonnet"
+    assert model_id == ccs.CLOUD_CODE_TIER_FALLBACKS["sonnet"]
+
+
+@pytest.mark.asyncio
+async def test_list_available_models_caches(monkeypatch):
+    """دومین فراخوانی باید از cache برگردد (بدون HTTP call)."""
+    from app.services import cloud_code_service as ccs
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test")
+    # cache را پاک کن
+    ccs._MODELS_CACHE["at"] = 0.0
+    ccs._MODELS_CACHE["list"] = []
+
+    call_count = {"n": 0}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        call_count["n"] += 1
+        return httpx.Response(
+            200,
+            json={"data": [
+                {"id": "claude-sonnet-4-5-20250929", "created_at": "2025-09-29", "display_name": "Sonnet 4.5"},
+            ]},
+        )
+
+    transport = httpx.MockTransport(_handler)
+    real_client_cls = httpx.AsyncClient
+
+    def _patched_client(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client_cls(*args, **kwargs)
+
+    monkeypatch.setattr(ccs.httpx, "AsyncClient", _patched_client)
+
+    first = await ccs.list_available_models()
+    second = await ccs.list_available_models()
+    assert call_count["n"] == 1  # دومی از cache
+    assert first[0]["id"] == "claude-sonnet-4-5-20250929"
+    assert second[0]["id"] == "claude-sonnet-4-5-20250929"
+
+    # force_refresh باید دوباره call بزند
+    third = await ccs.list_available_models(force_refresh=True)
+    assert call_count["n"] == 2
+    assert third[0]["id"] == "claude-sonnet-4-5-20250929"
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_auto_picks_model_and_reports_in_sink(monkeypatch):
+    """model='auto' باید pick_best_model را صدا بزند و picked_model را در sink بریزد."""
+    from app.services import cloud_code_service as ccs
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test")
+
+    captured_payload: dict = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        captured_payload.update(body)
+        return httpx.Response(
+            200,
+            content=_make_sse_body(["ok"]),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    transport = httpx.MockTransport(_handler)
+    real_client_cls = httpx.AsyncClient
+
+    def _patched_client(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client_cls(*args, **kwargs)
+
+    monkeypatch.setattr(ccs.httpx, "AsyncClient", _patched_client)
+
+    async def fake_pick(messages, tier_hint=None):
+        return "claude-opus-4-5-20251101", "opus"
+
+    monkeypatch.setattr(ccs, "pick_best_model", fake_pick)
+
+    sink: dict = {}
+    pieces = []
+    async for c in ccs.cloud_code_stream_chat(
+        [{"role": "user", "content": "refactor everything"}],
+        model="auto",
+        metadata_sink=sink,
+    ):
+        pieces.append(c)
+
+    assert "".join(pieces) == "ok"
+    assert sink["requested_model"] == "auto"
+    assert sink["picked_model"] == "claude-opus-4-5-20251101"
+    assert sink["picked_tier"] == "opus"
+    # درخواست واقعی به Anthropic باید مدل picked را داشته باشد
+    assert captured_payload["model"] == "claude-opus-4-5-20251101"
+
+
+# ---------------------------------------------------------------------------
 # Settings integration
 # ---------------------------------------------------------------------------
 

@@ -17155,6 +17155,11 @@ class InspectorCloudCodeRequest(BaseModel):
     session_id: Optional[int] = None
     max_tokens: int = 4096
     temperature: float = 0.7
+    # 🆕 (auto model selection) — "auto" (default) → picker بر اساس tier
+    # خودکار آخرین مدل را انتخاب می‌کند. می‌توان نام مدل را پین کرد
+    # (مثل "claude-opus-4-5-20251101") یا فقط tier را hint داد.
+    model: str = "auto"
+    tier_hint: Optional[str] = None  # "opus" | "sonnet" | "haiku" | None
 
 
 @router.post("/inspector/chat-cloud-code")
@@ -17263,6 +17268,8 @@ async def inspector_chat_cloud_code(
             stream_gen = await InspectorAgentService.chat_with_cloud_code(
                 history_payload,
                 system_prompt=system_prompt,
+                model=request.model or "auto",
+                tier_hint=request.tier_hint,
                 max_tokens=request.max_tokens,
                 temperature=request.temperature,
                 stream=True,
@@ -17346,6 +17353,40 @@ async def inspector_cloud_code_status():
     """
     from ...services.inspector_agent_service import InspectorAgentService
     return {"available": InspectorAgentService.cloud_code_available()}
+
+
+@router.get("/inspector/cloud-code/models")
+async def inspector_cloud_code_models(refresh: bool = False):
+    """لیست مدل‌های Claude در دسترس برای UI dropdown (auto + per-tier latest).
+
+    `?refresh=true` → cache یک‌ساعته را dump و /v1/models را دوباره pull کن
+    (برای وقتی Anthropic مدل جدید داد و کاربر می‌خواهد بدون انتظار ببیند).
+    """
+    from ...services.cloud_code_service import (
+        CLOUD_CODE_TIER_FALLBACKS,
+        _infer_tier_from_model_id,
+        _model_sort_key,
+        list_available_models,
+    )
+    from ...services.inspector_agent_service import InspectorAgentService
+    if not InspectorAgentService.cloud_code_available():
+        return {"available": False, "models": [], "tiers": {}}
+    models = await list_available_models(force_refresh=bool(refresh))
+    tiers: Dict[str, Optional[str]] = {}
+    for tier in ("opus", "sonnet", "haiku"):
+        in_tier = [m for m in models if _infer_tier_from_model_id(m.get("id", "")) == tier]
+        if in_tier:
+            in_tier.sort(key=_model_sort_key, reverse=True)
+            tiers[tier] = in_tier[0]["id"]
+        else:
+            tiers[tier] = CLOUD_CODE_TIER_FALLBACKS.get(tier)
+    return {
+        "available": True,
+        "models": models,
+        "latest_by_tier": tiers,
+        "auto_default": "auto",
+        "cache_ttl_sec": 3600,
+    }
 
 
 @router.post("/inspector/apply-action")

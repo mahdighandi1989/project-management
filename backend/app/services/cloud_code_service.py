@@ -30,16 +30,34 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import AsyncIterator, Dict, List, Optional
+import re
+import time
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
 
-CLOUD_CODE_DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
+CLOUD_CODE_DEFAULT_MODEL = "auto"  # "auto" → intelligent tier-based picker
 CLOUD_CODE_API_URL = "https://api.anthropic.com/v1/messages"
+CLOUD_CODE_MODELS_URL = "https://api.anthropic.com/v1/models"
 CLOUD_CODE_API_VERSION = "2023-06-01"
+
+# Hard-coded fallbacks per tier — used only when /v1/models is unreachable
+# or when the OAuth plan does not expose a tier. Updated as new families
+# ship; the dynamic discovery below will pick newer dated revisions
+# automatically without needing a code change.
+CLOUD_CODE_TIER_FALLBACKS: Dict[str, str] = {
+    "opus": "claude-opus-4-5-20251101",
+    "sonnet": "claude-sonnet-4-5-20250929",
+    "haiku": "claude-haiku-4-5-20251001",
+}
+
+# Cache window for /v1/models — Anthropic ships new dated revisions every
+# few weeks, so an hour keeps us fresh without hammering the endpoint.
+_MODELS_CACHE: Dict[str, Any] = {"at": 0.0, "list": []}
+_MODELS_CACHE_TTL_SEC = 3600.0
 # OAuth tokens issued by `claude setup-token` are bound to the Claude Code
 # subscription. To bypass the anti-abuse rate limiter that flags non-CLI
 # traffic with an immediate 429, requests must mimic the official CLI:
@@ -114,6 +132,186 @@ def _build_system_blocks(user_system_prompt: Optional[str]) -> List[Dict[str, st
     return blocks
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Dynamic model discovery + intelligent tier-based picker
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Claude ships new dated model revisions every few weeks (e.g., Sonnet
+# 4.5 → Sonnet 4.6 → Sonnet 5.0). To always reach the *latest* model
+# without redeploying we:
+#   1. Hit Anthropic's /v1/models endpoint (works with the OAuth token)
+#      to enumerate everything the Claude Code plan exposes.
+#   2. Cache the list for an hour so we don't pay the round-trip per chat.
+#   3. Classify each request into an opus/sonnet/haiku tier from a
+#      lightweight heuristic over the user's last message.
+#   4. Inside the chosen tier, pick the newest dated revision (sort by
+#      created_at descending). If discovery fails entirely, fall back to
+#      the hard-coded tier defaults at the top of this module.
+
+
+_TIER_HEAVY_PATTERNS = re.compile(
+    r"\b("
+    r"refactor|architecture|architect|design|audit|review|analyze|investigate|"
+    r"معماری|بازنگری|بازآرایی|بررسی\s*عمیق|طراحی|بازطراحی|بازنویسی|"
+    r"درست\s*کن.*کل|تمام\s*پروژه|سراسری|debug\s*end[- ]?to[- ]?end"
+    r")\b",
+    re.IGNORECASE,
+)
+_TIER_LIGHT_PATTERNS = re.compile(
+    r"^("
+    r"hi|hello|hey|thanks|thank you|yes|no|ok|"
+    r"سلام|درود|ممنون|بله|خیر|آره|نه|باشه|"
+    r"خودت\s*رو\s*معرفی|introduce\s*yourself"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _classify_tier(messages: List[Dict[str, str]]) -> str:
+    """Return one of 'opus' | 'sonnet' | 'haiku' based on the user's last
+    message. Default is 'sonnet' — the right balance for inspector chat.
+    Heavy keywords (architecture/refactor/...) bump to opus.
+    Light/greeting messages drop to haiku.
+    """
+    last_user = ""
+    for m in reversed(messages or []):
+        if (m.get("role") or "").lower() == "user":
+            last_user = str(m.get("content") or "").strip()
+            break
+    if not last_user:
+        return "sonnet"
+    # Heavy first — explicit signal wins over length.
+    if _TIER_HEAVY_PATTERNS.search(last_user):
+        return "opus"
+    # Very long context likely needs deeper reasoning.
+    if len(last_user) > 4000:
+        return "opus"
+    # Light: short greetings / yes-no.
+    if len(last_user) <= 80 and _TIER_LIGHT_PATTERNS.search(last_user):
+        return "haiku"
+    return "sonnet"
+
+
+def _infer_tier_from_model_id(model_id: str) -> Optional[str]:
+    mid = (model_id or "").lower()
+    for tier in ("opus", "sonnet", "haiku"):
+        if tier in mid:
+            return tier
+    return None
+
+
+def _model_sort_key(m: Dict[str, Any]) -> Tuple[Any, ...]:
+    """Sort key for picking the newest model within a tier.
+
+    Prefer `created_at` (Anthropic returns RFC3339), fall back to the
+    trailing YYYYMMDD in the model id (e.g., `claude-sonnet-4-5-20250929`).
+    """
+    created = m.get("created_at") or ""
+    mid = (m.get("id") or "")
+    match = re.search(r"(\d{8})$", mid)
+    date_in_id = match.group(1) if match else ""
+    return (created, date_in_id, mid)
+
+
+async def list_available_models(*, force_refresh: bool = False) -> List[Dict[str, Any]]:
+    """Hit /v1/models with the OAuth token + Claude Code beta headers.
+
+    Returns the cached list when fresh. On any error returns the previous
+    cached list (or an empty list) so callers can fall back to the
+    hard-coded tier defaults — chat must never break just because the
+    discovery endpoint is unreachable.
+    """
+    now = time.time()
+    if (
+        not force_refresh
+        and _MODELS_CACHE["list"]
+        and (now - _MODELS_CACHE["at"]) < _MODELS_CACHE_TTL_SEC
+    ):
+        return list(_MODELS_CACHE["list"])
+
+    token = get_cloud_code_token()
+    if not token:
+        return list(_MODELS_CACHE["list"])
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                CLOUD_CODE_MODELS_URL,
+                headers=_build_headers(token),
+            )
+            if resp.status_code != 200:
+                logger.info(
+                    "cloud_code /v1/models returned %s — keeping cached list",
+                    resp.status_code,
+                )
+                return list(_MODELS_CACHE["list"])
+            body = resp.json()
+            data = body.get("data") or body.get("models") or []
+            cleaned: List[Dict[str, Any]] = []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                mid = item.get("id") or item.get("model") or ""
+                if not mid:
+                    continue
+                cleaned.append({
+                    "id": mid,
+                    "display_name": item.get("display_name") or mid,
+                    "created_at": item.get("created_at") or "",
+                    "type": item.get("type") or "",
+                })
+            _MODELS_CACHE["list"] = cleaned
+            _MODELS_CACHE["at"] = now
+            logger.info(
+                "cloud_code refreshed model list: %d entries", len(cleaned)
+            )
+            return list(cleaned)
+    except Exception as e:
+        logger.warning("cloud_code list_available_models failed: %s", e)
+        return list(_MODELS_CACHE["list"])
+
+
+async def pick_best_model(
+    messages: List[Dict[str, str]],
+    *,
+    tier_hint: Optional[str] = None,
+) -> Tuple[str, str]:
+    """Return `(model_id, picked_tier)` based on dynamic discovery.
+
+    - `tier_hint` (optional): "opus" | "sonnet" | "haiku" to force a tier.
+      When omitted, the tier is inferred from the user's last message via
+      `_classify_tier`.
+    - Within the chosen tier, the newest available revision wins.
+    - Falls back to `CLOUD_CODE_TIER_FALLBACKS[tier]` when discovery
+      returns nothing for that tier.
+    """
+    tier = (tier_hint or _classify_tier(messages)).lower()
+    if tier not in CLOUD_CODE_TIER_FALLBACKS:
+        tier = "sonnet"
+
+    models = await list_available_models()
+    in_tier = [m for m in models if _infer_tier_from_model_id(m.get("id", "")) == tier]
+    if in_tier:
+        in_tier.sort(key=_model_sort_key, reverse=True)
+        return in_tier[0]["id"], tier
+
+    # Tier empty in plan → try sonnet → opus → haiku as a graceful chain.
+    for alt in ("sonnet", "opus", "haiku"):
+        if alt == tier:
+            continue
+        alt_in = [m for m in models if _infer_tier_from_model_id(m.get("id", "")) == alt]
+        if alt_in:
+            alt_in.sort(key=_model_sort_key, reverse=True)
+            logger.info(
+                "cloud_code: tier '%s' empty in plan, falling back to '%s'",
+                tier, alt,
+            )
+            return alt_in[0]["id"], alt
+
+    # /v1/models unreachable and cache empty → hard-coded default.
+    return CLOUD_CODE_TIER_FALLBACKS[tier], tier
+
+
 async def cloud_code_stream_chat(
     messages: List[Dict[str, str]],
     *,
@@ -123,6 +321,7 @@ async def cloud_code_stream_chat(
     temperature: float = 0.7,
     timeout: float = 180.0,
     metadata_sink: Optional[Dict[str, Any]] = None,
+    tier_hint: Optional[str] = None,
 ) -> AsyncIterator[str]:
     """
     metadata_sink: optional dict that the generator mutates as the stream
@@ -132,6 +331,11 @@ async def cloud_code_stream_chat(
     use this to display the *real* model in the UI — Claude's own
     self-identification in text replies is unreliable (the training data
     causes Sonnet 4.x to often say "I am Claude 3.5 Sonnet").
+
+    model: pass an explicit model id (e.g. "claude-opus-4-5-20251101") to
+    pin, or "auto" (the default) to let `pick_best_model` route the
+    request to the latest model in the inferred tier. `tier_hint` lets a
+    caller force a tier (opus/sonnet/haiku) without naming a specific id.
     """
     token = get_cloud_code_token()
     if not token:
@@ -139,6 +343,21 @@ async def cloud_code_stream_chat(
             "CLAUDE_CODE_OAUTH_TOKEN env var is not set — "
             "cloud_code engine unavailable"
         )
+
+    # 🤖 Dynamic model selection — "auto" routes to the latest model in
+    # the tier that best matches the user's request. Anything else is
+    # passed through verbatim so power users can pin.
+    picked_tier: Optional[str] = None
+    requested_model = model
+    if model == "auto" or tier_hint is not None:
+        chosen_id, picked_tier = await pick_best_model(
+            messages, tier_hint=tier_hint
+        )
+        model = chosen_id
+        if metadata_sink is not None:
+            metadata_sink["requested_model"] = requested_model
+            metadata_sink["picked_model"] = chosen_id
+            metadata_sink["picked_tier"] = picked_tier
 
     payload: Dict[str, object] = {
         "model": model,

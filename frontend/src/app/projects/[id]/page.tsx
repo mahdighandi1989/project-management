@@ -540,6 +540,14 @@ export default function ProjectDetailPage() {
   const [inspectorEngine, setInspectorEngine] = useState<'local' | 'cloud_code'>('local');
   // در دسترس بودن Cloud Code (از /inspector/cloud-code/status بازخوانی می‌شود)
   const [cloudCodeAvailable, setCloudCodeAvailable] = useState<boolean | null>(null);
+  // 🤖 انتخاب مدل Cloud Code — 'auto' (هوشمند، آخرین مدل بر اساس tier تسک)
+  // یا یک tier ثابت ('opus' | 'sonnet' | 'haiku') یا model id کامل.
+  const [cloudCodeModelChoice, setCloudCodeModelChoice] = useState<string>('auto');
+  // لیست مدل‌ها + latest per tier از /inspector/cloud-code/models
+  const [cloudCodeModelsInfo, setCloudCodeModelsInfo] = useState<{
+    latest_by_tier?: Record<string, string>;
+    models?: Array<{ id: string; display_name?: string; created_at?: string }>;
+  } | null>(null);
   // 🆕 (Addendum v5 §2.2) — state inspectorCollaborativeMode حذف شد همراه با
   // checkbox مربوطه چون هیچ‌جا به backend ارسال نمی‌شد و dead UI بود.
   const [inspectorSmartPrompt, setInspectorSmartPrompt] = useState(true); // 🧠 پرامپت ساختارمند — پیش‌فرض فعال
@@ -2656,6 +2664,16 @@ export default function ProjectDetailPage() {
         if (!res.ok) return;
         const data = await res.json();
         if (!cancelled) setCloudCodeAvailable(!!data.available);
+        // اگر available، لیست مدل‌ها هم بگیر (cache یک‌ساعته backend → ارزان است)
+        if (data.available) {
+          try {
+            const mres = await fetch(`${API_BASE}/api/render/inspector/cloud-code/models`);
+            if (mres.ok) {
+              const mdata = await mres.json();
+              if (!cancelled) setCloudCodeModelsInfo(mdata);
+            }
+          } catch {}
+        }
       } catch {
         if (!cancelled) setCloudCodeAvailable(false);
       }
@@ -5500,6 +5518,17 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
           .filter(m => m.role === 'user' || m.role === 'assistant')
           .slice(-20)
           .map(m => ({ role: m.role, content: (m as any).content || '' }));
+        // 🤖 (auto model) — انتخاب کاربر را به فرمت model/tier_hint تبدیل کن
+        let _ccModel: string = 'auto';
+        let _ccTierHint: string | undefined;
+        if (cloudCodeModelChoice === 'auto') {
+          _ccModel = 'auto';
+        } else if (cloudCodeModelChoice.startsWith('tier:')) {
+          _ccModel = 'auto';
+          _ccTierHint = cloudCodeModelChoice.slice(5);
+        } else {
+          _ccModel = cloudCodeModelChoice;
+        }
         const res = await fetch(`${API_BASE}/api/render/inspector/chat-cloud-code`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -5511,6 +5540,8 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
             frontend_url: inspectorFrontendUrl,
             page_url: inspectorFrontendUrl,
             session_id: inspectorSessionId || undefined,
+            model: _ccModel,
+            tier_hint: _ccTierHint,
           }),
         });
         const reader = res.body?.getReader();
@@ -14620,9 +14651,34 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                           </label>
                         </div>
                         {inspectorEngine === 'cloud_code' && cloudCodeAvailable !== false && (
-                          <p className="text-[10px] opacity-60 mt-1.5">
-                            ✨ پاسخ مستقیماً از Claude Code OAuth می‌آید — انتخاب مدل/scan/apply-action غیرفعال است.
-                          </p>
+                          <>
+                            <p className="text-[10px] opacity-60 mt-1.5">
+                              ✨ پاسخ مستقیماً از Claude Code OAuth می‌آید — scan/apply-action غیرفعال است.
+                            </p>
+                            <div className="mt-2">
+                              <label className="text-[10px] opacity-80 block mb-0.5">🤖 مدل Claude:</label>
+                              <select
+                                value={cloudCodeModelChoice}
+                                onChange={(e) => setCloudCodeModelChoice(e.target.value)}
+                                className="w-full text-[11px] bg-white/10 border border-white/30 rounded px-1.5 py-1 text-white"
+                              >
+                                <option value="auto">⚡ خودکار (آخرین مدل، بر اساس نوع تسک)</option>
+                                <option value="tier:opus">🧠 آخرین Opus (پیچیده/معماری)</option>
+                                <option value="tier:sonnet">⚖️ آخرین Sonnet (متعادل، پیش‌فرض)</option>
+                                <option value="tier:haiku">⚡ آخرین Haiku (سریع/ساده)</option>
+                                {cloudCodeModelsInfo?.models?.map(m => (
+                                  <option key={m.id} value={m.id}>
+                                    📌 {m.display_name || m.id} ({m.id})
+                                  </option>
+                                ))}
+                              </select>
+                              {cloudCodeModelsInfo?.latest_by_tier && (
+                                <p className="text-[9px] opacity-50 mt-0.5">
+                                  latest: Opus={cloudCodeModelsInfo.latest_by_tier.opus || '?'} · Sonnet={cloudCodeModelsInfo.latest_by_tier.sonnet || '?'} · Haiku={cloudCodeModelsInfo.latest_by_tier.haiku || '?'}
+                                </p>
+                              )}
+                            </div>
+                          </>
                         )}
                       </div>
 
