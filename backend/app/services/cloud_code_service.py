@@ -743,6 +743,12 @@ async def cloud_code_complete(
     max_tokens: int = 4096,
     temperature: float = 0.7,
     timeout: float = 180.0,
+    tier_hint: Optional[str] = None,
+    # 🆕 (capability test fix) — اجازه می‌دهد caller صراحتاً tier را
+    # مجبور کند. برای تست توانایی این لازم است: prompts تست کوتاه‌اند
+    # و _classify_tier آن‌ها را به haiku route می‌کند، که نتیجه‌ی
+    # نامنصفانه (32/100) به دست می‌دهد. caller معمولاً tier_hint="opus"
+    # می‌دهد تا قدرت کامل subscription سنجیده شود.
 ) -> str:
     chunks: List[str] = []
     async for piece in cloud_code_stream_chat(
@@ -752,6 +758,7 @@ async def cloud_code_complete(
         max_tokens=max_tokens,
         temperature=temperature,
         timeout=timeout,
+        tier_hint=tier_hint,
     ):
         chunks.append(piece)
     return "".join(chunks)

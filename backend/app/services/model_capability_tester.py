@@ -360,10 +360,19 @@ class ModelCapabilityTester:
                     "CLAUDE_CODE_OAUTH_TOKEN ست نشده — قبل از تست توانایی "
                     "cloud_code باید token را در env قرار دهید."
                 )
+            # 🆕 (capability test fairness fix) — قبلاً model="auto" پاس
+            # می‌شد که tier picker بر اساس طول prompt تصمیم می‌گرفت.
+            # prompts تست کوتاه‌اند و فاقد code signal → همیشه به Haiku
+            # route می‌شدند، نتیجه: امتیاز ~32/100 برای Cloud Code (که
+            # ضعیف‌ترین tier است). این منصفانه نیست — تست توانایی باید
+            # «بهترین چیزی که این provider می‌تواند ارائه دهد» را بسنجد،
+            # نه «ارزان‌ترین tier وقتی prompt کوتاه است». tier_hint="opus"
+            # قوی‌ترین مدل subscription را force می‌کند. هزینهٔ اضافه ندارد
+            # چون از همان OAuth token می‌آید.
             return await cloud_code_complete(
                 messages=[{"role": "user", "content": prompt}],
                 system_prompt="تو یک دستیار هوشمند هستی. فقط خروجی JSON برگردان.",
-                model="auto",  # tier picker خودش haiku/sonnet/opus را انتخاب می‌کند
+                tier_hint="opus",
                 max_tokens=2000,
                 temperature=0.3,
             )
