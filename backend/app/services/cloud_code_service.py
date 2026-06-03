@@ -48,10 +48,15 @@ CLOUD_CODE_API_VERSION = "2023-06-01"
 # or when the OAuth plan does not expose a tier. Updated as new families
 # ship; the dynamic discovery below will pick newer dated revisions
 # automatically without needing a code change.
+#
+# 🆕 (model refresh) — بروز شدن aliases به آخرین خانوادهٔ موجود تا اگر
+# /v1/models در دسترس نباشد، باز هم کاربر به جدیدترین مدل برسد. این فقط
+# safety net است؛ مسیر اصلی pick_best_model همچنان از /v1/models می‌خواند
+# و آخرین revision را با date بزرگتر برمی‌دارد — کاملاً dynamic.
 CLOUD_CODE_TIER_FALLBACKS: Dict[str, str] = {
-    "opus": "claude-opus-4-5-20251101",
-    "sonnet": "claude-sonnet-4-5-20250929",
-    "haiku": "claude-haiku-4-5-20251001",
+    "opus": "claude-opus-4-8",      # alias — Claude CLI آن را به آخرین Opus 4.8 route می‌کند
+    "sonnet": "claude-sonnet-4-6",  # alias — به آخرین Sonnet 4.6
+    "haiku": "claude-haiku-4-5",    # هنوز جدیدترین Haiku (نسخهٔ کوچک‌تر آپدیت کمتر دارد)
 }
 
 # Cache window for /v1/models — Anthropic ships new dated revisions every
@@ -551,12 +556,18 @@ async def pick_best_model(
     messages: List[Dict[str, str]],
     *,
     tier_hint: Optional[str] = None,
+    min_tier: Optional[str] = None,
 ) -> Tuple[str, str, str]:
     """Return `(model_id, picked_tier, reason)`.
 
     - `tier_hint` (optional): "opus" | "sonnet" | "haiku" to force a tier.
       When omitted, `_classify_tier` chooses + supplies a human-readable
       reason that the UI can display.
+    - `min_tier` (optional): "opus" | "sonnet" | "haiku" — حداقل tier
+      مجاز. اگر classifier پایین‌تر تشخیص داد، به این مقدار رو می‌رسد.
+      برای inspector chat و موتور خالق `min_tier="sonnet"` پیش‌فرض است
+      تا پرسش‌های کوتاه به Haiku نروند (Haiku گاهی خودش را غلط معرفی
+      می‌کند و پاسخ‌های سطحی‌تری می‌دهد).
     - Within the chosen tier, the newest available revision wins.
     - Falls back to `CLOUD_CODE_TIER_FALLBACKS[tier]` when discovery
       returns nothing for that tier; logs and reports the fallback path
@@ -570,6 +581,18 @@ async def pick_best_model(
     if tier not in CLOUD_CODE_TIER_FALLBACKS:
         tier = "sonnet"
         reason = f"unknown tier requested, defaulted to sonnet"
+    # 🆕 (min_tier floor) — caller می‌تواند کف tier تعیین کند تا hai/sonnet
+    # ها به Haiku route نشوند برای پرسش‌های کوتاه.
+    if min_tier and min_tier.lower() in CLOUD_CODE_TIER_FALLBACKS:
+        _order = ["haiku", "sonnet", "opus"]
+        try:
+            cur_idx = _order.index(tier)
+            min_idx = _order.index(min_tier.lower())
+            if cur_idx < min_idx:
+                tier = min_tier.lower()
+                reason = f"{reason}; raised to min_tier={tier}"
+        except ValueError:
+            pass
 
     models = await list_available_models()
     in_tier = [m for m in models if _infer_tier_from_model_id(m.get("id", "")) == tier]
@@ -610,6 +633,7 @@ async def cloud_code_stream_chat(
     timeout: float = 180.0,
     metadata_sink: Optional[Dict[str, Any]] = None,
     tier_hint: Optional[str] = None,
+    min_tier: Optional[str] = None,
 ) -> AsyncIterator[str]:
     """
     metadata_sink: optional dict that the generator mutates as the stream
@@ -637,9 +661,9 @@ async def cloud_code_stream_chat(
     # passed through verbatim so power users can pin.
     picked_tier: Optional[str] = None
     requested_model = model
-    if model == "auto" or tier_hint is not None:
+    if model == "auto" or tier_hint is not None or min_tier is not None:
         chosen_id, picked_tier, pick_reason = await pick_best_model(
-            messages, tier_hint=tier_hint
+            messages, tier_hint=tier_hint, min_tier=min_tier,
         )
         model = chosen_id
         if metadata_sink is not None:
@@ -744,6 +768,7 @@ async def cloud_code_complete(
     temperature: float = 0.7,
     timeout: float = 180.0,
     tier_hint: Optional[str] = None,
+    min_tier: Optional[str] = None,
     # 🆕 (capability test fix) — اجازه می‌دهد caller صراحتاً tier را
     # مجبور کند. برای تست توانایی این لازم است: prompts تست کوتاه‌اند
     # و _classify_tier آن‌ها را به haiku route می‌کند، که نتیجه‌ی
@@ -759,6 +784,7 @@ async def cloud_code_complete(
         temperature=temperature,
         timeout=timeout,
         tier_hint=tier_hint,
+        min_tier=min_tier,
     ):
         chunks.append(piece)
     return "".join(chunks)

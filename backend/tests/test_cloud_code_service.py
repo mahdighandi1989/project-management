@@ -1138,7 +1138,7 @@ async def test_stream_chat_auto_picks_model_and_reports_in_sink(monkeypatch):
 
     monkeypatch.setattr(ccs.httpx, "AsyncClient", _patched_client)
 
-    async def fake_pick(messages, tier_hint=None):
+    async def fake_pick(messages, tier_hint=None, min_tier=None):
         return "claude-opus-4-5-20251101", "opus", "heavy keyword → opus"
 
     monkeypatch.setattr(ccs, "pick_best_model", fake_pick)
