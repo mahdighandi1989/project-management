@@ -681,6 +681,15 @@ class OversightService:
             # `claude_model` فرستاده می‌شود. مقدار خالی → build_workflow_yaml
             # پیش‌فرض داینامیک خود را استفاده می‌کند.
             "claude_runner_default_args": "",
+            # 🆕 (Auto Backfill AC) — وقتی True، scheduler خودکار backfill
+            # AC ها (دکمهٔ زرد) و Phase-3 re-enrich (دکمهٔ بنفش) را با AI
+            # اجرا می‌کند و نتیجه در تلگرام می‌آید. کاربر دیگر لازم نیست
+            # دستی روی دکمه‌ها بزند. min_hours: فاصلهٔ زمانی بین اجراها
+            # (cooldown) تا از مصرف بی‌مورد جلوگیری شود.
+            "auto_backfill_ac_enabled": True,
+            "auto_backfill_ac_min_hours": 6,
+            # last_auto_backfill_ac_at توسط scheduler ست می‌شود (ISO).
+            "last_auto_backfill_ac_at": None,
         }
 
         # 🆕 (Dispatch Storm Prevention) — set از task_id هایی که در حال حاضر
@@ -9527,6 +9536,117 @@ AC = «طراحی شیک‌تر باشد»:
     # Scheduler tick (با scan دوره‌ای)
     # ====================================================================
 
+    async def _maybe_auto_backfill_ac(self) -> None:
+        """خودکار backfill AC ها (دکمهٔ زرد) و Phase-3 re-enrich (دکمهٔ بنفش)
+        را trigger می‌کند اگر شرایط جمع باشد:
+
+          - settings.auto_backfill_ac_enabled == True
+          - یک backfill قبلی در حال اجرا نیست
+          - از آخرین run، حداقل auto_backfill_ac_min_hours گذشته
+          - حداقل یک AC نیاز به backfill (ac_count > 0) یا upgrade
+            (phase3_ac_count > 0) دارد
+
+        نتیجه از طریق همان مسیر معمول (notify_event در پایان
+        _run_backfill_ac_classification) به تلگرام می‌رود — هیچ مسیر
+        تلگرام جدیدی نیاز نیست.
+        """
+        if not bool(self.settings.get("auto_backfill_ac_enabled", True)):
+            return
+
+        # cooldown
+        min_hours = float(self.settings.get("auto_backfill_ac_min_hours") or 6)
+        last = self.settings.get("last_auto_backfill_ac_at")
+        if last:
+            try:
+                from datetime import datetime as _dt_cd, timezone as _tz_cd
+                last_dt = _dt_cd.fromisoformat(str(last).replace("Z", "+00:00"))
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=_tz_cd.utc)
+                age_h = (
+                    _dt_cd.now(_tz_cd.utc) - last_dt
+                ).total_seconds() / 3600.0
+                if age_h < min_hours:
+                    return
+            except Exception:
+                pass  # parse failure → run
+
+        # lazy import — جلوگیری از circular import. _BACKFILL_STATE
+        # module-level در route file است؛ همچنین خود تابع backfill در آنجاست.
+        try:
+            from ..api.routes.oversight import (
+                _BACKFILL_STATE,
+                _run_backfill_ac_classification,
+            )
+        except Exception as _ie:
+            logger.warning(f"auto-backfill: import route module failed: {_ie}")
+            return
+
+        if _BACKFILL_STATE.get("running"):
+            return  # یک backfill در حال اجراست (دستی یا قبلی)
+
+        # شمارش — تکرار همان منطق /runtime/diagnostics ولی فقط counter ها
+        ac_unclassified = 0
+        ac_needing_phase3 = 0
+        for t in self.tasks:
+            if getattr(t, "archived", False):
+                continue
+            for ac in (getattr(t, "acceptance_criteria", []) or []):
+                if not isinstance(ac, dict):
+                    continue
+                method = ac.get("verify_method") or ac.get("method") or ""
+                if not method or method == "static":
+                    ac_unclassified += 1
+                    continue
+                plan = ac.get("verify_plan") or {}
+                steps = plan.get("steps") if isinstance(plan, dict) else None
+                if isinstance(steps, list) and 1 <= len(steps) <= 2:
+                    # Phase-2 style: کم‌مرحله، احتمالاً فقط navigate
+                    only_simple = all(
+                        isinstance(s, dict)
+                        and (s.get("action") or "") in ("navigate", "wait", "screenshot")
+                        for s in steps
+                    )
+                    if only_simple:
+                        ac_needing_phase3 += 1
+
+        if ac_unclassified == 0 and ac_needing_phase3 == 0:
+            return  # هیچ کاری لازم نیست
+
+        # ترجیح ارزان‌تر اول: اگر unclassified هست force=False؛ وگرنه force=True
+        force = ac_unclassified == 0 and ac_needing_phase3 > 0
+        target_count = ac_unclassified if not force else ac_needing_phase3
+        logger.info(
+            f"auto-backfill-ac: triggering "
+            f"({'force/Phase3' if force else 'regular'}) — "
+            f"{target_count} AC در صف."
+        )
+
+        # state را در همان struct route module ست کن تا /status frontend
+        # ببیند و دکمهٔ دستی disable شود.
+        from datetime import datetime as _dt_set
+        _BACKFILL_STATE["running"] = True
+        _BACKFILL_STATE["started_at"] = _dt_set.utcnow().isoformat()
+        _BACKFILL_STATE["finished_at"] = None
+        _BACKFILL_STATE["current_index"] = 0
+        _BACKFILL_STATE["total"] = 0
+        _BACKFILL_STATE["summary"] = None
+        _BACKFILL_STATE["error"] = None
+        _BACKFILL_STATE["force"] = bool(force)
+        _BACKFILL_STATE["triggered_by"] = "auto_scheduler"
+
+        # cooldown timestamp ثبت کن (در شروع، نه پایان — تا اگر backfill
+        # طولانی شد، tick بعدی دوباره trigger نکند)
+        self.settings["last_auto_backfill_ac_at"] = _dt_set.utcnow().isoformat()
+        try:
+            self._save_settings()
+        except Exception:
+            pass
+
+        import asyncio as _asyncio_abf
+        _asyncio_abf.create_task(
+            _run_backfill_ac_classification(None, force=force)
+        )
+
     async def scheduler_tick(self) -> Dict[str, Any]:
         """یک نوبت اجرای scheduler. سه نوع کار: scan، run، verify."""
         now = datetime.now(timezone.utc)
@@ -9556,6 +9676,15 @@ AC = «طراحی شیک‌تر باشد»:
             await _asyncio_lc.to_thread(cleanup_orphan_runtime_screenshots, 3)
         except Exception:
             pass
+
+        # 🆕 (Auto Backfill AC) — اگر settings فعال است، دکمه‌های زرد/بنفش
+        # که قبلاً کاربر دستی می‌زد را خودکار اجرا می‌کنیم. هزینهٔ check
+        # ناچیز است (یک شمارش روی task list). در صورت trigger، خود
+        # _run_backfill_ac_classification نوتیفیکیشن تلگرام را می‌فرستد.
+        try:
+            await self._maybe_auto_backfill_ac()
+        except Exception as _abe:
+            logger.warning(f"auto-backfill-ac check failed: {_abe}")
 
         # 🆕 (External Pending Verify Sweeper) — هر تیک scheduler چک می‌کنیم
         # که آیا تسک‌هایی هستند که Claude /complete کرد ولی verify-after-complete
