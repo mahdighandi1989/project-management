@@ -438,6 +438,43 @@ async def complete_prompt(task_id: str, payload: CompleteRequest):
 # 🔬 (verify-then-chain) — background flow بعد از /complete توسط Claude
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+def _normalize_remaining(items: List[Any]) -> List[str]:
+    """نرمال‌سازی برای مقایسهٔ remaining_parts بین دو verify run."""
+    out: List[str] = []
+    for it in items or []:
+        s = str(it or "").strip().lower()
+        if s:
+            out.append(s)
+    return sorted(out)
+
+
+def _remaining_unchanged(current: List[Any], task: Any) -> bool:
+    """🚨 (no-progress guard) — آیا remaining_parts این بار با remaining_parts
+    دور قبل تقریباً یکسان است؟ اگر بله، Claude در دور قبل نتوانست هیچ
+    آیتمی را تمام کند و ادامهٔ retry بی‌ثمر است. اطلاعات «دور قبل» در
+    `task._last_remaining_snapshot` ذخیره می‌شود (lazy attr روی dataclass؛
+    اگر وجود نداشت، فرض بر تغییر می‌گذاریم).
+    """
+    cur = _normalize_remaining(current)
+    prev = _normalize_remaining(
+        getattr(task, "_last_remaining_snapshot", []) or []
+    )
+    if not prev:
+        return False  # دور اول — معیار مقایسه نداریم
+    if not cur:
+        return False  # حالا remaining خالی است → پیشرفت کرد
+    # Jaccard ≥ 0.85 یعنی عملاً همان مجموعهٔ آیتم‌ها
+    set_cur = set(cur)
+    set_prev = set(prev)
+    inter = len(set_cur & set_prev)
+    union = len(set_cur | set_prev)
+    if union == 0:
+        return False
+    jaccard = inter / union
+    return jaccard >= 0.85
+
+
 async def _verify_then_chain(
     *, task_id: str, watched_id: str, agent_id: str,
 ) -> None:
@@ -505,7 +542,28 @@ async def _verify_then_chain(
     if vstatus == "done" or status_val_this_run == "done":
         action = "chain_next"
     elif vstatus in ("partial", "needs_clarification"):
-        if retries_done < max_retries:
+        # 🚨 (no-progress guard) — اگر این verify در مقایسه با verify
+        # قبلی همان تسک هیچ پیشرفت معناداری نشان نداده، یعنی Claude در
+        # دور قبل نتوانست remaining_parts را کم کند (احتمالاً نیازمند
+        # credential، فعل دستی، یا اطلاعاتی است که در دسترسش نیست).
+        # ادامهٔ retry فقط token می‌سوزاند و کاربر همان checklist را در
+        # Telegram دوباره می‌بیند ("هی داره تسک تکراری انجام میده").
+        # حالا مستقیماً TODO می‌نویسیم و archive می‌کنیم.
+        cur_remaining = list(
+            (verify_result.get("report") or {}).get("remaining_parts") or []
+        )
+        no_progress = (
+            retries_done >= 1
+            and _remaining_unchanged(cur_remaining, task)
+        )
+        if no_progress:
+            logger.info(
+                f"_verify_then_chain: no-progress detected for task={task_id} "
+                f"(retries_done={retries_done}, remaining={len(cur_remaining)}). "
+                f"Skipping retry — going straight to TODO."
+            )
+            action = "max_retries_todo"
+        elif retries_done < max_retries:
             action = "retry_same"
         else:
             action = "max_retries_todo"
@@ -522,12 +580,21 @@ async def _verify_then_chain(
     # 3) apply action
     if action == "retry_same":
         # تسک را به pending برگردان تا workflow بعدی همین را بگیرد
+        # 🚨 (no-progress guard) — snapshot remaining_parts روی task ذخیره
+        # کن تا دور بعد بتوانیم تشخیص بدهیم پیشرفتی هست یا نه.
+        _cur_remaining_for_snapshot = list(
+            (verify_result.get("report") or {}).get("remaining_parts") or []
+        )
         async with service._lock:
             task.external_status = "pending"
             task.status = "pending"
             task.external_locked_by = None
             task.external_lease_until = None
             task.updated_at = now_iso()
+            try:
+                setattr(task, "_last_remaining_snapshot", _cur_remaining_for_snapshot)
+            except Exception:
+                pass
             service._save_tasks()
             service._recompute_execution_priorities(task)
             # release lock
