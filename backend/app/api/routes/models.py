@@ -121,6 +121,17 @@ async def list_models(
                         continue
 
                 is_available = model_provider in available_providers
+                # 🆕 (Cloud Code centralization) — provider `cloud_code` در
+                # ai_manager._services ثبت نشده (چون via OAuth token کار می‌کند
+                # نه API key). availability را مستقیماً از env می‌خوانیم تا
+                # ردیف Cloud Code در صفحهٔ مدل‌ها به‌درستی "در دسترس" نمایش
+                # داده شود وقتی token ست است.
+                if model_provider == "cloud_code":
+                    try:
+                        from ...services.cloud_code_service import cloud_code_is_configured
+                        is_available = cloud_code_is_configured()
+                    except Exception:
+                        pass
 
                 # 🔴 چک کردن تنظیمات دیتابیس برای enabled
                 db_setting = db_settings_map.get(model.id)
@@ -175,6 +186,14 @@ async def list_providers():
         except Exception as e:
             logger.warning(f"Could not get AI manager: {e}")
 
+        # 🆕 (Cloud Code centralization) — availability برای cloud_code از env.
+        _cc_available = False
+        try:
+            from ...services.cloud_code_service import cloud_code_is_configured
+            _cc_available = cloud_code_is_configured()
+        except Exception:
+            pass
+
         # Build provider list
         providers = {}
         for model in MODEL_REGISTRY.values():
@@ -183,7 +202,10 @@ async def list_providers():
                 if provider not in providers:
                     providers[provider] = {
                         "provider": provider,
-                        "available": provider in available_providers,
+                        "available": (
+                            _cc_available if provider == "cloud_code"
+                            else provider in available_providers
+                        ),
                         "models": []
                     }
                 providers[provider]["models"].append(model.id)
@@ -1003,6 +1025,14 @@ async def get_models_for_task(task_type: str, db: Session = Depends(get_db)):
             if "all" in allowed_tasks or task_type in allowed_tasks:
                 model_provider = get_provider_value(model.provider)
                 is_available = model_provider in available_providers
+                # 🆕 (Cloud Code centralization) — cloud_code آن provider که
+                # via OAuth کار می‌کند (نه API key). از env چک می‌کنیم.
+                if model_provider == "cloud_code":
+                    try:
+                        from ...services.cloud_code_service import cloud_code_is_configured
+                        is_available = cloud_code_is_configured()
+                    except Exception:
+                        pass
 
                 allowed_models.append({
                     "model_id": model_id,
@@ -1074,7 +1104,12 @@ async def get_model_info(model_id: str):
         is_available = False
         try:
             ai_manager = get_ai_manager()
-            is_available = get_provider_value(model.provider) in ai_manager.get_available_providers()
+            provider_val = get_provider_value(model.provider)
+            is_available = provider_val in ai_manager.get_available_providers()
+            # 🆕 (Cloud Code centralization) — provider cloud_code via OAuth.
+            if provider_val == "cloud_code":
+                from ...services.cloud_code_service import cloud_code_is_configured
+                is_available = cloud_code_is_configured()
         except Exception:
             pass  # If AI manager not available, mark as unavailable
 
