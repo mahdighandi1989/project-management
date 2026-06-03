@@ -363,7 +363,12 @@ def _build_full_prompt_markdown(session, user_note: str, task_id: Optional[str])
         lines.append("")
 
     md_text = "\n".join(lines)
-    return md_text.encode("utf-8")
+    # 🔤 (UTF-8 BOM) — متن فارسی در فایل .md بدون BOM در Notepad ویندوز،
+    # برخی نمایش‌گرهای اندروید و حتی preview تلگرام به‌اشتباه به‌عنوان
+    # Windows-1252/ISO-8859 خوانده می‌شد و حروف فارسی به‌صورت موجو موجو
+    # نمایش داده می‌شدند. BOM یک سیگنال تضمینی است که فایل را UTF-8
+    # معرفی می‌کند و در همهٔ markdown viewer ها بی‌اثر روی متن است.
+    return "﻿".encode("utf-8") + md_text.encode("utf-8")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
