@@ -379,6 +379,13 @@ class OversightTask:
     # backward-compat: اگر در JSON نباشد، False خوانده می‌شود
     archived: bool = False
     archived_at: Optional[str] = None
+    # 🆕 (auto-runner abandonment) — وقتی Claude به سقف retry رسید یا verify
+    # regressed داد، task آرشیو می‌شود ولی *علتش با success فرق دارد*.
+    # این فیلد جدا می‌کند تا UI/گزارش‌ها بدانند:
+    #   - "" / None / "done"  → آرشیو معمولی (موفق)
+    #   - "max_retries"       → Claude در سقف retry گیر کرد، TO-DO ساخت
+    #   - "regressed"         → verify regression پیدا کرد، TO-DO ساخت
+    archived_reason: Optional[str] = None
     # ❌ Phase 2 prompt_history duplicate حذف شد — تعریف موجود در خط ۳۰۲
     # (P4) همان نیاز را پوشش می‌دهد. apply_followup_as_new_prompt و
     # revert_prompt_from_history با همان schema هماهنگ شده‌اند.
