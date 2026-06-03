@@ -141,6 +141,57 @@ def test_verify_task_returns_status_val():
     )
 
 
+# ---------------------------------------------------------------------------
+# No-progress guard: skip retry when Claude can't make progress
+# ---------------------------------------------------------------------------
+
+
+def test_remaining_unchanged_returns_false_when_no_previous_snapshot():
+    """دور اول retry — هیچ snapshot قبلی نداریم → نمی‌توانیم 'no progress'
+    بگوییم. باید False برگردد و retry طبق رویه ادامه پیدا کند."""
+    from app.api.routes.external_prompts import _remaining_unchanged
+
+    task = SimpleNamespace()  # هیچ _last_remaining_snapshot ندارد
+    assert _remaining_unchanged(["item a", "item b"], task) is False
+
+
+def test_remaining_unchanged_returns_false_when_now_empty():
+    """remaining این بار خالی است → پیشرفت کامل کرد → False (no-progress=False)."""
+    from app.api.routes.external_prompts import _remaining_unchanged
+
+    task = SimpleNamespace(_last_remaining_snapshot=["item a", "item b"])
+    assert _remaining_unchanged([], task) is False
+
+
+def test_remaining_unchanged_detects_identical_sets():
+    """دور قبل و این بار همان مجموعه آیتم‌ها → no-progress=True."""
+    from app.api.routes.external_prompts import _remaining_unchanged
+
+    task = SimpleNamespace(_last_remaining_snapshot=["Item A", "item B", "Item C"])
+    # case + whitespace باید عادی شوند → match
+    assert _remaining_unchanged(["item a", "ITEM B", "item c"], task) is True
+
+
+def test_remaining_unchanged_detects_progress_when_one_item_removed():
+    """3 آیتم → 2 آیتم: Jaccard = 2/3 = 0.67 < 0.85 → False (progress made)."""
+    from app.api.routes.external_prompts import _remaining_unchanged
+
+    task = SimpleNamespace(_last_remaining_snapshot=["a", "b", "c"])
+    assert _remaining_unchanged(["a", "b"], task) is False
+
+
+def test_remaining_unchanged_threshold_is_strict_enough():
+    """7 آیتم مشترک از 8 کل = 0.875 > 0.85 → True (almost no progress)."""
+    from app.api.routes.external_prompts import _remaining_unchanged
+
+    task = SimpleNamespace(
+        _last_remaining_snapshot=["a", "b", "c", "d", "e", "f", "g"]
+    )
+    assert _remaining_unchanged(
+        ["a", "b", "c", "d", "e", "f", "g", "h"], task
+    ) is True
+
+
 def test_verify_then_chain_short_circuits_on_raw_done():
     """🚨 The actual fix. `_verify_then_chain` must treat a raw verdict
     of DONE the same as task.verification_status=done — both lead to
@@ -154,7 +205,7 @@ def test_verify_then_chain_short_circuits_on_raw_done():
     # Find the action decision block.
     idx = src.find("action = \"chain_next\"  # default")
     assert idx != -1, "decision block not found — test stale"
-    window = src[idx:idx + 800]
+    window = src[idx:idx + 2000]
     # The done-branch must check BOTH vstatus and status_val.
     assert "status_val" in window, (
         "_verify_then_chain must read status_val from verify_result"
