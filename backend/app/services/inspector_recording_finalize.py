@@ -220,6 +220,152 @@ async def _send_to_telegram_audio(
         return {"ok": False, "error": f"send_audio wrapper exception: {str(e)[:300]}"}
 
 
+async def _send_to_telegram_document(
+    file_bytes: bytes, filename: str, caption: str = ""
+) -> Dict[str, Any]:
+    """ارسال document (مثل .md پرامپت کامل) به Telegram."""
+    try:
+        from .notification_service import notification_service
+        tg = notification_service._telegram()
+        return await tg.send_document(
+            file_bytes, filename,
+            caption=caption,
+            silent=False,
+        )
+    except Exception as e:
+        return {"ok": False, "error": f"send_document wrapper exception: {str(e)[:300]}"}
+
+
+def _build_full_prompt_markdown(session, user_note: str, task_id: Optional[str]) -> bytes:
+    """فایل .md کامل با پرامپت سنتزشده + همهٔ context (transcript, visual,
+    interactions, logs). این فایل به‌عنوان document به تلگرام ضمیمه می‌شود
+    تا کاربر پرامپت کامل را — نه فقط ۵۰۰ کاراکتر اول caption — داشته باشد.
+    """
+    mode_label = "🎯 A (iframe-focused)" if session.mode == "A" else "🌐 B (free multi-screen)"
+    duration = session.duration_sec()
+    m_int, s_int = int(duration // 60), int(duration % 60)
+
+    lines: List[str] = []
+    lines.append(f"# 🎬 ضبط بازرس ویژه — `{session.session_id[:8]}`")
+    lines.append("")
+    lines.append(f"- **پروژه:** `{session.project_full_name or session.project_id}`")
+    lines.append(f"- **حالت:** {mode_label}")
+    lines.append(f"- **مدت:** {m_int}m {s_int}s")
+    if task_id:
+        lines.append(f"- **تسک ساخته‌شده:** `{task_id}`")
+    if session.prompt_model:
+        lines.append(f"- **مدل سنتز پرامپت:** `{session.prompt_model}`")
+    if session.transcript_model:
+        lines.append(f"- **مدل multimodal:** `{session.transcript_model}`")
+    lines.append("")
+
+    if user_note:
+        lines.append("## 📝 یادداشت اولیه کاربر")
+        lines.append("")
+        lines.append(user_note.strip())
+        lines.append("")
+
+    lines.append("---")
+    lines.append("")
+    lines.append("## 💡 پرامپت کامل سنتز‌شده")
+    lines.append("")
+    lines.append(session.prompt or "(پرامپت تولید نشد)")
+    lines.append("")
+
+    if session.transcript:
+        lines.append("---")
+        lines.append("")
+        lines.append("## 🎙 transcript کامل صدا")
+        lines.append("")
+        lines.append("```")
+        lines.append(session.transcript)
+        lines.append("```")
+        lines.append("")
+
+    if session.visual_summary:
+        lines.append("---")
+        lines.append("")
+        lines.append("## 👁 خلاصه‌های بصری keyframes")
+        lines.append("")
+        for v in session.visual_summary:
+            ts_ms = v.get("timestamp_ms", 0)
+            mm = ts_ms // 60000
+            ss = (ts_ms % 60000) // 1000
+            lines.append(f"### [{mm:02d}:{ss:02d}]")
+            scene = v.get("scene") or ""
+            ocr = v.get("ocr_text") or ""
+            ui = v.get("ui_elements") or ""
+            err = v.get("error_signals") or ""
+            uvoice = v.get("user_voice_at_this_moment") or ""
+            if scene:
+                lines.append(f"- **scene:** {scene}")
+            if ocr:
+                lines.append(f"- **ocr:** {ocr[:800]}")
+            if ui:
+                lines.append(f"- **ui:** {ui[:400]}")
+            if err:
+                lines.append(f"- **errors:** {err[:400]}")
+            if uvoice:
+                lines.append(f"- **user voice:** {uvoice[:400]}")
+            lines.append("")
+
+    if session.mode == "B" and getattr(session, "location_timeline", None):
+        lines.append("---")
+        lines.append("")
+        lines.append("## 🗺 نقشهٔ زمانی فعالیت (mode B)")
+        lines.append("")
+        for item in session.location_timeline:
+            ts_ms = item.get("ts_ms", 0)
+            mm = ts_ms // 60000
+            ss = (ts_ms % 60000) // 1000
+            cat = item.get("category", "?")
+            who = item.get("url_or_app_name", "?")
+            rel = "✓ مرتبط" if item.get("related_to_project") else "✗ خارج"
+            act = item.get("activity_description", "")
+            lines.append(f"- `[{mm:02d}:{ss:02d}]` **{cat}** — {who} — {rel} — {act}")
+        lines.append("")
+
+    if session.interactions:
+        lines.append("---")
+        lines.append("")
+        lines.append(f"## 🖱 تعاملات کاربر ({len(session.interactions)} رویداد)")
+        lines.append("")
+        lines.append("```")
+        for ev in session.interactions[:300]:
+            ts_ms = getattr(ev, "ts_ms", 0)
+            mm = ts_ms // 60000
+            ss = (ts_ms % 60000) // 1000
+            details = json.dumps(getattr(ev, "details", {}), ensure_ascii=False)[:200]
+            lines.append(f"[{mm:02d}:{ss:02d}] {getattr(ev, 'type', '?')} — {details}")
+        lines.append("```")
+        lines.append("")
+
+    if session.console_logs:
+        lines.append("---")
+        lines.append("")
+        lines.append(f"## 🌐 Console logs frontend ({len(session.console_logs)})")
+        lines.append("")
+        lines.append("```")
+        for l in session.console_logs[-100:]:
+            lines.append(f"[{l.get('level','log')}] {(l.get('message') or '')[:300]}")
+        lines.append("```")
+        lines.append("")
+
+    if session.backend_logs:
+        lines.append("---")
+        lines.append("")
+        lines.append(f"## ⚙️ Backend logs ({len(session.backend_logs)})")
+        lines.append("")
+        lines.append("```")
+        for l in session.backend_logs[-100:]:
+            lines.append(f"[{l.get('level','info')}] {(l.get('message') or '')[:300]}")
+        lines.append("```")
+        lines.append("")
+
+    md_text = "\n".join(lines)
+    return md_text.encode("utf-8")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Cleanup
 # ─────────────────────────────────────────────────────────────────────────────
@@ -441,6 +587,46 @@ async def finalize_recording_session(
 
     session.telegram_message_ids = list(result["telegram_message_ids"])
 
+    # ------- Stage 3b: ارسال پرامپت کامل به‌صورت document مارک‌داون
+    # caption media به ۱۰۲۴ کاراکتر تلگرام محدود است — پرامپت کامل (که معمولاً
+    # چند هزار کاراکتر است) را به‌صورت یک فایل .md ضمیمه می‌کنیم تا کاربر
+    # خروجی AI synthesis + transcript + visual + logs + interactions را در
+    # تلگرام داشته باشد. این مرحله **قبل از** cleanup disk اجرا می‌شود.
+    if session.prompt:
+        try:
+            md_bytes = _build_full_prompt_markdown(
+                session, user_note, task_id=result.get("task_id")
+            )
+            md_filename = f"prompt_{session.session_id[:8]}.md"
+            md_caption = "📄 پرامپت کامل + transcript + visual + interactions + logs"
+            if result.get("task_id"):
+                md_caption += f"\n🆔 تسک: `{result['task_id'][:8]}`"
+            doc_res = await _send_to_telegram_document(
+                md_bytes, md_filename, caption=md_caption
+            )
+            if doc_res.get("ok"):
+                # message_id ممکن است در send_document نباشد؛ filename را
+                # به‌عنوان confirmation در warnings نگه می‌داریم
+                result["warnings"].append(
+                    f"پرامپت کامل به‌صورت {md_filename} ({len(md_bytes)//1024}KB) "
+                    f"به تلگرام ارسال شد"
+                )
+            else:
+                result["errors"].append(
+                    f"telegram[prompt.md]: {doc_res.get('error')}"
+                )
+                # ارسال document fail شد ولی media اصلی ok بود — success را
+                # false نکن چون کاربر می‌تواند پرامپت کامل را از تسک/UI ببیند
+                result["warnings"].append(
+                    "ارسال document پرامپت به تلگرام ناموفق — پرامپت کامل "
+                    "همچنان در تسک/UI قابل دسترسی است"
+                )
+        except Exception as _md_e:
+            logger.warning(f"prompt.md send failed: {_md_e}")
+            result["warnings"].append(
+                f"ساخت/ارسال prompt.md failed: {str(_md_e)[:200]}"
+            )
+
     # ------- Stage 4: chat routing (اگر send_to_oversight=False)
     if not send_to_oversight:
         chat_res = await _send_prompt_to_chat(session, user_note)
@@ -451,16 +637,20 @@ async def finalize_recording_session(
             result["errors"].append(f"chat: {chat_res.get('error')}")
 
     # ------- Stage 5: Cleanup disk
-    # حذف **فقط** اگر Telegram موفق بود (یا اصلاً media برای ارسال نبود)
-    # اگر Telegram fail کرد، فایل را برای ۲۴ ساعت نگه می‌داریم — sweeper
-    # بعداً پاکش می‌کند (sweep_stale در service که >120m idle اجرا می‌شود).
-    telegram_failed = any("telegram" in e.lower() for e in result["errors"])
-    if not telegram_failed:
+    # حذف **فقط** اگر Telegram media (video/audio/animation) موفق بود.
+    # شکست در ارسال prompt.md (که context cosmetic است) نباید جلوی cleanup
+    # را بگیرد چون فایل‌های media اصلی به تلگرام رسیده‌اند. اگر media fail
+    # کرد، فایل را برای ۲ ساعت نگه می‌داریم تا sweep_stale پاکش کند.
+    media_failed = any(
+        "telegram[" in e.lower() and "prompt.md" not in e.lower()
+        for e in result["errors"]
+    )
+    if not media_failed:
         _cleanup_session_disk(session)
         result["cleanup_done"] = True
     else:
         result["warnings"].append(
-            "فایل‌ها برای ۲ ساعت روی disk نگه داشته شدند چون Telegram fail کرد — "
+            "فایل‌ها برای ۲ ساعت روی disk نگه داشته شدند چون Telegram media fail کرد — "
             "sweep_stale در scheduler پاک خواهد کرد"
         )
 
