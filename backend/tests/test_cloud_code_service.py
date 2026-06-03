@@ -625,6 +625,431 @@ async def test_list_available_models_caches(monkeypatch):
     assert third[0]["id"] == "claude-sonnet-4-5-20250929"
 
 
+# ---------------------------------------------------------------------------
+# Tool-aware single-turn helper (foundation for the cloud-code agent loop)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cloud_code_message_sends_tools_and_returns_tool_use_block(monkeypatch):
+    """cloud_code_message must forward the `tools` array to Anthropic and
+    return the raw response so the caller can walk content blocks
+    (including tool_use) to drive the agent loop."""
+    from app.services import cloud_code_service as ccs
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test")
+
+    captured_body: dict = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured_body.update(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(200, json={
+            "id": "msg_xyz",
+            "model": "claude-sonnet-4-5-20250929",
+            "stop_reason": "tool_use",
+            "content": [
+                {"type": "text", "text": "Let me check that file."},
+                {
+                    "type": "tool_use",
+                    "id": "tool_1",
+                    "name": "read_file",
+                    "input": {"path": "src/app.py"},
+                },
+            ],
+            "usage": {"input_tokens": 50, "output_tokens": 20},
+        })
+
+    transport = httpx.MockTransport(_handler)
+    real_client_cls = httpx.AsyncClient
+
+    def _patched(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client_cls(*args, **kwargs)
+
+    monkeypatch.setattr(ccs.httpx, "AsyncClient", _patched)
+
+    sink: dict = {}
+    tools = [{
+        "name": "read_file",
+        "description": "read file",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    }]
+    out = await ccs.cloud_code_message(
+        [{"role": "user", "content": "show me src/app.py"}],
+        tools=tools,
+        model="claude-sonnet-4-5-20250929",  # skip auto-pick to isolate
+        metadata_sink=sink,
+    )
+
+    assert captured_body["tools"] == tools
+    assert any(
+        b.get("type") == "tool_use" and b.get("name") == "read_file"
+        for b in out["content"]
+    )
+    assert out["stop_reason"] == "tool_use"
+    assert sink["actual_model"] == "claude-sonnet-4-5-20250929"
+    assert sink["stop_reason"] == "tool_use"
+
+
+@pytest.mark.asyncio
+async def test_cloud_code_message_preserves_block_list_content(monkeypatch):
+    """When the caller appends an assistant turn whose content is a list
+    of blocks (text + tool_use), followed by a user turn of tool_result
+    blocks, _coerce_messages_for_tools must preserve the structure rather
+    than stringifying it like the text-only helper does."""
+    from app.services import cloud_code_service as ccs
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test")
+
+    captured_body: dict = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured_body.update(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(200, json={
+            "id": "msg_2",
+            "model": "claude-sonnet-4-5-20250929",
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "done"}],
+            "usage": {"input_tokens": 5, "output_tokens": 5},
+        })
+
+    transport = httpx.MockTransport(_handler)
+    real_client_cls = httpx.AsyncClient
+
+    def _patched(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client_cls(*args, **kwargs)
+
+    monkeypatch.setattr(ccs.httpx, "AsyncClient", _patched)
+
+    convo = [
+        {"role": "user", "content": "look at app.py"},
+        {"role": "assistant", "content": [
+            {"type": "text", "text": "ok"},
+            {"type": "tool_use", "id": "t1", "name": "read_file",
+             "input": {"path": "app.py"}},
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1",
+             "content": "print('hi')"},
+        ]},
+    ]
+    await ccs.cloud_code_message(convo, model="claude-sonnet-4-5-20250929")
+
+    msgs = captured_body["messages"]
+    # Assistant turn content remained a list of blocks (NOT flattened to str)
+    assert isinstance(msgs[1]["content"], list)
+    assert any(b.get("type") == "tool_use" for b in msgs[1]["content"])
+    # User tool_result turn preserved
+    assert isinstance(msgs[2]["content"], list)
+    assert msgs[2]["content"][0]["type"] == "tool_result"
+    assert msgs[2]["content"][0]["tool_use_id"] == "t1"
+
+
+@pytest.mark.asyncio
+async def test_cloud_code_message_classifier_handles_block_messages(monkeypatch):
+    """When messages contain block-list content (mid-agent-loop), the
+    auto-picker must still work — the flattener should extract text
+    so the tier classifier sees something meaningful."""
+    from app.services import cloud_code_service as ccs
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test")
+
+    async def fake_list(force_refresh=False):
+        return [
+            {"id": "claude-opus-4-5-20251101", "created_at": "2025-11-01"},
+            {"id": "claude-sonnet-4-5-20250929", "created_at": "2025-09-29"},
+        ]
+    monkeypatch.setattr(ccs, "list_available_models", fake_list)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "id": "msg_3", "model": "claude-opus-4-5-20251101",
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {},
+        })
+    transport = httpx.MockTransport(_handler)
+    real_client_cls = httpx.AsyncClient
+    monkeypatch.setattr(
+        ccs.httpx, "AsyncClient",
+        lambda *a, **kw: real_client_cls(*a, transport=transport, **{k: v for k, v in kw.items() if k != "transport"}),
+    )
+
+    sink: dict = {}
+    convo = [
+        {"role": "user", "content": [
+            {"type": "text", "text": "refactor کل architecture این پروژه"},
+        ]},
+    ]
+    await ccs.cloud_code_message(convo, model="auto", metadata_sink=sink)
+    assert sink["picked_tier"] == "opus"
+
+
+# ---------------------------------------------------------------------------
+# cloud_code_agent_loop — end-to-end agent loop with mocked executor
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_executes_tool_use_and_loops_until_end_turn(monkeypatch):
+    """Two-round agent loop:
+      round 1: model emits text + tool_use(read_file)
+      round 2: model emits text only with stop_reason=end_turn
+    Loop must:
+      - call the executor with the right input
+      - inject tool_result back as a user turn
+      - return final_text + tool_calls log + iterations=2
+    """
+    from app.services import cloud_code_service as ccs
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test")
+
+    captured_bodies: List[dict] = []
+    call_no = {"n": 0}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        call_no["n"] += 1
+        captured_bodies.append(json.loads(request.content.decode("utf-8")))
+        if call_no["n"] == 1:
+            return httpx.Response(200, json={
+                "id": "m1", "model": "claude-sonnet-4-5-20250929",
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "text", "text": "بذار فایل رو بخونم."},
+                    {"type": "tool_use", "id": "t1", "name": "read_file",
+                     "input": {"path": "src/app.py"}},
+                ],
+                "usage": {"input_tokens": 10, "output_tokens": 12},
+            })
+        return httpx.Response(200, json={
+            "id": "m2", "model": "claude-sonnet-4-5-20250929",
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "این فایل OK است."}],
+            "usage": {"input_tokens": 25, "output_tokens": 8},
+        })
+
+    transport = httpx.MockTransport(_handler)
+    real = httpx.AsyncClient
+    monkeypatch.setattr(
+        ccs.httpx, "AsyncClient",
+        lambda *a, **kw: real(*a, transport=transport, **{k: v for k, v in kw.items() if k != "transport"}),
+    )
+
+    executor_calls: List[Dict[str, Any]] = []
+
+    async def fake_exec(name: str, inp: Dict[str, Any]) -> Dict[str, Any]:
+        executor_calls.append({"name": name, "input": inp})
+        if name == "read_file":
+            return {"content": "print('hi')", "is_error": False}
+        return {"content": "unknown tool", "is_error": True}
+
+    tools = [{
+        "name": "read_file",
+        "description": "read file",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    }]
+
+    events: List[tuple] = []
+
+    async def on_event(kind, payload):
+        events.append((kind, payload))
+
+    result = await ccs.cloud_code_agent_loop(
+        user_prompt="src/app.py رو ببین",
+        system_prompt="you are a coder",
+        tools=tools,
+        executor=fake_exec,
+        model="claude-sonnet-4-5-20250929",
+        on_event=on_event,
+    )
+
+    # Executor saw the tool
+    assert len(executor_calls) == 1
+    assert executor_calls[0]["name"] == "read_file"
+    assert executor_calls[0]["input"]["path"] == "src/app.py"
+
+    # Two iterations, ending naturally
+    assert result["iterations"] == 2
+    assert result["stop_reason"] == "end_turn"
+    assert result["final_text"] == "این فایل OK است."
+
+    # tool_calls log captured the call + result
+    assert len(result["tool_calls"]) == 1
+    assert result["tool_calls"][0]["name"] == "read_file"
+    assert result["tool_calls"][0]["is_error"] is False
+    assert "print('hi')" in result["tool_calls"][0]["result"]
+
+    # Round-2 request to Anthropic carried the tool_result block back
+    second_msgs = captured_bodies[1]["messages"]
+    last_user_turn = second_msgs[-1]
+    assert last_user_turn["role"] == "user"
+    assert isinstance(last_user_turn["content"], list)
+    assert last_user_turn["content"][0]["type"] == "tool_result"
+    assert last_user_turn["content"][0]["tool_use_id"] == "t1"
+
+    # Events surfaced text + tool_use + tool_result + done
+    event_kinds = [k for k, _ in events]
+    assert "tool_use" in event_kinds
+    assert "tool_result" in event_kinds
+    assert "done" in event_kinds
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_executor_error_marked_is_error(monkeypatch):
+    """When the executor returns is_error=True, the tool_result block sent
+    back to Anthropic must carry is_error=true so the model knows to
+    recover or apologise — not just confidently proceed."""
+    from app.services import cloud_code_service as ccs
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test")
+
+    captured_bodies: List[dict] = []
+    call_no = {"n": 0}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        call_no["n"] += 1
+        captured_bodies.append(json.loads(request.content.decode("utf-8")))
+        if call_no["n"] == 1:
+            return httpx.Response(200, json={
+                "id": "x1", "model": "claude-sonnet-4-5-20250929",
+                "stop_reason": "tool_use",
+                "content": [{"type": "tool_use", "id": "t1",
+                             "name": "render_set_env_var",
+                             "input": {"service_id": "abc", "key": "X", "value": "y"}}],
+                "usage": {},
+            })
+        return httpx.Response(200, json={
+            "id": "x2", "model": "claude-sonnet-4-5-20250929",
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "نتوانستم تنظیم کنم."}],
+            "usage": {},
+        })
+
+    transport = httpx.MockTransport(_handler)
+    real = httpx.AsyncClient
+    monkeypatch.setattr(
+        ccs.httpx, "AsyncClient",
+        lambda *a, **kw: real(*a, transport=transport, **{k: v for k, v in kw.items() if k != "transport"}),
+    )
+
+    async def failing_exec(name, inp):
+        return {"content": "Render token missing", "is_error": True}
+
+    result = await ccs.cloud_code_agent_loop(
+        user_prompt="set env",
+        tools=[{"name": "render_set_env_var", "description": "",
+                "input_schema": {"type": "object", "properties": {},
+                                  "required": []}}],
+        executor=failing_exec,
+        model="claude-sonnet-4-5-20250929",
+    )
+
+    assert result["tool_calls"][0]["is_error"] is True
+    sent_tool_result = captured_bodies[1]["messages"][-1]["content"][0]
+    assert sent_tool_result["type"] == "tool_result"
+    assert sent_tool_result.get("is_error") is True
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_executor_crash_surfaces_as_is_error(monkeypatch):
+    """If the executor *raises*, the loop must catch it and synthesise an
+    is_error tool_result instead of crashing the whole chat. The user
+    still gets a response."""
+    from app.services import cloud_code_service as ccs
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test")
+    call_no = {"n": 0}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        call_no["n"] += 1
+        if call_no["n"] == 1:
+            return httpx.Response(200, json={
+                "id": "e1", "model": "claude-sonnet-4-5-20250929",
+                "stop_reason": "tool_use",
+                "content": [{"type": "tool_use", "id": "t1",
+                             "name": "broken_tool", "input": {}}],
+                "usage": {},
+            })
+        return httpx.Response(200, json={
+            "id": "e2", "model": "claude-sonnet-4-5-20250929",
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "got error, stopping"}],
+            "usage": {},
+        })
+
+    transport = httpx.MockTransport(_handler)
+    real = httpx.AsyncClient
+    monkeypatch.setattr(
+        ccs.httpx, "AsyncClient",
+        lambda *a, **kw: real(*a, transport=transport, **{k: v for k, v in kw.items() if k != "transport"}),
+    )
+
+    async def boom_exec(name, inp):
+        raise RuntimeError("kaboom")
+
+    result = await ccs.cloud_code_agent_loop(
+        user_prompt="x",
+        tools=[{"name": "broken_tool", "description": "",
+                "input_schema": {"type": "object", "properties": {},
+                                  "required": []}}],
+        executor=boom_exec,
+        model="claude-sonnet-4-5-20250929",
+        max_iterations=4,
+    )
+    assert result["tool_calls"][0]["is_error"] is True
+    assert "kaboom" in result["tool_calls"][0]["result"]
+    assert result["stop_reason"] == "end_turn"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_respects_max_iterations(monkeypatch):
+    """If the model keeps emitting tool_use forever, the loop must stop at
+    max_iterations and report stop_reason='max_iterations'."""
+    from app.services import cloud_code_service as ccs
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test")
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "id": "loop", "model": "claude-sonnet-4-5-20250929",
+            "stop_reason": "tool_use",
+            "content": [{"type": "tool_use", "id": "t", "name": "noop",
+                         "input": {}}],
+            "usage": {},
+        })
+
+    transport = httpx.MockTransport(_handler)
+    real = httpx.AsyncClient
+    monkeypatch.setattr(
+        ccs.httpx, "AsyncClient",
+        lambda *a, **kw: real(*a, transport=transport, **{k: v for k, v in kw.items() if k != "transport"}),
+    )
+
+    async def noop_exec(name, inp):
+        return "ok"
+
+    result = await ccs.cloud_code_agent_loop(
+        user_prompt="loop please",
+        tools=[{"name": "noop", "description": "",
+                "input_schema": {"type": "object", "properties": {},
+                                  "required": []}}],
+        executor=noop_exec,
+        model="claude-sonnet-4-5-20250929",
+        max_iterations=3,
+    )
+    assert result["iterations"] == 3
+    assert result["stop_reason"] == "max_iterations"
+
+
 @pytest.mark.asyncio
 async def test_stream_chat_auto_picks_model_and_reports_in_sink(monkeypatch):
     """model='auto' باید pick_best_model را صدا بزند و picked_model را در sink بریزد."""

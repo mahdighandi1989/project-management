@@ -564,3 +564,388 @@ async def cloud_code_complete(
     ):
         chunks.append(piece)
     return "".join(chunks)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tool-aware non-streaming call (for agent loop)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The streaming helper above is intentionally text-only — perfect for fast
+# Q&A. To match Local AI smart-chat capabilities (file read, Render API,
+# git, deploys, …) we need a tool-calling variant. Anthropic Messages API
+# supports it via:
+#   - request: tools=[{name,description,input_schema}, ...]
+#   - response: content blocks of type "tool_use" alongside text blocks
+#   - follow-up: user turn with tool_result content blocks for each tool_use
+#
+# We expose this as a single-turn call (not streaming) that returns the
+# full assistant message structure. The caller runs the loop, executes
+# tools, appends a user turn with the results, and calls again until the
+# model stops emitting tool_use blocks.
+
+
+async def cloud_code_message(
+    messages: List[Dict[str, Any]],
+    *,
+    system_prompt: Optional[str] = None,
+    model: str = CLOUD_CODE_DEFAULT_MODEL,
+    max_tokens: int = 8000,
+    temperature: float = 0.2,
+    timeout: float = 180.0,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tier_hint: Optional[str] = None,
+    metadata_sink: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Single-turn (non-streaming) call to Anthropic Messages API with full
+    `content` block support — including tool_use.
+
+    Returns the assistant's raw message dict:
+      {
+        "stop_reason": "end_turn" | "tool_use" | "max_tokens" | ...,
+        "content": [
+          {"type": "text", "text": "..."},
+          {"type": "tool_use", "id": "...", "name": "...", "input": {...}},
+          ...
+        ],
+        "usage": {...},
+        "model": "claude-...",
+      }
+
+    Callers running the agent loop:
+      1. Append the returned assistant turn verbatim to `messages`
+         (role=assistant, content=the content array).
+      2. For each tool_use block, execute the tool and append a user turn
+         whose content is a list of {"type":"tool_result","tool_use_id":id,
+         "content":..., "is_error":bool} blocks.
+      3. Re-call cloud_code_message until stop_reason != "tool_use".
+    """
+    token = get_cloud_code_token()
+    if not token:
+        raise RuntimeError(
+            "CLAUDE_CODE_OAUTH_TOKEN env var is not set — "
+            "cloud_code engine unavailable"
+        )
+
+    # auto-route via the same picker as streaming
+    if model == "auto" or tier_hint is not None:
+        chosen_id, picked_tier, pick_reason = await pick_best_model(
+            _flatten_messages_for_classifier(messages), tier_hint=tier_hint,
+        )
+        if metadata_sink is not None:
+            metadata_sink["requested_model"] = model
+            metadata_sink["picked_model"] = chosen_id
+            metadata_sink["picked_tier"] = picked_tier
+            metadata_sink["pick_reason"] = pick_reason
+        model = chosen_id
+
+    payload: Dict[str, Any] = {
+        "model": model,
+        "messages": _coerce_messages_for_tools(messages),
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "system": _build_system_blocks(system_prompt),
+    }
+    if tools:
+        payload["tools"] = tools
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(
+            CLOUD_CODE_API_URL,
+            headers=_build_headers(token),
+            json=payload,
+        )
+        if response.status_code != 200:
+            snippet = response.text[:500]
+            if response.status_code == 401:
+                hint = "OAuth token نامعتبر یا منقضی. با `claude setup-token` تازه بساز."
+            elif response.status_code == 429:
+                hint = "rate limit — یا انتی-abuse تشخیص داد. چند ثانیه صبر کن."
+            else:
+                hint = "جزئیات در پاسخ Anthropic."
+            raise RuntimeError(
+                f"cloud_code API returned {response.status_code}: {snippet} | {hint}"
+            )
+        data = response.json()
+        if metadata_sink is not None:
+            metadata_sink["actual_model"] = data.get("model") or model
+            metadata_sink["message_id"] = data.get("id")
+            metadata_sink["usage"] = data.get("usage")
+            metadata_sink["stop_reason"] = data.get("stop_reason")
+        return data
+
+
+def _flatten_messages_for_classifier(messages: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Tier classifier expects plain {role, content:str}. When messages
+    contain block lists (for tool_use/tool_result rounds), reduce each to
+    a text approximation so the classifier still works."""
+    out: List[Dict[str, str]] = []
+    for m in messages or []:
+        role = (m.get("role") or "").lower()
+        content = m.get("content")
+        if isinstance(content, str):
+            out.append({"role": role, "content": content})
+        elif isinstance(content, list):
+            texts: List[str] = []
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("type") == "text" and block.get("text"):
+                        texts.append(str(block["text"]))
+                    elif block.get("type") == "tool_use":
+                        texts.append(f"[tool_use:{block.get('name', '?')}]")
+                    elif block.get("type") == "tool_result":
+                        c = block.get("content")
+                        if isinstance(c, str):
+                            texts.append(c[:200])
+            if texts:
+                out.append({"role": role, "content": "\n".join(texts)})
+    return out
+
+
+def _coerce_messages_for_tools(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Same role-filtering rules as _coerce_messages, but PRESERVES rich
+    content (block lists) used by tool_use / tool_result turns."""
+    cleaned: List[Dict[str, Any]] = []
+    for m in messages or []:
+        role = (m.get("role") or "").strip().lower()
+        content = m.get("content")
+        if role not in ("user", "assistant"):
+            continue
+        if content is None:
+            continue
+        if isinstance(content, str) and not content.strip():
+            continue
+        if isinstance(content, list) and not content:
+            continue
+        cleaned.append({"role": role, "content": content})
+    while cleaned and cleaned[0]["role"] != "user":
+        cleaned.pop(0)
+    return cleaned
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Agent loop — closes the parity gap with Local AI smart-chat
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# This is the orchestrator that turns cloud_code_message into a real agent:
+# call the model → look at content blocks → for each tool_use, hand off to a
+# caller-provided executor → append the results as a new user turn → call
+# again. Stops when the model emits no more tool_use (stop_reason="end_turn"
+# or similar) or the iteration budget is exhausted.
+#
+# The executor is injected by the endpoint so it owns the dangerous things
+# (Render API, git tokens, file fetches). cloud_code_service stays
+# infrastructure-only.
+
+
+from typing import Awaitable, Callable  # noqa: E402  (kept near agent loop)
+
+
+ToolExecutor = Callable[[str, Dict[str, Any]], Awaitable[Dict[str, Any]]]
+"""(tool_name, tool_input) → {"content": str | list, "is_error": bool} or
+plain str (treated as success content). The executor must NEVER raise — any
+failure should be returned as {"content": "...", "is_error": True}."""
+
+
+async def cloud_code_agent_loop(
+    *,
+    user_prompt: str,
+    system_prompt: Optional[str] = None,
+    tools: List[Dict[str, Any]],
+    executor: ToolExecutor,
+    initial_history: Optional[List[Dict[str, Any]]] = None,
+    model: str = "auto",
+    tier_hint: Optional[str] = None,
+    max_iterations: int = 12,
+    max_tokens_per_call: int = 8000,
+    temperature: float = 0.2,
+    on_event: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
+    metadata_sink: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Drive an Anthropic agent loop on top of cloud_code_message.
+
+    Parameters
+    ----------
+    user_prompt
+        The user's latest message. Appended as a fresh "user" turn after
+        any history.
+    system_prompt
+        Optional system context for the agent. The Claude Code identity
+        block is always prepended by `_build_system_blocks`, so callers
+        only need to supply task-specific instructions.
+    tools
+        Anthropic tool schemas (same shape as inspector_agent's
+        `_build_tools()`). Reuse them verbatim — no translation needed.
+    executor
+        Async callable invoked for each tool_use block. Must return either
+        a string (success content) or a dict with `content` and an
+        optional `is_error: bool`.
+    initial_history
+        Optional prior turns (chat history). Each item is `{role, content}`
+        where content can be a string or an Anthropic block list.
+    on_event
+        Optional async callback for progress events. Receives
+        ("text", {"text": ...}), ("tool_use", {"name", "input", "id"}),
+        ("tool_result", {"name", "is_error", "content"}), ("done",
+        {"stop_reason", "iterations", "final_text"}).
+
+    Returns
+    -------
+    A summary dict:
+      {
+        "final_text": str,              # concatenated text blocks from the
+                                        # last assistant turn
+        "stop_reason": str,
+        "iterations": int,
+        "tool_calls": List[{name, input, result, is_error}],
+        "model_used": str,              # from metadata_sink["actual_model"]
+        "usage_last": Dict | None,
+      }
+    """
+    messages: List[Dict[str, Any]] = list(initial_history or [])
+    messages.append({"role": "user", "content": user_prompt})
+
+    sink: Dict[str, Any] = dict(metadata_sink or {})
+    tool_calls_log: List[Dict[str, Any]] = []
+    final_text = ""
+    stop_reason = "natural_stop"
+    iterations_done = 0
+
+    async def _emit(kind: str, payload: Dict[str, Any]) -> None:
+        if on_event is None:
+            return
+        try:
+            await on_event(kind, payload)
+        except Exception:
+            logger.debug("agent_loop on_event handler raised (continuing)")
+
+    for it in range(1, max_iterations + 1):
+        iterations_done = it
+        try:
+            response = await cloud_code_message(
+                messages,
+                system_prompt=system_prompt,
+                tools=tools,
+                model=model,
+                tier_hint=tier_hint,
+                max_tokens=max_tokens_per_call,
+                temperature=temperature,
+                metadata_sink=sink,
+            )
+        except Exception as e:
+            logger.warning("cloud_code_agent_loop call %d failed: %s", it, e)
+            final_text = f"⚠️ Cloud Code call failed: {str(e)[:300]}"
+            stop_reason = "error"
+            await _emit("error", {"message": final_text, "iteration": it})
+            break
+
+        # After the very first call, lock the model to whatever the auto
+        # picker chose so subsequent rounds use the same model (avoids
+        # mid-loop model drift if the message classification shifts).
+        if it == 1 and sink.get("picked_model"):
+            model = sink["picked_model"]
+            tier_hint = None
+
+        content_blocks = response.get("content") or []
+        stop_reason = response.get("stop_reason") or "natural_stop"
+
+        # Collect text the model emitted alongside any tool calls so the
+        # frontend can show progress narration even on tool-use rounds.
+        text_parts: List[str] = []
+        tool_uses: List[Dict[str, Any]] = []
+        for block in content_blocks:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == "text":
+                t = block.get("text") or ""
+                if t:
+                    text_parts.append(t)
+                    await _emit("text", {"text": t})
+            elif btype == "tool_use":
+                tool_uses.append(block)
+
+        if text_parts:
+            final_text = "\n".join(text_parts)
+
+        # Append the assistant turn verbatim so tool_use_id linkage holds.
+        messages.append({"role": "assistant", "content": content_blocks})
+
+        # No tool_use → we're done.
+        if not tool_uses or stop_reason != "tool_use":
+            await _emit("done", {
+                "stop_reason": stop_reason,
+                "iterations": iterations_done,
+                "final_text": final_text,
+            })
+            break
+
+        # Execute each tool_use in order; build a single user turn whose
+        # content is a list of tool_result blocks (Anthropic spec).
+        tool_result_blocks: List[Dict[str, Any]] = []
+        for tu in tool_uses:
+            name = tu.get("name") or ""
+            tu_id = tu.get("id") or ""
+            tinput = tu.get("input") or {}
+            await _emit("tool_use", {"name": name, "id": tu_id, "input": tinput})
+            try:
+                exec_result = await executor(name, tinput)
+            except Exception as exec_e:
+                logger.exception("executor raised on tool %s", name)
+                exec_result = {
+                    "content": f"خطای داخلی executor: {str(exec_e)[:300]}",
+                    "is_error": True,
+                }
+            # Normalise — executor may return str or dict.
+            if isinstance(exec_result, str):
+                result_content = exec_result
+                is_error = False
+            elif isinstance(exec_result, dict):
+                result_content = exec_result.get("content", "")
+                is_error = bool(exec_result.get("is_error"))
+            else:
+                result_content = str(exec_result)
+                is_error = False
+            tool_calls_log.append({
+                "name": name,
+                "input": tinput,
+                "result": (result_content if isinstance(result_content, str) else "[blocks]")[:500],
+                "is_error": is_error,
+            })
+            await _emit("tool_result", {
+                "name": name,
+                "is_error": is_error,
+                "content": (result_content if isinstance(result_content, str) else "[blocks]")[:1000],
+            })
+            block: Dict[str, Any] = {
+                "type": "tool_result",
+                "tool_use_id": tu_id,
+                "content": result_content,
+            }
+            if is_error:
+                block["is_error"] = True
+            tool_result_blocks.append(block)
+
+        if not tool_result_blocks:
+            # Should not happen, but break to avoid infinite loop.
+            break
+        messages.append({"role": "user", "content": tool_result_blocks})
+    else:
+        # for/else: budget exhausted without a natural stop
+        stop_reason = "max_iterations"
+        await _emit("done", {
+            "stop_reason": stop_reason,
+            "iterations": iterations_done,
+            "final_text": final_text,
+        })
+
+    if metadata_sink is not None:
+        metadata_sink.update(sink)
+
+    return {
+        "final_text": final_text,
+        "stop_reason": stop_reason,
+        "iterations": iterations_done,
+        "tool_calls": tool_calls_log,
+        "model_used": sink.get("actual_model") or model,
+        "usage_last": sink.get("usage"),
+    }

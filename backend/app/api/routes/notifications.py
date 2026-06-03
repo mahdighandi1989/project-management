@@ -104,12 +104,43 @@ async def telegram_webhook(request: Request):
     """endpoint که Telegram update‌ها را به آن می‌فرستد.
 
     باید با /telegram/set-webhook ست شود تا Telegram به این URL POST کند.
+
+    🛡 (safety net) — هر چیزی در handler به استثنا برسد، باز هم {"ok": True}
+    برگردانیم تا Telegram retry نکند (که باعث flood می‌شود). loggerبا
+    exception کامل وضعیت را روی Render قابل دیدن می‌کند.
     """
+    import logging as _logging_wh
+    _wh_logger = _logging_wh.getLogger(__name__)
     try:
         body = await request.json()
-    except Exception:
+    except Exception as _je:
+        _wh_logger.warning(f"telegram webhook: invalid JSON body: {_je}")
         return {"ok": True}
-    return await notification_service.handle_telegram_update(body)
+    try:
+        result = await notification_service.handle_telegram_update(body)
+        # diagnostic log اگر handler ای ignored برگرداند ولی پیام دستوری بود
+        if result.get("ignored") and (body.get("message") or {}).get("text"):
+            _wh_logger.info(
+                f"telegram webhook: ignored text='{(body.get('message') or {}).get('text', '')[:60]}' "
+                f"reason='{result.get('error') or 'configured_id_mismatch'}'"
+            )
+        return result
+    except Exception as _e:
+        _wh_logger.exception(f"telegram webhook handler crashed: {_e}")
+        # تلاش برای پاسخ‌دهی به کاربر — حداقل بداند backend در دسترس است
+        try:
+            chat_id = (body.get("message") or {}).get("chat", {}).get("id") \
+                or (body.get("callback_query") or {}).get("message", {}).get("chat", {}).get("id")
+            if chat_id:
+                await notification_service._telegram().send(
+                    f"⚠️ خطای داخلی در پردازش دستور:\n`{str(_e)[:200]}`\n\n"
+                    f"می‌توانی /kb بزنی تا منو برگردد یا /ping برای تست.",
+                    silent=True,
+                )
+        except Exception:
+            pass
+        # Always return 200 — تا Telegram retry نکند
+        return {"ok": True, "handler_error": str(_e)[:200]}
 
 
 @router.post("/telegram/set-webhook")
