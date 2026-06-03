@@ -59,6 +59,14 @@ class InspectorAgentService:
         stream: bool = True,
         metadata_sink: Optional[Dict[str, Any]] = None,
         tier_hint: Optional[str] = None,
+        min_tier: Optional[str] = "sonnet",
+        # 🆕 (UX fix) — برای inspector chat به‌صورت پیش‌فرض حداقل
+        # Sonnet را force می‌کنیم تا پرسش‌های کوتاه به Haiku نروند.
+        # Haiku 4.5 برای کارهای پیچیده ضعیف‌تر است و گاهی خودش را
+        # «Claude 3.5 Sonnet» معرفی می‌کند (model hallucination)
+        # که برای کاربر گیج‌کننده است. هزینهٔ اضافه ندارد چون از همان
+        # OAuth subscription کم می‌شود. caller می‌تواند min_tier=None
+        # یا "haiku" بدهد اگر صراحتاً Haiku می‌خواهد.
     ):
         """Run an inspector chat turn through the Cloud Code (Claude OAuth)
         engine.
@@ -85,6 +93,7 @@ class InspectorAgentService:
                 timeout=timeout,
                 metadata_sink=metadata_sink,
                 tier_hint=tier_hint,
+                min_tier=min_tier,
             )
         return await cloud_code_complete(
             messages,
@@ -93,6 +102,8 @@ class InspectorAgentService:
             max_tokens=max_tokens,
             temperature=temperature,
             timeout=timeout,
+            tier_hint=tier_hint,
+            min_tier=min_tier,
         )
 
 
