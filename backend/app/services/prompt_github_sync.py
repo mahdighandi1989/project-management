@@ -478,12 +478,26 @@ async def rebuild_project_index(
                 pick_model_for_task,
                 trigger_workflow_dispatch,
             )
-            # 🤖 (dynamic model) — مدل را بر اساس تسکی که تازه push شد
-            # انتخاب کن. این تسک قرار است در next-cycle workflow اجرا شود
-            # (Claude /next می‌زند معمولاً همین را برمی‌دارد چون جدیدترین
-            # pending است). اگر Claude تسک دیگری بردارد، مدل اشتباه است
-            # ولی بدتر از sonnet نخواهد بود — همان tier‌بندی است.
-            _picked_model = await pick_model_for_task(task)
+            # 🚨 (NameError fix) — قبلاً `pick_model_for_task(task)` صدا
+            # زده می‌شد ولی این تابع پارامتر `tasks` (لیست) دارد، نه
+            # `task` (یک تسک). در نتیجه هر rebuild یک NameError می‌خورد
+            # ("name 'task' is not defined") و workflow_dispatch هرگز
+            # واقعاً trigger نمی‌شد. حالا اولین tasks pickable را از
+            # روی همان sorted index برمی‌داریم — این همان تسکی است که
+            # Claude /next برمی‌دارد. اگر هیچ pickable task نبود، model
+            # پیک نمی‌شود و workflow از default خودش استفاده می‌کند.
+            _next_task_id = (
+                pickable[0]["task_id"] if pickable else None
+            )
+            _next_task = None
+            if _next_task_id:
+                _next_task = next(
+                    (t for t in tasks if getattr(t, "id", None) == _next_task_id),
+                    None,
+                )
+            _picked_model = (
+                await pick_model_for_task(_next_task) if _next_task else None
+            )
             disp = await trigger_workflow_dispatch(
                 watched, gh_token=token, ref=branch,
                 claude_model=_picked_model,
