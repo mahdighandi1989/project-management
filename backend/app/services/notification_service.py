@@ -532,12 +532,58 @@ class NotificationChannel(ABC):
 class TelegramChannel(NotificationChannel):
     name = "telegram"
 
+    # 🆕 (flood-protection) — Telegram Bot API limit: ~30 پیام/ثانیه به global،
+    # و ~۱ پیام/ثانیه به یک chat معین. وقتی verify ping-pong + scan + recording
+    # finalize با هم آتش می‌گیرند، صدها notification در چند ثانیه می‌خواهد
+    # ارسال شود → 429 با retry_after می‌گیریم → پیام‌های بعدی (شامل
+    # PERSISTENT_REPLY_KEYBOARD از /menu) drop می‌شوند. این class-level token
+    # bucket ضربه را پایین نگه می‌دارد:
+    #   - per-chat: حداکثر ۱ پیام در هر 1.1s
+    #   - وقتی Telegram خودش 429 با retry_after برمی‌گرداند، یک شات تا
+    #     زمان مشخص بیاباس می‌گذاریم (همهٔ chats را برای امنیت).
+    # پیاده‌سازی سبک: یک dict per-chat با last_send_at + یک متغیر کلاسی
+    # global_pause_until. هیچ external lib لازم نیست.
+    _last_send_at: Dict[str, float] = {}
+    _global_pause_until: float = 0.0
+    _MIN_INTERVAL_PER_CHAT_SEC: float = 1.1
+
     def __init__(self, bot_token: Optional[str], chat_id: Optional[str]):
         self.bot_token = (bot_token or "").strip()
         self.chat_id = (chat_id or "").strip()
 
     def is_configured(self) -> bool:
         return bool(self.bot_token and self.chat_id)
+
+    @classmethod
+    async def _throttle_for_chat(cls, chat_id: str) -> None:
+        """قبل از ارسال به chat_id، اگر global pause یا per-chat تأخیر فعال است،
+        صبر کن. این جلوی flood شدن و drop شدن پیام‌های مهم را می‌گیرد."""
+        import asyncio as _asyncio_thr
+        import time as _time_thr
+        now = _time_thr.monotonic()
+        if cls._global_pause_until > now:
+            await _asyncio_thr.sleep(cls._global_pause_until - now)
+            now = _time_thr.monotonic()
+        last = cls._last_send_at.get(chat_id, 0.0)
+        gap = now - last
+        if gap < cls._MIN_INTERVAL_PER_CHAT_SEC:
+            await _asyncio_thr.sleep(cls._MIN_INTERVAL_PER_CHAT_SEC - gap)
+        cls._last_send_at[chat_id] = _time_thr.monotonic()
+
+    @classmethod
+    def _absorb_429(cls, body_text: str) -> None:
+        """اگر Telegram 429 با parameters.retry_after برگرداند، global_pause
+        را تا آن لحظه تنظیم می‌کنیم تا همهٔ chat ها در سرعت چاپ شوند."""
+        import time as _time_429
+        try:
+            data = json.loads(body_text or "{}")
+            params = data.get("parameters") or {}
+            retry_after = int(params.get("retry_after") or 0)
+            if retry_after > 0:
+                # یک buffer کوچک اضافه تا از boundary رد شویم
+                cls._global_pause_until = _time_429.monotonic() + retry_after + 0.2
+        except Exception:
+            pass
 
     async def send(
         self, message: str, *, subject: Optional[str] = None,
@@ -558,12 +604,26 @@ class TelegramChannel(NotificationChannel):
         }
         if reply_markup:
             payload["reply_markup"] = reply_markup
+        # 🆕 throttle قبل از ارسال
+        await self._throttle_for_chat(self.chat_id)
         try:
             timeout = aiohttp.ClientTimeout(total=15)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(url, json=payload) as r:
                     if r.status != 200:
                         body = await r.text()
+                        # 🆕 (429 retry_after) — Telegram خودش گفته چقدر صبر کنیم.
+                        # global_pause را ست می‌کنیم تا بقیه‌ٔ پیام‌ها معطل بمانند،
+                        # و خود این فراخوانی را یک بار retry می‌کنیم.
+                        if r.status == 429:
+                            self._absorb_429(body)
+                            import asyncio as _asyncio_send
+                            await _asyncio_send.sleep(min(5.0, max(1.0, self._global_pause_until - __import__("time").monotonic())))
+                            async with session.post(url, json=payload) as r429:
+                                if r429.status == 200:
+                                    return {"ok": True, "channel": self.name, "silent": silent, "retried_after_429": True}
+                                body429 = await r429.text()
+                                return {"ok": False, "channel": self.name, "error": f"HTTP {r429.status} after 429-retry: {body429[:200]}"}
                         # اگر Markdown parse fail شد، یک بار retry بدون parse_mode
                         if "can't parse" in body.lower():
                             payload.pop("parse_mode", None)
@@ -2309,6 +2369,7 @@ class NotificationService:
                 "• /claude\\_tasks <repo\\_id> — 📋 تسک‌های یک پروژه (برای اجرا با Claude)\n"
                 "• /run\\_claude <task\\_id> — 🚀 اجرای فقط همین تسک توسط Claude در GitHub Actions\n"
                 "• /menu — منوی دسترسی سریع\n"
+                "• /kb — 🔁 برگرداندن منوی ثابت (سریع، حتی وقتی همه چیز شلوغ است)\n"
                 "• /status — وضعیت نوتیفیکیشن\n"
                 "• /cancel — لغو flow فعلی\n"
                 "• /hide\\_menu — مخفی‌کردن منوی ثابت\n"
@@ -2318,7 +2379,23 @@ class NotificationService:
                 "/menu را بزنید تا دوباره فعال شود."
             )
             # 🆕 reply_markup = persistent reply keyboard (یک‌بار ست می‌شود، تا remove نشود می‌ماند)
-            await tg.send(reply, silent=True, reply_markup=PERSISTENT_REPLY_KEYBOARD)
+            # 🆕 (robustness) — اگر اولین send fail کرد (rate-limit، شبکه، …)،
+            # یک retry سبک با backoff کوتاه. کاربر در دسکتاپ گزارش کرد منوی
+            # ثابت بعد از /start برنمی‌گردد؛ این علتش معمولاً flood-protection
+            # تلگرام در دوره‌های نوتیفیکیشن سنگین است.
+            _send_res = await tg.send(reply, silent=True, reply_markup=PERSISTENT_REPLY_KEYBOARD)
+            if not _send_res.get("ok"):
+                logger.warning(
+                    f"/start send failed (will retry): {_send_res.get('error')[:200]}"
+                )
+                import asyncio as _asyncio_start
+                await _asyncio_start.sleep(0.5)
+                # retry با پیام کوتاه‌تر (فقط keyboard، بدون متن بلند)
+                await tg.send(
+                    "👋 منوی ثابت فعال شد — /menu برای دسترسی سریع.",
+                    silent=True,
+                    reply_markup=PERSISTENT_REPLY_KEYBOARD,
+                )
             return {"ok": True, "handled": "start"}
 
         # 🆕 /index — پیام pin‌شدهٔ ایندکس کارها (دسته‌بندی شده، خودکار edit)
@@ -2333,6 +2410,26 @@ class NotificationService:
                 reply_markup={"remove_keyboard": True},
             )
             return {"ok": True, "handled": "hide_menu"}
+
+        # 🆕 /kb /keyboard /منو — restore سریع منوی ثابت، بدون هیچ منطق اضافه
+        # دو scenario که این لازم می‌شود:
+        #  1. منوی ثابت بعد از سوئیچ بین چت‌های Telegram Web از بین رفته
+        #  2. /menu شلوغ و سنگین است (inline_keyboard بزرگ + متن طولانی) — اگر
+        #     rate-limit Telegram موقتاً block کرد، این مسیر کوچک باز هم
+        #     می‌رسد. تنها یک send سبک با reply_markup=PERSISTENT_REPLY_KEYBOARD.
+        # اگر اولین تلاش ناموفق بود، یک retry با backoff کوتاه (300ms) می‌زنیم.
+        if text in ("/kb", "/keyboard", "/keys", "بازگردانی منو"):
+            import asyncio as _asyncio_kb
+            kb_result = await tg.send(
+                "📋 منوی ثابت برگشت.",
+                silent=True,
+                reply_markup=PERSISTENT_REPLY_KEYBOARD,
+            )
+            if not kb_result.get("ok"):
+                # تنها retry: بدون text، فقط emoji + keyboard
+                await _asyncio_kb.sleep(0.3)
+                await tg.send("📋", silent=True, reply_markup=PERSISTENT_REPLY_KEYBOARD)
+            return {"ok": True, "handled": "kb_restore"}
 
         if text == "/menu":
             reply = (
@@ -2388,13 +2485,28 @@ class NotificationService:
             # سوئیچ می‌کند گم می‌کنند. /menu باید این مشکل را resolve کند.
             # دو پیام: اول inline keyboard، بعد یک پیام کوتاه با reply_keyboard
             # برای re-attach.
-            await tg.send(reply, silent=True, reply_markup=kb)
-            await tg.send(
+            _menu_send = await tg.send(reply, silent=True, reply_markup=kb)
+            _kb_send = await tg.send(
                 "🎛 _منوی ثابت در پایین فعال است._",
                 silent=True,
                 reply_markup=PERSISTENT_REPLY_KEYBOARD,
             )
-            return {"ok": True, "handled": "menu"}
+            # 🆕 (robustness) — اگر تلگرام keyboard message را drop کرد
+            # (که در شلوغی نوتیفیکیشن‌ها زیاد دیده‌ایم)، یک retry سبک:
+            if not _kb_send.get("ok"):
+                logger.warning(
+                    f"/menu keyboard re-attach failed (retrying): "
+                    f"{_kb_send.get('error')[:200]}"
+                )
+                import asyncio as _asyncio_menu
+                await _asyncio_menu.sleep(0.5)
+                await tg.send("📋", silent=True, reply_markup=PERSISTENT_REPLY_KEYBOARD)
+            return {
+                "ok": True,
+                "handled": "menu",
+                "inline_ok": _menu_send.get("ok"),
+                "kb_ok": _kb_send.get("ok"),
+            }
 
         # 🆕 (Manual Claude single-task triggers via Telegram)
         # /claude_repos — لیست پروژه‌های watched که Claude Runner روی آنها نصب است
