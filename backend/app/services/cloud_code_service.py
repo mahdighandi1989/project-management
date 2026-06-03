@@ -823,6 +823,7 @@ async def cloud_code_message(
     timeout: float = 180.0,
     tools: Optional[List[Dict[str, Any]]] = None,
     tier_hint: Optional[str] = None,
+    min_tier: Optional[str] = None,
     metadata_sink: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Single-turn (non-streaming) call to Anthropic Messages API with full
@@ -856,9 +857,10 @@ async def cloud_code_message(
         )
 
     # auto-route via the same picker as streaming
-    if model == "auto" or tier_hint is not None:
+    if model == "auto" or tier_hint is not None or min_tier is not None:
         chosen_id, picked_tier, pick_reason = await pick_best_model(
-            _flatten_messages_for_classifier(messages), tier_hint=tier_hint,
+            _flatten_messages_for_classifier(messages),
+            tier_hint=tier_hint, min_tier=min_tier,
         )
         if metadata_sink is not None:
             metadata_sink["requested_model"] = model
@@ -984,6 +986,7 @@ async def cloud_code_agent_loop(
     initial_history: Optional[List[Dict[str, Any]]] = None,
     model: str = "auto",
     tier_hint: Optional[str] = None,
+    min_tier: Optional[str] = None,
     max_iterations: int = 12,
     max_tokens_per_call: int = 8000,
     temperature: float = 0.2,
@@ -1056,6 +1059,7 @@ async def cloud_code_agent_loop(
                 tools=tools,
                 model=model,
                 tier_hint=tier_hint,
+                min_tier=min_tier,
                 max_tokens=max_tokens_per_call,
                 temperature=temperature,
                 metadata_sink=sink,

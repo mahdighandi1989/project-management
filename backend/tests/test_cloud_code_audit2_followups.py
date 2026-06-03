@@ -56,52 +56,78 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # ---------------------------------------------------------------------------
 
 
-def test_picker_short_circuit_respects_require_api_key(monkeypatch):
-    """🚨 The critical fix. When require_api_key=True, the cloud_code
-    short-circuit must be SKIPPED so the fallback path can land on
-    Gemini (or whatever has a real API key)."""
+def test_picker_short_circuit_respects_exclude_cloud_code_flag(monkeypatch):
+    """🚨 The critical fix. When exclude_cloud_code=True (set by the
+    fallback path in _ai_extract_text), the cloud_code short-circuit
+    must be SKIPPED so the fallback lands on Gemini."""
     from app.core import models_registry as mr
 
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "dummy")
-    # Helper says yes for file_extraction — but require_api_key=True
-    # is the override the fallback uses.
     monkeypatch.setattr(
         "app.services.cloud_code_service.cloud_code_setting_is_enabled_for",
         lambda key: True,
     )
 
-    # Call with require_api_key=True, like _ai_extract_text's fallback does.
     picked = mr.pick_best_extraction_model(
-        "image/png", require_api_key=True,
+        "image/png", exclude_cloud_code=True,
     )
-    # cloud_code MUST NOT be returned in this path. Picker may return None
-    # if no api-key-backed model qualifies in test env, but never cloud_code.
+    # cloud_code MUST NOT be returned. Other models may not qualify in
+    # test env, but cloud_code must be excluded.
     assert picked is None or picked.id != "cloud_code"
 
 
-def test_picker_short_circuit_still_works_when_require_api_key_false(monkeypatch):
-    """Regression guard for happy path. require_api_key=False is the
-    default used by normal extractions — cloud_code must still win
-    when the helper says yes."""
+def test_picker_returns_cloud_code_for_default_caller(monkeypatch):
+    """🚨🚨 THE REGRESSION THIS WHOLE COMMIT EXISTS TO PREVENT.
+    The production caller at oversight_extraction.py:1303 calls the
+    picker with NO require_api_key or exclude_cloud_code argument:
+        pick_best_extraction_model(mime, preferred_model_id=..., db_enabled_ids=...)
+
+    Previously, the cloud_code short-circuit was gated by `not require_api_key`,
+    and require_api_key defaulted to True — so the default call NEVER
+    returned cloud_code. The whole c5523f6 commit (extraction routing)
+    was silently dead code; Gemini API budget was still burned for
+    image/PDF extraction.
+
+    This test calls the picker with NO override kwargs (mimicking the
+    real production call) and asserts cloud_code IS returned for an
+    image MIME when the helper says yes."""
     from app.core import models_registry as mr
 
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "dummy")
     monkeypatch.setattr(
         "app.services.cloud_code_service.cloud_code_setting_is_enabled_for",
-        lambda key: key == "file_extraction",
+        lambda key: True,
     )
 
-    picked = mr.pick_best_extraction_model(
-        "image/png", require_api_key=False,
+    # NO require_api_key, NO exclude_cloud_code — defaults like production
+    picked = mr.pick_best_extraction_model("image/png")
+    assert picked is not None
+    assert picked.id == "cloud_code", (
+        f"production default call must return cloud_code (got {picked.id!r}). "
+        f"if this test fails, the feature toggle in the models page is a no-op."
     )
+
+
+def test_picker_short_circuit_still_works_when_require_api_key_false(monkeypatch):
+    """Legacy regression guard kept for safety. The flag still works
+    even though it's no longer the primary gating mechanism."""
+    from app.core import models_registry as mr
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "dummy")
+    monkeypatch.setattr(
+        "app.services.cloud_code_service.cloud_code_setting_is_enabled_for",
+        lambda key: True,
+    )
+
+    picked = mr.pick_best_extraction_model("image/png", require_api_key=False)
     assert picked is not None
     assert picked.id == "cloud_code"
 
 
-def test_extraction_fallback_calls_picker_with_require_api_key():
+def test_extraction_fallback_calls_picker_with_exclude_cloud_code():
     """Source check — the fallback path in _ai_extract_text must pass
-    require_api_key=True so the picker excludes cloud_code. Otherwise
-    the fallback re-picks cloud_code and re-raises (issue A3)."""
+    exclude_cloud_code=True so the picker excludes cloud_code. Otherwise
+    the fallback re-picks cloud_code and re-raises."""
     src = (
         Path(__file__).resolve().parents[1]
         / "app/services/oversight_extraction.py"
@@ -110,9 +136,9 @@ def test_extraction_fallback_calls_picker_with_require_api_key():
     idx = src.find('logger.warning(\n                f"_ai_extract_text: cloud_code path failed')
     assert idx != -1, "fallback block not found — test stale"
     rest = src[idx:idx + 2000]
-    # Must call _pick with require_api_key=True
-    assert "require_api_key=True" in rest, (
-        "fallback must call picker with require_api_key=True so "
+    # Must call _pick with exclude_cloud_code=True
+    assert "exclude_cloud_code=True" in rest, (
+        "fallback must call picker with exclude_cloud_code=True so "
         "cloud_code is excluded (otherwise it re-picks cloud_code "
         "and re-raises the original error)"
     )

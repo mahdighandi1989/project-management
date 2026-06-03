@@ -250,6 +250,50 @@ def test_inspector_chat_defaults_to_min_tier_sonnet():
     )
 
 
+def test_cloud_code_message_supports_min_tier():
+    """🚨 (audit2 medium fix) — cloud_code_message must accept min_tier
+    too. Otherwise the tool-enabled inspector chat path (the default
+    flow) bypasses the floor and short prompts still go to Haiku."""
+    from app.services.cloud_code_service import cloud_code_message
+    import inspect
+
+    sig = inspect.signature(cloud_code_message)
+    assert "min_tier" in sig.parameters, (
+        "cloud_code_message must accept min_tier — otherwise the "
+        "tool-enabled inspector chat bypasses the floor"
+    )
+
+
+def test_cloud_code_agent_loop_supports_min_tier():
+    """🚨 (audit2 medium fix) — same for cloud_code_agent_loop, which
+    is what render_logs.chat-cloud-code actually invokes."""
+    from app.services.cloud_code_service import cloud_code_agent_loop
+    import inspect
+
+    sig = inspect.signature(cloud_code_agent_loop)
+    assert "min_tier" in sig.parameters, (
+        "cloud_code_agent_loop must accept min_tier so the inspector "
+        "tool path benefits from the floor"
+    )
+
+
+def test_render_logs_inspector_chat_passes_min_tier_sonnet():
+    """The actual route that handles inspector chat must default
+    min_tier='sonnet' when invoking cloud_code_agent_loop. Otherwise
+    the user fix is dead code for the real endpoint."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/render_logs.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("cloud_code_agent_loop(")
+    assert idx != -1, "agent_loop call not found in render_logs"
+    rest = src[idx:idx + 2000]
+    assert 'min_tier="sonnet"' in rest, (
+        "the agent_loop call in render_logs must pass min_tier='sonnet' "
+        "for the inspector chat surface"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Fallback dict is at least up to date
 # ---------------------------------------------------------------------------
