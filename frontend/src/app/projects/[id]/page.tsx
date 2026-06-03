@@ -14663,9 +14663,20 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                         </div>
                         {inspectorEngine === 'cloud_code' && cloudCodeAvailable !== false && (
                           <>
-                            <p className="text-[10px] opacity-60 mt-1.5">
-                              ✨ پاسخ مستقیماً از Claude Code OAuth می‌آید — scan/apply-action غیرفعال است.
-                            </p>
+                            <div className="text-[10px] mt-1.5 p-1.5 rounded bg-amber-500/20 border border-amber-300/40">
+                              <p className="font-bold mb-0.5">⚠️ Cloud Code فعلاً فقط چت متنی است</p>
+                              <p className="opacity-90 leading-relaxed">
+                                این موتور tool-calling ندارد. برای کارهایی مثل:
+                                <br/>
+                                • تنظیم متغیرهای محیطی Render (مثل API_KEY ها)
+                                <br/>
+                                • خواندن فایل پروژه، apply-action، scan انتخابی
+                                <br/>
+                                • دیپلوی، PR ساختن، تعامل با GitHub/Render API
+                                <br/>
+                                → روی <b>«🤖 Local AI»</b> سوئیچ کن. Local AI ۲۴ ابزار دارد و می‌تواند مستقیم API ها را صدا بزند.
+                              </p>
+                            </div>
                             <div className="mt-2">
                               <label className="text-[10px] opacity-80 block mb-0.5">🤖 مدل Claude:</label>
                               {/* 🎨 (a11y/contrast) — selectی که در پنل قرمز رنگ
@@ -16870,7 +16881,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                         }
                         // Shift+Enter یا Ctrl+Enter → default textarea behavior (newline)
                       }}
-                      rows={1}
+                      rows={3}
                       placeholder={
                         inspectorOpLock
                           ? (inspectorOpType === 'investigate' ? '🔒 در حال بررسی... لطفاً صبر کنید' : '🔒 در حال اصلاح... لطفاً صبر کنید')
@@ -16881,7 +16892,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                               : "ابتدا مدلی انتخاب کنید..."
                       }
                       disabled={(inspectorEngine !== 'cloud_code' && !inspectorAutoSelect && inspectorSelectedModels.length === 0) || inspectorChatLoading || inspectorOpLock}
-                      className={`flex-1 bg-gray-100 dark:bg-gray-700 rounded-2xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50 resize-none max-h-32 overflow-y-auto ${inspectorOpLock ? 'cursor-not-allowed' : ''}`}
+                      className={`flex-1 bg-gray-100 dark:bg-gray-700 rounded-2xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50 resize-none max-h-96 overflow-y-auto leading-relaxed ${inspectorOpLock ? 'cursor-not-allowed' : ''}`}
                     />
                     <button
                       onClick={() => sendInspectorChat()}
