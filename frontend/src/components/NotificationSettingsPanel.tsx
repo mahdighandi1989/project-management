@@ -66,11 +66,45 @@ const EVENT_GROUPS: Array<{ title: string; icon: string; keys: string[] }> = [
     icon: '📥',
     keys: ['task_from_inspector'],
   },
+  // 🆕 (Claude Auto-Runner) — اجرای خودکار با Claude Code در GitHub Actions
+  // هم تشمل toggle نصب workflow، هم چرخهٔ claim → complete → verify → retry.
+  // پیام‌های اجرای خودکار و per-task «اجرا از طریق کلاد» اینجا تنظیم می‌شوند.
+  {
+    title: 'Claude Auto-Runner (اجرای خودکار)',
+    icon: '🤖',
+    keys: [
+      'claude_runner_enable_attempt',
+      'claude_runner_disabled',
+      'external_runner_claimed',
+      'external_runner_completed',
+      'external_runner_failed',
+      'external_runner_retry_after_partial_verify',
+      'external_runner_max_retries_or_regressed',
+    ],
+  },
+  // 🆕 (Backfill AC) — خودکار + دستی. شامل پیشنهاد phase 3 و پایان backfill.
+  {
+    title: 'Backfill AC (خودکار + دستی)',
+    icon: '🔬',
+    keys: ['backfill_ac_needed', 'backfill_ac_completed'],
+  },
+  // 🆕 (Reminder) یادآوری‌ها
+  {
+    title: 'یادآوری‌ها',
+    icon: '🔔',
+    keys: ['reminder_due', 'reminder_done', 'reminder_snoozed'],
+  },
   // 🆕 (Creator) گروه ساخت پروژه
   {
     title: 'Creator (ساخت پروژه)',
     icon: '🚀',
     keys: ['project_created', 'project_auto_watched', 'creator_failed'],
+  },
+  // 🆕 (Model Temp) — فعال/غیرفعال موقت مدل‌ها
+  {
+    title: 'مدیریت موقت مدل‌ها',
+    icon: '🎛',
+    keys: ['model_temp_activated', 'model_temp_reverted'],
   },
   // 🆕 (AI Usage) مصرف توکن و موجودی
   {
@@ -510,6 +544,67 @@ export default function NotificationSettingsPanel() {
           روی 🧪 کلیک کنید تا پیام نمونه برای همان رویداد ارسال شود.
         </p>
 
+        {/* 🛡 (auto-catch) — هر event که در backend registry هست ولی در هیچ
+            گروه explicit نیامده، در گروه "سایر" نمایش داده می‌شود. این
+            regression-guard ست تا event جدیدی که در backend اضافه می‌شود
+            هرگز در UI نامرئی نماند. */}
+        {(() => {
+          const groupedKeys = new Set<string>();
+          EVENT_GROUPS.forEach(g => g.keys.forEach(k => groupedKeys.add(k)));
+          const orphans = Object.keys(status.events_registry).filter(
+            k => !groupedKeys.has(k)
+          );
+          if (orphans.length === 0) return null;
+          return (
+            <div className="mb-4">
+              <h4 className="font-semibold text-sm mb-2 text-gray-700 dark:text-gray-200 flex items-center gap-2">
+                <span>🗂</span> سایر (auto-detected)
+              </h4>
+              <p className="text-[10px] text-amber-600 dark:text-amber-400 mb-1">
+                این رویدادها در backend ثبت شده‌اند ولی در هیچ گروه explicit
+                نیامده‌اند — هنوز می‌توانید تنظیم کنید.
+              </p>
+              <div className="space-y-1">
+                {orphans.map(key => {
+                  const meta = status.events_registry[key];
+                  if (!meta) return null;
+                  const enabled = !!status.prefs.events[key];
+                  const sound = !!status.prefs.sound[key];
+                  return (
+                    <div key={key}
+                      className="flex items-center gap-2 p-2 hover:bg-gray-50 dark:hover:bg-gray-700/30 rounded">
+                      <label className="flex items-center gap-2 flex-1 cursor-pointer min-w-0">
+                        <input
+                          type="checkbox"
+                          checked={enabled}
+                          disabled={saving}
+                          onChange={(e) => updatePrefs({ events: { [key]: e.target.checked } })}
+                        />
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm font-medium truncate">
+                            {meta.icon} {meta.label}
+                          </div>
+                          <div className="text-[10px] text-gray-500 dark:text-gray-400 truncate">
+                            {meta.help}
+                          </div>
+                        </div>
+                      </label>
+                      <label className="flex items-center gap-1 cursor-pointer text-[10px]">
+                        <input
+                          type="checkbox"
+                          checked={sound}
+                          disabled={saving || !enabled}
+                          onChange={(e) => updatePrefs({ sound: { [key]: e.target.checked } })}
+                        />
+                        <span>🔊</span>
+                      </label>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })()}
         {EVENT_GROUPS.map(group => (
           <div key={group.title} className="mb-4">
             <h4 className="font-semibold text-sm mb-2 text-gray-700 dark:text-gray-200 flex items-center gap-2">
