@@ -290,9 +290,6 @@ def _resolve_done_remaining_contradictions_v7(
         if t.strip():
             done_texts.append(t.strip().lower())
 
-    if not done_texts:
-        return list(remaining_parts)
-
     # اگر step_code_verdicts وجود دارد و verdict implemented است،
     # تسک‌های مرتبط را به‌عنوان قطعاً done در نظر می‌گیریم
     code_aware_implemented_texts: List[str] = []
@@ -309,6 +306,16 @@ def _resolve_done_remaining_contradictions_v7(
                     title = (s.get("title") or s.get("scope") or "").strip()
                     if title:
                         code_aware_implemented_texts.append(title.lower())
+
+    # 🆕 (audit pass) — early-return فقط وقتی *هیچ* سیگنالی برای merge
+    # نداریم (نه done_parts متنی، نه code-aware implemented). قبلاً
+    # `if not done_texts: return ...` بود که باعث می‌شد code-aware
+    # path هرگز اجرا نشود اگر done_parts خالی بود — حتی وقتی
+    # step_code_verdicts صریحاً implemented برمی‌گرداند. این bug latent
+    # از روز اول test_resolver_code_aware_implemented_wins را fail
+    # می‌کرد ولی دیده نشده بود.
+    if not done_texts and not code_aware_implemented_texts:
+        return list(remaining_parts)
 
     cleaned_remaining: List[Any] = []
     removed_log: List[str] = []
