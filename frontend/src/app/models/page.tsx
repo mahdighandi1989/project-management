@@ -66,6 +66,19 @@ interface TaskType {
   description: string;
 }
 
+// 🆕 (Cloud Code centralization — UX fix) — task type های اختصاصی Cloud Code.
+// این 4 key فقط برای ردیف cloud_code معنا دارند: helper مرکزی فقط همین‌ها را
+// می‌خواند. tic زدن «چت/تولید کد/...» برای cloud_code اثری ندارد و کاربر را
+// گیج می‌کرد. در edit modal ردیف cloud_code فقط همین 4 گزینه را نشان می‌دهیم؛
+// در ردیف سایر مدل‌ها این 4 گزینه را پنهان می‌کنیم (برای آن‌ها هم بی‌معنا است).
+const CLOUD_CODE_TASK_KEYS = new Set([
+  'claude_auto_runner',
+  'claude_single_task',
+  'inspector_cloud_code',
+  'creator_engine',
+  'file_extraction',
+]);
+
 export default function ModelsPage() {
   const [models, setModels] = useState<Model[]>([]);
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
@@ -673,7 +686,14 @@ export default function ModelsPage() {
                       <td className="py-3 px-4">
                         {isEditing ? (
                           <div className="flex flex-wrap gap-1">
-                            {taskTypes.map(task => {
+                            {taskTypes
+                              .filter(task => {
+                                // 🆕 (cloud_code UX) — task type های اختصاصی فقط
+                                // برای ردیف cloud_code معنا دارند.
+                                const isCcKey = CLOUD_CODE_TASK_KEYS.has(task.id);
+                                return isCloudCodeRow ? (isCcKey || task.id === 'all') : !isCcKey;
+                              })
+                              .map(task => {
                               const isSelected = setting.allowed_tasks.includes(task.id) || setting.allowed_tasks.includes('all');
                               return (
                                 <label key={task.id} className="flex items-center gap-1 text-xs cursor-pointer">
@@ -718,7 +738,14 @@ export default function ModelsPage() {
                       <td className="py-3 px-4">
                         {isEditing ? (
                           <div className="flex flex-wrap gap-1">
-                            {taskTypes.filter(t => t.id !== 'all').map(task => {
+                            {taskTypes
+                              .filter(t => t.id !== 'all')
+                              .filter(task => {
+                                // 🆕 (cloud_code UX) — همان منطق ستون قبل.
+                                const isCcKey = CLOUD_CODE_TASK_KEYS.has(task.id);
+                                return isCloudCodeRow ? isCcKey : !isCcKey;
+                              })
+                              .map(task => {
                               const isPreferred = setting.preferred_for.includes(task.id);
                               return (
                                 <label key={task.id} className="flex items-center gap-1 text-xs cursor-pointer">

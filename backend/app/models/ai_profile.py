@@ -341,15 +341,23 @@ AVAILABLE_TASK_TYPES = [
         "name": "موتور خالق",
         "description": "ساخت/بازبینی پروژه در موتور خالق با Cloud Code",
     },
+    # 🆕 (extraction routing) — Claude vision via OAuth برای استخراج
+    # تصویر/PDF (بدون کسر از API key Gemini). برای صوت/ویدیو ساپورت ندارد
+    # و خودکار به Gemini fallback می‌شود.
+    {
+        "id": "file_extraction",
+        "name": "استخراج فایل‌های پیوست (تصویر/PDF)",
+        "description": "استفاده از Cloud Code OAuth به‌جای کلید Gemini برای استخراج تصویر و PDF — بدون هزینهٔ کلید. صوت و ویدیو همیشه با Gemini.",
+    },
 ]
 
 # 🆕 (Cloud Code centralization) — لیست id های preferred_for که فقط مربوط
-# به entry Cloud Code هستند. هر consumer (بعدا در مرحلهٔ 3 سیم‌کشی می‌شود)
-# با یکی از این key ها از helper مرکزی می‌پرسد «آیا برای این کار از Cloud
-# Code استفاده کنم؟».
+# به entry Cloud Code هستند. هر consumer با یکی از این key ها از helper
+# مرکزی می‌پرسد «آیا برای این کار از Cloud Code استفاده کنم؟».
 CLOUD_CODE_PREFERRED_FOR_KEYS = [
     "claude_auto_runner",
     "claude_single_task",
     "inspector_cloud_code",
     "creator_engine",
+    "file_extraction",
 ]
