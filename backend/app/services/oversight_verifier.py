@@ -323,32 +323,37 @@ def _resolve_done_remaining_contradictions_v7(
             continue
 
         # 1) چک تناقض با done_parts
+        # 🆕 (Verify v8 Tighten) — Jaccard threshold از 0.5 → 0.7 بالاتر برده
+        # شد. 0.5 خیلی liberal بود و آیتم‌های متفاوت ولی هم‌کلمه را اشتباهاً
+        # ادغام می‌کرد (مثلاً "endpoint /chat-cloud-code اضافه نشده" را با
+        # "endpoint /chat اضافه شده" یکی می‌گرفت). 0.7 نیاز به overlap
+        # واقعی دارد.
         is_in_done = False
         for d_lower in done_texts:
-            # substring بزرگ (≥30 char)
-            if len(r_lower) >= 30 and r_lower in d_lower:
+            # substring بزرگ (≥40 char — قبلاً 30 بود)
+            if len(r_lower) >= 40 and r_lower in d_lower:
                 is_in_done = True
                 break
-            if len(d_lower) >= 30 and d_lower in r_lower:
+            if len(d_lower) >= 40 and d_lower in r_lower:
                 is_in_done = True
                 break
-            # Jaccard
+            # Jaccard ≥ 0.7 (قبلاً 0.5 بود)
             sim = _jaccard_word_similarity(r_lower, d_lower)
-            if sim >= 0.5:
+            if sim >= 0.7:
                 is_in_done = True
                 break
         if is_in_done:
             removed_log.append(f"contradict_done: {r_text[:80]}")
             continue
 
-        # 2) چک code-aware: implemented
+        # 2) چک code-aware: implemented (همان threshold tighten)
         is_implemented = False
         for impl_lower in code_aware_implemented_texts:
-            if len(impl_lower) >= 20 and impl_lower in r_lower:
+            if len(impl_lower) >= 30 and impl_lower in r_lower:
                 is_implemented = True
                 break
             sim = _jaccard_word_similarity(r_lower, impl_lower)
-            if sim >= 0.5:
+            if sim >= 0.7:
                 is_implemented = True
                 break
         if is_implemented:
@@ -3384,6 +3389,17 @@ async def verify_task(
   اگر شک داری 0.5-0.7، اگر نمی‌توانی قضاوت کنی زیر 0.3.
 - **اگر status="partial"** ولی remaining_parts خالی باشد، در logs ثبت
   می‌شود که AI خطا داشته — باید حتماً remaining_parts را پر کنی.
+- 🚨 **قاعدهٔ سازگاری حیاتی (Consistency Rule)**: اگر در `steps_status`
+  حتی **یک** مرحله را با `status: "done"` و `remaining: "..."` غیرخالی
+  مشخص کردی، **اشتباه است**. یا مرحله را `partial` کن (با remaining
+  پر شده)، یا remaining را خالی بگذار (`""`). همچنین اگر `remaining_parts`
+  لیست بیرونی هر آیتمی دارد، **حتماً** حداقل یک مرحلهٔ مرتبط در
+  `steps_status` نباید `done` باشد. مثال غلط: همهٔ steps `done` ولی
+  `remaining_parts` = `["X هنوز اضافه نشده"]` ← این تناقض است و
+  سیستم به‌طور خودکار تنزل می‌دهد. مثال درست: اگر چیزی واقعاً باقی
+  مانده، آن step را `partial` بگذار و `remaining_parts` را هم پر کن
+  با همان آیتم. **این قانون اجرا می‌شود — وگرنه auto-archive بلاک
+  می‌شود.**
 - **آیتم‌های لیست‌ها فارسی باشند** (مگر نام فایل/کد).
 - **محدودیت طول حیاتی برای جلوگیری از truncation**:
   - هر `evidence` در `criteria_results` حداکثر **80 کاراکتر** (فقط نام فایل/تابع کلیدی).
@@ -3939,6 +3955,27 @@ async def verify_task(
                 pct = 0
             elif new_status == "partial":
                 pct = max(1, min(99, pct or 50))
+            # 🆕 (Consistency Tighten §1) — اگر AI گفت done ولی فیلد remaining
+            # غیرخالی برگرداند (مثلاً "اضافه نشده", "ناقص", "هنوز ...")، این
+            # یک تناقض درون-step است. سیاست: AI به remaining خودش بیشتر اعتماد
+            # شود — به partial تنزل بده. این جلوی این bug را می‌گیرد که AI
+            # ۹/۹ ✅ بزند ولی در remaining هر step چیزی برای انجام نشده ذکر کند.
+            _step_remaining_text = (upd.get("remaining") or "").strip()
+            if new_status == "done" and len(_step_remaining_text) >= 10:
+                _lower = _step_remaining_text.lower()
+                # اگر متن remaining "ندارد/none/n/a" نیست → واقعاً کار باقی مانده
+                if not any(
+                    tok in _lower for tok in (
+                        "ندارد", "نیست", "none", "n/a", "n\\a", "هیچ", "no remaining"
+                    )
+                ):
+                    logger.info(
+                        f"verify {task.id}: step {sid} — AI گفت done ولی "
+                        f"remaining='{_step_remaining_text[:80]}' دارد → "
+                        f"به partial تنزل می‌دهیم."
+                    )
+                    new_status = "partial"
+                    pct = max(1, min(99, pct or 60))
             new_entry["status"] = new_status
             new_entry["completion_pct"] = pct
             new_entry["remaining"] = (upd.get("remaining") or "").strip() if new_status != "done" else ""
@@ -4022,6 +4059,54 @@ async def verify_task(
         _checklist_computed_steps = updated_steps
         _checklist_overall_pct = overall_pct
 
+        # 🆕 (Consistency Guard §2 — جلوگیری از auto-archive کاذب) — اگر
+        # per-step verifier گفت همهٔ مراحل done است ولی AI overall verifier
+        # هنوز remaining_parts غیرخالی برگردانده (بعد از contradiction
+        # resolver و code-aware sync بالا)، این یک تناقض جدی است: یا AI
+        # per-step خوش‌بینانه قضاوت کرده، یا کلیه acceptance criteria در
+        # task_steps نگاشت نشده‌اند. در هر دو حالت، auto-archive کردن
+        # یک تسک ناقص رخ می‌دهد. سیاست: تنزل به partial، یک step را به
+        # partial برگردان (آخرین step) تا overall_pct < 100 شود و
+        # all_steps_done = False شود تا bypass_streak فعال نشود.
+        _remaining_after_sync = [
+            r for r in (getattr(report, "remaining_parts", []) or [])
+            if str(r).strip()
+        ]
+        _remaining_count_after_sync = len(_remaining_after_sync)
+        if all_steps_done and _remaining_count_after_sync > 0:
+            logger.warning(
+                f"verify {task.id}: consistency mismatch — per-step "
+                f"checklist {done_count}/{total_steps} done ولی "
+                f"remaining_parts (پس از resolver) {_remaining_count_after_sync} "
+                f"مورد دارد. جلوگیری از auto-archive کاذب: تنزل به partial."
+            )
+            # یک step done را به partial تنزل بده تا کاربر در UI ببیند
+            # کدام مرحله هنوز کامل نیست + overall_pct < 100 شود.
+            for _us in reversed(updated_steps):
+                if _us.get("status") == "done":
+                    _us["status"] = "partial"
+                    _us["completion_pct"] = 80
+                    _us["remaining"] = (
+                        f"تأیید کلی AI {_remaining_count_after_sync} مورد "
+                        f"باقی‌مانده پیدا کرده — بازبینی لازم: "
+                        + "; ".join(str(r)[:60] for r in _remaining_after_sync[:3])
+                    )[:500]
+                    _us["completed_at"] = None
+                    done_count -= 1
+                    break
+            total_steps = len(updated_steps)
+            completion_sum = sum(
+                int(_s.get("completion_pct", 0) or 0) for _s in updated_steps
+            )
+            overall_pct = (
+                int(round(completion_sum / total_steps)) if total_steps else 0
+            )
+            all_steps_done = False
+            status_val = VERIFICATION_PARTIAL
+            report.status = VERIFICATION_PARTIAL
+            _checklist_computed_steps = updated_steps
+            _checklist_overall_pct = overall_pct
+
         # 🆕 اگر AI همه را done نشان داد ولی status کلی را done نگفت، در صورت
         # کامل بودن چک‌لیست، status_val را به done بالا ببر تا transition عادی
         # streak/auto-done اجرا شود (verifier ممکن است محافظه‌کار باشد).
@@ -4077,25 +4162,45 @@ async def verify_task(
             task.verification_history = task.verification_history[-30:]
 
         if status_val == VERIFICATION_DONE:
-            task.confirmation_streak += 1
-            # 🆕 (audit fix) — وقتی task_steps دارد و *همهٔ* مراحل done شدند
-            # (per-step verified)، streak guard دور زده می‌شود. این سیگنال
-            # دقیق‌تر از یک verify کلی است و کاربر منتظر «verify بعدی»
-            # نمی‌ماند برای کاری که ۱۰۰٪ checklist تأیید شده.
-            bypass_streak = bool(
-                all_steps_done and (task.task_steps or [])
-            )
-            if task.confirmation_streak >= streak_required or bypass_streak:
-                task.verification_status = "done"
-                task.status = "done"
-                # 🆕 (P3) auto-archive وقتی هم status هم verification_status = done
-                # تسک از فهرست فعال حذف می‌شود ولی در آرشیو قابل مشاهده است
-                if not getattr(task, "archived", False):
-                    task.archived = True
-                    task.archived_at = now_iso()
-            else:
+            # 🆕 (Auto-Archive Hard Guard) — defense in depth: حتی اگر تمام
+            # منطق بالا decide کرده done است، اگر report.remaining_parts هنوز
+            # غیرخالی است، auto-archive ممنوع. این تضمین می‌کند که هیچ تسکی
+            # با "جزئیات می‌گوید X مورد باقی‌مانده" آرشیو نشود.
+            _final_remaining = [
+                r for r in (getattr(report, "remaining_parts", []) or [])
+                if str(r).strip()
+            ]
+            if _final_remaining:
+                logger.warning(
+                    f"verify {task.id}: hard-guard blocked auto-archive — "
+                    f"status_val=done ولی {len(_final_remaining)} مورد در "
+                    f"remaining_parts باقی است. تنزل به partial."
+                )
+                status_val = VERIFICATION_PARTIAL
+                report.status = VERIFICATION_PARTIAL
+                task.confirmation_streak = 0
                 task.verification_status = "partial"
                 task.status = "awaiting_review"
+            else:
+                task.confirmation_streak += 1
+                # 🆕 (audit fix) — وقتی task_steps دارد و *همهٔ* مراحل done شدند
+                # (per-step verified)، streak guard دور زده می‌شود. این سیگنال
+                # دقیق‌تر از یک verify کلی است و کاربر منتظر «verify بعدی»
+                # نمی‌ماند برای کاری که ۱۰۰٪ checklist تأیید شده.
+                bypass_streak = bool(
+                    all_steps_done and (task.task_steps or [])
+                )
+                if task.confirmation_streak >= streak_required or bypass_streak:
+                    task.verification_status = "done"
+                    task.status = "done"
+                    # 🆕 (P3) auto-archive وقتی هم status هم verification_status = done
+                    # تسک از فهرست فعال حذف می‌شود ولی در آرشیو قابل مشاهده است
+                    if not getattr(task, "archived", False):
+                        task.archived = True
+                        task.archived_at = now_iso()
+                else:
+                    task.verification_status = "partial"
+                    task.status = "awaiting_review"
         elif status_val == VERIFICATION_PARTIAL:
             task.confirmation_streak = 0
             task.verification_status = "partial"
