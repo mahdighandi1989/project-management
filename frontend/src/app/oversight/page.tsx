@@ -1472,6 +1472,11 @@ export default function OversightPage() {
   const [watched, setWatched] = useState<Watched[]>([]);
 
   const [tasks, setTasks] = useState<Task[]>([]);
+  // 🚨 (crash fix) — counts of file-extractions per task. parent یک بار
+  // fetch می‌کند تا 684 پنل فرزند هر کدام جدا API نزنند (که قبلاً باعث
+  // OOM crash backend می‌شد). تسک‌هایی که 0 پیوست دارند پنل را render
+  // نمی‌کنند؛ بقیه فقط هنگام expand واقعی fetch می‌کنند.
+  const [extractionsCounts, setExtractionsCounts] = useState<Record<string, number>>({});
   const [taskFilterStatus, setTaskFilterStatus] = useState<string>('all');
   const [taskFilterWatched, setTaskFilterWatched] = useState<string>('all');
   // 🆕 (P3) فیلتر archived: 'active' | 'archived' | 'all' — default: active
@@ -1863,6 +1868,14 @@ export default function OversightPage() {
     }
     // best-effort — دکمه backfill بر اساس وضعیت AC ها مشروط نشان داده می‌شود
     fetchBackfillNeeded();
+    // 🚨 (crash fix) — counts بالکی برای ExtractedFilesPanel.
+    try {
+      const rc = await fetch(`${API_BASE}/api/oversight/extractions/counts-by-task`);
+      if (rc.ok) {
+        const dc = await rc.json();
+        setExtractionsCounts(dc.counts || {});
+      }
+    } catch {}
   };
 
   const reloadStatus = async () => {
@@ -1879,6 +1892,15 @@ export default function OversightPage() {
       const data = await r.json();
       setTasks(data.items || []);
     }
+    // 🚨 (crash fix) — یک fetch بالکی برای شمارش پیوست‌های هر تسک.
+    // قبل از این پنل هر تسک خودش به /extractions می‌زد (684 request).
+    try {
+      const rc = await fetch(`${API_BASE}/api/oversight/extractions/counts-by-task`);
+      if (rc.ok) {
+        const dc = await rc.json();
+        setExtractionsCounts(dc.counts || {});
+      }
+    } catch {}
   };
 
   const reloadReports = async () => {
@@ -9090,7 +9112,11 @@ function TasksPanel({
               </details>
             )}
             {/* 🆕 (Stage 8 — File Attachment) — فایل‌های پیوست + متن استخراج‌شده */}
-            <ExtractedFilesPanel taskId={t.id} apiBase={API_BASE} />
+            <ExtractedFilesPanel
+              taskId={t.id}
+              apiBase={API_BASE}
+              expectedCount={extractionsCounts[t.id] ?? 0}
+            />
             {/* 🆕 (Multi-pass Checklist) — وضعیت per-step + progress bar */}
             {Array.isArray(t.task_steps) && t.task_steps.length > 0 && (() => {
               const steps = t.task_steps!;

@@ -46,6 +46,13 @@ interface FileExtraction {
 interface Props {
   taskId: string;
   apiBase: string;
+  /**
+   * تعداد فایل‌های پیوست (از endpoint بالکی counts-by-task).
+   * اگر undefined باشد، panel در حالت قدیمی fetch خودش را می‌زند.
+   * اگر 0 باشد، اصلاً render نمی‌شود (هیچ fetch).
+   * اگر >0 باشد، summary را نمایش می‌دهد و فقط هنگام expand fetch می‌کند.
+   */
+  expectedCount?: number;
 }
 
 function pickIcon(mime: string): string {
@@ -73,15 +80,27 @@ function highlight(text: string, q: string): React.ReactNode {
   );
 }
 
-export default function ExtractedFilesPanel({ taskId, apiBase }: Props) {
+export default function ExtractedFilesPanel({ taskId, apiBase, expectedCount }: Props) {
   const [extractions, setExtractions] = useState<FileExtraction[] | null>(null);
   const [segmentsByExt, setSegmentsByExt] = useState<Record<string, ExtractionSegment[]>>({});
   const [openIds, setOpenIds] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
+
+  // اگر parent counts را داده و 0 است — اصلاً render نمی‌کنیم.
+  const hasNoAttachments = expectedCount === 0;
+
+  // legacy mode: expectedCount داده نشده → behavior قدیمی (fetch on mount).
+  // new mode: expectedCount > 0 → فقط هنگام expand یا اگر panel به صراحت
+  // باز شد (open prop در summary)، fetch می‌کنیم.
+  const lazyMode = typeof expectedCount === 'number';
 
   useEffect(() => {
+    if (hasNoAttachments) return;
+    if (lazyMode && !expanded) return;
+    if (extractions !== null) return; // already fetched
     let cancelled = false;
     setLoading(true);
     setError(null);
@@ -99,7 +118,7 @@ export default function ExtractedFilesPanel({ taskId, apiBase }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [apiBase, taskId]);
+  }, [apiBase, taskId, hasNoAttachments, lazyMode, expanded, extractions]);
 
   const toggleOpen = async (extId: string) => {
     const newOpen = new Set(openIds);
@@ -159,6 +178,22 @@ export default function ExtractedFilesPanel({ taskId, apiBase }: Props) {
     }
   };
 
+  if (hasNoAttachments) return null;
+
+  // lazy mode + هنوز expand نشده → فقط یک summary سبک نشان می‌دهیم.
+  if (lazyMode && !expanded && extractions === null) {
+    return (
+      <details
+        className="mt-2 text-[11px] bg-cyan-50 dark:bg-cyan-900/20 border border-cyan-200 dark:border-cyan-800 rounded p-2"
+        onToggle={(ev) => setExpanded((ev.target as HTMLDetailsElement).open)}
+      >
+        <summary className="cursor-pointer font-semibold text-cyan-700 dark:text-cyan-300 flex items-center gap-2">
+          📎 {expectedCount} فایل پیوست (برای دیدن جزئیات کلیک کنید)
+        </summary>
+      </details>
+    );
+  }
+
   if (loading)
     return <div className="text-xs text-gray-500 dark:text-gray-400 mt-2">⏳ بارگذاری فایل‌های پیوست...</div>;
   if (error)
@@ -168,7 +203,11 @@ export default function ExtractedFilesPanel({ taskId, apiBase }: Props) {
   const totalSegments = extractions.reduce((a, e) => a + e.completed_segments, 0);
 
   return (
-    <details className="mt-2 text-[11px] bg-cyan-50 dark:bg-cyan-900/20 border border-cyan-200 dark:border-cyan-800 rounded p-2" open>
+    <details
+      className="mt-2 text-[11px] bg-cyan-50 dark:bg-cyan-900/20 border border-cyan-200 dark:border-cyan-800 rounded p-2"
+      open={!lazyMode || expanded}
+      onToggle={(ev) => setExpanded((ev.target as HTMLDetailsElement).open)}
+    >
       <summary className="cursor-pointer font-semibold text-cyan-700 dark:text-cyan-300 flex items-center gap-2">
         📎 {extractions.length} فایل پیوست ({totalSegments} segment استخراج شد)
         <button
