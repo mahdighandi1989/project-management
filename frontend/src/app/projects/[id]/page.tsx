@@ -14668,17 +14668,24 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                             </p>
                             <div className="mt-2">
                               <label className="text-[10px] opacity-80 block mb-0.5">🤖 مدل Claude:</label>
+                              {/* 🎨 (a11y/contrast) — selectی که در پنل قرمز رنگ
+                                  text-white می‌گیرد، وقتی dropdown باز می‌شود سفید روی
+                                  سفید نامرئی است. روی هر <option> رنگ تیره را
+                                  explicit ست می‌کنیم (background سفید + text تیره)
+                                  تا در dropdown باز هم خوانا باشد، ولی valueی که
+                                  در حالت بسته نمایش داده می‌شود همچنان روی پس‌زمینهٔ
+                                  قرمز سفید بماند. */}
                               <select
                                 value={cloudCodeModelChoice}
                                 onChange={(e) => setCloudCodeModelChoice(e.target.value)}
-                                className="w-full text-[11px] bg-white/10 border border-white/30 rounded px-1.5 py-1 text-white"
+                                className="w-full text-[11px] bg-white/10 border border-white/30 rounded px-1.5 py-1 text-white [&>option]:bg-white [&>option]:text-gray-900"
                               >
-                                <option value="auto">⚡ خودکار (آخرین مدل، بر اساس نوع تسک)</option>
-                                <option value="tier:opus">🧠 آخرین Opus (پیچیده/معماری)</option>
-                                <option value="tier:sonnet">⚖️ آخرین Sonnet (متعادل، پیش‌فرض)</option>
-                                <option value="tier:haiku">⚡ آخرین Haiku (سریع/ساده)</option>
+                                <option value="auto" className="bg-white text-gray-900">⚡ خودکار (آخرین مدل، بر اساس نوع تسک)</option>
+                                <option value="tier:opus" className="bg-white text-gray-900">🧠 آخرین Opus (پیچیده/معماری)</option>
+                                <option value="tier:sonnet" className="bg-white text-gray-900">⚖️ آخرین Sonnet (متعادل، پیش‌فرض)</option>
+                                <option value="tier:haiku" className="bg-white text-gray-900">⚡ آخرین Haiku (سریع/ساده)</option>
                                 {cloudCodeModelsInfo?.models?.map(m => (
-                                  <option key={m.id} value={m.id}>
+                                  <option key={m.id} value={m.id} className="bg-white text-gray-900">
                                     📌 {m.display_name || m.id} ({m.id})
                                   </option>
                                 ))}
