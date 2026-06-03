@@ -17259,12 +17259,14 @@ async def inspector_chat_cloud_code(
                 )
                 + "\n\n"
             )
+            cc_meta: Dict[str, Any] = {}
             stream_gen = await InspectorAgentService.chat_with_cloud_code(
                 history_payload,
                 system_prompt=system_prompt,
                 max_tokens=request.max_tokens,
                 temperature=request.temperature,
                 stream=True,
+                metadata_sink=cc_meta,
             )
             async for chunk in stream_gen:
                 assembled.append(chunk)
@@ -17276,7 +17278,9 @@ async def inspector_chat_cloud_code(
 
             full_text = "".join(assembled).strip()
 
-            # persist پاسخ assistant
+            # persist پاسخ assistant — actual model را در model_id ذخیره
+            # کن (نه placeholder "cloud_code") تا تاریخچهٔ DB دقیق بماند.
+            actual_model = cc_meta.get("actual_model") or "cloud_code"
             assistant_msg_id = None
             if request.session_id and full_text:
                 try:
@@ -17284,7 +17288,7 @@ async def inspector_chat_cloud_code(
                         session_id=request.session_id,
                         role="assistant",
                         content=full_text,
-                        model_id="cloud_code",
+                        model_id=f"cloud_code:{actual_model}",
                     )
                     db.add(asst_row)
                     db.commit()
@@ -17301,6 +17305,9 @@ async def inspector_chat_cloud_code(
                     {
                         "success": True,
                         "engine": "cloud_code",
+                        "actual_model": actual_model,
+                        "usage": cc_meta.get("usage"),
+                        "stop_reason": cc_meta.get("stop_reason"),
                         "message_id": assistant_msg_id,
                         "content": full_text,
                     },

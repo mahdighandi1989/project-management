@@ -3919,12 +3919,14 @@ async def oversight_inspector_chat_cloud_code(
                 )
                 + "\n\n"
             )
+            cc_meta: Dict[str, Any] = {}
             stream_gen = await InspectorAgentService.chat_with_cloud_code(
                 history,
                 system_prompt=request.system_prompt,
                 max_tokens=request.max_tokens,
                 temperature=request.temperature,
                 stream=True,
+                metadata_sink=cc_meta,
             )
             async for chunk in stream_gen:
                 assembled.append(chunk)
@@ -3935,6 +3937,7 @@ async def oversight_inspector_chat_cloud_code(
                 )
 
             full_text = "".join(assembled).strip()
+            actual_model = cc_meta.get("actual_model") or "cloud_code"
             assistant_id = None
             if request.session_id and full_text:
                 with SessionLocal() as _db:
@@ -3943,7 +3946,7 @@ async def oversight_inspector_chat_cloud_code(
                             session_id=request.session_id,
                             role="assistant",
                             content=full_text,
-                            model_id="cloud_code",
+                            model_id=f"cloud_code:{actual_model}",
                         )
                         _db.add(row)
                         _db.commit()
@@ -3957,6 +3960,9 @@ async def oversight_inspector_chat_cloud_code(
                     {
                         "success": True,
                         "engine": "cloud_code",
+                        "actual_model": actual_model,
+                        "usage": cc_meta.get("usage"),
+                        "stop_reason": cc_meta.get("stop_reason"),
                         "message_id": assistant_id,
                         "user_message_id": db_user_id,
                         "content": full_text,

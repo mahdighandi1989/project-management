@@ -19,7 +19,7 @@ Usage:
 
 from __future__ import annotations
 
-from typing import AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 from .cloud_code_service import (
     CLOUD_CODE_DEFAULT_MODEL,
@@ -51,6 +51,7 @@ class InspectorAgentService:
         temperature: float = 0.7,
         timeout: float = 180.0,
         stream: bool = True,
+        metadata_sink: Optional[Dict[str, Any]] = None,
     ):
         """Run an inspector chat turn through the Cloud Code (Claude OAuth)
         engine.
@@ -75,6 +76,7 @@ class InspectorAgentService:
                 max_tokens=max_tokens,
                 temperature=temperature,
                 timeout=timeout,
+                metadata_sink=metadata_sink,
             )
         return await cloud_code_complete(
             messages,

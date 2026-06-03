@@ -122,7 +122,17 @@ async def cloud_code_stream_chat(
     max_tokens: int = 4096,
     temperature: float = 0.7,
     timeout: float = 180.0,
+    metadata_sink: Optional[Dict[str, Any]] = None,
 ) -> AsyncIterator[str]:
+    """
+    metadata_sink: optional dict that the generator mutates as the stream
+    progresses. After the first `message_start` event it contains
+    `actual_model` (the model ID Anthropic actually served), and after
+    `message_delta` it gains `usage` (input/output tokens). Callers can
+    use this to display the *real* model in the UI — Claude's own
+    self-identification in text replies is unreliable (the training data
+    causes Sonnet 4.x to often say "I am Claude 3.5 Sonnet").
+    """
     token = get_cloud_code_token()
     if not token:
         raise RuntimeError(
@@ -190,7 +200,26 @@ async def cloud_code_stream_chat(
                     data = json.loads(data_str)
                 except json.JSONDecodeError:
                     continue
-                if data.get("type") == "content_block_delta":
+                ev_type = data.get("type")
+                if ev_type == "message_start" and metadata_sink is not None:
+                    # Anthropic streaming first event: message.model = actual
+                    # model served (may differ from requested if Anthropic
+                    # routed to a fallback). Capture for UI display.
+                    msg = data.get("message") or {}
+                    if msg.get("model"):
+                        metadata_sink["actual_model"] = msg["model"]
+                    if msg.get("id"):
+                        metadata_sink["message_id"] = msg["id"]
+                    if msg.get("usage"):
+                        metadata_sink["usage_start"] = msg["usage"]
+                elif ev_type == "message_delta" and metadata_sink is not None:
+                    usage = (data.get("usage") or {})
+                    if usage:
+                        metadata_sink["usage"] = usage
+                    stop_reason = (data.get("delta") or {}).get("stop_reason")
+                    if stop_reason:
+                        metadata_sink["stop_reason"] = stop_reason
+                elif ev_type == "content_block_delta":
                     delta = data.get("delta") or {}
                     if delta.get("type") == "text_delta":
                         text = delta.get("text", "")
