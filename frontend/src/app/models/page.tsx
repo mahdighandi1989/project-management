@@ -76,6 +76,7 @@ const CLOUD_CODE_TASK_KEYS = new Set([
   'claude_single_task',
   'inspector_cloud_code',
   'creator_engine',
+  'file_extraction',
 ]);
 
 export default function ModelsPage() {

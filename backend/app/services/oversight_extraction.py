@@ -506,6 +506,55 @@ async def _ai_extract_text(
         else:
             inline_files = (inline_files or []) + [(mime, b64)]
 
+    # 🆕 (Cloud Code centralization — Fix #3) — اگر picker، cloud_code
+    # را برگردانده، مسیر OAuth را اجرا می‌کنیم نه ai_manager (که cloud_code
+    # را نمی‌شناسد). Claude content blocks برای تصویر و PDF ساپورت می‌شوند.
+    # اگر این call شکست خورد (مثلاً اشتراک به سقف رسیده)، خودکار به
+    # بهترین گزینهٔ ai_manager برای همین MIME fallback می‌کنیم تا کاربر
+    # هیچ اختلالی نبیند.
+    if model_id == "cloud_code":
+        try:
+            return await _extract_via_cloud_code(
+                prompt=prompt + extra_text,
+                images=images or [],
+                inline_files=inline_files or [],
+                max_tokens=max_tokens,
+            )
+        except Exception as _cc_e:
+            logger.warning(
+                f"_ai_extract_text: cloud_code path failed ({_cc_e!r}); "
+                f"falling back to non-OAuth multimodal model"
+            )
+            # fallback: بهترین مدل غیر-OAuth برای همین MIME
+            try:
+                from ..core.models_registry import (
+                    pick_best_extraction_model as _pick,
+                )
+                _mime_for_fallback = None
+                if inline_file_data is not None:
+                    _mime_for_fallback = inline_file_data[0]
+                elif image_b64:
+                    _mime_for_fallback = "image/png"
+                if _mime_for_fallback:
+                    # require_api_key=True تا حتماً Gemini واقعی برگرده
+                    # (نه cloud_code که الان شکست خورد)
+                    _fallback = _pick(
+                        _mime_for_fallback,
+                        require_api_key=True,
+                    )
+                    if _fallback and _fallback.id != "cloud_code":
+                        model_id = _fallback.id
+                        logger.info(
+                            f"_ai_extract_text: cloud_code fallback → {model_id}"
+                        )
+                    else:
+                        raise  # هیچ fallback پیدا نشد
+                else:
+                    raise
+            except Exception:
+                raise _cc_e
+        # ادامه با model_id جدید (fallback) به مسیر ai_manager زیر
+
     mgr = get_ai_manager()
     messages = [
         Message(role="system", content=EXTRACTION_SYSTEM_PROMPT),
@@ -528,6 +577,83 @@ async def _ai_extract_text(
         allow_fallback=False,
     )
     return (resp.content or "").strip()
+
+
+async def _extract_via_cloud_code(
+    *,
+    prompt: str,
+    images: List[str],
+    inline_files: List[Tuple[str, str]],
+    max_tokens: int,
+) -> str:
+    """🆕 (Fix #3) — استخراج متن از طریق Cloud Code OAuth subscription.
+
+    content blocks Anthropic Messages API:
+      - text  → {"type": "text", "text": "..."}
+      - image → {"type": "image", "source": {type: base64, media_type, data}}
+      - document → {"type": "document", "source": {type: base64, media_type, data}}
+
+    یک turn فرستاده می‌شود؛ پاسخ text-only برمی‌گردد (هیچ tool_use
+    نمی‌خواهیم — این فقط extraction است).
+    """
+    from .cloud_code_service import cloud_code_message
+
+    content_blocks: List[Dict[str, Any]] = [
+        {"type": "text", "text": prompt or ""}
+    ]
+    for b64 in images:
+        content_blocks.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": b64,
+            },
+        })
+    for mime, b64 in inline_files:
+        ml = (mime or "").lower()
+        if ml == "application/pdf":
+            content_blocks.append({
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": mime,
+                    "data": b64,
+                },
+            })
+        elif ml.startswith("image/"):
+            content_blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": mime,
+                    "data": b64,
+                },
+            })
+        else:
+            # صوت/ویدیو/سایر — Claude ساپورت ندارد. این path نباید
+            # اصلاً اینجا برسد چون picker قبلاً صوت/ویدیو را به Gemini
+            # داده. ولی برای ایمنی exception می‌اندازیم تا fallback fire شود.
+            raise ValueError(
+                f"cloud_code path does not support mime={mime!r} — "
+                f"picker should have routed this to Gemini"
+            )
+
+    msg = await cloud_code_message(
+        messages=[{"role": "user", "content": content_blocks}],
+        system_prompt=EXTRACTION_SYSTEM_PROMPT,
+        model="auto",  # tier picker (haiku/sonnet/opus)
+        max_tokens=max_tokens,
+        temperature=0.1,
+    )
+    # text blocks را به هم بچسبان
+    out_parts: List[str] = []
+    for block in (msg.get("content") or []):
+        if isinstance(block, dict) and block.get("type") == "text":
+            t = block.get("text") or ""
+            if t:
+                out_parts.append(t)
+    return "\n".join(out_parts).strip()
 
 
 async def _plan_headings(model_id: str, user_idea: str, filename: str, mime: str) -> List[str]:

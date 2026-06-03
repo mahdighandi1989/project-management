@@ -82,26 +82,28 @@ def test_cloud_code_entry_has_code_and_reasoning_capabilities():
 # ---------------------------------------------------------------------------
 
 
-def test_four_cloud_code_task_types_defined():
-    """The user picked these 4 consumers as the targets for the
-    centralization. Each gets its own preferred_for key so the user
-    can independently toggle whether Cloud Code drives that consumer
-    or not."""
+def test_initial_cloud_code_task_types_defined():
+    """The user originally picked 4 consumers (auto-runner, single-task,
+    inspector, creator). A later fix added `file_extraction` as a 5th.
+    All of them must be present in AVAILABLE_TASK_TYPES and in the
+    CLOUD_CODE_PREFERRED_FOR_KEYS constant."""
     from app.models.ai_profile import AVAILABLE_TASK_TYPES, CLOUD_CODE_PREFERRED_FOR_KEYS
 
     ids = {t["id"] for t in AVAILABLE_TASK_TYPES}
-    expected = {
+    initial = {
         "claude_auto_runner",
         "claude_single_task",
         "inspector_cloud_code",
         "creator_engine",
     }
-    assert expected.issubset(ids), (
-        f"AVAILABLE_TASK_TYPES missing one of {expected - ids} — these are "
-        "the 4 keys the consumers will check via preferred_for"
+    assert initial.issubset(ids), (
+        f"AVAILABLE_TASK_TYPES missing one of {initial - ids} — these are "
+        "the original 4 keys the consumers check via preferred_for"
     )
-    # The constant must list the same keys (single source of truth).
-    assert set(CLOUD_CODE_PREFERRED_FOR_KEYS) == expected
+    # CLOUD_CODE_PREFERRED_FOR_KEYS is the single source of truth for the
+    # full set (initial 4 + any added later). It must be a superset of the
+    # initial 4.
+    assert initial.issubset(set(CLOUD_CODE_PREFERRED_FOR_KEYS))
 
 
 def test_existing_task_types_not_broken():

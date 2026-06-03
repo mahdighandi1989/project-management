@@ -515,6 +515,14 @@ MODEL_REGISTRY: Dict[str, AIModel] = {
             ModelCapability.REASONING,
             ModelCapability.LONG_CONTEXT,
             ModelCapability.THINKING,
+            # 🆕 (extraction routing) — Claude Sonnet/Opus از طریق
+            # OAuth ساپورت می‌کند: تصویر (image content blocks)،
+            # PDF (document content blocks). صوت و ویدیو ساپورت ندارد
+            # — برای آن‌ها picker خودکار به Gemini fallback می‌کند.
+            ModelCapability.VISION,
+            ModelCapability.IMAGE_ANALYSIS,
+            ModelCapability.DOCUMENT_UNDERSTANDING,
+            ModelCapability.MULTIMODAL,
         ],
         max_tokens=32768,
         context_window=200000,
@@ -523,10 +531,13 @@ MODEL_REGISTRY: Dict[str, AIModel] = {
             "auto_tier_pick",
             "tool_use",
             "single_source_oauth",
+            "vision_via_oauth",
+            "pdf_documents_via_oauth",
         ],
         cost_per_1k_tokens=0.0,
         priority=1,
         enabled=True,
+        supports_images=True,
     ),
 }
 
@@ -653,6 +664,36 @@ def pick_best_extraction_model(
     خروجی: AIModel یا None اگر هیچ مدلی نه قابلیت دارد نه enabled است.
     """
     required = mime_to_required_capability(mime_type)
+
+    # 🆕 (Cloud Code centralization — Fix #3) — قبل از همه‌چیز، اگر کاربر
+    # در صفحهٔ مدل‌ها `file_extraction` را برای cloud_code تیک زده باشد
+    # و این MIME در محدودهٔ ساپورت Claude OAuth باشد (تصویر / PDF /
+    # document)، cloud_code را برگردان. هزینه از اشتراک OAuth کم می‌شود،
+    # نه از کلید Gemini.
+    #
+    # برای صوت/ویدیو این شرط false می‌شود (cloud_code آن capability را
+    # ندارد در capabilities خود) و picker طبق روال عادی Gemini را
+    # برمی‌گرداند — fallback خودکار.
+    if (
+        required in (
+            ModelCapability.VISION,
+            ModelCapability.IMAGE_ANALYSIS,
+            ModelCapability.DOCUMENT_UNDERSTANDING,
+            ModelCapability.MULTIMODAL,
+        )
+    ):
+        try:
+            from ..services.cloud_code_service import (
+                cloud_code_setting_is_enabled_for,
+            )
+            if cloud_code_setting_is_enabled_for("file_extraction"):
+                cc = MODEL_REGISTRY.get("cloud_code")
+                if cc is not None and required in cc.capabilities:
+                    return cc
+        except Exception:
+            # silent fallback به منطق legacy — این path هرگز نباید
+            # crash کند، فقط priority می‌دهد.
+            pass
 
     # 🛡 (audit fix CRITICAL) — کش provider key availability
     import os as _os
