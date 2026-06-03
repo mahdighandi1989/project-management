@@ -17177,14 +17177,11 @@ async def inspector_chat_cloud_code(
     تاریخچهٔ چت بین مودها (local/cloud) یکپارچه بماند.
     """
     from fastapi.responses import StreamingResponse
-    from ...services.cloud_code_service import (
-        cloud_code_is_configured,
-        cloud_code_stream_chat,
-    )
+    from ...services.inspector_agent_service import InspectorAgentService
     from ...models.inspector_session import InspectorMessage, InspectorSession
 
     # 1) اعتبارسنجی env
-    if not cloud_code_is_configured():
+    if not InspectorAgentService.cloud_code_available():
         async def _missing_token_stream():
             payload = {
                 "kind": "cloud_code_unavailable",
@@ -17262,12 +17259,14 @@ async def inspector_chat_cloud_code(
                 )
                 + "\n\n"
             )
-            async for chunk in cloud_code_stream_chat(
+            stream_gen = await InspectorAgentService.chat_with_cloud_code(
                 history_payload,
                 system_prompt=system_prompt,
                 max_tokens=request.max_tokens,
                 temperature=request.temperature,
-            ):
+                stream=True,
+            )
+            async for chunk in stream_gen:
                 assembled.append(chunk)
                 yield (
                     "event: chunk\ndata: "
@@ -17338,8 +17337,8 @@ async def inspector_cloud_code_status():
     Frontend از این endpoint استفاده می‌کند تا اگر `CLAUDE_CODE_OAUTH_TOKEN`
     تنظیم نشده، گزینهٔ Cloud Code را به‌صورت disabled با tooltip نمایش دهد.
     """
-    from ...services.cloud_code_service import cloud_code_is_configured
-    return {"available": cloud_code_is_configured()}
+    from ...services.inspector_agent_service import InspectorAgentService
+    return {"available": InspectorAgentService.cloud_code_available()}
 
 
 @router.post("/inspector/apply-action")
