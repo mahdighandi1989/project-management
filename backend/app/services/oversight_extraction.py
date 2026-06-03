@@ -543,11 +543,14 @@ async def _ai_extract_text(
                 elif image_b64:
                     _mime_for_fallback = "image/png"
                 if _mime_for_fallback:
-                    # require_api_key=True تا حتماً Gemini واقعی برگرده
-                    # (نه cloud_code که الان شکست خورد)
+                    # 🚨 (audit2 critical) — exclude_cloud_code=True تا حتماً
+                    # یک مدل API-key دار (Gemini) برگرده، نه cloud_code که
+                    # الان شکست خورد. قبلاً از require_api_key=True استفاده
+                    # می‌شد ولی این semantics اشتباه بود — جزء side-effect
+                    # کل feature استخراج cloud_code رو dead کرد.
                     _fallback = _pick(
                         _mime_for_fallback,
-                        require_api_key=True,
+                        exclude_cloud_code=True,
                     )
                     if _fallback and _fallback.id != "cloud_code":
                         model_id = _fallback.id

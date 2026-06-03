@@ -195,6 +195,41 @@ async def test_min_tier_does_not_lower_opus(monkeypatch):
     assert tier == "opus"
 
 
+@pytest.mark.asyncio
+async def test_tier_hint_overrides_min_tier(monkeypatch):
+    """🚨 (precedence fix) — اگر کاربر در UI صراحتاً Haiku را انتخاب کند
+    (tier_hint="haiku")، min_tier="sonnet" نباید آن را override کند.
+    صراحت کاربر همیشه برنده. min_tier فقط برای حالت auto-classified
+    اعمال می‌شود.
+
+    این bug را خودم در self-audit پیدا کردم: پیاده‌سازی اولیه min_tier را
+    بعد از tier_hint اعمال می‌کرد، که یعنی کاربر هرگز نمی‌توانست Haiku
+    را در inspector chat انتخاب کند (همیشه به Sonnet floor می‌شد)."""
+    from app.services import cloud_code_service as ccs
+
+    fake_models = [
+        {"id": "claude-haiku-4-5-20251001", "created_at": "2025-10-01"},
+        {"id": "claude-sonnet-4-8-20251101", "created_at": "2025-11-01"},
+    ]
+    monkeypatch.setattr(
+        ccs, "list_available_models",
+        AsyncMock(return_value=fake_models),
+    )
+
+    # User explicitly picks Haiku in the UI — must get Haiku even
+    # when min_tier defaults to sonnet
+    model_id, tier, _ = await ccs.pick_best_model(
+        [{"role": "user", "content": "x" * 1000}],  # long → would classify sonnet
+        tier_hint="haiku",
+        min_tier="sonnet",  # default for inspector chat — must NOT override
+    )
+    assert tier == "haiku", (
+        f"tier_hint='haiku' (user's explicit choice) must override "
+        f"min_tier='sonnet'; got {tier!r}"
+    )
+    assert "haiku" in model_id
+
+
 # ---------------------------------------------------------------------------
 # Inspector chat default is sonnet floor
 # ---------------------------------------------------------------------------
@@ -212,6 +247,50 @@ def test_inspector_chat_defaults_to_min_tier_sonnet():
     assert 'min_tier: Optional[str] = "sonnet"' in src, (
         "InspectorAgentService.chat_with_cloud_code must default "
         "min_tier='sonnet' to avoid Haiku on short prompts"
+    )
+
+
+def test_cloud_code_message_supports_min_tier():
+    """🚨 (audit2 medium fix) — cloud_code_message must accept min_tier
+    too. Otherwise the tool-enabled inspector chat path (the default
+    flow) bypasses the floor and short prompts still go to Haiku."""
+    from app.services.cloud_code_service import cloud_code_message
+    import inspect
+
+    sig = inspect.signature(cloud_code_message)
+    assert "min_tier" in sig.parameters, (
+        "cloud_code_message must accept min_tier — otherwise the "
+        "tool-enabled inspector chat bypasses the floor"
+    )
+
+
+def test_cloud_code_agent_loop_supports_min_tier():
+    """🚨 (audit2 medium fix) — same for cloud_code_agent_loop, which
+    is what render_logs.chat-cloud-code actually invokes."""
+    from app.services.cloud_code_service import cloud_code_agent_loop
+    import inspect
+
+    sig = inspect.signature(cloud_code_agent_loop)
+    assert "min_tier" in sig.parameters, (
+        "cloud_code_agent_loop must accept min_tier so the inspector "
+        "tool path benefits from the floor"
+    )
+
+
+def test_render_logs_inspector_chat_passes_min_tier_sonnet():
+    """The actual route that handles inspector chat must default
+    min_tier='sonnet' when invoking cloud_code_agent_loop. Otherwise
+    the user fix is dead code for the real endpoint."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/render_logs.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("cloud_code_agent_loop(")
+    assert idx != -1, "agent_loop call not found in render_logs"
+    rest = src[idx:idx + 2000]
+    assert 'min_tier="sonnet"' in rest, (
+        "the agent_loop call in render_logs must pass min_tier='sonnet' "
+        "for the inspector chat surface"
     )
 
 

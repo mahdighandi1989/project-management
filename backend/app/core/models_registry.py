@@ -643,6 +643,18 @@ def pick_best_extraction_model(
     prefer_provider: Optional[ModelProvider] = ModelProvider.GEMINI,
     preferred_model_id: Optional[str] = None,
     require_api_key: bool = True,
+    exclude_cloud_code: bool = False,
+    # 🆕 (audit fix CRITICAL) — caller می‌تواند cloud_code را صراحتاً
+    # حذف کند. این برای fallback path در `_ai_extract_text` ست می‌شود
+    # وقتی cloud_code call fail کرد و می‌خواهیم به مدل API-key دار
+    # برگردیم. caller های عادی پیش‌فرض False می‌گیرند → cloud_code
+    # می‌تواند انتخاب شود اگر helper اجازه دهد.
+    #
+    # قبلاً از require_api_key=True برای این منظور استفاده می‌کردیم،
+    # ولی این flag default True بود (با هدف "مدل باید کلید داشته باشد")
+    # و cloud_code همیشه silently filter می‌شد. کشف شد در audit:
+    # toggle "استخراج فایل" کاری نمی‌کرد چون short-circuit هرگز fire
+    # نمی‌شد.
 ) -> Optional[AIModel]:
     """انتخاب بهترین مدل enabled برای استخراج فایلی با mime مشخص.
 
@@ -675,16 +687,16 @@ def pick_best_extraction_model(
     # ندارد در capabilities خود) و picker طبق روال عادی Gemini را
     # برمی‌گرداند — fallback خودکار.
     #
-    # 🚨 (Fix #3 audit follow-up — critical) — وقتی caller صراحتاً
-    # require_api_key=True پاس می‌دهد، cloud_code را skip کن. این برای
-    # مسیر fallback است: وقتی cloud_code call شکست خورد، `_ai_extract_text`
-    # دوباره picker را با require_api_key=True صدا می‌زند تا یک مدل
-    # *واقعی* (Gemini, OpenAI, ...) برگردد. اگر cloud_code را اینجا هم
-    # برگردانیم، fallback همان cloud_code را می‌گیرد و دوباره fail می‌کند
-    # — کاربر outage می‌بیند. cloud_code provider در env_map نیست، پس
-    # require_api_key=True منطقاً یعنی "از cloud_code نمی‌خواهیم".
+    # 🚨 (audit2 critical fix) — قبلاً short-circuit با `not require_api_key`
+    # محافظت شده بود. ولی production caller (`oversight_extraction.py:1303`)
+    # require_api_key پاس نمی‌داد → default True → cloud_code همیشه skip
+    # می‌شد → toggle "استخراج فایل" silently dead بود.
+    #
+    # الان از `exclude_cloud_code` (default False) استفاده می‌کنیم. کالر
+    # عادی → fire می‌شود. مسیر fallback در `_ai_extract_text` صراحتاً
+    # `exclude_cloud_code=True` پاس می‌دهد تا یک مدل API-key دار بگیرد.
     if (
-        not require_api_key
+        not exclude_cloud_code
         and required in (
             ModelCapability.VISION,
             ModelCapability.IMAGE_ANALYSIS,

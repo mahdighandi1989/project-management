@@ -17401,6 +17401,11 @@ async def inspector_chat_cloud_code(
                 from ...services.cloud_code_service import cloud_code_agent_loop
 
                 # run loop در background تا event ها همزمان forward شوند
+                # 🆕 (audit2 medium fix) — min_tier="sonnet" برای مسیر
+                # tool-enabled inspector chat هم اعمال شود (default).
+                # قبلاً min_tier فقط در text-only streaming اعمال می‌شد و
+                # کاربر در مسیر tool-enabled (پیش‌فرض) به Haiku می‌خورد و
+                # پاسخ‌های "I am Claude 3.5 Sonnet" hallucination می‌گرفت.
                 loop_task = _aio_cc.create_task(cloud_code_agent_loop(
                     user_prompt=request.message,
                     system_prompt=system_prompt,
@@ -17409,6 +17414,7 @@ async def inspector_chat_cloud_code(
                     initial_history=history_payload[:-1],  # exclude final user (loop appends)
                     model=request.model or "auto",
                     tier_hint=request.tier_hint,
+                    min_tier="sonnet",
                     max_iterations=12,
                     max_tokens_per_call=request.max_tokens,
                     temperature=request.temperature,
