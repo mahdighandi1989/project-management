@@ -129,7 +129,12 @@ def cloud_code_setting_is_enabled_for(consumer_key: str) -> bool:
         from ..core.database import SessionLocal
         from ..models.ai_profile import ModelSettings
     except Exception as e:
-        logger.debug(f"cloud_code_setting_is_enabled_for: import failed: {e}")
+        # 🆕 (audit follow-up) — این مسیر معمولی نباید پیش بیاید. اگر
+        # تکرار شود، operator باید بفهمد. WARN نه DEBUG.
+        logger.warning(
+            f"cloud_code_setting_is_enabled_for: import failed for "
+            f"consumer={consumer_key!r}: {e} — falling back to legacy True"
+        )
         return True  # fallback — رفتار قبلی
     try:
         db = SessionLocal()
@@ -154,7 +159,14 @@ def cloud_code_setting_is_enabled_for(consumer_key: str) -> bool:
             except Exception:
                 pass
     except Exception as e:
-        logger.debug(f"cloud_code_setting_is_enabled_for DB read failed: {e}")
+        # 🆕 (audit follow-up) — اگر DB در outage باشد، helper به True
+        # برمی‌گردد (legacy default امن‌تر). ولی operator باید بفهمد —
+        # توگل کاربر در این فاصله honor نمی‌شود.
+        logger.warning(
+            f"cloud_code_setting_is_enabled_for: DB read failed for "
+            f"consumer={consumer_key!r}: {e} — falling back to legacy True. "
+            f"User's models-page toggle is NOT being honored during this outage."
+        )
         return True  # fallback — رفتار قبلی
 
 

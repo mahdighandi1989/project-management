@@ -231,11 +231,12 @@ async def list_available_models():
     """لیست مدل‌های قابل استفاده (با API key)"""
     try:
         from ...services.ai_manager import get_ai_manager
+        from ...core.models_registry import MODEL_REGISTRY, get_model
 
         ai_manager = get_ai_manager()
         available = ai_manager.get_available_models()
 
-        return [ModelInfo(
+        result = [ModelInfo(
             id=m.id,
             provider=get_provider_value(m.provider),
             name=m.name,
@@ -252,6 +253,38 @@ async def list_available_models():
             is_image_generator=m.is_image_generator,
             is_available=True,
         ) for m in available]
+
+        # 🆕 (Cloud Code centralization — audit follow-up) — ai_manager
+        # فقط مدل‌هایی را که API key دارند برمی‌گرداند. cloud_code از OAuth
+        # token کار می‌کند، پس در این لیست نبود. parity لازم است: اگر token
+        # ست باشد، cloud_code هم در /available ظاهر شود تا callers یکپارچه
+        # ببینند آن چه در دسترس است.
+        try:
+            from ...services.cloud_code_service import cloud_code_is_configured
+            if cloud_code_is_configured():
+                cc = get_model("cloud_code")
+                if cc is not None and not any(r.id == "cloud_code" for r in result):
+                    result.append(ModelInfo(
+                        id=cc.id,
+                        provider=get_provider_value(cc.provider),
+                        name=cc.name,
+                        capabilities=[get_capability_value(c) for c in cc.capabilities],
+                        max_tokens=cc.max_tokens,
+                        context_window=cc.context_window,
+                        strengths=cc.strengths,
+                        weaknesses=cc.weaknesses,
+                        cost_per_1k_tokens=cc.cost_per_1k_tokens,
+                        priority=cc.priority,
+                        enabled=cc.enabled,
+                        supports_images=cc.supports_images,
+                        supports_video=cc.supports_video,
+                        is_image_generator=cc.is_image_generator,
+                        is_available=True,
+                    ))
+        except Exception:
+            pass
+
+        return result
 
     except Exception as e:
         logger.warning(f"Error in list_available_models: {e}")
