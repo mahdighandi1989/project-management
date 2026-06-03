@@ -144,6 +144,11 @@ interface Watched {
   claude_runner_installed_at?: string | null;
   claude_runner_last_error?: string | null;
   claude_runner_workflow_path?: string | null;
+  // 🆕 (verify-after-complete lock) — اگر set باشد یعنی backend در حال
+  // verify عمیق روی این تسک پس از تکمیل Claude است (مرحلهٔ ping-pong).
+  // تا lock آزاد نشود، تسک بعدی شروع نمی‌شود.
+  claude_runner_verifying_task_id?: string | null;
+  claude_runner_verifying_started_at?: string | null;
 }
 
 // 🔬 (Runtime Verify Stage 1) — ساختار AC جدید
@@ -1879,6 +1884,55 @@ export default function OversightPage() {
       setReports(data.items || []);
     }
   };
+
+  // 🤖 (Claude Auto-Runner live updates) — وقتی Claude در پس‌زمینه روی تسکی
+  // کار می‌کند یا backend در حال verify عمیق بعد از تکمیل است، tasks/reports
+  // در DB تغییر می‌کنند ولی frontend بدون refresh دستی نمی‌بیند. این effect
+  // یک polling هوشمند است:
+  //   - فقط وقتی فعال است که حداقل یک سیگنال "در حال اجرا" داشته باشیم:
+  //       • watched ای با claude_runner_verifying_task_id (verify-lock فعال)
+  //       • تسک با status === 'running'
+  //       • تسک با verification_status === 'pending' که اخیراً verify شده
+  //         (یعنی Claude تازه complete زده و verify در حال اجراست)
+  //   - هر ۶ ثانیه tasks + reports + watched را refresh می‌کند
+  //   - وقتی همهٔ سیگنال‌ها قطع شدند، polling متوقف می‌شود
+  //   - وقتی tab مخفی است (document.hidden) متوقف می‌شود (battery save)
+  // نتیجه: کاربر گزارش verify عمیق ping-pong را به‌محض رسیدن می‌بیند، با
+  // checklist + done_parts + remaining_parts + summary — مثل verify دستی.
+  useEffect(() => {
+    const hasActiveRunner = (
+      watched.some(w => !!w.claude_runner_verifying_task_id)
+      || tasks.some(t =>
+        t.status === 'running'
+        || (
+          t.verification_status === 'pending'
+          && !!t.last_verified_at
+          && (Date.now() - new Date(t.last_verified_at).getTime()) < 5 * 60 * 1000
+        )
+      )
+    );
+    if (!hasActiveRunner) return;
+
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled || (typeof document !== 'undefined' && document.hidden)) return;
+      try {
+        await Promise.all([
+          reloadTasks(),
+          reloadReports(),
+          // watched هم refresh — چون verify-lock روی watched ست می‌شود
+          fetch(`${API_BASE}/api/oversight/watched`).then(r => r.ok ? r.json() : null).then(data => {
+            if (data?.items && !cancelled) setWatched(data.items);
+          }),
+        ]);
+      } catch {}
+    };
+    const interval = setInterval(tick, 6000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [watched, tasks]);
 
   // ============================ Repos ============================
 
@@ -8183,6 +8237,23 @@ function WatchedCard({
             <span className="text-amber-500 text-xs" title={runnerError}>⚠️</span>
           )}
         </button>
+        {/* 🔬 (verify-after-complete badge) — وقتی Claude تسکی را تمام کرده
+            و backend در حال verify عمیق است (مرحلهٔ ping-pong)، یک نشانگر
+            زنده نشان بده تا کاربر بداند چرا تسک هنوز archive نشده. polling
+            هوشمند هر ۶ ثانیه tasks/reports/watched را refresh می‌کند، پس
+            وقتی verify تمام شد، گزارش خودکار در پنل ظاهر می‌شود. */}
+        {w.claude_runner_verifying_task_id && (
+          <span
+            className="px-2 py-1 rounded text-xs bg-cyan-50 dark:bg-cyan-900/40 text-cyan-700 dark:text-cyan-300 border border-cyan-300 dark:border-cyan-700 flex items-center gap-1"
+            title={
+              `Claude تسک ${w.claude_runner_verifying_task_id.slice(0, 8)} را تمام کرد. `
+              + `backend در حال verify عمیق است — تا تأیید کامل، تسک بعدی شروع نمی‌شود. `
+              + `نتیجه خودکار در این پنل نمایش داده می‌شود.`
+            }
+          >
+            <span className="animate-pulse">🔬</span> verify ping-pong
+          </span>
+        )}
         <button
           onClick={onRemove}
           className="px-3 py-1.5 bg-red-100 dark:bg-red-900/40 text-red-600 dark:text-red-300 rounded text-sm hover:bg-red-200 mr-auto"
