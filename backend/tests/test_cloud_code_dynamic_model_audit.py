@@ -195,6 +195,41 @@ async def test_min_tier_does_not_lower_opus(monkeypatch):
     assert tier == "opus"
 
 
+@pytest.mark.asyncio
+async def test_tier_hint_overrides_min_tier(monkeypatch):
+    """🚨 (precedence fix) — اگر کاربر در UI صراحتاً Haiku را انتخاب کند
+    (tier_hint="haiku")، min_tier="sonnet" نباید آن را override کند.
+    صراحت کاربر همیشه برنده. min_tier فقط برای حالت auto-classified
+    اعمال می‌شود.
+
+    این bug را خودم در self-audit پیدا کردم: پیاده‌سازی اولیه min_tier را
+    بعد از tier_hint اعمال می‌کرد، که یعنی کاربر هرگز نمی‌توانست Haiku
+    را در inspector chat انتخاب کند (همیشه به Sonnet floor می‌شد)."""
+    from app.services import cloud_code_service as ccs
+
+    fake_models = [
+        {"id": "claude-haiku-4-5-20251001", "created_at": "2025-10-01"},
+        {"id": "claude-sonnet-4-8-20251101", "created_at": "2025-11-01"},
+    ]
+    monkeypatch.setattr(
+        ccs, "list_available_models",
+        AsyncMock(return_value=fake_models),
+    )
+
+    # User explicitly picks Haiku in the UI — must get Haiku even
+    # when min_tier defaults to sonnet
+    model_id, tier, _ = await ccs.pick_best_model(
+        [{"role": "user", "content": "x" * 1000}],  # long → would classify sonnet
+        tier_hint="haiku",
+        min_tier="sonnet",  # default for inspector chat — must NOT override
+    )
+    assert tier == "haiku", (
+        f"tier_hint='haiku' (user's explicit choice) must override "
+        f"min_tier='sonnet'; got {tier!r}"
+    )
+    assert "haiku" in model_id
+
+
 # ---------------------------------------------------------------------------
 # Inspector chat default is sonnet floor
 # ---------------------------------------------------------------------------

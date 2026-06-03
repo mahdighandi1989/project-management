@@ -573,26 +573,31 @@ async def pick_best_model(
       returns nothing for that tier; logs and reports the fallback path
       so callers know the model wasn't the first choice.
     """
+    # 🆕 (precedence) — tier_hint = "صراحت کاربر" است (مثلاً انتخاب از
+    # dropdown). همیشه برنده. min_tier فقط برای حالتی است که از classifier
+    # استفاده می‌شود (tier_hint خالی). به این ترتیب اگر کاربر در UI
+    # دستی Haiku را انتخاب کند، min_tier="sonnet" آن را override نمی‌کند.
     if tier_hint:
         tier = tier_hint.lower()
         reason = f"tier hint forced → {tier}"
     else:
         tier, reason = _classify_tier(messages)
+        # 🆕 (min_tier floor) — فقط برای حالت auto-classified اعمال می‌شود.
+        # caller می‌تواند کف tier تعیین کند تا پرسش‌های کوتاه به Haiku
+        # route نشوند بدون اینکه انتخاب صریح کاربر را override کند.
+        if min_tier and min_tier.lower() in CLOUD_CODE_TIER_FALLBACKS:
+            _order = ["haiku", "sonnet", "opus"]
+            try:
+                cur_idx = _order.index(tier)
+                min_idx = _order.index(min_tier.lower())
+                if cur_idx < min_idx:
+                    tier = min_tier.lower()
+                    reason = f"{reason}; raised to min_tier={tier}"
+            except ValueError:
+                pass
     if tier not in CLOUD_CODE_TIER_FALLBACKS:
         tier = "sonnet"
         reason = f"unknown tier requested, defaulted to sonnet"
-    # 🆕 (min_tier floor) — caller می‌تواند کف tier تعیین کند تا hai/sonnet
-    # ها به Haiku route نشوند برای پرسش‌های کوتاه.
-    if min_tier and min_tier.lower() in CLOUD_CODE_TIER_FALLBACKS:
-        _order = ["haiku", "sonnet", "opus"]
-        try:
-            cur_idx = _order.index(tier)
-            min_idx = _order.index(min_tier.lower())
-            if cur_idx < min_idx:
-                tier = min_tier.lower()
-                reason = f"{reason}; raised to min_tier={tier}"
-        except ValueError:
-            pass
 
     models = await list_available_models()
     in_tier = [m for m in models if _infer_tier_from_model_id(m.get("id", "")) == tier]
