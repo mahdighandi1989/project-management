@@ -10,7 +10,7 @@ verification_status: partial
 watched_id: 3f34a2b1-2a8d-4ad2-904a-9835a8a5b7c9
 project: mahdighandi1989/project-management
 created_at: '2026-05-17T08:43:37.735746+00:00'
-updated_at: '2026-06-03T17:25:14.238140+00:00'
+updated_at: '2026-06-03T18:17:08.769944+00:00'
 ---
 
 # dependency بلااستفاده: Pillow (python)
