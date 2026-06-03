@@ -5566,6 +5566,38 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
                   setInspectorChatMessages(prev => prev.map(m =>
                     m.id === asstMsgId ? { ...m, content: asstBuffer } as any : m
                   ));
+                } else if (eventType === 'tool_use') {
+                  // 🔧 (Phase 4) — مدل دارد ابزاری را صدا می‌زند. به‌عنوان یک
+                  // پیام system جداگانه نشان بده تا کاربر بفهمد چه کاری
+                  // انجام می‌شود (read_file، render_set_env_var، …).
+                  const inputPreview = data.input
+                    ? Object.entries(data.input)
+                        .slice(0, 3)
+                        .map(([k, v]) => `${k}=${String(v).slice(0, 60)}`)
+                        .join(', ')
+                    : '';
+                  setInspectorChatMessages(prev => [...prev, {
+                    id: `tool_use_${data.id || Date.now()}`,
+                    role: 'system' as const,
+                    content: `🔧 ${data.name}(${inputPreview})`,
+                    timestamp: new Date(),
+                  } as any]);
+                } else if (eventType === 'tool_result') {
+                  const icon = data.is_error ? '❌' : '✓';
+                  const preview = (data.content_preview || '').slice(0, 200);
+                  setInspectorChatMessages(prev => [...prev, {
+                    id: `tool_result_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                    role: 'system' as const,
+                    content: `${icon} ${data.name}: ${preview}${preview.length >= 200 ? '…' : ''}`,
+                    timestamp: new Date(),
+                  } as any]);
+                } else if (eventType === 'progress' && data.message) {
+                  setInspectorChatMessages(prev => [...prev, {
+                    id: `cc_prog_${Date.now()}`,
+                    role: 'system' as const,
+                    content: data.message,
+                    timestamp: new Date(),
+                  } as any]);
                 } else if (eventType === 'done' && data.actual_model) {
                   // 🌥️ مدل واقعی + tier + reason ای که picker انتخاب کرد.
                   // Claude خودش را در متن اغلب اشتباه معرفی می‌کند، پس
@@ -14663,18 +14695,19 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                         </div>
                         {inspectorEngine === 'cloud_code' && cloudCodeAvailable !== false && (
                           <>
-                            <div className="text-[10px] mt-1.5 p-1.5 rounded bg-amber-500/20 border border-amber-300/40">
-                              <p className="font-bold mb-0.5">⚠️ Cloud Code فعلاً فقط چت متنی است</p>
+                            <div className="text-[10px] mt-1.5 p-1.5 rounded bg-emerald-500/20 border border-emerald-300/40">
+                              <p className="font-bold mb-0.5">🛠️ Cloud Code + ابزارها (Phase 3)</p>
                               <p className="opacity-90 leading-relaxed">
-                                این موتور tool-calling ندارد. برای کارهایی مثل:
+                                موتور Cloud Code حالا ۱۲ ابزار در دسترس دارد:
                                 <br/>
-                                • تنظیم متغیرهای محیطی Render (مثل API_KEY ها)
+                                • <b>فایل/گیت:</b> read_file، list_files، list_branches، read_file_from_branch
                                 <br/>
-                                • خواندن فایل پروژه، apply-action، scan انتخابی
+                                • <b>Render:</b> list_services، get_service، get_env_vars، <b>set_env_var</b>، trigger_deploy، get_deploys
                                 <br/>
-                                • دیپلوی، PR ساختن، تعامل با GitHub/Render API
+                                • <b>سایر:</b> submit_action_plan، preflight_check
                                 <br/>
-                                → روی <b>«🤖 Local AI»</b> سوئیچ کن. Local AI ۲۴ ابزار دارد و می‌تواند مستقیم API ها را صدا بزند.
+                                مثلاً «این env vars را روی سرویس Render ست کن» مستقیم اجرا می‌شود.
+                                برای ابزارهای سنگین‌تر (postgres provisioning، scan، apply-action عمیق) Local AI همچنان توصیه می‌شود.
                               </p>
                             </div>
                             <div className="mt-2">

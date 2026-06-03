@@ -17160,6 +17160,11 @@ class InspectorCloudCodeRequest(BaseModel):
     # (مثل "claude-opus-4-5-20251101") یا فقط tier را hint داد.
     model: str = "auto"
     tier_hint: Optional[str] = None  # "opus" | "sonnet" | "haiku" | None
+    # 🆕 (Phase 4 — tool use) — وقتی True (پیش‌فرض)، اگر project_id با
+    # GitHub repo قابل resolve باشد، agent loop با ۱۲ ابزار (read_file،
+    # render_set_env_var، …) اجرا می‌شود. False → fallback به text-only
+    # streaming (رفتار قبلی).
+    enable_tools: bool = True
 
 
 @router.post("/inspector/chat-cloud-code")
@@ -17252,6 +17257,93 @@ async def inspector_chat_cloud_code(
             slog.warning(f"[chat-cloud-code] persist user msg failed: {_e}")
             db.rollback()
 
+    # 🆕 (Phase 4 — tool use) — تلاش برای ساخت executor با GitHub + Render
+    # context. اگر موفق شد، agent loop با ابزار اجرا می‌شود؛ وگرنه fallback
+    # به text-only streaming قبلی. تمام شکست‌ها silent — کاربر چیزی تغییری
+    # نمی‌بیند جز در دسترس بودن ابزار.
+    agent_executor = None
+    agent_tools_schema = None
+    agent_ctx_summary: Dict[str, Any] = {}
+    if request.enable_tools:
+        try:
+            from ...models.project import Project as _Proj
+            project = db.query(_Proj).filter(_Proj.id == request.project_id).first()
+            if project:
+                from ...services.github_pr_service import get_github_pr_service
+                from ...services.render_service import get_render_service
+                from ...services.cloud_code_executor import (
+                    build_inspector_executor,
+                    get_phase_3_tool_schemas,
+                )
+                extra = {}
+                if project.extra_data:
+                    try:
+                        extra = (json.loads(project.extra_data)
+                                 if isinstance(project.extra_data, str)
+                                 else project.extra_data)
+                    except Exception:
+                        extra = {}
+                owner = extra.get("owner", "")
+                repo = extra.get("repo", "")
+                if not owner and "/" in (project.github_path or ""):
+                    owner, repo = project.github_path.split("/", 1)
+                gh_token = os.environ.get("GITHUB_TOKEN", "")
+                if not gh_token:
+                    from ...models.setting import Setting as _S
+                    gh_token = _S.get_value(db, "api_key_github") or ""
+                gh_svc = get_github_pr_service() if owner and repo else None
+                # file list — اگر در دسترس نباشد، executor با لیست خالی
+                # کار می‌کند (read_file در آن حالت validation نمی‌کند).
+                file_list_resolved: List[str] = []
+                if gh_svc and owner and repo:
+                    try:
+                        flres = await gh_svc.list_repository_files(
+                            owner, repo, branch="main", token=gh_token,
+                        ) if hasattr(gh_svc, "list_repository_files") else None
+                        if flres and flres.get("success"):
+                            file_list_resolved = list(flres.get("files") or [])
+                    except Exception as _fle:
+                        slog.debug(f"[chat-cloud-code] file list resolve failed: {_fle}")
+                # Render service: اختیاری
+                render_svc = None
+                try:
+                    render_svc = get_render_service()
+                except Exception:
+                    render_svc = None
+                if gh_svc and owner and repo:
+                    agent_executor = build_inspector_executor(
+                        github_svc=gh_svc,
+                        render_service=render_svc,
+                        owner=owner,
+                        repo=repo,
+                        branch="main",
+                        github_token=gh_token,
+                        file_list=file_list_resolved,
+                    )
+                    agent_tools_schema = get_phase_3_tool_schemas()
+                    agent_ctx_summary = {
+                        "owner": owner,
+                        "repo": repo,
+                        "files_known": len(file_list_resolved),
+                        "render_available": render_svc is not None,
+                        "tools_count": len(agent_tools_schema),
+                    }
+                    # context را به system prompt اضافه کن تا مدل بداند چه
+                    # ابزاری دارد.
+                    system_prompt += (
+                        f"\n\nتو ابزارهای کاری زیر را در دسترس داری "
+                        f"({len(agent_tools_schema)} ابزار): "
+                        f"خواندن فایل، لیست فایل، شاخه‌ها، Render API "
+                        f"(مشاهده/تنظیم env vars، deploy)، submit_action_plan. "
+                        f"از آنها مستقیم استفاده کن — هرگز نگو «دسترسی ندارم». "
+                        f"پروژه: `{owner}/{repo}`"
+                        + (f" • {len(file_list_resolved)} فایل" if file_list_resolved else "")
+                        + (" • Render OK" if render_svc else " • Render unavailable")
+                    )
+        except Exception as _ex:
+            slog.warning(f"[chat-cloud-code] tool setup failed: {_ex}")
+            agent_executor = None
+
     # 4) stream
     async def _gen():
         assembled: List[str] = []
@@ -17259,31 +17351,119 @@ async def inspector_chat_cloud_code(
             yield (
                 "event: progress\ndata: "
                 + json.dumps(
-                    {"message": "🌥️ اتصال به Claude Code OAuth..."},
+                    {
+                        "message": (
+                            f"🌥️ اتصال به Claude Code OAuth"
+                            + (f" — {agent_ctx_summary.get('tools_count', 0)} ابزار فعال"
+                               if agent_executor else " (text-only)")
+                        ),
+                        "agent_ctx": agent_ctx_summary or None,
+                    },
                     ensure_ascii=False,
                 )
                 + "\n\n"
             )
             cc_meta: Dict[str, Any] = {}
-            stream_gen = await InspectorAgentService.chat_with_cloud_code(
-                history_payload,
-                system_prompt=system_prompt,
-                model=request.model or "auto",
-                tier_hint=request.tier_hint,
-                max_tokens=request.max_tokens,
-                temperature=request.temperature,
-                stream=True,
-                metadata_sink=cc_meta,
-            )
-            async for chunk in stream_gen:
-                assembled.append(chunk)
-                yield (
-                    "event: chunk\ndata: "
-                    + json.dumps({"text": chunk}, ensure_ascii=False)
-                    + "\n\n"
-                )
 
-            full_text = "".join(assembled).strip()
+            # 🆕 Phase 4 — agent loop مسیر
+            if agent_executor and agent_tools_schema:
+                # یک queue برای forward کردن event های on_event به SSE
+                import asyncio as _aio_cc
+                event_q: _aio_cc.Queue = _aio_cc.Queue()
+
+                async def _on_event(kind: str, payload: Dict[str, Any]) -> None:
+                    await event_q.put((kind, payload))
+
+                from ...services.cloud_code_service import cloud_code_agent_loop
+
+                # run loop در background تا event ها همزمان forward شوند
+                loop_task = _aio_cc.create_task(cloud_code_agent_loop(
+                    user_prompt=request.message,
+                    system_prompt=system_prompt,
+                    tools=agent_tools_schema,
+                    executor=agent_executor,
+                    initial_history=history_payload[:-1],  # exclude final user (loop appends)
+                    model=request.model or "auto",
+                    tier_hint=request.tier_hint,
+                    max_iterations=12,
+                    max_tokens_per_call=request.max_tokens,
+                    temperature=request.temperature,
+                    on_event=_on_event,
+                    metadata_sink=cc_meta,
+                ))
+
+                # drain events + chunk forwarding
+                while True:
+                    try:
+                        evt = await _aio_cc.wait_for(event_q.get(), timeout=0.5)
+                    except _aio_cc.TimeoutError:
+                        if loop_task.done():
+                            break
+                        continue
+                    kind, payload = evt
+                    if kind == "text":
+                        txt = payload.get("text", "")
+                        if txt:
+                            assembled.append(txt)
+                            yield (
+                                "event: chunk\ndata: "
+                                + json.dumps({"text": txt}, ensure_ascii=False)
+                                + "\n\n"
+                            )
+                    elif kind == "tool_use":
+                        yield (
+                            "event: tool_use\ndata: "
+                            + json.dumps({
+                                "name": payload.get("name"),
+                                "id": payload.get("id"),
+                                "input": payload.get("input"),
+                            }, ensure_ascii=False)
+                            + "\n\n"
+                        )
+                    elif kind == "tool_result":
+                        yield (
+                            "event: tool_result\ndata: "
+                            + json.dumps({
+                                "name": payload.get("name"),
+                                "is_error": payload.get("is_error"),
+                                "content_preview": (payload.get("content") or "")[:300],
+                            }, ensure_ascii=False)
+                            + "\n\n"
+                        )
+                    elif kind == "done":
+                        # loop also pushes done; we break after the task itself completes
+                        pass
+                    elif kind == "error":
+                        yield (
+                            "event: error\ndata: "
+                            + json.dumps({
+                                "message": payload.get("message"),
+                            }, ensure_ascii=False)
+                            + "\n\n"
+                        )
+                # collect loop result
+                loop_result = await loop_task
+                full_text = (loop_result.get("final_text") or "").strip() or "".join(assembled).strip()
+            else:
+                # fallback path: text-only streaming (رفتار قبلی)
+                stream_gen = await InspectorAgentService.chat_with_cloud_code(
+                    history_payload,
+                    system_prompt=system_prompt,
+                    model=request.model or "auto",
+                    tier_hint=request.tier_hint,
+                    max_tokens=request.max_tokens,
+                    temperature=request.temperature,
+                    stream=True,
+                    metadata_sink=cc_meta,
+                )
+                async for chunk in stream_gen:
+                    assembled.append(chunk)
+                    yield (
+                        "event: chunk\ndata: "
+                        + json.dumps({"text": chunk}, ensure_ascii=False)
+                        + "\n\n"
+                    )
+                full_text = "".join(assembled).strip()
 
             # persist پاسخ assistant — actual model را در model_id ذخیره
             # کن (نه placeholder "cloud_code") تا تاریخچهٔ DB دقیق بماند.
@@ -17320,6 +17500,8 @@ async def inspector_chat_cloud_code(
                         "stop_reason": cc_meta.get("stop_reason"),
                         "message_id": assistant_msg_id,
                         "content": full_text,
+                        "agent_mode": bool(agent_executor),
+                        "agent_ctx": agent_ctx_summary or None,
                     },
                     ensure_ascii=False,
                 )
