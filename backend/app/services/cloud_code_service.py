@@ -564,3 +564,159 @@ async def cloud_code_complete(
     ):
         chunks.append(piece)
     return "".join(chunks)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tool-aware non-streaming call (for agent loop)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The streaming helper above is intentionally text-only — perfect for fast
+# Q&A. To match Local AI smart-chat capabilities (file read, Render API,
+# git, deploys, …) we need a tool-calling variant. Anthropic Messages API
+# supports it via:
+#   - request: tools=[{name,description,input_schema}, ...]
+#   - response: content blocks of type "tool_use" alongside text blocks
+#   - follow-up: user turn with tool_result content blocks for each tool_use
+#
+# We expose this as a single-turn call (not streaming) that returns the
+# full assistant message structure. The caller runs the loop, executes
+# tools, appends a user turn with the results, and calls again until the
+# model stops emitting tool_use blocks.
+
+
+async def cloud_code_message(
+    messages: List[Dict[str, Any]],
+    *,
+    system_prompt: Optional[str] = None,
+    model: str = CLOUD_CODE_DEFAULT_MODEL,
+    max_tokens: int = 8000,
+    temperature: float = 0.2,
+    timeout: float = 180.0,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tier_hint: Optional[str] = None,
+    metadata_sink: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Single-turn (non-streaming) call to Anthropic Messages API with full
+    `content` block support — including tool_use.
+
+    Returns the assistant's raw message dict:
+      {
+        "stop_reason": "end_turn" | "tool_use" | "max_tokens" | ...,
+        "content": [
+          {"type": "text", "text": "..."},
+          {"type": "tool_use", "id": "...", "name": "...", "input": {...}},
+          ...
+        ],
+        "usage": {...},
+        "model": "claude-...",
+      }
+
+    Callers running the agent loop:
+      1. Append the returned assistant turn verbatim to `messages`
+         (role=assistant, content=the content array).
+      2. For each tool_use block, execute the tool and append a user turn
+         whose content is a list of {"type":"tool_result","tool_use_id":id,
+         "content":..., "is_error":bool} blocks.
+      3. Re-call cloud_code_message until stop_reason != "tool_use".
+    """
+    token = get_cloud_code_token()
+    if not token:
+        raise RuntimeError(
+            "CLAUDE_CODE_OAUTH_TOKEN env var is not set — "
+            "cloud_code engine unavailable"
+        )
+
+    # auto-route via the same picker as streaming
+    if model == "auto" or tier_hint is not None:
+        chosen_id, picked_tier, pick_reason = await pick_best_model(
+            _flatten_messages_for_classifier(messages), tier_hint=tier_hint,
+        )
+        if metadata_sink is not None:
+            metadata_sink["requested_model"] = model
+            metadata_sink["picked_model"] = chosen_id
+            metadata_sink["picked_tier"] = picked_tier
+            metadata_sink["pick_reason"] = pick_reason
+        model = chosen_id
+
+    payload: Dict[str, Any] = {
+        "model": model,
+        "messages": _coerce_messages_for_tools(messages),
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "system": _build_system_blocks(system_prompt),
+    }
+    if tools:
+        payload["tools"] = tools
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(
+            CLOUD_CODE_API_URL,
+            headers=_build_headers(token),
+            json=payload,
+        )
+        if response.status_code != 200:
+            snippet = response.text[:500]
+            if response.status_code == 401:
+                hint = "OAuth token نامعتبر یا منقضی. با `claude setup-token` تازه بساز."
+            elif response.status_code == 429:
+                hint = "rate limit — یا انتی-abuse تشخیص داد. چند ثانیه صبر کن."
+            else:
+                hint = "جزئیات در پاسخ Anthropic."
+            raise RuntimeError(
+                f"cloud_code API returned {response.status_code}: {snippet} | {hint}"
+            )
+        data = response.json()
+        if metadata_sink is not None:
+            metadata_sink["actual_model"] = data.get("model") or model
+            metadata_sink["message_id"] = data.get("id")
+            metadata_sink["usage"] = data.get("usage")
+            metadata_sink["stop_reason"] = data.get("stop_reason")
+        return data
+
+
+def _flatten_messages_for_classifier(messages: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Tier classifier expects plain {role, content:str}. When messages
+    contain block lists (for tool_use/tool_result rounds), reduce each to
+    a text approximation so the classifier still works."""
+    out: List[Dict[str, str]] = []
+    for m in messages or []:
+        role = (m.get("role") or "").lower()
+        content = m.get("content")
+        if isinstance(content, str):
+            out.append({"role": role, "content": content})
+        elif isinstance(content, list):
+            texts: List[str] = []
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("type") == "text" and block.get("text"):
+                        texts.append(str(block["text"]))
+                    elif block.get("type") == "tool_use":
+                        texts.append(f"[tool_use:{block.get('name', '?')}]")
+                    elif block.get("type") == "tool_result":
+                        c = block.get("content")
+                        if isinstance(c, str):
+                            texts.append(c[:200])
+            if texts:
+                out.append({"role": role, "content": "\n".join(texts)})
+    return out
+
+
+def _coerce_messages_for_tools(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Same role-filtering rules as _coerce_messages, but PRESERVES rich
+    content (block lists) used by tool_use / tool_result turns."""
+    cleaned: List[Dict[str, Any]] = []
+    for m in messages or []:
+        role = (m.get("role") or "").strip().lower()
+        content = m.get("content")
+        if role not in ("user", "assistant"):
+            continue
+        if content is None:
+            continue
+        if isinstance(content, str) and not content.strip():
+            continue
+        if isinstance(content, list) and not content:
+            continue
+        cleaned.append({"role": role, "content": content})
+    while cleaned and cleaned[0]["role"] != "user":
+        cleaned.pop(0)
+    return cleaned

@@ -625,6 +625,171 @@ async def test_list_available_models_caches(monkeypatch):
     assert third[0]["id"] == "claude-sonnet-4-5-20250929"
 
 
+# ---------------------------------------------------------------------------
+# Tool-aware single-turn helper (foundation for the cloud-code agent loop)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cloud_code_message_sends_tools_and_returns_tool_use_block(monkeypatch):
+    """cloud_code_message must forward the `tools` array to Anthropic and
+    return the raw response so the caller can walk content blocks
+    (including tool_use) to drive the agent loop."""
+    from app.services import cloud_code_service as ccs
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test")
+
+    captured_body: dict = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured_body.update(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(200, json={
+            "id": "msg_xyz",
+            "model": "claude-sonnet-4-5-20250929",
+            "stop_reason": "tool_use",
+            "content": [
+                {"type": "text", "text": "Let me check that file."},
+                {
+                    "type": "tool_use",
+                    "id": "tool_1",
+                    "name": "read_file",
+                    "input": {"path": "src/app.py"},
+                },
+            ],
+            "usage": {"input_tokens": 50, "output_tokens": 20},
+        })
+
+    transport = httpx.MockTransport(_handler)
+    real_client_cls = httpx.AsyncClient
+
+    def _patched(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client_cls(*args, **kwargs)
+
+    monkeypatch.setattr(ccs.httpx, "AsyncClient", _patched)
+
+    sink: dict = {}
+    tools = [{
+        "name": "read_file",
+        "description": "read file",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    }]
+    out = await ccs.cloud_code_message(
+        [{"role": "user", "content": "show me src/app.py"}],
+        tools=tools,
+        model="claude-sonnet-4-5-20250929",  # skip auto-pick to isolate
+        metadata_sink=sink,
+    )
+
+    assert captured_body["tools"] == tools
+    assert any(
+        b.get("type") == "tool_use" and b.get("name") == "read_file"
+        for b in out["content"]
+    )
+    assert out["stop_reason"] == "tool_use"
+    assert sink["actual_model"] == "claude-sonnet-4-5-20250929"
+    assert sink["stop_reason"] == "tool_use"
+
+
+@pytest.mark.asyncio
+async def test_cloud_code_message_preserves_block_list_content(monkeypatch):
+    """When the caller appends an assistant turn whose content is a list
+    of blocks (text + tool_use), followed by a user turn of tool_result
+    blocks, _coerce_messages_for_tools must preserve the structure rather
+    than stringifying it like the text-only helper does."""
+    from app.services import cloud_code_service as ccs
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test")
+
+    captured_body: dict = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured_body.update(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(200, json={
+            "id": "msg_2",
+            "model": "claude-sonnet-4-5-20250929",
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "done"}],
+            "usage": {"input_tokens": 5, "output_tokens": 5},
+        })
+
+    transport = httpx.MockTransport(_handler)
+    real_client_cls = httpx.AsyncClient
+
+    def _patched(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client_cls(*args, **kwargs)
+
+    monkeypatch.setattr(ccs.httpx, "AsyncClient", _patched)
+
+    convo = [
+        {"role": "user", "content": "look at app.py"},
+        {"role": "assistant", "content": [
+            {"type": "text", "text": "ok"},
+            {"type": "tool_use", "id": "t1", "name": "read_file",
+             "input": {"path": "app.py"}},
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1",
+             "content": "print('hi')"},
+        ]},
+    ]
+    await ccs.cloud_code_message(convo, model="claude-sonnet-4-5-20250929")
+
+    msgs = captured_body["messages"]
+    # Assistant turn content remained a list of blocks (NOT flattened to str)
+    assert isinstance(msgs[1]["content"], list)
+    assert any(b.get("type") == "tool_use" for b in msgs[1]["content"])
+    # User tool_result turn preserved
+    assert isinstance(msgs[2]["content"], list)
+    assert msgs[2]["content"][0]["type"] == "tool_result"
+    assert msgs[2]["content"][0]["tool_use_id"] == "t1"
+
+
+@pytest.mark.asyncio
+async def test_cloud_code_message_classifier_handles_block_messages(monkeypatch):
+    """When messages contain block-list content (mid-agent-loop), the
+    auto-picker must still work — the flattener should extract text
+    so the tier classifier sees something meaningful."""
+    from app.services import cloud_code_service as ccs
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test")
+
+    async def fake_list(force_refresh=False):
+        return [
+            {"id": "claude-opus-4-5-20251101", "created_at": "2025-11-01"},
+            {"id": "claude-sonnet-4-5-20250929", "created_at": "2025-09-29"},
+        ]
+    monkeypatch.setattr(ccs, "list_available_models", fake_list)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "id": "msg_3", "model": "claude-opus-4-5-20251101",
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {},
+        })
+    transport = httpx.MockTransport(_handler)
+    real_client_cls = httpx.AsyncClient
+    monkeypatch.setattr(
+        ccs.httpx, "AsyncClient",
+        lambda *a, **kw: real_client_cls(*a, transport=transport, **{k: v for k, v in kw.items() if k != "transport"}),
+    )
+
+    sink: dict = {}
+    convo = [
+        {"role": "user", "content": [
+            {"type": "text", "text": "refactor کل architecture این پروژه"},
+        ]},
+    ]
+    await ccs.cloud_code_message(convo, model="auto", metadata_sink=sink)
+    assert sink["picked_tier"] == "opus"
+
+
 @pytest.mark.asyncio
 async def test_stream_chat_auto_picks_model_and_reports_in_sink(monkeypatch):
     """model='auto' باید pick_best_model را صدا بزند و picked_model را در sink بریزد."""
