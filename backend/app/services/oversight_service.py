@@ -6565,6 +6565,45 @@ class OversightService:
 {chr(10).join(f'  • {p}' for p in deep_paths[:25]) if deep_paths else '  (هیچ‌کدام)'}
 """
 
+        # 🆕 (Reference Projects — system prompt) — اگر کاربر پروژه‌های مرجع
+        # انتخاب کرده، fusion text در idea injection شده است. system prompt
+        # باید AI را صریحاً ملزم کند که:
+        #   1. بخش پروژه‌های مرجع را در description ذکر کند (نه drop)
+        #   2. در proposed_action هشدار adapt-to-current-stack بنویسد
+        #   3. در risks خطر mixing stack/dependency را ذکر کند
+        #   4. هرگز syntax/dependency مرجع را blind copy نکند
+        # تشخیص: header fusion service `## 📚 پروژه‌های مرجع` در idea.
+        _reference_block = ""
+        if "## 📚 پروژه‌های مرجع" in idea or "Reference Projects" in idea:
+            _reference_block = (
+                "\n\n# 🔵 قانون پروژه‌های مرجع (CRITICAL — کاربر صریحاً پروژه‌های دیگر را به‌عنوان الهام انتخاب کرده)\n"
+                "متن user حاوی بخش `## 📚 پروژه‌های مرجع (Reference Projects)` است که "
+                "خلاصهٔ ساختار/فایل/الگوهای **پروژه‌های دیگری** را در بر دارد. این پروژه‌ها "
+                "**پروژهٔ مقصد نیستند** — فقط منبع الهام هستند. تو باید:\n\n"
+                "**قوانین مطلق**:\n"
+                "1. **بخش «پروژه‌های مرجع» را در description ذکر کن** — لیست نام پروژه‌ها، "
+                "چرا کاربر انتخاب‌شان کرده، و کدام الگو/فایل/feature از آنها قرار است الهام شود. "
+                "هرگز این بخش را silent drop نکن.\n"
+                "2. **در proposed_action، صریحاً هشدار تطبیق با stack فعلی بنویس**. "
+                "مثال: «الگوی X از پروژهٔ مرجع foo/bar الهام گرفته شده — قبل از پیاده‌سازی، باید "
+                "به stack فعلی پروژه (مثلاً Next.js App Router به جای Pages Router مرجع، یا "
+                "FastAPI به جای Flask) adapt شود. هرگز import یا syntax کورکورانه از مرجع کپی "
+                "نشود.»\n"
+                "3. **در risks، خطر mixing dependency/naming/stack را explicit ذکر کن**. "
+                "مثال: «اگر developer الگوی auth از پروژهٔ مرجع X را بدون تطبیق با ORM فعلی پیاده "
+                "کند، migration ناسازگار می‌شود.»\n"
+                "4. **در tech_context، تفاوت‌های کلیدی stack مرجع vs فعلی را ذکر کن** "
+                "(مثل: «مرجع Flask است، فعلی FastAPI — endpoint signature متفاوت است»).\n"
+                "5. **در acceptance_criteria، یک معیار اضافه کن**: «الگوی برداشت‌شده از پروژهٔ مرجع "
+                "با dependency و naming پروژهٔ فعلی سازگار است (نه copy-paste صرف).»\n"
+                "6. **هرگز یک reference به پروژهٔ مرجع را به‌عنوان path پروژهٔ فعلی استفاده نکن**. "
+                "فایل‌های ذکرشده در fusion text **برای الهام** هستن، نه برای ویرایش. "
+                "target_locations فقط فایل‌های پروژهٔ فعلی است.\n\n"
+                "**هدف**: کاربر می‌خواهد بداند الهام از کجا گرفته شده، و developer نباید بدون توجه "
+                "به differences پیاده‌سازی کند. این یک سیگنال صریح است که الگو **شناخته‌شده ولی "
+                "نیازمند adapt** است.\n"
+            )
+
         # 🔴 (extraction-100pct-fix) — اگر فایل پیوست داره، یک قانون صریح
         # اضافه می‌کنیم به system prompt تا synthesis از روی متن کامل پیوست
         # ساخته بشه، نه خلاصه‌ای از idea.
@@ -6594,6 +6633,7 @@ class OversightService:
 
 خروجی این تسک به یک ابزار کدنویس خارجی (Cursor/Copilot/ChatGPT) داده می‌شود — پس فیلدها باید **کاملاً مشخص، grounded در کد واقعی، و قابل اعمال** باشند.
 {_attachment_block}
+{_reference_block}
 # 🧠 چارچوب فکر کردن (الزامی — قبل از تولید JSON، این مراحل را ذهنی طی کن)
 
 **مرحله ۱ — تحلیل کامل متن کاربر** (هیچ‌چیز را skip نکن):
