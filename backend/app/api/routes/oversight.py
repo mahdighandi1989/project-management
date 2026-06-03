@@ -3869,16 +3869,46 @@ async def set_extraction_default(payload: SetDefaultExtractionModelRequest):
     }
 
 
+@router.get("/extractions/counts-by-task")
+async def extractions_counts_by_task():
+    """تعداد فایل‌های استخراج‌شده per task برای کل ریپو.
+
+    این endpoint زمانی اضافه شد که پنل oversight روی هر تسک یک fetch
+    جدا برای /extractions می‌زد و backend با ~684 تسک کرش می‌کرد. حالا
+    frontend یک بار counts را می‌گیرد و فقط برای تسک‌های دارای پیوست
+    وارد جزئیات می‌شود (lazy on expand).
+    """
+    from ...services.oversight_extraction import get_extraction_repo
+    repo = get_extraction_repo()
+    counts: Dict[str, int] = {}
+    for fe in repo._extractions.values():
+        if not fe.task_id:
+            continue
+        counts[fe.task_id] = counts.get(fe.task_id, 0) + 1
+    return {"counts": counts}
+
+
 @router.get("/tasks/{task_id}/extractions")
-async def task_extractions(task_id: str):
-    """لیست همهٔ فایل‌های استخراج‌شدهٔ یک تسک."""
+async def task_extractions(task_id: str, include_full_text: bool = False):
+    """لیست همهٔ فایل‌های استخراج‌شدهٔ یک تسک.
+
+    پیش‌فرض: full_text_cache حذف می‌شود تا response سبک بماند (قبلاً
+    payload های 5-10MB باعث crash backend می‌شد). برای دریافت متن کامل
+    از /extractions/{id}/full-text استفاده کنید، یا include_full_text=true.
+    """
     from ...services.oversight_extraction import get_extraction_repo
     repo = get_extraction_repo()
     items = repo.list_by_task(task_id)
+    extractions_out: List[Dict[str, Any]] = []
+    for e in items:
+        d = e.to_dict()
+        if not include_full_text:
+            d.pop("full_text_cache", None)
+        extractions_out.append(d)
     return {
         "task_id": task_id,
         "count": len(items),
-        "extractions": [e.to_dict() for e in items],
+        "extractions": extractions_out,
     }
 
 
