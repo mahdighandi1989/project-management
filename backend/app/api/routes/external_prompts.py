@@ -489,13 +489,20 @@ async def _verify_then_chain(
         return
 
     vstatus = getattr(task, "verification_status", None)
+    # 🚨 (auto-runner loop fix) — raw verdict verifier در این run. اگر
+    # status_val=done باشد ولی vstatus به streak guard خورده و "partial"
+    # شده، retry فقط token هدر می‌دهد (Claude همه کارها را درست انجام
+    # داده، فقط streak یک واحد کم است). با bypass جدید برای trigger های
+    # claude_auto_runner_*، این مسیر هم تأیید می‌گیرد ولی به‌عنوان defense-
+    # in-depth، اگر verifier از قبل گفته done این بار هم retry نمی‌کنیم.
+    status_val_this_run = str(verify_result.get("status_val") or "").lower()
     max_retries = int(
         getattr(watched, "claude_runner_max_retries_per_task", 3) or 3
     )
     retries_done = int(getattr(task, "followup_round", 0) or 0)
 
     action = "chain_next"  # default
-    if vstatus == "done":
+    if vstatus == "done" or status_val_this_run == "done":
         action = "chain_next"
     elif vstatus in ("partial", "needs_clarification"):
         if retries_done < max_retries:

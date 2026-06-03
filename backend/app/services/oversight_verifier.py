@@ -4197,7 +4197,21 @@ async def verify_task(
                 bypass_streak = bool(
                     all_steps_done and (task.task_steps or [])
                 )
-                if task.confirmation_streak >= streak_required or bypass_streak:
+                # 🚨 (auto-runner loop fix) — auto-runner یک deep verify کامل
+                # (با runtime probes و iterative orchestrator) اجرا می‌کند.
+                # وقتی این verify عمیق می‌گوید DONE، شرط streak دو-باره معنا
+                # ندارد — فقط باعث یک Claude run اضافه (+token+wait) می‌شد و
+                # کاربر همان checklist را دوباره در Telegram می‌دید. حالا
+                # برای trigger های auto-runner، streak دور زده می‌شود.
+                bypass_for_auto_runner = (
+                    isinstance(triggered_by, str)
+                    and triggered_by.startswith("claude_auto_runner")
+                )
+                if (
+                    task.confirmation_streak >= streak_required
+                    or bypass_streak
+                    or bypass_for_auto_runner
+                ):
                     task.verification_status = "done"
                     task.status = "done"
                     # 🆕 (P3) auto-archive وقتی هم status هم verification_status = done
@@ -4390,4 +4404,8 @@ async def verify_task(
         "final": task.verification_status == "done",
         "followup_available": bool(task.followup_prompt),
         "followup_round": task.followup_round,
+        # 🚨 (auto-runner loop fix) — raw status_val قبل از mutation وضعیت
+        # task. به _verify_then_chain اجازه می‌دهد بفهمد "verify done ولی
+        # streak<required" را با "partial واقعی" اشتباه نگیرد.
+        "status_val": status_val,
     }

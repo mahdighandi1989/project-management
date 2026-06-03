@@ -807,6 +807,15 @@ async def runtime_diagnostics():
     ac_needing_phase3_upgrade = 0
     tasks_needing_phase3_upgrade = 0
     for t in service.tasks:
+        # 🚨 (auto-backfill alignment fix) — قبلاً archived ها هم شمرده
+        # می‌شدند، ولی auto-trigger (`_maybe_auto_backfill_ac`) صراحتاً
+        # archived ها را skip می‌کند. نتیجه: دکمهٔ بنفش/زرد روی dashboard
+        # برای N>0 می‌ماند ولی auto هرگز fire نمی‌شد (counter=0 می‌دید).
+        # کاربر «مدت‌هاست دارم می‌بینمش» را تجربه می‌کرد. حالا هر دو counter
+        # یک منطق دارند: فقط active tasks. archived ها داده‌های مرده هستند
+        # و re-enrich آن‌ها فقط هزینهٔ token است.
+        if getattr(t, "archived", False):
+            continue
         total_tasks += 1
         acs = t.acceptance_criteria or []
         if not acs:
