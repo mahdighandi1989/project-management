@@ -87,6 +87,55 @@ def test_capability_tester_raises_clear_error_without_token():
     )
 
 
+def test_capability_tester_forces_opus_tier_for_cloud_code():
+    """🚨 (capability test fairness fix) — قبل از این، model="auto" پاس
+    می‌شد و _classify_tier برای prompts کوتاه تست همیشه haiku را
+    برمی‌گزید. Haiku ضعیف‌ترین مدل subscription است، نتیجه: امتیاز ~32
+    برای Cloud Code، که اصلاً قدرت واقعی Claude Opus را نشان نمی‌داد.
+
+    حالا tier_hint="opus" مجبور می‌کند بهترین مدل تست شود — منصفانه‌تر
+    و خود subscription هیچ هزینه اضافه‌ای ندارد."""
+    src_path = (
+        Path(__file__).resolve().parents[1]
+        / "app/services/model_capability_tester.py"
+    )
+    src = src_path.read_text(encoding="utf-8")
+    idx = src.find("if model_id == \"cloud_code\":")
+    assert idx != -1
+    body = src[idx:idx + 2000]
+    assert 'tier_hint="opus"' in body, (
+        "capability tester must force tier_hint='opus' for cloud_code "
+        "(otherwise short test prompts route to Haiku and the model "
+        "scores unfairly low)"
+    )
+    # model="auto" must not appear as an executable call (it may appear
+    # in a comment that documents the prior bug — that's fine). Check
+    # by scanning only non-comment lines.
+    code_lines = [
+        ln for ln in body.splitlines()
+        if 'model="auto"' in ln and not ln.lstrip().startswith("#")
+    ]
+    assert code_lines == [], (
+        f"model='auto' must not appear as an executable call when "
+        f"tier_hint='opus' is set. Found: {code_lines}"
+    )
+
+
+def test_cloud_code_complete_signature_accepts_tier_hint():
+    """The cloud_code_complete helper must expose tier_hint so callers
+    (like the capability tester) can force a specific tier."""
+    from app.services.cloud_code_service import cloud_code_complete
+    import inspect
+
+    sig = inspect.signature(cloud_code_complete)
+    assert "tier_hint" in sig.parameters, (
+        "cloud_code_complete must accept tier_hint so callers can force "
+        "a specific tier — used by capability test to force Opus"
+    )
+    # Backward-compat: default is None (legacy: model arg handles it)
+    assert sig.parameters["tier_hint"].default is None
+
+
 # ---------------------------------------------------------------------------
 # Frontend filters the task list correctly
 # ---------------------------------------------------------------------------
