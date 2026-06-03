@@ -9631,30 +9631,54 @@ AC = «طراحی شیک‌تر باشد»:
         if _BACKFILL_STATE.get("running"):
             return  # یک backfill در حال اجراست (دستی یا قبلی)
 
-        # شمارش — تکرار همان منطق /runtime/diagnostics ولی فقط counter ها
+        # 🚨 (audit fix) — counter قبلاً غلط بود و auto هرگز trigger نمی‌شد.
+        # حالا دقیقاً همان منطق /runtime/diagnostics را استفاده می‌کنیم —
+        # ui_steps (نه steps)، _ac_already_classified helper، NON_REAL set،
+        # و real_count < 1 برای phase3 detection. تمام این موارد در
+        # /runtime/diagnostics مشخص است که چه counter ای پشت دکمه‌های UI
+        # است. هر تفاوت = silent no-op auto.
+        try:
+            from .verify_runtime.ac_enricher import _ac_already_classified
+        except Exception:
+            _ac_already_classified = None  # type: ignore
+
+        _NON_REAL_ACTIONS = {"", "navigate", "screenshot", "wait_for_load"}
         ac_unclassified = 0
         ac_needing_phase3 = 0
         for t in self.tasks:
             if getattr(t, "archived", False):
                 continue
             for ac in (getattr(t, "acceptance_criteria", []) or []):
-                if not isinstance(ac, dict):
+                ac_dict = (
+                    ac if isinstance(ac, dict)
+                    else {"text": str(ac), "verify_method": "static", "verify_plan": {}}
+                )
+                # unclassified detection — همان helper diagnostics
+                if _ac_already_classified is not None:
+                    if not _ac_already_classified(ac_dict):
+                        ac_unclassified += 1
+                        continue
+                else:
+                    m_str = str(ac_dict.get("verify_method") or "static").lower()
+                    if m_str in ("", "static"):
+                        ac_unclassified += 1
+                        continue
+                # phase3 gap detection — فقط ui_interaction، فقط
+                # ui_steps، و real_count < 1
+                m = str(ac_dict.get("verify_method") or "static").lower()
+                if m != "ui_interaction":
                     continue
-                method = ac.get("verify_method") or ac.get("method") or ""
-                if not method or method == "static":
-                    ac_unclassified += 1
+                _plan = (ac_dict.get("verify_plan") if isinstance(ac_dict.get("verify_plan"), dict) else {}) or {}
+                _steps = _plan.get("ui_steps") or []
+                if not isinstance(_steps, list):
                     continue
-                plan = ac.get("verify_plan") or {}
-                steps = plan.get("steps") if isinstance(plan, dict) else None
-                if isinstance(steps, list) and 1 <= len(steps) <= 2:
-                    # Phase-2 style: کم‌مرحله، احتمالاً فقط navigate
-                    only_simple = all(
-                        isinstance(s, dict)
-                        and (s.get("action") or "") in ("navigate", "wait", "screenshot")
-                        for s in steps
-                    )
-                    if only_simple:
-                        ac_needing_phase3 += 1
+                _real_count = sum(
+                    1 for s in _steps
+                    if isinstance(s, dict)
+                    and str(s.get("action") or "").lower() not in _NON_REAL_ACTIONS
+                )
+                if _real_count < 1:
+                    ac_needing_phase3 += 1
 
         if ac_unclassified == 0 and ac_needing_phase3 == 0:
             return  # هیچ کاری لازم نیست

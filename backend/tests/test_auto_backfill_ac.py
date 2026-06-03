@@ -47,28 +47,47 @@ def _make_service(
     return svc
 
 
+# 🚨 The schema below mirrors what /runtime/diagnostics actually reads:
+#   verify_plan.ui_steps (not .steps)
+#   _ac_already_classified() helper for the "unclassified" branch
+#   only ui_interaction is considered for phase3 gap detection
+#   "real" steps are anything NOT in {"", navigate, screenshot, wait_for_load}
+# The earlier (buggy) helpers used the wrong field name and method
+# filter, so the test was green while production was silently broken.
+
+
 def _ac_unclassified():
-    return {"text": "Login button works", "verify_method": ""}
+    # No verify_method ⇒ unclassified. _ac_already_classified returns False.
+    return {"text": "Login button works", "verify_method": "", "verify_plan": {}}
 
 
 def _ac_classified_with_phase2_plan():
+    """ui_interaction with no real interaction steps — only navigate/wait/screenshot."""
     return {
         "text": "Form submits",
         "verify_method": "ui_interaction",
-        "verify_plan": {"steps": [{"action": "navigate"}]},
+        "verify_plan": {
+            "ui_steps": [
+                {"action": "navigate"},
+                {"action": "wait_for_load"},
+            ]
+        },
     }
 
 
 def _ac_classified_with_rich_plan():
+    """ui_interaction with at least one real step (click/type/assert) — already Phase-3."""
     return {
         "text": "Form submits",
         "verify_method": "ui_interaction",
-        "verify_plan": {"steps": [
-            {"action": "navigate"},
-            {"action": "click"},
-            {"action": "type"},
-            {"action": "assert"},
-        ]},
+        "verify_plan": {
+            "ui_steps": [
+                {"action": "navigate"},
+                {"action": "click"},
+                {"action": "fill"},
+                {"action": "assert_visible"},
+            ]
+        },
     }
 
 
@@ -239,6 +258,76 @@ async def test_auto_backfill_ignores_archived_tasks():
     svc = _make_service(tasks=[
         _make_task([_ac_unclassified()], archived=True),
     ])
+    fake_state = {"running": False}
+    fake_runner = AsyncMock()
+    with patch.dict("sys.modules", {"app.api.routes.oversight": SimpleNamespace(
+        _BACKFILL_STATE=fake_state,
+        _run_backfill_ac_classification=fake_runner,
+    )}):
+        await svc._maybe_auto_backfill_ac()
+    fake_runner.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Regression: counter must mirror /runtime/diagnostics exactly
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_auto_backfill_counter_matches_diagnostics_for_phase3_gap():
+    """The user saw the purple "Force re-enrich (Phase 3) — N تسک" button
+    sitting on the dashboard for an hour without the scheduler picking
+    it up. Root cause: my counter was reading verify_plan.steps while
+    diagnostics (which the UI shows) was reading verify_plan.ui_steps.
+
+    This test pins both reads to the same field by checking that an AC
+    using exactly the diagnostics-shape (ui_steps with only NON_REAL
+    actions) IS counted by the auto path. If the auto counter ever
+    drifts back to .steps or to a different "simple" set, this test
+    fails loudly.
+    """
+    svc = _make_service(tasks=[_make_task([
+        # ui_interaction with ui_steps that are ALL NON_REAL → must count
+        # as needing phase3.
+        {
+            "text": "Form X submits",
+            "verify_method": "ui_interaction",
+            "verify_plan": {"ui_steps": [
+                {"action": "navigate"},
+                {"action": "screenshot"},
+            ]},
+        },
+    ])])
+    fake_state = {"running": False}
+    fake_runner = AsyncMock()
+    with patch.dict("sys.modules", {"app.api.routes.oversight": SimpleNamespace(
+        _BACKFILL_STATE=fake_state,
+        _run_backfill_ac_classification=fake_runner,
+    )}):
+        await svc._maybe_auto_backfill_ac()
+    import asyncio
+    await asyncio.sleep(0)
+
+    # The phase3-detection path must fire with force=True (no unclassified
+    # ACs in this fixture, only Phase-2 plans).
+    fake_runner.assert_called_once()
+    assert fake_runner.call_args.kwargs.get("force") is True
+
+
+@pytest.mark.asyncio
+async def test_auto_backfill_does_not_count_non_ui_interaction_methods():
+    """Diagnostics restricts phase3 gap detection to verify_method ==
+    'ui_interaction'. The auto counter must do the same — an
+    api_response or backend_test AC with a stub plan is NOT a phase3
+    gap, it's a different category that doesn't need backfill at all."""
+    svc = _make_service(tasks=[_make_task([
+        # api_response with empty plan must NOT trigger phase3 counter.
+        {
+            "text": "/api/foo returns 200",
+            "verify_method": "api_response",
+            "verify_plan": {"ui_steps": []},
+        },
+    ])])
     fake_state = {"running": False}
     fake_runner = AsyncMock()
     with patch.dict("sys.modules", {"app.api.routes.oversight": SimpleNamespace(
