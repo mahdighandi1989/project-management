@@ -458,6 +458,12 @@ async def _ai_extract_text(
     *,
     prompt: str,
     image_b64: Optional[str] = None,
+    image_mime: str = "image/png",
+    # 🆕 (Fix #3 audit follow-up A5) — قبلاً وقتی caller image_b64 می‌داد،
+    # media_type همیشه image/png ست می‌شد حتی اگر فایل JPEG/WebP/GIF بود.
+    # Anthropic معمولاً tolerant است ولی edge case هایی برای WebP/GIF
+    # رد می‌کند. این param اجازه می‌دهد caller MIME واقعی را بدهد.
+    # default "image/png" برای backward-compat با callers قدیمی.
     inline_file_data: Optional[Tuple[str, bytes]] = None,  # (mime, bytes) — for Gemini Files
     max_tokens: int = 32000,  # 🔴 (extraction-100pct-fix v2) برگشت 64K→32K.
     # 64K در v1 برای GPT-4 turbo (16K) و DeepSeek (8K) شکست می‌خورد و چون
@@ -517,6 +523,7 @@ async def _ai_extract_text(
             return await _extract_via_cloud_code(
                 prompt=prompt + extra_text,
                 images=images or [],
+                image_mime=image_mime,
                 inline_files=inline_files or [],
                 max_tokens=max_tokens,
             )
@@ -583,6 +590,7 @@ async def _extract_via_cloud_code(
     *,
     prompt: str,
     images: List[str],
+    image_mime: str,
     inline_files: List[Tuple[str, str]],
     max_tokens: int,
 ) -> str:
@@ -602,11 +610,13 @@ async def _extract_via_cloud_code(
         {"type": "text", "text": prompt or ""}
     ]
     for b64 in images:
+        # 🆕 (Fix #3 audit follow-up A5) — استفاده از MIME واقعی به جای
+        # hardcode image/png. caller image_mime را پاس می‌دهد.
         content_blocks.append({
             "type": "image",
             "source": {
                 "type": "base64",
-                "media_type": "image/png",
+                "media_type": image_mime,
                 "data": b64,
             },
         })
@@ -1491,7 +1501,11 @@ async def _run_extraction(
             )
             try:
                 text = await asyncio.wait_for(
-                    _ai_extract_text(fe.model_used, prompt=prompt, image_b64=b64, max_tokens=16000),
+                    _ai_extract_text(
+                        fe.model_used, prompt=prompt, image_b64=b64,
+                        image_mime=mime,  # 🆕 (A5) MIME واقعی به جای hardcode
+                        max_tokens=16000,
+                    ),
                     timeout=PER_SEGMENT_TIMEOUT_SEC,
                 )
             except asyncio.TimeoutError:

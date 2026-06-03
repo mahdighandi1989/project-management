@@ -674,8 +674,18 @@ def pick_best_extraction_model(
     # برای صوت/ویدیو این شرط false می‌شود (cloud_code آن capability را
     # ندارد در capabilities خود) و picker طبق روال عادی Gemini را
     # برمی‌گرداند — fallback خودکار.
+    #
+    # 🚨 (Fix #3 audit follow-up — critical) — وقتی caller صراحتاً
+    # require_api_key=True پاس می‌دهد، cloud_code را skip کن. این برای
+    # مسیر fallback است: وقتی cloud_code call شکست خورد، `_ai_extract_text`
+    # دوباره picker را با require_api_key=True صدا می‌زند تا یک مدل
+    # *واقعی* (Gemini, OpenAI, ...) برگردد. اگر cloud_code را اینجا هم
+    # برگردانیم، fallback همان cloud_code را می‌گیرد و دوباره fail می‌کند
+    # — کاربر outage می‌بیند. cloud_code provider در env_map نیست، پس
+    # require_api_key=True منطقاً یعنی "از cloud_code نمی‌خواهیم".
     if (
-        required in (
+        not require_api_key
+        and required in (
             ModelCapability.VISION,
             ModelCapability.IMAGE_ANALYSIS,
             ModelCapability.DOCUMENT_UNDERSTANDING,
