@@ -10,7 +10,7 @@ verification_status: pending
 watched_id: 3f34a2b1-2a8d-4ad2-904a-9835a8a5b7c9
 project: mahdighandi1989/project-management
 created_at: '2026-05-17T07:13:07.628374+00:00'
-updated_at: '2026-06-03T17:23:55.416362+00:00'
+updated_at: '2026-06-03T18:16:14.823404+00:00'
 ---
 
 # [منطق] عدم تطابق نوع ورودی messages در ai_base.py با ساختار مورد انتظار
