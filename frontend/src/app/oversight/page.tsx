@@ -1940,20 +1940,42 @@ export default function OversightPage() {
     if (!hasActiveRunner) return;
 
     let cancelled = false;
+    let tickCount = 0;
     const tick = async () => {
       if (cancelled || (typeof document !== 'undefined' && document.hidden)) return;
+      tickCount += 1;
       try {
-        await Promise.all([
-          reloadTasks(),
-          reloadReports(),
-          // watched هم refresh — چون verify-lock روی watched ست می‌شود
-          fetch(`${API_BASE}/api/oversight/watched`).then(r => r.ok ? r.json() : null).then(data => {
-            if (data?.items && !cancelled) setWatched(data.items);
-          }),
-        ]);
+        // 🚨 (crash fix) — هر tick فقط تسک‌های فعال را می‌گیریم
+        // (نه archived؛ payload ~نصف می‌شود). reports + watched هم
+        // هر سه تیک یک‌بار refresh می‌شوند تا حجم HTTP/3 کمتر شود و
+        // QUIC connection نخوابد. صفحه initial-load همچنان archived=all
+        // می‌گیرد برای کار کردن تب آرشیو.
+        const tasksP = fetch(`${API_BASE}/api/oversight/tasks?archived=active`)
+          .then(r => r.ok ? r.json() : null)
+          .then(data => {
+            if (data?.items && !cancelled) {
+              // merge: keep archived ones from previous state، فقط active ها update.
+              setTasks(prev => {
+                const archivedKept = prev.filter(t => t.archived);
+                const activeNew: Task[] = data.items;
+                return [...activeNew, ...archivedKept];
+              });
+            }
+          });
+        const heavyTick = tickCount % 3 === 0;
+        const extras: Promise<any>[] = [];
+        if (heavyTick) {
+          extras.push(reloadReports().catch(() => {}));
+          extras.push(
+            fetch(`${API_BASE}/api/oversight/watched`).then(r => r.ok ? r.json() : null).then(data => {
+              if (data?.items && !cancelled) setWatched(data.items);
+            }).catch(() => {})
+          );
+        }
+        await Promise.all([tasksP, ...extras]);
       } catch {}
     };
-    const interval = setInterval(tick, 6000);
+    const interval = setInterval(tick, 10000);
     return () => {
       cancelled = true;
       clearInterval(interval);
