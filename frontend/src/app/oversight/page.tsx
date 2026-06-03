@@ -4398,6 +4398,7 @@ export default function OversightPage() {
             executeDisabledReason={selectedModelIds.length === 0 ? 'حداقل یک مدل انتخاب کنید' : ''}
             fmtDate={fmtDate}
             fmtRelative={fmtRelative}
+            extractionsCounts={extractionsCounts}
           />
         ) : (
           <ReportsPanel
@@ -8796,6 +8797,7 @@ function TasksPanel({
   executeDisabledReason,
   fmtDate,
   fmtRelative,
+  extractionsCounts,
 }: {
   tasks: Task[];
   filteredTasks: Task[];
@@ -8839,6 +8841,7 @@ function TasksPanel({
   executeDisabledReason: string;
   fmtDate: (d?: string | null) => string;
   fmtRelative: (d?: string | null) => string;
+  extractionsCounts: Record<string, number>;
 }) {
   // 🆕 (C5) — title editing state (inline)
   const [editingTitleId, setEditingTitleId] = useState<string | null>(null);
