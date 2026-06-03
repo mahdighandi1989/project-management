@@ -295,6 +295,9 @@ async def test_verify_then_chain_partial_at_max_retries_writes_todo_and_chains()
         verification_status="partial",
         followup_round=3,  # already at max
         external_status="done", status="awaiting_review",
+        external_locked_by="claude", external_lease_until="2030-01-01",
+        archived=False, archived_at=None, archived_reason=None,
+        updated_at="",
     )
 
     todo_written = {"flag": False}
@@ -315,6 +318,9 @@ async def test_verify_then_chain_partial_at_max_retries_writes_todo_and_chains()
             pass
 
         def _save_watched(self):
+            pass
+
+        def _save_tasks(self):
             pass
 
     fake_svc = _Svc()
@@ -359,3 +365,75 @@ async def test_verify_then_chain_partial_at_max_retries_writes_todo_and_chains()
     # At max retries we move on rather than spinning on the same task
     assert dispatched["args"]["target_task_id"] is None
     assert dispatched["args"]["force"] is False
+    # 🚨 (loop-bug fix) — the task MUST be archived with reason so /next
+    # never picks it up again. Before this fix, the task stayed at
+    # status=awaiting_review (which is in PICKABLE_STATUSES), so the next
+    # workflow dispatch grabbed it again and an infinite loop ensued.
+    assert task.archived is True
+    assert task.archived_reason == "max_retries"
+    assert task.status == "abandoned"
+    assert task.external_status == "abandoned"
+    assert task.external_locked_by is None
+
+
+@pytest.mark.asyncio
+async def test_verify_then_chain_regressed_archives_with_regressed_reason():
+    """Same guarantee for the regressed branch: the task is removed from
+    the pickable set with archived_reason='regressed' so /next does not
+    grab it again."""
+    from app.api.routes import external_prompts
+
+    task = SimpleNamespace(
+        id="t1", watched_id="w1", title="x", raw_idea="", prompt="x",
+        verification_status="regressed",
+        followup_round=1,
+        external_status="done", status="awaiting_review",
+        external_locked_by=None, external_lease_until=None,
+        archived=False, archived_at=None, archived_reason=None,
+        updated_at="",
+    )
+
+    class _Svc:
+        def __init__(self):
+            self.tasks = [task]
+            self._lock = _AsyncLock()
+        def _find_watched(self, _id):
+            return SimpleNamespace(
+                id="w1", repo_full_name="owner/repo",
+                claude_runner_max_retries_per_task=3,
+            )
+        def _release_verify_lock(self, _id): pass
+        def _save_watched(self): pass
+        def _save_tasks(self): pass
+
+    fake_svc = _Svc()
+
+    async def fake_verify(task_id, **kw):
+        return {"task": {"verification_status": "regressed"}, "report": {"status": "regressed"}}
+
+    dispatched = {"args": None}
+
+    async def fake_dispatch(watched, *, gh_token, target_task_id, force, claude_model):
+        dispatched["args"] = {"target_task_id": target_task_id, "force": force}
+        return {"success": True}
+
+    with patch("app.api.routes.external_prompts.get_oversight_service", return_value=fake_svc), \
+         patch("app.services.oversight_verifier.verify_task", side_effect=fake_verify), \
+         patch("app.services.oversight_service.get_github_token", return_value="ghp_x"), \
+         patch("app.services.claude_runner_bootstrap.trigger_workflow_dispatch",
+               side_effect=fake_dispatch), \
+         patch("app.services.claude_runner_bootstrap.pick_model_for_task",
+               AsyncMock(return_value=None)), \
+         patch("app.api.routes.external_prompts._write_todo_for_task",
+               new=AsyncMock(return_value=None)), \
+         patch("app.api.routes.external_prompts._emit_runner_notification",
+               new=lambda **kw: None):
+        await external_prompts._verify_then_chain(
+            task_id="t1", watched_id="w1", agent_id="claude-code-action",
+        )
+
+    assert task.archived is True
+    assert task.archived_reason == "regressed"
+    assert task.status == "abandoned"
+    # chain_next, not retry
+    assert dispatched["args"]["target_task_id"] is None

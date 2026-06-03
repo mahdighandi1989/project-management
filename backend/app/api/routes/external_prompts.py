@@ -537,7 +537,24 @@ async def _verify_then_chain(
         await _write_todo_for_task(
             task=task, watched=watched, verify_result=verify_result,
         )
+        # 🚨 (loop-bug fix) — قبلاً فقط TODO نوشته می‌شد ولی task همچنان
+        # pickable می‌ماند (status=awaiting_review در PICKABLE_STATUSES است).
+        # پس chain_next با /next همان task را دوباره برمی‌داشت و بی‌نهایت
+        # loop می‌شد. حالا task را archive می‌کنیم تا از /next حذف شود،
+        # ولی با archived_reason جدا از success تا UI/گزارش‌ها بفهمند.
+        from ...services.oversight_service import now_iso as _now_iso_abnd
         async with service._lock:
+            task.archived = True
+            task.archived_at = _now_iso_abnd()
+            task.archived_reason = (
+                "regressed" if action == "regressed_todo" else "max_retries"
+            )
+            task.status = "abandoned"  # نه done — به‌وضوح متمایز
+            task.external_status = "abandoned"
+            task.external_locked_by = None
+            task.external_lease_until = None
+            task.updated_at = _now_iso_abnd()
+            service._save_tasks()
             service._release_verify_lock(watched_id)
             service._save_watched()
         _emit_runner_notification(
@@ -546,7 +563,8 @@ async def _verify_then_chain(
             agent_id=agent_id,
             extra=(
                 f"verify={vstatus}, retries={retries_done}/{max_retries}.\n"
-                f"تسک در TO-DO/ ثبت شد. سراغ تسک بعدی می‌رویم."
+                f"تسک با علت `{task.archived_reason}` آرشیو شد و در TO-DO/ ثبت گردید.\n"
+                f"سراغ تسک بعدی می‌رویم."
             ),
         )
     else:
