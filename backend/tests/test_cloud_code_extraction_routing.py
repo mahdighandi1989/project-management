@@ -95,17 +95,21 @@ def test_file_extraction_key_added_to_preferred_for_keys():
 
 def test_picker_returns_cloud_code_for_image_when_helper_enabled(monkeypatch):
     """The happy path: user enabled file_extraction on cloud_code,
-    picker must short-circuit and return cloud_code for image MIMEs."""
+    picker must short-circuit and return cloud_code for image MIMEs.
+
+    Note: pass require_api_key=False explicitly — that's what the
+    normal extraction call uses. (The fallback path uses
+    require_api_key=True to exclude cloud_code; that's a different
+    scenario tested in audit2_followups.)"""
     from app.core import models_registry as mr
 
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "dummy")
-    # Pretend the helper says yes for file_extraction:
     monkeypatch.setattr(
         "app.services.cloud_code_service.cloud_code_setting_is_enabled_for",
         lambda key: key == "file_extraction",
     )
 
-    picked = mr.pick_best_extraction_model("image/png")
+    picked = mr.pick_best_extraction_model("image/png", require_api_key=False)
     assert picked is not None
     assert picked.id == "cloud_code"
 
@@ -120,7 +124,7 @@ def test_picker_returns_cloud_code_for_pdf_when_helper_enabled(monkeypatch):
         lambda key: key == "file_extraction",
     )
 
-    picked = mr.pick_best_extraction_model("application/pdf")
+    picked = mr.pick_best_extraction_model("application/pdf", require_api_key=False)
     assert picked is not None
     assert picked.id == "cloud_code"
 
@@ -131,13 +135,12 @@ def test_picker_does_not_return_cloud_code_for_audio(monkeypatch):
     from app.core import models_registry as mr
 
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "dummy")
-    # Helper says yes — but capability gate must prevent cloud_code anyway.
     monkeypatch.setattr(
         "app.services.cloud_code_service.cloud_code_setting_is_enabled_for",
         lambda key: True,
     )
 
-    picked = mr.pick_best_extraction_model("audio/ogg")
+    picked = mr.pick_best_extraction_model("audio/ogg", require_api_key=False)
     # The picker may return None (no audio model available in test env),
     # but it absolutely must not return cloud_code.
     assert picked is None or picked.id != "cloud_code"
@@ -153,7 +156,7 @@ def test_picker_does_not_return_cloud_code_for_video(monkeypatch):
         lambda key: True,
     )
 
-    picked = mr.pick_best_extraction_model("video/mp4")
+    picked = mr.pick_best_extraction_model("video/mp4", require_api_key=False)
     assert picked is None or picked.id != "cloud_code"
 
 
@@ -167,7 +170,7 @@ def test_picker_skips_cloud_code_when_helper_says_off(monkeypatch):
         lambda key: False,
     )
 
-    picked = mr.pick_best_extraction_model("image/png")
+    picked = mr.pick_best_extraction_model("image/png", require_api_key=False)
     # cloud_code must not be picked when helper says off
     assert picked is None or picked.id != "cloud_code"
 
