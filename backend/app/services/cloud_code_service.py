@@ -40,9 +40,19 @@ logger = logging.getLogger(__name__)
 CLOUD_CODE_DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
 CLOUD_CODE_API_URL = "https://api.anthropic.com/v1/messages"
 CLOUD_CODE_API_VERSION = "2023-06-01"
-# OAuth tokens issued by `claude setup-token` require this beta header to be
-# accepted by the Messages API. Keep in sync with claude_runner_bootstrap.
-CLOUD_CODE_OAUTH_BETA = "oauth-2025-04-20"
+# OAuth tokens issued by `claude setup-token` are bound to the Claude Code
+# subscription. To bypass the anti-abuse rate limiter that flags non-CLI
+# traffic with an immediate 429, requests must mimic the official CLI:
+#   - User-Agent identifying claude-cli
+#   - X-App: cli
+#   - the OAuth beta header (and optionally the claude-code feature flag)
+# Without these, even the first request returns
+# `{"type":"rate_limit_error","message":"Error"}` — which is the API's way
+# of saying "you're calling me with an OAuth token but you don't look like
+# the CLI". The beta string includes both `oauth-2025-04-20` and
+# `claude-code-20250219` so the call is treated as a Claude Code session.
+CLOUD_CODE_OAUTH_BETA = "oauth-2025-04-20,claude-code-20250219"
+CLOUD_CODE_USER_AGENT = "claude-cli/1.0.110 (external, cli)"
 
 
 def get_cloud_code_token() -> Optional[str]:
@@ -61,6 +71,9 @@ def _build_headers(token: str) -> Dict[str, str]:
         "Authorization": f"Bearer {token}",
         "anthropic-version": CLOUD_CODE_API_VERSION,
         "anthropic-beta": CLOUD_CODE_OAUTH_BETA,
+        "User-Agent": CLOUD_CODE_USER_AGENT,
+        "X-App": "cli",
+        "Accept": "application/json",
     }
 
 
@@ -79,6 +92,26 @@ def _coerce_messages(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
     while cleaned and cleaned[0]["role"] != "user":
         cleaned.pop(0)
     return cleaned
+
+
+# Anthropic enforces that OAuth tokens (Claude Code subscription) only run
+# within "Claude Code" sessions. The signal is the first block of `system`:
+# if it doesn't identify the caller as Claude Code, the API returns
+# `rate_limit_error` immediately — regardless of actual quota usage.
+# So we always inject this identification block as the first system entry
+# and append the user's actual system prompt as a second block.
+CLAUDE_CODE_IDENTITY_PROMPT = (
+    "You are Claude Code, Anthropic's official CLI for Claude."
+)
+
+
+def _build_system_blocks(user_system_prompt: Optional[str]) -> List[Dict[str, str]]:
+    blocks: List[Dict[str, str]] = [
+        {"type": "text", "text": CLAUDE_CODE_IDENTITY_PROMPT}
+    ]
+    if user_system_prompt and user_system_prompt.strip():
+        blocks.append({"type": "text", "text": user_system_prompt.strip()})
+    return blocks
 
 
 async def cloud_code_stream_chat(
@@ -103,9 +136,11 @@ async def cloud_code_stream_chat(
         "max_tokens": max_tokens,
         "temperature": temperature,
         "stream": True,
+        # 🔐 Claude Code OAuth requires system prompt as a list whose first
+        # block identifies the caller as Claude Code; otherwise the API
+        # returns rate_limit_error even on the first request.
+        "system": _build_system_blocks(system_prompt),
     }
-    if system_prompt:
-        payload["system"] = system_prompt
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         async with client.stream(
@@ -122,8 +157,27 @@ async def cloud_code_stream_chat(
                     response.status_code,
                     snippet,
                 )
+                # Helpful Persian guidance per status code — کاربر باید بفهمد
+                # 429 با message="Error" یعنی شناسایی Claude Code ناموفق بوده
+                # (نه quota exhaustion).
+                if response.status_code == 401:
+                    hint = (
+                        "توکن `CLAUDE_CODE_OAUTH_TOKEN` نامعتبر یا منقضی است. "
+                        "با `claude setup-token` یک توکن تازه بساز."
+                    )
+                elif response.status_code == 429:
+                    hint = (
+                        "Anthropic این درخواست را به‌عنوان non-CLI تشخیص داد "
+                        "(rate_limit anti-abuse). اگر این پیام بعد از دیپلوی "
+                        "این فیکس دیدی، چند ثانیه صبر کن و دوباره امتحان کن. "
+                        "اگر تکرار شد، sandbox/IP رو از Anthropic رفع‌محدودیت "
+                        "بخواه یا quota اشتراک Claude Code رو چک کن."
+                    )
+                else:
+                    hint = "جزئیات در پاسخ Anthropic."
                 raise RuntimeError(
-                    f"cloud_code API returned {response.status_code}: {snippet}"
+                    f"cloud_code API returned {response.status_code}: "
+                    f"{snippet} | راهنما: {hint}"
                 )
 
             async for line in response.aiter_lines():

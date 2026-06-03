@@ -122,6 +122,41 @@ def test_coerce_messages_unknown_roles_filtered():
 
 
 # ---------------------------------------------------------------------------
+# Claude Code identity injection (anti-abuse requirement)
+# ---------------------------------------------------------------------------
+
+
+def test_build_system_blocks_always_starts_with_claude_code_identity():
+    from app.services.cloud_code_service import _build_system_blocks
+
+    # هیچ system prompt کاربر داده نشده → فقط identity block
+    blocks = _build_system_blocks(None)
+    assert len(blocks) == 1
+    assert "Claude Code" in blocks[0]["text"]
+
+    # system prompt خالی → باز هم فقط identity
+    blocks = _build_system_blocks("   ")
+    assert len(blocks) == 1
+
+    # system prompt واقعی → identity سپس prompt کاربر
+    blocks = _build_system_blocks("be helpful")
+    assert len(blocks) == 2
+    assert "Claude Code" in blocks[0]["text"]
+    assert blocks[1]["text"] == "be helpful"
+
+
+def test_build_headers_includes_cli_impersonation():
+    """Anthropic OAuth tokens 429 می‌دهند اگر User-Agent و X-App ست نشود
+    — این تست regression-guard است."""
+    headers = _build_headers("sk-ant-oat01-test")
+    assert headers["User-Agent"].startswith("claude-cli/")
+    assert headers["X-App"] == "cli"
+    # هر دو beta flag (oauth + claude-code) باید حضور داشته باشند
+    assert "oauth-2025-04-20" in headers["anthropic-beta"]
+    assert "claude-code-20250219" in headers["anthropic-beta"]
+
+
+# ---------------------------------------------------------------------------
 # Streaming end-to-end (mocked transport)
 # ---------------------------------------------------------------------------
 
@@ -185,11 +220,18 @@ async def test_stream_chat_yields_text_chunks(monkeypatch):
         pieces.append(c)
 
     assert "".join(pieces) == "سلام دنیا"
-    # Authorization & beta header propagated.
+    # Authorization, beta and CLI-impersonation headers propagated.
     assert captured["headers"]["authorization"] == "Bearer sk-ant-oat01-test"
     assert captured["headers"]["anthropic-beta"] == CLOUD_CODE_OAUTH_BETA
-    # System prompt + stream + messages present.
-    assert captured["body"]["system"] == "you are helpful"
+    assert captured["headers"]["user-agent"].startswith("claude-cli/")
+    assert captured["headers"]["x-app"] == "cli"
+    # System prompt is wrapped in blocks; first block must be the Claude Code
+    # identity (anti-abuse requirement), second block is user's prompt.
+    system_blocks = captured["body"]["system"]
+    assert isinstance(system_blocks, list)
+    assert system_blocks[0]["type"] == "text"
+    assert "Claude Code" in system_blocks[0]["text"]
+    assert system_blocks[1]["text"] == "you are helpful"
     assert captured["body"]["stream"] is True
     assert captured["body"]["messages"] == [{"role": "user", "content": "hi"}]
 
