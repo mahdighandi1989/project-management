@@ -3930,6 +3930,8 @@ class InspectorChatCloudCodeRequest(BaseModel):
     session_id: Optional[int] = None
     max_tokens: int = 4096
     temperature: float = 0.7
+    model: str = "auto"
+    tier_hint: Optional[str] = None  # "opus" | "sonnet" | "haiku"
 
 
 @router.get("/inspector/cloud-code/status")
@@ -4007,6 +4009,8 @@ async def oversight_inspector_chat_cloud_code(
             stream_gen = await InspectorAgentService.chat_with_cloud_code(
                 history,
                 system_prompt=request.system_prompt,
+                model=request.model or "auto",
+                tier_hint=request.tier_hint,
                 max_tokens=request.max_tokens,
                 temperature=request.temperature,
                 stream=True,

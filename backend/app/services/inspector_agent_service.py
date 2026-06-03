@@ -52,6 +52,7 @@ class InspectorAgentService:
         timeout: float = 180.0,
         stream: bool = True,
         metadata_sink: Optional[Dict[str, Any]] = None,
+        tier_hint: Optional[str] = None,
     ):
         """Run an inspector chat turn through the Cloud Code (Claude OAuth)
         engine.
@@ -77,6 +78,7 @@ class InspectorAgentService:
                 temperature=temperature,
                 timeout=timeout,
                 metadata_sink=metadata_sink,
+                tier_hint=tier_hint,
             )
         return await cloud_code_complete(
             messages,
