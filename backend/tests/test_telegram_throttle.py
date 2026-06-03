@@ -255,6 +255,71 @@ async def test_kb_command_sends_persistent_reply_keyboard(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_ping_command_responds_with_pong_minimal_overhead(monkeypatch):
+    """The /ping diagnostic must always succeed — single send, no markup,
+    no DB, no external call. It is the lifeline when everything else
+    seems broken."""
+    from app.services.notification_service import notification_service
+
+    captured: List[Dict[str, Any]] = []
+
+    class _FakeTG:
+        bot_token = "x"
+        chat_id = "config-chat"
+
+        async def send(self, message, *, silent=False, reply_markup=None, subject=None):
+            captured.append({"message": message, "reply_markup": reply_markup, "silent": silent})
+            return {"ok": True}
+
+    monkeypatch.setattr(notification_service, "_telegram", lambda: _FakeTG())
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "config-chat")
+
+    res = await notification_service.handle_telegram_update({
+        "message": {"text": "/ping", "chat": {"id": "config-chat"}},
+    })
+    assert res.get("handled") == "ping"
+    assert len(captured) == 1
+    assert "pong" in captured[0]["message"].lower()
+    # No reply_markup — keep it minimum surface so it can't be blocked by
+    # markup parse errors or rate-limit cascades.
+    assert captured[0]["reply_markup"] is None
+
+
+@pytest.mark.asyncio
+async def test_handle_update_keeps_running_when_cleanup_state_crashes(monkeypatch):
+    """If _cleanup_expired_state throws, the user's command must still be
+    processed — regression against the original report where the bot
+    silently stopped responding."""
+    from app.services import notification_service as ns_module
+    from app.services.notification_service import notification_service
+
+    captured: List[Dict[str, Any]] = []
+
+    class _FakeTG:
+        bot_token = "x"
+        chat_id = "config-chat"
+
+        async def send(self, message, *, silent=False, reply_markup=None, subject=None):
+            captured.append({"message": message})
+            return {"ok": True}
+
+    monkeypatch.setattr(notification_service, "_telegram", lambda: _FakeTG())
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "config-chat")
+
+    # Simulate cleanup crashing
+    def _boom():
+        raise RuntimeError("cleanup crash")
+    monkeypatch.setattr(ns_module, "_cleanup_expired_state", _boom)
+
+    res = await notification_service.handle_telegram_update({
+        "message": {"text": "/ping", "chat": {"id": "config-chat"}},
+    })
+    # /ping still succeeded despite the cleanup crash
+    assert res.get("handled") == "ping"
+    assert any("pong" in (c["message"].lower()) for c in captured)
+
+
+@pytest.mark.asyncio
 async def test_kb_command_retries_when_first_send_fails(monkeypatch):
     """If the first send fails (rate-limit just kicked in), /kb should
     retry once with an even smaller payload — so the user always gets

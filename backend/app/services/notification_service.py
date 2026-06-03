@@ -2163,7 +2163,12 @@ class NotificationService:
 
     async def handle_telegram_update(self, update: Dict[str, Any]) -> Dict[str, Any]:
         """پردازش update از Telegram webhook. text commands + callback_query."""
-        _cleanup_expired_state()
+        # 🛡 (safety) — _cleanup_expired_state در دور قبلی crash می‌کرد و کل
+        # handler return می‌داد. حالا حتی crash هم اجرا را متوقف نمی‌کند.
+        try:
+            _cleanup_expired_state()
+        except Exception as _ce:
+            logger.warning(f"_cleanup_expired_state crashed (continuing): {_ce}")
 
         # ——— callback_query (دکمه‌های inline) ———
         cq = update.get("callback_query")
@@ -2370,6 +2375,8 @@ class NotificationService:
                 "• /run\\_claude <task\\_id> — 🚀 اجرای فقط همین تسک توسط Claude در GitHub Actions\n"
                 "• /menu — منوی دسترسی سریع\n"
                 "• /kb — 🔁 برگرداندن منوی ثابت (سریع، حتی وقتی همه چیز شلوغ است)\n"
+                "• /ping — 🏓 تست live بودن webhook (کم‌ترین overhead)\n"
+                "• /diag — 🩺 تشخیص chat\\_id و وضعیت webhook (برای debug)\n"
                 "• /status — وضعیت نوتیفیکیشن\n"
                 "• /cancel — لغو flow فعلی\n"
                 "• /hide\\_menu — مخفی‌کردن منوی ثابت\n"
@@ -2410,6 +2417,47 @@ class NotificationService:
                 reply_markup={"remove_keyboard": True},
             )
             return {"ok": True, "handled": "hide_menu"}
+
+        # 🆕 /ping — کوچک‌ترین دستور ممکن برای تشخیص live بودن webhook.
+        # هیچ منطقی، هیچ DB، هیچ external call. فقط یک echo بدون reply_markup
+        # و بدون throttle (می‌رود ته صف ولی حداقل تصدیق می‌شود).
+        if text == "/ping":
+            await tg.send(f"🏓 pong (chat_id={chat_id_str})", silent=True)
+            return {"ok": True, "handled": "ping"}
+
+        # 🆕 /diag — تشخیص کامل برای admin: chat_id، configured_id، webhook info.
+        # برای زمانی که هیچ کاری کار نمی‌کند و باید بفهمیم مشکل کجاست.
+        if text == "/diag":
+            from urllib.parse import quote as _qd
+            import os as _os_diag
+            cfg_id = (_os_diag.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+            cfg_url = (_os_diag.environ.get("BACKEND_PUBLIC_URL")
+                       or _os_diag.environ.get("RENDER_EXTERNAL_URL") or "").strip()
+            wi = "?"
+            try:
+                wi_url = f"https://api.telegram.org/bot{tg.bot_token}/getWebhookInfo"
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                    async with session.get(wi_url) as r:
+                        if r.status == 200:
+                            wi_data = await r.json()
+                            r_obj = (wi_data.get("result") or {})
+                            wi = (
+                                f"url=`{r_obj.get('url', '?')[:80]}`\n"
+                                f"pending={r_obj.get('pending_update_count', 0)}\n"
+                                f"last_err={(r_obj.get('last_error_message') or 'none')[:200]}"
+                            )
+            except Exception as _wi_e:
+                wi = f"getWebhookInfo failed: {str(_wi_e)[:100]}"
+            await tg.send(
+                f"🩺 *Diag*\n\n"
+                f"your chat_id: `{chat_id_str}`\n"
+                f"configured: `{cfg_id or '(empty — همه پاسخ می‌گیرند)'}`\n"
+                f"match: {'✅' if not cfg_id or cfg_id == chat_id_str else '❌'}\n"
+                f"backend_url: `{cfg_url or '(unset)'}`\n\n"
+                f"*Webhook*:\n{wi}",
+                silent=True,
+            )
+            return {"ok": True, "handled": "diag"}
 
         # 🆕 /kb /keyboard /منو — restore سریع منوی ثابت، بدون هیچ منطق اضافه
         # دو scenario که این لازم می‌شود:
