@@ -496,7 +496,9 @@ async def rebuild_project_index(
                     None,
                 )
             _picked_model = (
-                await pick_model_for_task(_next_task) if _next_task else None
+                await pick_model_for_task(
+                    _next_task, consumer_key="claude_auto_runner",
+                ) if _next_task else None
             )
             disp = await trigger_workflow_dispatch(
                 watched, gh_token=token, ref=branch,

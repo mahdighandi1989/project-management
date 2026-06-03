@@ -25,6 +25,7 @@ from .cloud_code_service import (
     CLOUD_CODE_DEFAULT_MODEL,
     cloud_code_complete,
     cloud_code_is_configured,
+    cloud_code_setting_is_enabled_for,
     cloud_code_stream_chat,
 )
 
@@ -39,7 +40,12 @@ class InspectorAgentService:
 
     @staticmethod
     def cloud_code_available() -> bool:
-        return cloud_code_is_configured()
+        """🆕 (centralization — stage 3) — همانند قبل availability از
+        طریق token چک می‌شود؛ اضافه شد: کاربر اگر در صفحهٔ مدل‌ها
+        consumer `inspector_cloud_code` را خاموش کرده باشد، این متد
+        False برمی‌گرداند تا UI گزینهٔ Cloud Code engine را خاکستری کند.
+        """
+        return cloud_code_setting_is_enabled_for("inspector_cloud_code")
 
     @staticmethod
     async def chat_with_cloud_code(

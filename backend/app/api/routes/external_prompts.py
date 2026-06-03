@@ -671,7 +671,9 @@ async def _verify_then_chain(
             # tier بر اساس همان تسک فعلی (که verify شد) — منطق این است
             # که تسک بعدی در صف معمولاً مشابه است؛ اگر متفاوت بود، Claude
             # CLI همچنان alias `sonnet` را به آخرین Sonnet route می‌کند.
-            _picked_model = await pick_model_for_task(task) if task else None
+            _picked_model = await pick_model_for_task(
+                task, consumer_key="claude_auto_runner",
+            ) if task else None
             disp = await trigger_workflow_dispatch(
                 watched,
                 gh_token=gh_token,
