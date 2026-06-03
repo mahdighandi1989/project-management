@@ -599,18 +599,22 @@ class TelegramChannel(NotificationChannel):
             data.add_field("disable_notification", "true")
         if reply_markup:
             data.add_field("reply_markup", json.dumps(reply_markup))
-        # تشخیص content_type از پسوند filename — برای PDF/HTML/JSON/MD
+        # تشخیص content_type از پسوند filename — برای PDF/HTML/JSON/MD/TXT
+        # 🔤 (charset=utf-8 explicit) — برای فایل‌های متنی (md/txt/html/json)
+        # که محتوای فارسی دارند، charset را صریحاً اعلام می‌کنیم. بدون این،
+        # تلگرام یا نمایش‌گر مقصد ممکن است به Windows-1252 fallback کند و
+        # متن فارسی موجو موجو دیده شود. binary types (pdf) charset نمی‌خواهند.
         fname_low = filename.lower()
         if fname_low.endswith(".pdf"):
             ctype = "application/pdf"
         elif fname_low.endswith(".html") or fname_low.endswith(".htm"):
-            ctype = "text/html"
+            ctype = "text/html; charset=utf-8"
         elif fname_low.endswith(".json"):
-            ctype = "application/json"
+            ctype = "application/json; charset=utf-8"
         elif fname_low.endswith(".txt"):
-            ctype = "text/plain"
+            ctype = "text/plain; charset=utf-8"
         else:
-            ctype = "text/markdown"
+            ctype = "text/markdown; charset=utf-8"
         data.add_field(
             "document", file_bytes,
             filename=filename, content_type=ctype,
