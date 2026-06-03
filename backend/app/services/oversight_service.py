@@ -675,11 +675,12 @@ class OversightService:
             # OVERSIGHT_BACKEND_URL در env نباشند، silently skip می‌شود
             # تا setup خراب نشود.
             "claude_runner_auto_enable_new": False,
-            # claude_args پیش‌فرض برای workflow های نصب‌شده
-            "claude_runner_default_args": (
-                "--max-turns 250 --model claude-opus-4-8 "
-                "--dangerously-skip-permissions"
-            ),
+            # claude_args پیش‌فرض برای workflow های نصب‌شده — هیچ model id
+            # ثابتی نه. مدل به‌صورت داینامیک در زمان dispatch توسط backend
+            # picker از /v1/models انتخاب می‌شود و به‌عنوان workflow input
+            # `claude_model` فرستاده می‌شود. مقدار خالی → build_workflow_yaml
+            # پیش‌فرض داینامیک خود را استفاده می‌کند.
+            "claude_runner_default_args": "",
         }
 
         # 🆕 (Dispatch Storm Prevention) — set از task_id هایی که در حال حاضر
@@ -2235,11 +2236,11 @@ class OversightService:
 
         from .claude_runner_bootstrap import install_runner, WORKFLOW_PATH
 
-        args = (
-            claude_args
-            or self.settings.get("claude_runner_default_args")
-            or "--max-turns 250 --model claude-opus-4-8 --dangerously-skip-permissions"
-        )
+        # claude_args=None or "" → install_runner از template داینامیک
+        # YAML استفاده می‌کند (--model ${{ inputs.claude_model || 'sonnet' }})
+        # که هیچ model id ثابتی هاردکد نمی‌کند. اگر کاربر/تنظیمات explicit
+        # claude_args داده، آن را پاس بده.
+        args = claude_args or self.settings.get("claude_runner_default_args") or None
         result = await install_runner(
             watched,
             gh_token=gh_token,
@@ -2689,11 +2690,11 @@ class OversightService:
 
         from .claude_runner_bootstrap import install_runner, WORKFLOW_PATH
 
-        args = (
-            claude_args
-            or self.settings.get("claude_runner_default_args")
-            or "--max-turns 250 --model claude-opus-4-8 --dangerously-skip-permissions"
-        )
+        # claude_args=None or "" → install_runner از template داینامیک
+        # YAML استفاده می‌کند (--model ${{ inputs.claude_model || 'sonnet' }})
+        # که هیچ model id ثابتی هاردکد نمی‌کند. اگر کاربر/تنظیمات explicit
+        # claude_args داده، آن را پاس بده.
+        args = claude_args or self.settings.get("claude_runner_default_args") or None
         result = await install_runner(
             watched,
             gh_token=gh_token,
@@ -2819,12 +2820,20 @@ class OversightService:
         max_attempts = 4 if auto_installed else 1
         delays = [3.0, 5.0, 8.0]
         dispatch_result: Dict[str, Any] = {}
+        # 🤖 (dynamic model) — قبل از trigger، آخرین مدل tier درست را برای
+        # این تسک خاص از /v1/models بگیر و به workflow بفرست. اگر None
+        # برگشت (مثلاً OAuth token ندارد)، workflow از default خودش
+        # (alias `sonnet`) استفاده می‌کند که Claude Code CLI به آخرین
+        # Sonnet route می‌کند.
+        from .claude_runner_bootstrap import pick_model_for_task
+        _picked_model = await pick_model_for_task(t)
         for attempt in range(max_attempts):
             dispatch_result = await trigger_workflow_dispatch(
                 watched,
                 gh_token=gh_token,
                 target_task_id=task_id,
                 force=True,
+                claude_model=_picked_model,
             )
             # موفقیت یا خطای غیر-transient → بیرون
             if dispatch_result.get("success") or not dispatch_result.get("transient"):

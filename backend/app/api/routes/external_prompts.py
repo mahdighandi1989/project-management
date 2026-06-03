@@ -568,14 +568,24 @@ async def _verify_then_chain(
     force_dispatch = action == "retry_same"
     try:
         from ...services.oversight_service import get_github_token
-        from ...services.claude_runner_bootstrap import trigger_workflow_dispatch
+        from ...services.claude_runner_bootstrap import (
+            pick_model_for_task,
+            trigger_workflow_dispatch,
+        )
         gh_token = get_github_token()
         if gh_token:
+            # 🤖 (dynamic model) — برای retry روی همان تسک، tier بر اساس
+            # محتوای آن تسک. برای chain-next که target_task_id خالی است،
+            # tier بر اساس همان تسک فعلی (که verify شد) — منطق این است
+            # که تسک بعدی در صف معمولاً مشابه است؛ اگر متفاوت بود، Claude
+            # CLI همچنان alias `sonnet` را به آخرین Sonnet route می‌کند.
+            _picked_model = await pick_model_for_task(task) if task else None
             disp = await trigger_workflow_dispatch(
                 watched,
                 gh_token=gh_token,
                 target_task_id=target_for_dispatch,
                 force=force_dispatch,
+                claude_model=_picked_model,
             )
             logger.info(
                 f"_verify_then_chain: dispatched workflow after action={action}, "

@@ -474,9 +474,19 @@ async def rebuild_project_index(
     # بیدار شود حتی اگر فهرست index ثابت مانده.
     if upsert.get("success") and getattr(watched, "claude_runner_enabled", False):
         try:
-            from .claude_runner_bootstrap import trigger_workflow_dispatch
+            from .claude_runner_bootstrap import (
+                pick_model_for_task,
+                trigger_workflow_dispatch,
+            )
+            # 🤖 (dynamic model) — مدل را بر اساس تسکی که تازه push شد
+            # انتخاب کن. این تسک قرار است در next-cycle workflow اجرا شود
+            # (Claude /next می‌زند معمولاً همین را برمی‌دارد چون جدیدترین
+            # pending است). اگر Claude تسک دیگری بردارد، مدل اشتباه است
+            # ولی بدتر از sonnet نخواهد بود — همان tier‌بندی است.
+            _picked_model = await pick_model_for_task(task)
             disp = await trigger_workflow_dispatch(
                 watched, gh_token=token, ref=branch,
+                claude_model=_picked_model,
             )
             if not disp.get("success") and not disp.get("skipped"):
                 logger.warning(
