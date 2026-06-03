@@ -17135,6 +17135,213 @@ async def _execute_render_actions(render_actions: List[dict]) -> Dict[str, Any]:
     return {"success": overall_success, "results": results, "errors": errors}
 
 
+class InspectorCloudCodeRequest(BaseModel):
+    """درخواست چت بازرس ویژه با موتور Cloud Code (Claude OAuth).
+
+    Schema حداقلی است: project_id, message, chat_history. مدل، tools و
+    intent detection کنار گذاشته شده‌اند چون این مسیر یک wrapper مستقیم
+    روی Claude Code OAuth است (پرامپت کاربر را با system prompt مختصر
+    به Anthropic می‌فرستد و response را stream می‌کند).
+    """
+    project_id: str
+    message: str
+    chat_history: Optional[List[InspectorChatMessage]] = None
+    backend_logs: Optional[List[dict]] = None
+    frontend_url: Optional[str] = None
+    page_url: Optional[str] = None
+    # session_id اختیاری — اگر داده شود، پیام user و پاسخ assistant در
+    # همان session لاگ می‌شوند (مثل smart-chat). اگر None، فقط stream
+    # برمی‌گردد بدون persist.
+    session_id: Optional[int] = None
+    max_tokens: int = 4096
+    temperature: float = 0.7
+
+
+@router.post("/inspector/chat-cloud-code")
+async def inspector_chat_cloud_code(
+    request: InspectorCloudCodeRequest,
+    db: Session = Depends(get_db),
+):
+    """🆕 موتور پردازش پرامپت «Cloud Code» (Claude OAuth) برای تب بازرس ویژه.
+
+    این endpoint موازی smart-chat است ولی به‌جای استفاده از مدل‌های Local AI
+    (gemini/openrouter/...)، پیام را با Bearer token Claude Code (همان توکنی
+    که در oversight و workflow استفاده می‌شود — `CLAUDE_CODE_OAUTH_TOKEN`)
+    به Anthropic API می‌فرستد و response را به‌صورت SSE stream می‌کند.
+
+    پاسخ به فرمت SSE با eventهای `progress`, `chunk`, `done`, `error` برمی‌گردد
+    تا frontend (sendInspectorChat) بتواند آن را با همان parser موجود مصرف کند.
+
+    در صورتی که `session_id` داده شود، پیام user و پاسخ assistant در همان
+    `inspector_sessions` table (مدل InspectorMessage) ذخیره می‌شوند تا
+    تاریخچهٔ چت بین مودها (local/cloud) یکپارچه بماند.
+    """
+    from fastapi.responses import StreamingResponse
+    from ...services.cloud_code_service import (
+        cloud_code_is_configured,
+        cloud_code_stream_chat,
+    )
+    from ...models.inspector_session import InspectorMessage, InspectorSession
+
+    # 1) اعتبارسنجی env
+    if not cloud_code_is_configured():
+        async def _missing_token_stream():
+            payload = {
+                "kind": "cloud_code_unavailable",
+                "message": (
+                    "⚠️ توکن Claude Code (`CLAUDE_CODE_OAUTH_TOKEN`) "
+                    "روی سرور تنظیم نشده. لطفاً ابتدا توکن را در محیط "
+                    "اضافه کن یا از موتور Local AI استفاده کن."
+                ),
+            }
+            yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            yield f"event: done\ndata: {json.dumps({'success': False, 'reason': 'env_missing'})}\n\n"
+        return StreamingResponse(_missing_token_stream(), media_type="text/event-stream")
+
+    # 2) ساخت system prompt مختصر و messages
+    system_prompt = (
+        "تو دستیار توسعهٔ نرم‌افزار «بازرس ویژه» هستی. کاربر در حال بررسی "
+        "یک پروژهٔ تحت توسعه است و سؤال/درخواست توسعه می‌فرستد. به فارسی "
+        "پاسخ بده، concise باش، و اگر کد ارائه می‌دهی، در code block "
+        "مارک‌داون قرار بده. اگر اطلاعات بیشتری لازم داری، صریحاً بپرس."
+    )
+    if request.frontend_url or request.page_url:
+        url = request.page_url or request.frontend_url
+        system_prompt += f"\n\nصفحهٔ فعلی کاربر: {url}"
+    if request.backend_logs:
+        try:
+            recent_logs = [
+                (l.get("message") or "")[:200]
+                for l in request.backend_logs[-5:]
+            ]
+            if recent_logs:
+                system_prompt += "\n\nآخرین لاگ‌های بک‌اند:\n" + "\n".join(
+                    f"- {l}" for l in recent_logs
+                )
+        except Exception:
+            pass
+
+    history_payload: List[Dict[str, str]] = []
+    if request.chat_history:
+        for m in request.chat_history[-20:]:  # حداکثر ۲۰ پیام آخر
+            try:
+                history_payload.append({"role": m.role, "content": m.content})
+            except Exception:
+                continue
+    history_payload.append({"role": "user", "content": request.message})
+
+    # 3) persist پیام user اگر session داریم
+    user_msg_row = None
+    if request.session_id:
+        try:
+            sess = db.query(InspectorSession).filter(
+                InspectorSession.id == request.session_id
+            ).first()
+            if sess:
+                user_msg_row = InspectorMessage(
+                    session_id=request.session_id,
+                    role="user",
+                    content=request.message,
+                    model_id="cloud_code",
+                )
+                db.add(user_msg_row)
+                db.commit()
+        except Exception as _e:
+            slog.warning(f"[chat-cloud-code] persist user msg failed: {_e}")
+            db.rollback()
+
+    # 4) stream
+    async def _gen():
+        assembled: List[str] = []
+        try:
+            yield (
+                "event: progress\ndata: "
+                + json.dumps(
+                    {"message": "🌥️ اتصال به Claude Code OAuth..."},
+                    ensure_ascii=False,
+                )
+                + "\n\n"
+            )
+            async for chunk in cloud_code_stream_chat(
+                history_payload,
+                system_prompt=system_prompt,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+            ):
+                assembled.append(chunk)
+                yield (
+                    "event: chunk\ndata: "
+                    + json.dumps({"text": chunk}, ensure_ascii=False)
+                    + "\n\n"
+                )
+
+            full_text = "".join(assembled).strip()
+
+            # persist پاسخ assistant
+            assistant_msg_id = None
+            if request.session_id and full_text:
+                try:
+                    asst_row = InspectorMessage(
+                        session_id=request.session_id,
+                        role="assistant",
+                        content=full_text,
+                        model_id="cloud_code",
+                    )
+                    db.add(asst_row)
+                    db.commit()
+                    assistant_msg_id = asst_row.id
+                except Exception as _e:
+                    slog.warning(
+                        f"[chat-cloud-code] persist assistant msg failed: {_e}"
+                    )
+                    db.rollback()
+
+            yield (
+                "event: done\ndata: "
+                + json.dumps(
+                    {
+                        "success": True,
+                        "engine": "cloud_code",
+                        "message_id": assistant_msg_id,
+                        "content": full_text,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n\n"
+            )
+        except Exception as e:
+            slog.warning(f"[chat-cloud-code] stream failed: {e}")
+            yield (
+                "event: error\ndata: "
+                + json.dumps(
+                    {
+                        "kind": "cloud_code_stream_error",
+                        "message": f"خطا در ارتباط با Claude Code: {str(e)[:300]}",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n\n"
+            )
+            yield (
+                "event: done\ndata: "
+                + json.dumps({"success": False, "reason": "stream_error"})
+                + "\n\n"
+            )
+
+    return StreamingResponse(_gen(), media_type="text/event-stream")
+
+
+@router.get("/inspector/cloud-code/status")
+async def inspector_cloud_code_status():
+    """گزارش وضعیت در دسترس بودن موتور Cloud Code (برای UI selector).
+
+    Frontend از این endpoint استفاده می‌کند تا اگر `CLAUDE_CODE_OAUTH_TOKEN`
+    تنظیم نشده، گزینهٔ Cloud Code را به‌صورت disabled با tooltip نمایش دهد.
+    """
+    from ...services.cloud_code_service import cloud_code_is_configured
+    return {"available": cloud_code_is_configured()}
+
+
 @router.post("/inspector/apply-action")
 async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db)):
     """

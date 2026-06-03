@@ -535,6 +535,12 @@ export default function ProjectDetailPage() {
 
   // 🆕 انتخاب خودکار مدل و همکاری
   const [inspectorAutoSelect, setInspectorAutoSelect] = useState(true); // پیش‌فرض فعال
+  // 🆕 (Cloud Code Engine) — موتور پردازش پرامپت برای بازرس ویژه.
+  // 'local' = استفاده از مدل‌های Local AI (پیش‌فرض، مثل قبل).
+  // 'cloud_code' = استفاده از اشتراک Claude Code کاربر (OAuth Bearer).
+  const [inspectorEngine, setInspectorEngine] = useState<'local' | 'cloud_code'>('local');
+  // در دسترس بودن Cloud Code (از /inspector/cloud-code/status بازخوانی می‌شود)
+  const [cloudCodeAvailable, setCloudCodeAvailable] = useState<boolean | null>(null);
   // 🆕 (Addendum v5 §2.2) — state inspectorCollaborativeMode حذف شد همراه با
   // checkbox مربوطه چون هیچ‌جا به backend ارسال نمی‌شد و dead UI بود.
   const [inspectorSmartPrompt, setInspectorSmartPrompt] = useState(true); // 🧠 پرامپت ساختارمند — پیش‌فرض فعال
@@ -2637,6 +2643,25 @@ export default function ProjectDetailPage() {
     if (projectId && activeTab === 'inspector') {
       loadPromptFields();
     }
+  }, [projectId, activeTab]);
+
+  // 🌥️ (Cloud Code) بررسی در دسترس بودن موتور Cloud Code وقتی تب Inspector
+  // باز می‌شود. اگر CLAUDE_CODE_OAUTH_TOKEN روی سرور نیست، گزینهٔ Cloud Code
+  // در UI به‌صورت disabled با tooltip نمایش داده می‌شود.
+  useEffect(() => {
+    if (!projectId || activeTab !== 'inspector') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/render/inspector/cloud-code/status`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) setCloudCodeAvailable(!!data.available);
+      } catch {
+        if (!cancelled) setCloudCodeAvailable(false);
+      }
+    })();
+    return () => { cancelled = true; };
   }, [projectId, activeTab]);
 
   // 🆕 (Phase 5 — bug 25) — Auto-init سشن وقتی تب Inspector باز می‌شود.
@@ -5565,6 +5590,102 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
     // در حالت انتخاب خودکار، نیازی به انتخاب دستی مدل نیست
     const rawMessage = (overrideMessage || inspectorChatInput).trim();
     if (!rawMessage) return;
+
+    // 🌥️ (Cloud Code Engine) — اگر کاربر موتور Cloud Code را انتخاب کرده،
+    // مسیر کاملاً متفاوتی طی می‌شود: مستقیم به /inspector/chat-cloud-code
+    // می‌رود (بدون smart-prompt enhancement، بدون selective scan،
+    // بدون model selection)، چون این موتور خودش Claude است.
+    if (inspectorEngine === 'cloud_code') {
+      if (cloudCodeAvailable === false) {
+        setInspectorChatMessages(prev => [...prev, {
+          id: `cc_unavail_${Date.now()}`,
+          role: 'system' as const,
+          content: '⚠️ موتور Cloud Code در دسترس نیست (توکن CLAUDE_CODE_OAUTH_TOKEN تنظیم نشده). به Local AI سوئیچ کن.',
+          timestamp: new Date(),
+        } as any]);
+        return;
+      }
+      if (!overrideMessage && !_isRetry) setInspectorChatInput('');
+      setInspectorChatLoading(true);
+      const userMsgId = `cc_u_${Date.now()}`;
+      setInspectorChatMessages(prev => [...prev, {
+        id: userMsgId,
+        role: 'user' as const,
+        content: rawMessage,
+        timestamp: new Date(),
+      } as any]);
+      const asstMsgId = `cc_a_${Date.now()}`;
+      let asstBuffer = '';
+      setInspectorChatMessages(prev => [...prev, {
+        id: asstMsgId,
+        role: 'assistant' as const,
+        content: '',
+        timestamp: new Date(),
+        modelUsed: 'cloud_code',
+      } as any]);
+      try {
+        const history = inspectorChatMessages
+          .filter(m => m.role === 'user' || m.role === 'assistant')
+          .slice(-20)
+          .map(m => ({ role: m.role, content: (m as any).content || '' }));
+        const res = await fetch(`${API_BASE}/api/render/inspector/chat-cloud-code`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            project_id: projectId,
+            message: rawMessage,
+            chat_history: history,
+            backend_logs: inspectorBackendLogs,
+            frontend_url: inspectorFrontendUrl,
+            page_url: inspectorFrontendUrl,
+            session_id: inspectorSessionId || undefined,
+          }),
+        });
+        const reader = res.body?.getReader();
+        if (!reader) throw new Error('No stream reader');
+        const decoder = new TextDecoder();
+        let sseBuf = '';
+        let eventType = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          sseBuf += decoder.decode(value, { stream: true });
+          const lines = sseBuf.split('\n');
+          sseBuf = lines.pop() || '';
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              eventType = line.slice(7).trim();
+            } else if (line.startsWith('data: ') && eventType) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                if (eventType === 'chunk' && data.text) {
+                  asstBuffer += data.text;
+                  setInspectorChatMessages(prev => prev.map(m =>
+                    m.id === asstMsgId ? { ...m, content: asstBuffer } as any : m
+                  ));
+                } else if (eventType === 'error') {
+                  setInspectorChatMessages(prev => prev.map(m =>
+                    m.id === asstMsgId
+                      ? { ...m, content: `❌ ${data.message || 'خطا'}` } as any
+                      : m
+                  ));
+                }
+              } catch {}
+            }
+          }
+        }
+      } catch (e: any) {
+        setInspectorChatMessages(prev => prev.map(m =>
+          m.id === asstMsgId
+            ? { ...m, content: `❌ خطا در Cloud Code: ${e?.message || e}` } as any
+            : m
+        ));
+      } finally {
+        setInspectorChatLoading(false);
+      }
+      return;
+    }
+
     if (!inspectorAutoSelect && inspectorSelectedModels.length === 0) return;
 
     // 🆕 (concurrency guard) — ریشهٔ قاتی‌شدن پیام‌ها: کاربر پیام جدید
@@ -14572,6 +14693,58 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                   {/* انتخابگر مدل */}
                   {inspectorShowModelSelector && (
                     <div className="mt-3 bg-white/10 rounded-lg p-2 max-h-60 overflow-auto">
+                      {/* 🌥️ موتور پردازش پرامپت (Local AI vs Cloud Code) */}
+                      <div className="mb-3 pb-2 border-b border-white/20">
+                        <p className="text-xs mb-2 opacity-80 font-medium">⚙️ موتور پردازش پرامپت:</p>
+                        <div className="flex gap-2">
+                          <label className="flex-1 flex items-center gap-2 cursor-pointer hover:bg-white/10 p-1.5 rounded border border-white/20">
+                            <input
+                              type="radio"
+                              name="inspector-engine"
+                              value="local"
+                              checked={inspectorEngine === 'local'}
+                              onChange={() => setInspectorEngine('local')}
+                              className="accent-white"
+                            />
+                            <div>
+                              <span className="text-xs font-medium">🤖 Local AI</span>
+                              <p className="text-[10px] opacity-70">مدل‌های متصل (Gemini/Claude/...)</p>
+                            </div>
+                          </label>
+                          <label
+                            className={`flex-1 flex items-center gap-2 p-1.5 rounded border border-white/20 ${
+                              cloudCodeAvailable === false
+                                ? 'opacity-50 cursor-not-allowed'
+                                : 'cursor-pointer hover:bg-white/10'
+                            }`}
+                            title={
+                              cloudCodeAvailable === false
+                                ? 'توکن CLAUDE_CODE_OAUTH_TOKEN روی سرور تنظیم نشده'
+                                : 'استفاده از اشتراک Claude Code شما (OAuth)'
+                            }
+                          >
+                            <input
+                              type="radio"
+                              name="inspector-engine"
+                              value="cloud_code"
+                              checked={inspectorEngine === 'cloud_code'}
+                              onChange={() => setInspectorEngine('cloud_code')}
+                              disabled={cloudCodeAvailable === false}
+                              className="accent-white"
+                            />
+                            <div>
+                              <span className="text-xs font-medium">☁️ Cloud Code</span>
+                              <p className="text-[10px] opacity-70">اشتراک Claude Code (OAuth)</p>
+                            </div>
+                          </label>
+                        </div>
+                        {inspectorEngine === 'cloud_code' && cloudCodeAvailable !== false && (
+                          <p className="text-[10px] opacity-60 mt-1.5">
+                            ✨ پاسخ مستقیماً از Claude Code OAuth می‌آید — انتخاب مدل/scan/apply-action غیرفعال است.
+                          </p>
+                        )}
+                      </div>
+
                       {/* 🆕 چک‌باکس انتخاب خودکار */}
                       <div className="mb-3 pb-2 border-b border-white/20">
                         <label className="flex items-center gap-2 cursor-pointer hover:bg-white/10 p-1 rounded">
@@ -14580,6 +14753,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                             checked={inspectorAutoSelect}
                             onChange={(e) => setInspectorAutoSelect(e.target.checked)}
                             className="w-4 h-4 rounded accent-white"
+                            disabled={inspectorEngine === 'cloud_code'}
                           />
                           <div>
                             <span className="text-xs font-medium">🎯 انتخاب خودکار مدل</span>
@@ -16768,12 +16942,12 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                               ? "پیام خود را بنویسید... (Shift/Ctrl+Enter برای خط جدید)"
                               : "ابتدا مدلی انتخاب کنید..."
                       }
-                      disabled={(!inspectorAutoSelect && inspectorSelectedModels.length === 0) || inspectorChatLoading || inspectorOpLock}
+                      disabled={(inspectorEngine !== 'cloud_code' && !inspectorAutoSelect && inspectorSelectedModels.length === 0) || inspectorChatLoading || inspectorOpLock}
                       className={`flex-1 bg-gray-100 dark:bg-gray-700 rounded-2xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50 resize-none max-h-32 overflow-y-auto ${inspectorOpLock ? 'cursor-not-allowed' : ''}`}
                     />
                     <button
                       onClick={() => sendInspectorChat()}
-                      disabled={!inspectorChatInput.trim() || (!inspectorAutoSelect && inspectorSelectedModels.length === 0) || inspectorChatLoading || inspectorOpLock}
+                      disabled={!inspectorChatInput.trim() || (inspectorEngine !== 'cloud_code' && !inspectorAutoSelect && inspectorSelectedModels.length === 0) || inspectorChatLoading || inspectorOpLock}
                       className="bg-gradient-to-r from-red-500 to-orange-500 text-white rounded-full w-10 h-10 flex items-center justify-center hover:opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {inspectorChatLoading ? (
@@ -16785,7 +16959,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                       )}
                     </button>
                   </div>
-                  {!inspectorAutoSelect && inspectorSelectedModels.length === 0 && inspectorPowerOn && (
+                  {inspectorEngine !== 'cloud_code' && !inspectorAutoSelect && inspectorSelectedModels.length === 0 && inspectorPowerOn && (
                     <p className="text-xs text-red-500 mt-1 text-center">از بالا مدلی انتخاب کنید یا انتخاب خودکار را فعال کنید</p>
                   )}
                 </div>

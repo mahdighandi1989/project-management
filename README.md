@@ -66,6 +66,27 @@
 | تحلیل کد | تولید دیاگرام از کد | ✅ |
 | ژورنال پروژه | ثبت تاریخچه | ✅ |
 | ساختار پروژه | نمایش درختی | ✅ |
+| بازرس ویژه — موتور Cloud Code | چت بازرس از طریق Claude Code OAuth (اشتراک کاربر) | ✅ |
+
+#### موتور Cloud Code در بازرس ویژه
+
+تب «بازرس ویژه» در صفحهٔ پروژه دو موتور برای پردازش پرامپت چت دارد:
+
+- **Local AI** (پیش‌فرض): از مدل‌های متصل (Gemini/Claude/OpenRouter/…)
+  با مسیر کامل smart-chat (intent detection + selective scan + apply-action).
+- **Cloud Code** (☁️): مستقیماً به Anthropic Messages API می‌رود با
+  Bearer token از `CLAUDE_CODE_OAUTH_TOKEN`. این مسیر اشتراک Claude Code
+  کاربر را مصرف می‌کند نه quota متره. ساده‌تر است (بدون scan/apply)
+  و فقط چت متنی است.
+
+برای فعال کردن گزینهٔ Cloud Code در UI کافی است env var
+`CLAUDE_CODE_OAUTH_TOKEN` را روی سرور بک‌اند ست کنی. اگر تنظیم نشد،
+radio button به‌صورت disabled با tooltip توضیحی نمایش داده می‌شود.
+
+Endpoints مرتبط:
+
+- `GET  /api/render/inspector/cloud-code/status` — وضعیت در دسترس بودن
+- `POST /api/render/inspector/chat-cloud-code` — چت SSE با Cloud Code
 
 ### در حال توسعه
 
@@ -344,6 +365,12 @@ PERPLEXITY_API_KEY=pplx-...
 # استقرار
 RENDER_API_KEY=rnd_...
 GITHUB_TOKEN=ghp_...
+
+# Cloud Code (Claude Code OAuth) — موتور پردازش پرامپت برای بازرس ویژه
+# توکن اشتراک Claude Code که با `claude setup-token` ساخته می‌شود.
+# همین توکن در claude_runner و GitHub Actions هم استفاده می‌شود.
+CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+EXTERNAL_TOOL_TOKEN=change-me-to-a-random-secret
 
 # سیستم
 DEBUG=true
