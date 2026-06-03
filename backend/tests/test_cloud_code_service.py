@@ -1011,6 +1011,67 @@ async def test_agent_loop_executor_crash_surfaces_as_is_error(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_agent_loop_final_text_only_holds_last_round(monkeypatch):
+    """Documented behaviour: cloud_code_agent_loop.final_text is the LAST
+    round's text only (overwritten each iteration). Callers wanting the
+    full streamed transcript must accumulate the on_event "text" payloads
+    themselves — which the endpoint does via its `assembled` list."""
+    from app.services import cloud_code_service as ccs
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test")
+    call_no = {"n": 0}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        call_no["n"] += 1
+        if call_no["n"] == 1:
+            return httpx.Response(200, json={
+                "id": "r1", "model": "claude-sonnet-4-5-20250929",
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "text", "text": "بذار فایل را بخوانم..."},
+                    {"type": "tool_use", "id": "t1", "name": "noop", "input": {}},
+                ],
+                "usage": {},
+            })
+        return httpx.Response(200, json={
+            "id": "r2", "model": "claude-sonnet-4-5-20250929",
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "تمام شد."}],
+            "usage": {},
+        })
+
+    transport = httpx.MockTransport(_handler)
+    real = httpx.AsyncClient
+    monkeypatch.setattr(
+        ccs.httpx, "AsyncClient",
+        lambda *a, **kw: real(*a, transport=transport, **{k: v for k, v in kw.items() if k != "transport"}),
+    )
+
+    async def noop(name, inp):
+        return "done"
+
+    streamed_texts: List[str] = []
+
+    async def on_event(kind, payload):
+        if kind == "text":
+            streamed_texts.append(payload["text"])
+
+    result = await ccs.cloud_code_agent_loop(
+        user_prompt="x",
+        tools=[{"name": "noop", "description": "",
+                "input_schema": {"type": "object", "properties": {}, "required": []}}],
+        executor=noop,
+        model="claude-sonnet-4-5-20250929",
+        on_event=on_event,
+    )
+    # final_text is just the last round
+    assert result["final_text"] == "تمام شد."
+    # but on_event saw both rounds — this is what the endpoint accumulates
+    # into its `assembled` list and serves to the DB.
+    assert streamed_texts == ["بذار فایل را بخوانم...", "تمام شد."]
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_respects_max_iterations(monkeypatch):
     """If the model keeps emitting tool_use forever, the loop must stop at
     max_iterations and report stop_reason='max_iterations'."""

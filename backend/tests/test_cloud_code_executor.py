@@ -43,6 +43,30 @@ def test_phase_3_tool_schemas_pulled_from_inspector_agent():
         assert "name" in t and "description" in t and "input_schema" in t
 
 
+def test_supported_tools_match_actual_dispatcher_branches():
+    """The SUPPORTED_TOOLS_PHASE_3 set must contain ONLY tools the
+    executor actually dispatches. Any orphan there would make the model
+    invoke something we silently can't run, wasting iterations."""
+    import inspect
+
+    from app.services import cloud_code_executor as ccx
+
+    # Pull the source of build_inspector_executor so we can see which
+    # `if name == "..."` branches exist in the dispatcher.
+    src = inspect.getsource(ccx.build_inspector_executor)
+    dispatched = set()
+    import re as _re
+    for m in _re.finditer(r'name == "([^"]+)"', src):
+        dispatched.add(m.group(1))
+
+    # Every supported tool must have a real dispatcher branch.
+    for tool in SUPPORTED_TOOLS_PHASE_3:
+        assert tool in dispatched, f"{tool} listed as supported but no dispatcher branch"
+    # And no orphan: every branch we wrote should be in the supported set.
+    for tool in dispatched:
+        assert tool in SUPPORTED_TOOLS_PHASE_3, f"{tool} dispatched but not in SUPPORTED_TOOLS_PHASE_3"
+
+
 # ---------------------------------------------------------------------------
 # File-level tools
 # ---------------------------------------------------------------------------

@@ -17292,22 +17292,46 @@ async def inspector_chat_cloud_code(
                     from ...models.setting import Setting as _S
                     gh_token = _S.get_value(db, "api_key_github") or ""
                 gh_svc = get_github_pr_service() if owner and repo else None
-                # file list — اگر در دسترس نباشد، executor با لیست خالی
-                # کار می‌کند (read_file در آن حالت validation نمی‌کند).
+                # 🆕 (audit fix #1) — file_list را از GitHub trees API
+                # (همان pattern smart-chat) بگیر. github_pr_service متد
+                # list_repository_files ندارد، پس direct REST call می‌زنیم.
                 file_list_resolved: List[str] = []
-                if gh_svc and owner and repo:
+                if owner and repo and gh_token:
                     try:
-                        flres = await gh_svc.list_repository_files(
-                            owner, repo, branch="main", token=gh_token,
-                        ) if hasattr(gh_svc, "list_repository_files") else None
-                        if flres and flres.get("success"):
-                            file_list_resolved = list(flres.get("files") or [])
+                        import httpx as _httpx_fl
+                        async with _httpx_fl.AsyncClient(timeout=15.0) as _fl_cli:
+                            _fl_res = await _fl_cli.get(
+                                f"https://api.github.com/repos/{owner}/{repo}/git/trees/main?recursive=1",
+                                headers={
+                                    "Authorization": f"token {gh_token}",
+                                    "Accept": "application/vnd.github+json",
+                                },
+                            )
+                            if _fl_res.status_code == 200:
+                                _tree = _fl_res.json()
+                                file_list_resolved = [
+                                    item["path"] for item in (_tree.get("tree") or [])
+                                    if item.get("type") == "blob" and item.get("path")
+                                ]
                     except Exception as _fle:
                         slog.debug(f"[chat-cloud-code] file list resolve failed: {_fle}")
-                # Render service: اختیاری
+                # 🆕 (audit fix #3) — render_service فقط زمانی شمرده می‌شود
+                # که هم instance ساخته شود هم api_key واقعی داشته باشد. در
+                # غیر این صورت None می‌گذاریم تا executor پیام واضح
+                # "Render unavailable" بدهد، نه خطای 401 از API.
                 render_svc = None
                 try:
-                    render_svc = get_render_service()
+                    _candidate = get_render_service()
+                    # _load_api_key (sync) lazily reads `api_key_render` از Settings.
+                    # متدها داخلاً همین کار را می‌کنند ولی اینجا up-front می‌خوانیم
+                    # تا حالت "Render unavailable" را در system prompt بگوییم.
+                    if hasattr(_candidate, "_load_api_key"):
+                        try:
+                            _candidate._load_api_key()
+                        except Exception:
+                            pass
+                    if getattr(_candidate, "api_key", None):
+                        render_svc = _candidate
                 except Exception:
                     render_svc = None
                 if gh_svc and owner and repo:
@@ -17392,26 +17416,20 @@ async def inspector_chat_cloud_code(
                     metadata_sink=cc_meta,
                 ))
 
-                # drain events + chunk forwarding
-                while True:
-                    try:
-                        evt = await _aio_cc.wait_for(event_q.get(), timeout=0.5)
-                    except _aio_cc.TimeoutError:
-                        if loop_task.done():
-                            break
-                        continue
-                    kind, payload = evt
+                def _format_evt(kind: str, payload: Dict[str, Any]) -> Optional[str]:
+                    """tuple → SSE string. None اگر event داده‌ای ندارد."""
                     if kind == "text":
                         txt = payload.get("text", "")
-                        if txt:
-                            assembled.append(txt)
-                            yield (
-                                "event: chunk\ndata: "
-                                + json.dumps({"text": txt}, ensure_ascii=False)
-                                + "\n\n"
-                            )
-                    elif kind == "tool_use":
-                        yield (
+                        if not txt:
+                            return None
+                        assembled.append(txt)
+                        return (
+                            "event: chunk\ndata: "
+                            + json.dumps({"text": txt}, ensure_ascii=False)
+                            + "\n\n"
+                        )
+                    if kind == "tool_use":
+                        return (
                             "event: tool_use\ndata: "
                             + json.dumps({
                                 "name": payload.get("name"),
@@ -17420,8 +17438,8 @@ async def inspector_chat_cloud_code(
                             }, ensure_ascii=False)
                             + "\n\n"
                         )
-                    elif kind == "tool_result":
-                        yield (
+                    if kind == "tool_result":
+                        return (
                             "event: tool_result\ndata: "
                             + json.dumps({
                                 "name": payload.get("name"),
@@ -17430,20 +17448,62 @@ async def inspector_chat_cloud_code(
                             }, ensure_ascii=False)
                             + "\n\n"
                         )
-                    elif kind == "done":
-                        # loop also pushes done; we break after the task itself completes
-                        pass
-                    elif kind == "error":
-                        yield (
+                    if kind == "error":
+                        return (
                             "event: error\ndata: "
-                            + json.dumps({
-                                "message": payload.get("message"),
-                            }, ensure_ascii=False)
+                            + json.dumps({"message": payload.get("message")}, ensure_ascii=False)
                             + "\n\n"
                         )
-                # collect loop result
-                loop_result = await loop_task
-                full_text = (loop_result.get("final_text") or "").strip() or "".join(assembled).strip()
+                    return None  # 'done' and any unknown — handled out-of-band
+
+                # 🆕 (audit fix #2) — drain events + race-safe loop termination.
+                # حلقهٔ قبلی این bug را داشت: اگر event پس از done شدن
+                # loop_task به queue اضافه می‌شد ولی بین دو get بود، drop
+                # می‌شد. حالا: ابتدا polling تا loop_task done، سپس drain
+                # کامل queue (هر چیزی که باقی مانده).
+                while not loop_task.done():
+                    try:
+                        evt = await _aio_cc.wait_for(event_q.get(), timeout=0.5)
+                    except _aio_cc.TimeoutError:
+                        continue
+                    sse = _format_evt(evt[0], evt[1])
+                    if sse:
+                        yield sse
+                # loop done — drain هرچه در queue باقی مانده (بدون wait)
+                while not event_q.empty():
+                    try:
+                        evt = event_q.get_nowait()
+                    except _aio_cc.QueueEmpty:
+                        break
+                    sse = _format_evt(evt[0], evt[1])
+                    if sse:
+                        yield sse
+
+                # 🆕 (audit fix #5) — اگر loop_task با exception تمام شد،
+                # آن را به‌جای raise، به‌عنوان event:error می‌فرستیم تا
+                # frontend پاسخ مشخصی ببیند نه stream cut.
+                loop_result: Dict[str, Any] = {}
+                try:
+                    loop_result = await loop_task
+                except Exception as _loop_e:
+                    slog.warning(f"[chat-cloud-code] agent loop crashed: {_loop_e}")
+                    yield (
+                        "event: error\ndata: "
+                        + json.dumps({
+                            "message": f"agent loop crashed: {str(_loop_e)[:300]}"
+                        }, ensure_ascii=False)
+                        + "\n\n"
+                    )
+
+                # 🆕 (audit fix #4) — full_text باید همان چیزی باشد که کاربر
+                # دید (assembled). final_text فقط آخرین round را نگه می‌دارد
+                # — برای DB ناقص است. assembled صفر فقط اگر مدل اصلاً متن
+                # نداده باشد → آنگاه از final_text/stop_reason پیام بساز.
+                full_text = "".join(assembled).strip()
+                if not full_text:
+                    fb = (loop_result.get("final_text") or "").strip()
+                    sr = loop_result.get("stop_reason") or "?"
+                    full_text = fb or f"(پاسخ متنی تولید نشد — stop_reason={sr})"
             else:
                 # fallback path: text-only streaming (رفتار قبلی)
                 stream_gen = await InspectorAgentService.chat_with_cloud_code(
