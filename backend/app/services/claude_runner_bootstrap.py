@@ -408,7 +408,11 @@ async def delete_repo_secret(
 # workflow_dispatch trigger — backend از این برای آغاز run استفاده می‌کند
 # ----------------------------------------------------------------------
 
-async def pick_model_for_task(task: Any) -> Optional[str]:
+async def pick_model_for_task(
+    task: Any,
+    *,
+    consumer_key: Optional[str] = None,
+) -> Optional[str]:
     """انتخاب آخرین مدل Claude متناسب با محتوای تسک.
 
     منطق: prompt تسک + raw_idea + title را به‌عنوان "پیام کاربر" به
@@ -424,11 +428,25 @@ async def pick_model_for_task(task: Any) -> Optional[str]:
     استفاده می‌کند که Claude Code CLI آن را به آخرین Sonnet route می‌کند.
     """
     try:
-        from .cloud_code_service import cloud_code_is_configured, pick_best_model
+        from .cloud_code_service import (
+            cloud_code_is_configured,
+            cloud_code_setting_is_enabled_for,
+            pick_best_model,
+        )
     except Exception as e:
         logger.debug(f"pick_model_for_task: cloud_code import failed: {e}")
         return None
     if not cloud_code_is_configured():
+        return None
+    # 🆕 (centralization — stage 3) — اگر caller consumer_key داده، باید از
+    # helper مرکزی هم رد شویم. اگر کاربر در صفحهٔ مدل‌ها Cloud Code را
+    # برای این consumer غیرفعال کرده، None برمی‌گردانیم تا workflow از
+    # default خود (alias `sonnet`) استفاده کند — همان رفتار قبلی پیش‌فرض.
+    if consumer_key and not cloud_code_setting_is_enabled_for(consumer_key):
+        logger.info(
+            f"pick_model_for_task: Cloud Code disabled by user for "
+            f"consumer={consumer_key} → returning None (fall back to default)"
+        )
         return None
     parts = []
     title = (getattr(task, "title", "") or "").strip()

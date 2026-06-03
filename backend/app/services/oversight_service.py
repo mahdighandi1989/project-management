@@ -2875,7 +2875,13 @@ class OversightService:
         # (alias `sonnet`) استفاده می‌کند که Claude Code CLI به آخرین
         # Sonnet route می‌کند.
         from .claude_runner_bootstrap import pick_model_for_task
-        _picked_model = await pick_model_for_task(t)
+        # 🆕 (centralization — stage 3) — این مسیر دکمهٔ «اجرا از طریق
+        # کلاد» تک‌تسک است. consumer_key="claude_single_task" تا اگر
+        # کاربر در صفحهٔ مدل‌ها این consumer را خاموش کرده باشد، Cloud
+        # Code انتخاب نشود و workflow از default خودش استفاده کند.
+        _picked_model = await pick_model_for_task(
+            t, consumer_key="claude_single_task",
+        )
         for attempt in range(max_attempts):
             dispatch_result = await trigger_workflow_dispatch(
                 watched,

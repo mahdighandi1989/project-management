@@ -233,6 +233,10 @@ export default function ModelsPage() {
       deepseek: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
       perplexity: 'bg-cyan-100 text-cyan-800 dark:bg-cyan-900 dark:text-cyan-200',
       groq: 'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200',
+      // 🆕 (Cloud Code centralization) — provider جدید با گرادیان متمایز
+      // تا کاربر سریع تشخیص بدهد این ردیف، سرویس مرکزی Cloud Code است
+      // (نه یک مدل API key معمولی).
+      cloud_code: 'bg-gradient-to-r from-indigo-100 to-purple-100 text-indigo-800 dark:from-indigo-900 dark:to-purple-900 dark:text-indigo-200',
     };
     return colors[provider] || 'bg-gray-100 text-gray-800';
   };
@@ -587,15 +591,38 @@ export default function ModelsPage() {
                   const model = models.find(m => m.id === setting.model_id);
                   const isEditing = editingModel === setting.model_id;
 
+                  // 🆕 (Cloud Code centralization) — ردیف Cloud Code با
+                  // یک نشان متمایز نمایش داده می‌شود تا کاربر بفهمد این
+                  // ردیف، هاب مرکزی برای مصرف‌کنندگان Cloud Code است
+                  // (auto-runner / single-task / inspector chat / creator).
+                  // در ستون «ترجیحی برای» کاربر می‌تواند انتخاب کند کدام
+                  // مصرف‌کننده از Cloud Code استفاده کند.
+                  const isCloudCodeRow = setting.model_id === 'cloud_code';
+
                   return (
-                    <tr key={setting.model_id} className="border-b dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/50">
+                    <tr
+                      key={setting.model_id}
+                      className={
+                        isCloudCodeRow
+                          ? 'border-b border-indigo-200 dark:border-indigo-800 bg-indigo-50/30 dark:bg-indigo-900/10 hover:bg-indigo-50 dark:hover:bg-indigo-900/20'
+                          : 'border-b dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/50'
+                      }
+                    >
                       {/* Model Name */}
                       <td className="py-3 px-4">
                         <div className="flex items-center gap-2">
                           <span className={`w-2 h-2 rounded-full ${model?.is_available ? 'bg-green-500' : 'bg-gray-400'}`} />
                           <div>
-                            <div className="font-medium">{setting.model_name}</div>
+                            <div className="font-medium flex items-center gap-1.5">
+                              {isCloudCodeRow && <span title="هاب مرکزی Cloud Code">🎯</span>}
+                              {setting.model_name}
+                            </div>
                             <div className="text-xs text-gray-500">{setting.model_id}</div>
+                            {isCloudCodeRow && (
+                              <div className="text-[10px] text-indigo-700 dark:text-indigo-300 mt-0.5">
+                                هاب مرکزی — اجرای خودکار، اجرای تکی، چت بازرس، موتور خالق
+                              </div>
+                            )}
                           </div>
                           <span className={`badge text-xs ${getProviderColor(setting.provider)}`}>
                             {setting.provider}

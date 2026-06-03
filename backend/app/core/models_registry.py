@@ -17,6 +17,13 @@ class ModelProvider(str, Enum):
     OPENROUTER = "openrouter"
     GROQ = "groq"
     PERPLEXITY = "perplexity"  # 🆕 Perplexity AI
+    # 🆕 (Cloud Code centralization) — Claude Code OAuth token engine.
+    # یک provider مجزا تا در صفحهٔ مدل‌ها به‌عنوان یک ردیف مستقل قابل
+    # toggle شود و preferred_for مشخص کند کجاها (auto-runner / single-task /
+    # inspector chat / creator engine) از این engine استفاده کنند. خود
+    # token از env (`CLAUDE_CODE_OAUTH_TOKEN`) خوانده می‌شود — این entry
+    # فقط switchboard کاربر است.
+    CLOUD_CODE = "cloud_code"
 
 
 class ModelCapability(str, Enum):
@@ -488,6 +495,38 @@ MODEL_REGISTRY: Dict[str, AIModel] = {
         strengths=["reasoning", "logic", "research", "citations"],
         cost_per_1k_tokens=0.005,
         priority=1
+    ),
+    # ===========================================
+    # 🆕 (Cloud Code centralization) — Claude Code OAuth engine.
+    # یک ردیف "swappable" در صفحهٔ مدل‌ها. وضعیت enabled و preferred_for
+    # از ModelSettings DB خوانده می‌شود؛ این entry فقط metadata است.
+    # cost_per_1k_tokens=0 چون از اشتراک Claude Code استفاده می‌کند نه
+    # API key متری. id="cloud_code" — همان شناسه‌ای که consumer ها از آن
+    # برای پرس‌وجوی وضعیت استفاده می‌کنند.
+    # ===========================================
+    "cloud_code": AIModel(
+        id="cloud_code",
+        provider=ModelProvider.CLOUD_CODE,
+        name="Cloud Code (Claude OAuth)",
+        endpoint="https://api.anthropic.com/v1/messages",
+        capabilities=[
+            ModelCapability.TEXT,
+            ModelCapability.CODE,
+            ModelCapability.REASONING,
+            ModelCapability.LONG_CONTEXT,
+            ModelCapability.THINKING,
+        ],
+        max_tokens=32768,
+        context_window=200000,
+        strengths=[
+            "claude_subscription",
+            "auto_tier_pick",
+            "tool_use",
+            "single_source_oauth",
+        ],
+        cost_per_1k_tokens=0.0,
+        priority=1,
+        enabled=True,
     ),
 }
 

@@ -316,4 +316,40 @@ AVAILABLE_TASK_TYPES = [
     {"id": "testing", "name": "تست", "description": "نوشتن و اجرای تست‌ها"},
     {"id": "image_analysis", "name": "تحلیل تصویر", "description": "بررسی و تحلیل تصاویر"},
     {"id": "research", "name": "تحقیق", "description": "جستجو و تحقیق (Perplexity)"},
+    # 🆕 (Cloud Code centralization) — 4 task type جدید که فقط برای entry
+    # Cloud Code معنا دارند. هر کدام یک مصرف‌کنندهٔ مرکزی است: اگر کاربر
+    # یکی را در ستون «ترجیحی برای» تیک نزند، آن مصرف‌کننده از Cloud Code
+    # استفاده نمی‌کند و به‌رفتار پیش‌فرض خود بازمی‌گردد (alias `sonnet`
+    # در workflow، local AI در inspector chat).
+    {
+        "id": "claude_auto_runner",
+        "name": "اجرای خودکار",
+        "description": "تسک‌ها در حالت اجرای خودکار (auto-runner) از Cloud Code استفاده کنند",
+    },
+    {
+        "id": "claude_single_task",
+        "name": "اجرای تکی از طریق کلاد",
+        "description": "دکمهٔ «اجرا از طریق کلاد» روی هر کارت تسک",
+    },
+    {
+        "id": "inspector_cloud_code",
+        "name": "چت بازرس ویژه (Cloud Code)",
+        "description": "engine انتخابی در inspector chat هنگام انتخاب Cloud Code",
+    },
+    {
+        "id": "creator_engine",
+        "name": "موتور خالق",
+        "description": "ساخت/بازبینی پروژه در موتور خالق با Cloud Code",
+    },
+]
+
+# 🆕 (Cloud Code centralization) — لیست id های preferred_for که فقط مربوط
+# به entry Cloud Code هستند. هر consumer (بعدا در مرحلهٔ 3 سیم‌کشی می‌شود)
+# با یکی از این key ها از helper مرکزی می‌پرسد «آیا برای این کار از Cloud
+# Code استفاده کنم؟».
+CLOUD_CODE_PREFERRED_FOR_KEYS = [
+    "claude_auto_runner",
+    "claude_single_task",
+    "inspector_cloud_code",
+    "creator_engine",
 ]

@@ -83,6 +83,125 @@ def cloud_code_is_configured() -> bool:
     return bool(get_cloud_code_token())
 
 
+# ---------------------------------------------------------------------------
+# 🆕 (Cloud Code centralization — stage 2) — single-source-of-truth helper
+# ---------------------------------------------------------------------------
+# Cloud Code قبلاً در 4 جای مختلف به‌صورت مستقل سیم‌کشی شده بود:
+#   - claude_runner_bootstrap.pick_model_for_task (auto-runner)
+#   - oversight.run-via-claude endpoint (دکمهٔ تک‌تسک)
+#   - inspector_agent_service.chat_with_cloud_code (چت بازرس)
+#   - creator engine (هنوز اضافه نشده)
+# هر کدام cloud_code_is_configured() را مستقیماً صدا می‌زدند و اگر True
+# می‌بود، استفاده می‌کردند — بدون toggle مرکزی برای کاربر. حالا با ثبت
+# Cloud Code به‌عنوان یک ردیف در صفحهٔ مدل‌ها (stage 1)، کاربر می‌تواند
+# enabled آن را خاموش کند یا preferred_for را به subset از 4 مصرف‌کننده
+# محدود کند. این helper آن وضعیت را برای consumer ها در یک نقطه می‌خواند.
+
+_CLOUD_CODE_MODEL_ID = "cloud_code"
+
+
+def cloud_code_setting_is_enabled_for(consumer_key: str) -> bool:
+    """🆕 (centralization) — آیا کاربر این مصرف‌کننده را برای Cloud Code
+    فعال کرده؟
+
+    consumer_key باید یکی از CLOUD_CODE_PREFERRED_FOR_KEYS باشد:
+      - "claude_auto_runner"       → اجرای خودکار workflow
+      - "claude_single_task"       → دکمهٔ Run via Claude
+      - "inspector_cloud_code"     → چت بازرس Cloud Code engine
+      - "creator_engine"           → موتور خالق
+
+    قواعد:
+      1) اگر token اصلاً ست نیست (env خالی) → False مطلق.
+      2) اگر ردیف cloud_code در DB موجود نیست → fallback به default
+         رفتار: True برای همهٔ consumer ها (سازگاری با قبل).
+      3) اگر ردیف موجود است ولی enabled=False → False.
+      4) اگر enabled=True ولی preferred_for خالی است → True برای همه
+         (به این معنا که کاربر هنوز سفارشی نکرده).
+      5) اگر enabled=True و preferred_for پر است → فقط key های موجود
+         در آن لیست True می‌گیرند.
+
+    خطاها silent — هرگز exception نمی‌اندازد. اگر DB در دسترس نیست،
+    fallback به True (سازگاری با قبل).
+    """
+    if not cloud_code_is_configured():
+        return False
+    try:
+        from ..core.database import SessionLocal
+        from ..models.ai_profile import ModelSettings
+    except Exception as e:
+        logger.debug(f"cloud_code_setting_is_enabled_for: import failed: {e}")
+        return True  # fallback — رفتار قبلی
+    try:
+        db = SessionLocal()
+        try:
+            row = db.query(ModelSettings).filter(
+                ModelSettings.model_id == _CLOUD_CODE_MODEL_ID
+            ).first()
+            if row is None:
+                return True  # default — هنوز سفارشی نشده
+            if not row.enabled:
+                return False
+            preferred = list(row.preferred_for or [])
+            if not preferred:
+                return True  # enabled بدون فیلتر — همه consumer ها مجاز
+            # "all" به عنوان wildcard
+            if "all" in preferred:
+                return True
+            return consumer_key in preferred
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+    except Exception as e:
+        logger.debug(f"cloud_code_setting_is_enabled_for DB read failed: {e}")
+        return True  # fallback — رفتار قبلی
+
+
+def cloud_code_settings_snapshot() -> Dict[str, Any]:
+    """🆕 (centralization) — snapshot کامل از وضعیت Cloud Code برای
+    debug/diagnostics endpoint. شامل availability env، enabled DB،
+    preferred_for، و نتیجهٔ per-consumer flag ها.
+    """
+    out: Dict[str, Any] = {
+        "token_configured": cloud_code_is_configured(),
+        "registry_enabled": True,
+        "db_row_present": False,
+        "db_enabled": None,
+        "preferred_for": [],
+        "consumers": {},
+    }
+    try:
+        from ..core.models_registry import MODEL_REGISTRY
+        entry = MODEL_REGISTRY.get(_CLOUD_CODE_MODEL_ID)
+        if entry is not None:
+            out["registry_enabled"] = bool(entry.enabled)
+    except Exception:
+        pass
+    try:
+        from ..core.database import SessionLocal
+        from ..models.ai_profile import ModelSettings, CLOUD_CODE_PREFERRED_FOR_KEYS
+        db = SessionLocal()
+        try:
+            row = db.query(ModelSettings).filter(
+                ModelSettings.model_id == _CLOUD_CODE_MODEL_ID
+            ).first()
+            if row is not None:
+                out["db_row_present"] = True
+                out["db_enabled"] = bool(row.enabled)
+                out["preferred_for"] = list(row.preferred_for or [])
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+        for key in CLOUD_CODE_PREFERRED_FOR_KEYS:
+            out["consumers"][key] = cloud_code_setting_is_enabled_for(key)
+    except Exception as e:
+        out["error"] = str(e)[:200]
+    return out
+
+
 def _build_headers(token: str) -> Dict[str, str]:
     return {
         "Content-Type": "application/json",
