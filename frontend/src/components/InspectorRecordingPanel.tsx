@@ -174,18 +174,29 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
   const openPicker = useCallback(async () => {
     setErrorMsg(null);
     // درخواست permission میکروفون برای enumerate (labels فقط با permission)
+    let micPermissionOk = false;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       stream.getTracks().forEach((t) => t.stop()); // فقط برای permission
+      micPermissionOk = true;
     } catch {
-      // continue حتی اگر permission ندارد — کاربر می‌تواند هم‌اکنون mic را خاموش کند
+      // permission denied یا میکروفون وجود ندارد — checkbox mic را auto-off می‌کنیم
+      micPermissionOk = false;
     }
+    let mics: MediaDeviceInfo[] = [];
     try {
       const devs = await navigator.mediaDevices.enumerateDevices();
-      const mics = devs.filter((d) => d.kind === 'audioinput');
+      mics = devs.filter((d) => d.kind === 'audioinput');
       setMicDevices(mics);
     } catch {
       setMicDevices([]);
+    }
+    // 🆕 (fix #429-recording) — اگر میکروفون موجود نیست یا permission نگرفتیم،
+    // پیش‌فرض mic را خاموش کن تا کاربر هنگام شروع ضبط با
+    // "Requested device not found" مواجه نشود. کاربر در picker می‌تواند
+    // دستی برگردونه روشن (مثلاً اگر بعداً mic نصب کرد).
+    if (!micPermissionOk || mics.length === 0) {
+      setAudioConfig((prev) => ({ ...prev, mic: false, micDeviceId: null }));
     }
     setPhase('picker');
   }, []);
@@ -214,7 +225,15 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
       // ─── شروع audio recording (mic + اختیاری system audio)
       if (audioConfig.mic || audioConfig.system) {
         const audioStream = await getAudioStream(audioConfig);
+        // 🆕 (fix #429-recording) — اگر هیچ track صوتی واقعی برگردانده نشد
+        // (مثلاً mic در دسترس نیست و system هم پشتیبانی نمی‌شود)، اصلاً
+        // MediaRecorder صوتی نسازید — وگرنه recorder خالی شروع/پایان
+        // می‌شود که ممکن است سمت بک‌اند خطا تولید کند.
+        const hasRealAudio = audioStream.getAudioTracks().some((t) => t.enabled && t.readyState === 'live');
         audioStreamRef.current = audioStream;
+        if (!hasRealAudio) {
+          console.info('skipping audio recorder — no live audio tracks');
+        } else {
         const rec = new MediaRecorder(audioStream, {
           mimeType: pickSupportedMime(['audio/webm;codecs=opus', 'audio/webm']),
         });
@@ -230,15 +249,33 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
         };
         rec.start(10_000); // هر 10 ثانیه chunk
         audioRecorderRef.current = rec;
+        }  // close: if (hasRealAudio)
       }
 
       // ─── شروع video/frames بسته به mode
       if (mode === 'B') {
         // getDisplayMedia: کاربر تب/پنجره/screen را انتخاب می‌کند
-        const displayStream = await navigator.mediaDevices.getDisplayMedia({
-          video: { frameRate: 15 },
-          audio: audioConfig.system,
-        });
+        // 🆕 (fix #429-recording) — اگر system audio درخواست شد ولی browser
+        // یا device نتوانست (مثلاً system audio روی macOS/Linux معمولاً
+        // not supported)، یک بار retry بدون audio.
+        let displayStream: MediaStream;
+        try {
+          displayStream = await navigator.mediaDevices.getDisplayMedia({
+            video: { frameRate: 15 },
+            audio: audioConfig.system,
+          });
+        } catch (dmErr: any) {
+          if (audioConfig.system) {
+            console.warn('getDisplayMedia with audio failed, retrying video-only:', dmErr?.name, dmErr?.message);
+            displayStream = await navigator.mediaDevices.getDisplayMedia({
+              video: { frameRate: 15 },
+              audio: false,
+            });
+            setErrorMsg('صدای سیستم در مرورگر شما پشتیبانی نمی‌شود — فقط ویدئو ضبط می‌شود.');
+          } else {
+            throw dmErr;
+          }
+        }
         videoStreamRef.current = displayStream;
         const vrec = new MediaRecorder(displayStream, {
           mimeType: pickSupportedMime(['video/webm;codecs=vp9', 'video/webm']),
@@ -316,13 +353,41 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
   async function getAudioStream(cfg: AudioConfig): Promise<MediaStream> {
     const streams: MediaStream[] = [];
     if (cfg.mic) {
-      const constraints: MediaStreamConstraints = {
-        audio: cfg.micDeviceId
-          ? { deviceId: { exact: cfg.micDeviceId } }
-          : true,
+      // 🆕 (fix #429-recording) — تلاش soft برای mic. اگر deviceId مشخص‌شده
+      // دیگر موجود نیست (مثلاً USB mic disconnect)، یا اصلاً mic روی دستگاه
+      // نیست، به‌جای throw → fall back به constraint ساده، و اگر آن هم
+      // failed شد، silently بدون audio ادامه بده. این جلوی
+      // "Requested device not found" را می‌گیرد.
+      const tryGetUserMedia = async (
+        constraints: MediaStreamConstraints,
+      ): Promise<MediaStream | null> => {
+        try {
+          return await navigator.mediaDevices.getUserMedia(constraints);
+        } catch (e: any) {
+          console.warn('getUserMedia(audio) failed', e?.name, e?.message);
+          return null;
+        }
       };
-      const s = await navigator.mediaDevices.getUserMedia(constraints);
-      streams.push(s);
+      let s: MediaStream | null = null;
+      if (cfg.micDeviceId) {
+        s = await tryGetUserMedia({
+          audio: { deviceId: { exact: cfg.micDeviceId } },
+        });
+        if (!s) {
+          // deviceId exact شکست خورد → constraint عمومی
+          s = await tryGetUserMedia({ audio: true });
+        }
+      } else {
+        s = await tryGetUserMedia({ audio: true });
+      }
+      if (s) {
+        streams.push(s);
+      } else {
+        // mic غیرقابل دسترس — کاربر را مطلع کن ولی ضبط ادامه پیدا کند
+        setErrorMsg(
+          'میکروفون در دسترس نیست — ضبط بدون صدا ادامه می‌یابد.',
+        );
+      }
     }
     // system audio پیچیده‌تر است و در حالت A معمولاً نیست — اگر mode B بود
     // در getDisplayMedia جداگانه handle می‌شود
