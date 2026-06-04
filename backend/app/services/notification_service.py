@@ -1138,6 +1138,169 @@ class TelegramChannel(NotificationChannel):
             return {"ok": False, "error": str(e)[:300]}
 
 
+# ---------------------------------------------------------------------------
+# 🛡 (Telegram webhook self-heal supervisor)
+# ---------------------------------------------------------------------------
+# Why this exists:
+#   The bot worked fine, then the user reported "every button I press, nothing
+#   happens" — multiple times across separate weeks. Each time it was the
+#   same root cause: Telegram's webhook pointed at a stale URL (or got
+#   paused after repeated delivery errors), and there was no recovery path.
+#   The user had to remember to manually call /telegram/set-webhook every
+#   time Render redeployed or env vars changed.
+#
+# Root fix: supervise the webhook ourselves. At startup + every 5 minutes,
+# call getWebhookInfo and re-set the webhook if:
+#   - URL doesn't match our current public URL (deploy moved us)
+#   - pending_update_count is huge (Telegram paused delivery; drop + restart)
+#   - last_error indicates persistent failure
+#
+# Idempotent — if the webhook is already healthy, this is a single GET
+# request every 5 minutes (negligible cost).
+# ---------------------------------------------------------------------------
+
+_TG_WEBHOOK_HEAL_INTERVAL_SEC = 300  # 5 minutes
+_TG_WEBHOOK_HEAL_INITIAL_DELAY = 20  # let app become healthy before first probe
+_TG_WEBHOOK_PENDING_RESET_THRESHOLD = 100  # if queue grows past this, drop+reset
+
+
+def _resolve_public_url() -> str:
+    """Determine the public URL of this backend, in priority order.
+
+    Returns empty string if no source is available — in that case the
+    supervisor cannot self-heal and will log a one-time debug message.
+    """
+    for key in ("BACKEND_PUBLIC_URL", "RENDER_EXTERNAL_URL", "PUBLIC_URL"):
+        v = (os.environ.get(key) or "").strip().rstrip("/")
+        if v:
+            return v
+    return ""
+
+
+async def _telegram_webhook_heal_once() -> Dict[str, Any]:
+    """One supervisor cycle. Returns a dict describing what happened so
+    callers (manual trigger endpoint, tests) can inspect it.
+
+    Result keys:
+      - skipped: str (reason) — when nothing was done
+      - healthy: True — webhook URL matches expectation, queue normal
+      - reset: True + reason — we re-set the webhook
+      - error: str — something went wrong (logged, not raised)
+    """
+    bot_token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    if not bot_token:
+        return {"skipped": "no_bot_token"}
+
+    public_url = _resolve_public_url()
+    if not public_url:
+        return {"skipped": "no_public_url"}
+
+    expected_url = f"{public_url}/api/notifications/telegram/webhook"
+
+    # 1) Read current webhook state from Telegram
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                f"https://api.telegram.org/bot{bot_token}/getWebhookInfo"
+            ) as r:
+                if r.status != 200:
+                    return {"error": f"getWebhookInfo status={r.status}"}
+                info = (await r.json()).get("result") or {}
+    except Exception as e:
+        return {"error": f"getWebhookInfo: {str(e)[:200]}"}
+
+    current_url = (info.get("url") or "").strip()
+    pending = int(info.get("pending_update_count") or 0)
+    last_err = (info.get("last_error_message") or "").strip()
+    last_err_date = int(info.get("last_error_date") or 0)
+
+    # 2) Decide whether to reset
+    reasons: List[str] = []
+    if current_url != expected_url:
+        reasons.append(
+            f"url mismatch (telegram='{current_url[:60]}', expected='{expected_url[:60]}')"
+        )
+    if pending > _TG_WEBHOOK_PENDING_RESET_THRESHOLD:
+        reasons.append(f"pending_update_count={pending}")
+
+    if last_err and last_err_date:
+        import time as _t_h
+        age_sec = max(0, int(_t_h.time()) - last_err_date)
+        logger.warning(
+            f"telegram_webhook_supervisor: last delivery error "
+            f"({age_sec}s ago): {last_err[:200]}"
+        )
+
+    if not reasons:
+        return {
+            "healthy": True,
+            "url": current_url,
+            "pending": pending,
+        }
+
+    # 3) Re-set the webhook
+    logger.warning(
+        f"telegram_webhook_supervisor: re-setting webhook because: {'; '.join(reasons)}"
+    )
+    try:
+        payload = {
+            "url": expected_url,
+            "allowed_updates": ["message", "callback_query"],
+            # Drop pending only when the queue is huge — otherwise users
+            # lose recent button-presses that we could still process.
+            "drop_pending_updates": pending > _TG_WEBHOOK_PENDING_RESET_THRESHOLD,
+        }
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                f"https://api.telegram.org/bot{bot_token}/setWebhook",
+                json=payload,
+            ) as r:
+                body = await r.json()
+                if body.get("ok"):
+                    logger.info(
+                        f"telegram_webhook_supervisor: webhook re-set → {expected_url}"
+                    )
+                    return {
+                        "reset": True, "reasons": reasons,
+                        "new_url": expected_url, "dropped_pending": payload["drop_pending_updates"],
+                    }
+                return {"error": f"setWebhook returned: {body}"}
+    except Exception as e:
+        return {"error": f"setWebhook crashed: {str(e)[:200]}"}
+
+
+async def telegram_webhook_supervisor_loop(stop_event: "asyncio.Event") -> None:
+    """🔁 Periodic supervisor — never lets the webhook silently rot.
+
+    Cancel via stop_event.set() (lifespan shutdown wires this up).
+    """
+    try:
+        await asyncio.wait_for(
+            stop_event.wait(), timeout=_TG_WEBHOOK_HEAL_INITIAL_DELAY
+        )
+        return  # stop signalled during initial delay
+    except asyncio.TimeoutError:
+        pass
+
+    while not stop_event.is_set():
+        try:
+            result = await _telegram_webhook_heal_once()
+            if "error" in result:
+                logger.warning(
+                    f"telegram_webhook_supervisor: heal cycle error: {result['error']}"
+                )
+        except Exception as e:
+            logger.exception(f"telegram_webhook_supervisor: cycle crashed: {e}")
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(), timeout=_TG_WEBHOOK_HEAL_INTERVAL_SEC
+            )
+        except asyncio.TimeoutError:
+            continue
+
+
 class EmailChannel(NotificationChannel):
     name = "email"
 

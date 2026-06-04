@@ -158,6 +158,21 @@ async def delete_webhook():
     return await tg.delete_webhook()
 
 
+@router.post("/telegram/heal-webhook")
+async def heal_webhook():
+    """🛡 Manual trigger for the self-heal supervisor.
+
+    Use when buttons stop responding and you want an immediate fix without
+    waiting for the next 5-minute supervisor cycle. Returns a diagnostic
+    dict showing what was found and what was changed.
+
+    Idempotent — safe to hit anytime. If everything is healthy, returns
+    {"healthy": true, ...} with no side effects.
+    """
+    from ...services.notification_service import _telegram_webhook_heal_once
+    return await _telegram_webhook_heal_once()
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # 🆕 (Daily Report) endpoints برای preview + send-now
 # ──────────────────────────────────────────────────────────────────────────
