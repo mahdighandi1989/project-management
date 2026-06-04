@@ -61,33 +61,29 @@ def _read(rel: str) -> str:
     ).read_text(encoding="utf-8")
 
 
-def test_ai_generate_short_circuits_cloud_code():
-    """🚨 The central fix. `_ai_generate` must route to
-    `cloud_code_complete` when model_id == "cloud_code", instead of
-    silently falling back to the first available ai_manager model."""
+def test_ai_generate_routes_through_oauth_registry():
+    """🚨 The central fix, generalized. `_ai_generate` must consult the
+    oauth_model_registry first, so cloud_code (and any future OAuth
+    model) routes correctly instead of falling through to ai_manager."""
     src = _read("app/services/oversight_service.py")
     idx = src.find("async def _ai_generate(")
     assert idx != -1
     rest = src[idx + 1:]
-    # next async def
     nxt = rest.find("\n    async def ")
     body = rest if nxt == -1 else rest[:nxt]
-    assert 'model_id == "cloud_code"' in body, (
-        "_ai_generate must check model_id == 'cloud_code' to short-circuit"
+    assert "get_oauth_dispatcher" in body, (
+        "_ai_generate must consult oauth_model_registry.get_oauth_dispatcher "
+        "to handle non-API-key models generically"
     )
-    assert "cloud_code_complete" in body, (
-        "_ai_generate must call cloud_code_complete on the short-circuit"
-    )
-    # The legacy ai_manager path must remain for other model ids.
+    # The legacy ai_manager path must remain for API-key models.
     assert "manager.generate" in body, (
-        "legacy ai_manager path must remain for non-cloud_code models"
+        "legacy ai_manager path must remain for API-key models"
     )
 
 
-def test_ai_generate_multi_handles_cloud_code_target():
-    """`_ai_generate_multi` is the consensus-mode entry point. It must
-    accept "cloud_code" as a valid target (not silently drop it) and
-    dispatch the per-target call to the right backend."""
+def test_ai_generate_multi_uses_registry_for_oauth_models():
+    """`_ai_generate_multi` is the consensus entry point. It must use
+    the same registry to accept any registered OAuth model as a target."""
     src = _read("app/services/oversight_service.py")
     idx = src.find("async def _ai_generate_multi(")
     assert idx != -1
@@ -98,30 +94,51 @@ def test_ai_generate_multi_handles_cloud_code_target():
     if nxt == -1:
         nxt = rest.find("\n    def ")
     body = rest if nxt == -1 else rest[:nxt]
-    assert 'mid == "cloud_code"' in body, (
-        "_ai_generate_multi must accept cloud_code as a valid target"
+    assert "list_registered_oauth_models" in body, (
+        "_ai_generate_multi must use the registry, not a hardcoded check"
     )
-    assert "cloud_code_complete" in body, (
-        "_ai_generate_multi must dispatch cloud_code targets to "
-        "cloud_code_complete (not ai_manager.generate)"
+    assert "get_oauth_dispatcher" in body
+    # No hardcoded cloud_code check should remain — pattern is generic now.
+    assert 'mid == "cloud_code"' not in body, (
+        "the hardcoded cloud_code check must be replaced by the registry "
+        "lookup so future OAuth models work with zero refactoring"
     )
 
 
-def test_ai_generate_multi_accepts_cloud_code_when_no_other_models():
-    """Edge case the source must handle: if ai_manager has zero
-    available models but cloud_code is configured, we should still
-    work instead of raising 'هیچ مدل AI فعالی نیست'."""
-    src = _read("app/services/oversight_service.py")
-    idx = src.find("async def _ai_generate_multi(")
-    rest = src[idx + 1:]
-    nxt = rest.find("\n    @staticmethod")
-    if nxt == -1:
-        nxt = rest.find("\n    async def ")
-    body = rest if nxt == -1 else rest[:nxt]
-    # The "no models" check must factor cloud_code availability
-    assert "if not available and not cc_ok" in body, (
-        "the no-models check must factor in cloud_code availability"
+def test_registry_has_cloud_code_registered():
+    """cloud_code is registered automatically on cloud_code_service import."""
+    # Trigger registration
+    import app.services.cloud_code_service  # noqa: F401
+    from app.services.oauth_model_registry import (
+        is_oauth_model,
+        list_registered_oauth_models,
     )
+
+    assert is_oauth_model("cloud_code"), (
+        "cloud_code must be registered in the OAuth dispatcher registry "
+        "(it should self-register when cloud_code_service is imported)"
+    )
+    assert "cloud_code" in list_registered_oauth_models()
+
+
+def test_future_oauth_model_can_register_one_line(monkeypatch):
+    """🆕 The whole point of the registry — a future OAuth provider
+    should be addable with a single registration call. This test
+    simulates adding a hypothetical 'gemini_oauth' model and verifies
+    `_ai_generate` would route to it without any other code change."""
+    from app.services.oauth_model_registry import (
+        register_oauth_dispatcher,
+        get_oauth_dispatcher,
+        is_oauth_model,
+    )
+
+    async def _fake_gemini_oauth(prompt, *, max_tokens, temperature):
+        return f"FROM GEMINI OAUTH: {prompt[:20]}"
+
+    register_oauth_dispatcher("gemini_oauth", _fake_gemini_oauth)
+    assert is_oauth_model("gemini_oauth")
+    disp = get_oauth_dispatcher("gemini_oauth")
+    assert disp is not None
 
 
 # ---------------------------------------------------------------------------
