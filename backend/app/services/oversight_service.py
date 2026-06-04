@@ -9201,7 +9201,25 @@ AC = «طراحی شیک‌تر باشد»:
             logger.warning(f"generate_followup_prompt failed: {_e}")
             new_prompt = None
 
+        # 🚨 (auto-runner loop fix CRITICAL) — followup_round باید همیشه
+        # increment شود وقتی verify partial است، حتی اگر followup_prompt
+        # generation شکست خورد. قبلاً `if not new_prompt: return` early
+        # exit می‌کرد و increment line 9258 هرگز اجرا نمی‌شد. نتیجه:
+        # retries_done همیشه 0 می‌ماند → notification "retry 1/3" بارها
+        # تکرار → max_retries هرگز نمی‌رسد → max_retries_todo هرگز fire
+        # نمی‌شود → TODO نوشته نمی‌شود → task هرگز archive نمی‌شود.
+        # کاربر این loop را گزارش داد: همان checklist چندین بار در Telegram
+        # ظاهر می‌شد بدون پیشرفت در counter.
         if not new_prompt:
+            async with self._lock:
+                task.followup_round = (task.followup_round or 0) + 1
+                task.updated_at = now_iso()
+                self._save_tasks()
+            logger.info(
+                f"apply_followup: prompt generation failed but incremented "
+                f"followup_round to {task.followup_round} for task={task.id} "
+                f"(prevents infinite retry loop)"
+            )
             return
 
         # extract معیارها و locations از پرامپت تولید شده

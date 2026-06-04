@@ -449,17 +449,39 @@ def _normalize_remaining(items: List[Any]) -> List[str]:
     return sorted(out)
 
 
-def _remaining_unchanged(current: List[Any], task: Any) -> bool:
+def _remaining_unchanged(current: List[Any], task: Any, service: Any = None) -> bool:
     """🚨 (no-progress guard) — آیا remaining_parts این بار با remaining_parts
     دور قبل تقریباً یکسان است؟ اگر بله، Claude در دور قبل نتوانست هیچ
-    آیتمی را تمام کند و ادامهٔ retry بی‌ثمر است. اطلاعات «دور قبل» در
-    `task._last_remaining_snapshot` ذخیره می‌شود (lazy attr روی dataclass؛
-    اگر وجود نداشت، فرض بر تغییر می‌گذاریم).
+    آیتمی را تمام کند و ادامهٔ retry بی‌ثمر است.
+
+    منبع snapshot: اول `task._last_remaining_snapshot` (lazy attr داخل
+    process). اگر نبود (مثلاً پس از restart که این attr lost می‌شود)،
+    از آخرین گزارش این تسک در `service.reports` می‌خوانیم — این persistent
+    است. این تضمین می‌کند guard پس از restart هم کار کند.
     """
     cur = _normalize_remaining(current)
     prev = _normalize_remaining(
         getattr(task, "_last_remaining_snapshot", []) or []
     )
+    if not prev and service is not None:
+        # 🆕 (persistence fix) — از reports تاریخچه بخوان
+        try:
+            task_reports = [
+                r for r in (getattr(service, "reports", None) or [])
+                if getattr(r, "task_id", None) == getattr(task, "id", None)
+            ]
+            # آخرین گزارش (به ترتیب زمانی)
+            task_reports.sort(
+                key=lambda r: getattr(r, "generated_at", "") or "",
+                reverse=True,
+            )
+            for r in task_reports[:5]:  # 5 گزارش اخیر را اسکن کن
+                prev_candidate = getattr(r, "remaining_parts", None) or []
+                if prev_candidate:
+                    prev = _normalize_remaining(prev_candidate)
+                    break
+        except Exception:
+            pass
     if not prev:
         return False  # دور اول — معیار مقایسه نداریم
     if not cur:
@@ -554,7 +576,7 @@ async def _verify_then_chain(
         )
         no_progress = (
             retries_done >= 1
-            and _remaining_unchanged(cur_remaining, task)
+            and _remaining_unchanged(cur_remaining, task, service)
         )
         if no_progress:
             logger.info(
