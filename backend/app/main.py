@@ -276,6 +276,25 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"compose boot cleanup failed (non-fatal): {e}")
 
+    # 🛡 (Telegram webhook self-heal supervisor) — keep the bot reachable
+    # without manual /set-webhook after every Render redeploy. Reads the
+    # webhook URL Telegram currently has, compares it to BACKEND_PUBLIC_URL /
+    # RENDER_EXTERNAL_URL, and re-sets it if mismatched or if Telegram's
+    # delivery queue has built up past 100 (which means Telegram paused
+    # delivery — every button press silently dropped). Runs every 5 min.
+    try:
+        import asyncio as _asyncio_tg
+        from .services.notification_service import telegram_webhook_supervisor_loop
+        app.state.tg_webhook_stop = _asyncio_tg.Event()
+        app.state.tg_webhook_task = _asyncio_tg.create_task(
+            telegram_webhook_supervisor_loop(app.state.tg_webhook_stop)
+        )
+        logger.info("📡 Telegram webhook self-heal supervisor started")
+    except Exception as e:
+        logger.warning(f"Telegram webhook supervisor failed to start: {e}")
+        app.state.tg_webhook_stop = None
+        app.state.tg_webhook_task = None
+
     yield
 
     # Shutdown
@@ -294,6 +313,17 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(task, timeout=5)
     except Exception as e:
         logger.warning(f"Oversight stop error: {e}")
+
+    # Stop Telegram webhook supervisor
+    try:
+        stop_evt = getattr(app.state, "tg_webhook_stop", None)
+        task = getattr(app.state, "tg_webhook_task", None)
+        if stop_evt:
+            stop_evt.set()
+        if task:
+            await asyncio.wait_for(task, timeout=5)
+    except Exception as e:
+        logger.warning(f"Telegram webhook supervisor stop error: {e}")
 
     # close oversight session
     try:
