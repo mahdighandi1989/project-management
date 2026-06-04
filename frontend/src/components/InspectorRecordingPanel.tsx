@@ -120,6 +120,15 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
   const screenshotIntervalRef = useRef<any>(null);
   const interactionEventsRef = useRef<any[]>([]);
   const sessionIdRef = useRef<string | null>(null); // برای handler ها
+  // 🆕 Mode A real capture: offscreen <video> reading the tab stream,
+  // a canvas that crops to just the iframe rect, the captured iframe
+  // stream we feed to MediaRecorder, the rAF id, and the stop closure
+  // for the draw loop. Cleared in cleanupStreams().
+  const sourceVideoRef = useRef<HTMLVideoElement | null>(null);
+  const cropCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const cropStreamRef = useRef<MediaStream | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const cropStoppedRef = useRef<(() => void) | null>(null);
 
   // ─────────────────────────────────────────────────────────────────────────
   // Helpers — fetch wrappers
@@ -307,31 +316,159 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
         vrec.start(15_000); // هر 15 ثانیه chunk
         videoRecorderRef.current = vrec;
       } else {
-        // mode A: ابتدا تلاش به Playwright backend screencast (بهینه‌تر)،
-        // اگر در دسترس نبود → fallback به polling سمت client
-        const iframeUrl = inspectorIframeRef?.current?.contentWindow?.location?.href || '';
-        let useFrontendPolling = true;
-        if (iframeUrl) {
-          try {
-            const scRes = await apiPost(`/${sid}/start-screencast`, {
-              target_url: iframeUrl,
-              viewport_width: 1280,
-              viewport_height: 720,
-            });
-            if (scRes?.success && scRes?.method === 'playwright_backend') {
-              useFrontendPolling = false;
-              console.log('🎬 Playwright backend screencast active');
-            } else {
-              console.log('🎬 Playwright unavailable, falling back to polling:', scRes?.error);
-            }
-          } catch (e) {
-            console.warn('start-screencast call failed, falling back to polling:', e);
+        // ═════════════════════════════════════════════════════════════════
+        // mode A: REAL iframe-only video via getDisplayMedia + canvas crop
+        // ═════════════════════════════════════════════════════════════════
+        // The previous design (screenshot polling at ~0.5-1 Hz) only
+        // produced a slideshow — no audio, no smooth motion, no visible
+        // interactions. The user explicitly asked for "ضبط واقعی". For
+        // cross-origin iframes browser security blocks direct capture, so
+        // the only path to a real iframe-only video is:
+        //   1. getDisplayMedia({preferCurrentTab: true}) — browser shows
+        //      the picker but pre-selects the current tab. User approves
+        //      once per session.
+        //   2. Stream is the FULL tab. We crop it to just the iframe's
+        //      bounding-rect every frame via canvas + rAF.
+        //   3. canvas.captureStream(fps) gives us an iframe-only video
+        //      stream that we feed to MediaRecorder — same downstream
+        //      pipeline as mode B.
+        //   4. System audio (if the user ticked it) flows from
+        //      getDisplayMedia's audio track. Mic audio still goes
+        //      through the separate audio recorder we already started.
+        //   5. Interaction / console / network metadata continues to be
+        //      collected via the existing channels (postMessage bridge,
+        //      Inspector logs) — totally orthogonal.
+        const iframeEl = inspectorIframeRef?.current;
+        if (!iframeEl) {
+          throw new Error(
+            'iframe ای در دسترس نیست — برای حالت بازرس ویژه ابتدا یک پروژه را در پنل بازرس باز کنید.',
+          );
+        }
+        let tabStream: MediaStream;
+        try {
+          tabStream = await navigator.mediaDevices.getDisplayMedia({
+            // preferCurrentTab is a Chrome-only hint; on browsers that
+            // don't recognise it, the picker still works fine.
+            preferCurrentTab: true,
+            video: { frameRate: 30 },
+            audio: audioConfig.system,
+          } as MediaStreamConstraints);
+        } catch (dmErr: any) {
+          if (audioConfig.system) {
+            // Retry without system audio (some browsers refuse the
+            // combo, esp. on macOS/Linux)
+            tabStream = await navigator.mediaDevices.getDisplayMedia({
+              preferCurrentTab: true,
+              video: { frameRate: 30 },
+              audio: false,
+            } as MediaStreamConstraints);
+            setErrorMsg('صدای سیستم در مرورگر شما پشتیبانی نمی‌شود — فقط ویدئو + میکروفون ضبط می‌شود.');
+          } else {
+            throw dmErr;
           }
         }
-        if (useFrontendPolling) {
-          startScreenshotPolling(sid);
+        videoStreamRef.current = tabStream;
+
+        // If the user stopped sharing from the browser bar, finish the recording.
+        const vTrack = tabStream.getVideoTracks()[0];
+        if (vTrack) {
+          vTrack.onended = () => { stopRecording().catch(() => {}); };
         }
-        // postMessage bridge برای interactions
+
+        // Build an offscreen <video> element to read frames from the
+        // captured tab stream. We don't attach it to the DOM — it just
+        // decodes the MediaStream so we can draw it.
+        const sourceVideo = document.createElement('video');
+        sourceVideo.muted = true;
+        sourceVideo.playsInline = true;
+        sourceVideo.srcObject = tabStream;
+        await sourceVideo.play().catch(() => {});
+        sourceVideoRef.current = sourceVideo;
+
+        // Canvas sized to the iframe's *intrinsic* dimensions (device-
+        // pixel-ratio aware so we don't downsample on retina displays).
+        const dpr = window.devicePixelRatio || 1;
+        const iframeRect0 = iframeEl.getBoundingClientRect();
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(2, Math.round(iframeRect0.width * dpr));
+        canvas.height = Math.max(2, Math.round(iframeRect0.height * dpr));
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('canvas 2d context در دسترس نیست');
+        cropCanvasRef.current = canvas;
+
+        // requestAnimationFrame loop: each frame, compute the iframe's
+        // current rect (handles panel resize / scroll during recording)
+        // and draw the matching region from the source video.
+        let stopped = false;
+        const draw = () => {
+          if (stopped) return;
+          try {
+            const vw = sourceVideo.videoWidth || 0;
+            const vh = sourceVideo.videoHeight || 0;
+            if (vw > 0 && vh > 0) {
+              const rect = iframeEl.getBoundingClientRect();
+              // Tab viewport size (window.innerWidth/Height includes only
+              // the viewport, not chrome — which matches what
+              // getDisplayMedia returns for tab capture in Chrome).
+              const tabW = window.innerWidth;
+              const tabH = window.innerHeight;
+              // Scale: the source-video dimensions map 1:1 onto the tab
+              // viewport, so we can scale the iframe's CSS rect by the
+              // ratio between videoWidth and innerWidth.
+              const sx = (rect.left / tabW) * vw;
+              const sy = (rect.top / tabH) * vh;
+              const sw = (rect.width / tabW) * vw;
+              const sh = (rect.height / tabH) * vh;
+              // Resize canvas if iframe got resized
+              const targetW = Math.max(2, Math.round(rect.width * dpr));
+              const targetH = Math.max(2, Math.round(rect.height * dpr));
+              if (canvas.width !== targetW || canvas.height !== targetH) {
+                canvas.width = targetW;
+                canvas.height = targetH;
+              }
+              ctx.drawImage(
+                sourceVideo,
+                Math.max(0, sx), Math.max(0, sy),
+                Math.max(1, sw), Math.max(1, sh),
+                0, 0, canvas.width, canvas.height,
+              );
+            }
+          } catch (drawErr) {
+            // a single bad frame must not kill the recording
+            console.debug('iframe crop draw failed', drawErr);
+          }
+          rafRef.current = requestAnimationFrame(draw);
+        };
+        rafRef.current = requestAnimationFrame(draw);
+        cropStoppedRef.current = () => { stopped = true; };
+
+        // Build the recorder stream: iframe-cropped video + any system
+        // audio track that came with the tab capture.
+        const cropStream = canvas.captureStream(30);
+        const sysAudio = tabStream.getAudioTracks();
+        for (const t of sysAudio) cropStream.addTrack(t);
+        cropStreamRef.current = cropStream;
+
+        const vrec = new MediaRecorder(cropStream, {
+          mimeType: pickSupportedMime(['video/webm;codecs=vp9', 'video/webm']),
+          videoBitsPerSecond: 1_200_000,
+        });
+        vrec.ondataavailable = async (e) => {
+          if (e.data && e.data.size > 0) {
+            const seq = videoSeqRef.current++;
+            try {
+              await apiUploadBlob(`/${sid}/video-chunk`, e.data, seq);
+            } catch (err) {
+              console.warn('video chunk upload failed', err);
+            }
+          }
+        };
+        vrec.start(15_000); // hourly chunks like mode B
+        videoRecorderRef.current = vrec;
+
+        // postMessage bridge for in-iframe interactions (clicks, scrolls,
+        // form input). This metadata is captured ALONGSIDE the video so
+        // the extractor can correlate events with timestamps.
         attachPostMessageBridge();
       }
 
@@ -592,6 +729,28 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
   }, [phase, apiPost, userNote, getConsoleLogsSnapshot, getBackendLogsSnapshot]);
 
   function cleanupStreams() {
+    // Stop mode-A crop loop before releasing the source stream so the
+    // rAF callback can't read from a destroyed video element.
+    if (cropStoppedRef.current) {
+      try { cropStoppedRef.current(); } catch { /* */ }
+      cropStoppedRef.current = null;
+    }
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    if (cropStreamRef.current) {
+      cropStreamRef.current.getTracks().forEach((t) => t.stop());
+      cropStreamRef.current = null;
+    }
+    if (sourceVideoRef.current) {
+      try {
+        sourceVideoRef.current.pause();
+        sourceVideoRef.current.srcObject = null;
+      } catch { /* */ }
+      sourceVideoRef.current = null;
+    }
+    cropCanvasRef.current = null;
     if (audioStreamRef.current) {
       audioStreamRef.current.getTracks().forEach((t) => t.stop());
       audioStreamRef.current = null;

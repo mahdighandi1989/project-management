@@ -446,8 +446,11 @@ class InspectorRecordingService:
         self, session_id: str, seq: int, chunk_bytes: bytes
     ) -> None:
         session = self._require_session(session_id)
-        if session.mode != "B":
-            raise RuntimeError("video chunks فقط در حالت B پذیرفته می‌شوند")
+        # 🎬 Both modes now produce real webm video chunks via
+        # MediaRecorder. Mode A used to be a screenshot slideshow (frames
+        # only, no video chunks accepted) — that path was a UX dead-end.
+        # The new mode A uses getDisplayMedia + canvas crop and ships
+        # webm chunks just like mode B.
         if session.phase not in ("recording", "stopping"):
             raise RuntimeError(
                 f"cannot append video in phase={session.phase}"
