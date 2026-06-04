@@ -1182,3 +1182,44 @@ async def cloud_code_agent_loop(
         "model_used": sink.get("actual_model") or model,
         "usage_last": sink.get("usage"),
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🆕 (OAuth dispatcher registration) — `_ai_generate` in OversightService
+# consults oauth_model_registry to route cloud_code through this dispatcher
+# instead of falling through to ai_manager.generate (which would fail
+# silently since cloud_code isn't in ai_manager._services).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def _dispatch_cloud_code_for_oversight(
+    prompt: str, *, max_tokens: int, temperature: float,
+) -> str:
+    """Bridge: `_ai_generate`-style call (single prompt → text response)
+    routed through `cloud_code_complete` with the auto tier picker.
+
+    Raises RuntimeError with a clear Persian message when the env token
+    is missing. Anything else (rate limit, subscription cap) propagates
+    as-is so the caller (consensus mode etc.) can decide what to do.
+    """
+    if not cloud_code_is_configured():
+        raise RuntimeError(
+            "CLAUDE_CODE_OAUTH_TOKEN ست نشده — برای استفاده از Cloud Code "
+            "به‌عنوان مدل نظارت، توکن را در env قرار دهید."
+        )
+    return await cloud_code_complete(
+        messages=[{"role": "user", "content": prompt}],
+        model="auto",
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
+
+
+try:
+    from .oauth_model_registry import register_oauth_dispatcher as _register_oauth
+    _register_oauth("cloud_code", _dispatch_cloud_code_for_oversight)
+except Exception as _reg_e:
+    logger.warning(
+        "cloud_code_service: oauth dispatcher registration failed: %s",
+        _reg_e,
+    )
