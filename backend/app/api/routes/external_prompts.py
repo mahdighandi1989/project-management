@@ -612,6 +612,14 @@ async def _verify_then_chain(
             task.status = "pending"
             task.external_locked_by = None
             task.external_lease_until = None
+            # 🚨 (loop fix v2) — followup_round حالا در همین نقطه increment
+            # می‌شود — یعنی فقط وقتی auto-runner واقعاً تسک را به pending
+            # برمی‌گرداند برای retry. قبلاً در apply_followup_after_verify
+            # increment می‌شد که از scheduler/manual/sweeper هم صدا زده
+            # می‌شود — counter اشتباه بالا می‌رفت و workflow های جاری
+            # cancel می‌شدند. حالا semantics درست: followup_round = تعداد
+            # retry های واقعی auto-runner.
+            task.followup_round = (task.followup_round or 0) + 1
             task.updated_at = now_iso()
             try:
                 setattr(task, "_last_remaining_snapshot", _cur_remaining_for_snapshot)

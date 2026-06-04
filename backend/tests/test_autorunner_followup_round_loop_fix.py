@@ -63,34 +63,57 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # ---------------------------------------------------------------------------
 
 
-def test_apply_followup_increments_round_even_on_prompt_failure():
-    """🚨 The critical fix. apply_followup_after_verify must increment
-    followup_round on partial even when generate_followup_prompt fails.
-    Otherwise retries_done stays at 0 forever and the runner loops."""
+def test_apply_followup_does_not_increment_round_on_partial():
+    """🚨 (loop fix v2) — apply_followup_after_verify is called from
+    MANY paths (manual verify, scheduler, sweeper, auto-runner). If
+    we increment followup_round here, every partial verify bumps the
+    counter — max_retries hits prematurely and in-flight workflows
+    get cancelled. The fix moved the increment to _verify_then_chain's
+    retry_same branch (auto-runner specific). This source check pins
+    the removal."""
     src = (
         Path(__file__).resolve().parents[1]
         / "app/services/oversight_service.py"
     ).read_text(encoding="utf-8")
     idx = src.find("async def apply_followup_after_verify")
     assert idx != -1
-    # Slice to next async def
     rest = src[idx + 1:]
     nxt = rest.find("\n    async def ")
     body = rest if nxt == -1 else rest[:nxt]
 
-    # The early-return branch must include the increment.
-    assert "if not new_prompt:" in body
-    # Look for the increment near the early return.
-    early_return_idx = body.find("if not new_prompt:")
-    assert early_return_idx != -1
-    early_return_window = body[early_return_idx:early_return_idx + 1500]
-    assert "task.followup_round = (task.followup_round or 0) + 1" in early_return_window, (
-        "the early-return branch (when new_prompt generation fails) must "
-        "increment followup_round; otherwise the retry counter loops at 0"
+    # The increment line must NOT appear as executable code in the
+    # partial branch. (Comments mentioning the move are fine.)
+    code_lines = [
+        ln for ln in body.splitlines()
+        if "task.followup_round = (task.followup_round or 0) + 1" in ln
+        and not ln.lstrip().startswith("#")
+    ]
+    assert code_lines == [], (
+        f"apply_followup_after_verify must NOT increment followup_round "
+        f"on partial — that responsibility was moved to _verify_then_chain. "
+        f"Found offending lines: {code_lines}"
     )
-    assert "prevents infinite retry loop" in early_return_window, (
-        "fix must include the comment explaining why — easy for the next "
-        "reader to understand the intent"
+    # But reset on done must STILL happen.
+    assert "task.followup_round = 0" in body, (
+        "reset to 0 on done must remain — that's correct semantics"
+    )
+
+
+def test_verify_then_chain_increments_followup_round_on_retry():
+    """🚨 (loop fix v2) — followup_round increment must now happen in
+    _verify_then_chain's retry_same branch. That's the ONLY path that
+    represents a real auto-runner retry."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/external_prompts.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find('if action == "retry_same":')
+    assert idx != -1
+    # Slice to the next action branch
+    rest = src[idx:idx + 3000]
+    assert "task.followup_round = (task.followup_round or 0) + 1" in rest, (
+        "_verify_then_chain retry_same branch must increment "
+        "followup_round (this is the ONLY path that should bump the counter)"
     )
 
 
