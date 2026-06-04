@@ -731,9 +731,21 @@ class TelegramChannel(NotificationChannel):
             ctype = "video/webm"
         elif fname_low.endswith(".mp4"):
             ctype = "video/mp4"
-        elif fname_low.endswith(".webp"):
-            ctype = "image/webp"
+        elif fname_low.endswith(".gif"):
+            # 🎞 GIF → sendAnimation (Telegram plays inline)
+            ctype = "image/gif"
             is_animation = True
+        elif fname_low.endswith(".webp"):
+            # 🚨 WebP animated is broken via sendAnimation — Telegram
+            # treats it as a sticker. Send as document so the user at
+            # least gets the file (and can preview frame-by-frame).
+            # New recordings should produce MP4/GIF via
+            # inspector_recording_finalize._build_video_for_telegram.
+            ctype = "image/webp"
+            return await self.send_document(
+                file_bytes, filename,
+                caption=caption, silent=silent,
+            )
         else:
             ctype = "application/octet-stream"
         # انتخاب endpoint
