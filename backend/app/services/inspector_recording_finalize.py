@@ -59,6 +59,198 @@ def _assemble_video_from_chunks(video_dir: Path) -> Optional[bytes]:
     return b"".join(parts)
 
 
+def _ffmpeg_available() -> bool:
+    """آیا ffmpeg در PATH هست؟"""
+    import shutil as _shutil
+    return _shutil.which("ffmpeg") is not None
+
+
+def _build_mp4_from_frames(
+    frames_dir: Path, max_frames: int = 120, fps: int = 4,
+) -> Optional[Tuple[bytes, str]]:
+    """🎬 Build a real MP4 from PNG/JPG frames using ffmpeg.
+
+    Why this exists: the previous implementation produced an animated WebP.
+    Telegram's `sendAnimation` doesn't actually play WebP — it extracts the
+    first frame and displays a static sticker. Users got a screenshot, not
+    a video. MP4 is the only format Telegram plays inline reliably for
+    iframe-mode recordings.
+
+    Requires ffmpeg in PATH (already used elsewhere in the app for
+    audio/video chunking). Returns None if ffmpeg isn't available so the
+    caller can fall back to GIF.
+    """
+    if not _ffmpeg_available():
+        return None
+    if not frames_dir.exists():
+        return None
+    all_frames = (
+        sorted(frames_dir.glob("frame_*.png"))
+        + sorted(frames_dir.glob("frame_*.jpg"))
+    )
+    if not all_frames:
+        return None
+    # Downsample to max_frames so 30-min recordings don't produce huge MP4s
+    if len(all_frames) > max_frames:
+        step = len(all_frames) / max_frames
+        all_frames = [all_frames[int(i * step)] for i in range(max_frames)]
+
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="mp4build_") as tmp:
+        tmp_path = Path(tmp)
+        # Stage frames as a sequential numbered set so ffmpeg's image2
+        # demuxer can read them in order regardless of original names.
+        for i, src in enumerate(all_frames):
+            ext = src.suffix.lower()
+            dst = tmp_path / f"f_{i:06d}{ext}"
+            try:
+                dst.write_bytes(src.read_bytes())
+            except Exception as _e:
+                logger.warning(f"_build_mp4_from_frames: skip frame {src.name}: {_e}")
+        # Use glob pattern that matches whatever extension we staged
+        # (frames_dir might have both png and jpg).
+        # Pick the most common extension actually present.
+        png_count = len(list(tmp_path.glob("f_*.png")))
+        jpg_count = len(list(tmp_path.glob("f_*.jpg")))
+        if png_count == 0 and jpg_count == 0:
+            return None
+        ext = "png" if png_count >= jpg_count else "jpg"
+        pattern = str(tmp_path / f"f_%06d.{ext}")
+        out_path = tmp_path / "out.mp4"
+        # H.264 yuv420p + faststart so Telegram can preview the first frame
+        # immediately. Even-dimension constraint via scale filter (libx264
+        # requires even width/height).
+        cmd = [
+            "ffmpeg", "-y",
+            "-framerate", str(fps),
+            "-i", pattern,
+            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            "-loglevel", "error",
+            str(out_path),
+        ]
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, timeout=120, check=False,
+            )
+            if proc.returncode != 0 or not out_path.exists():
+                logger.warning(
+                    f"_build_mp4_from_frames: ffmpeg failed rc={proc.returncode} "
+                    f"stderr={(proc.stderr or b'').decode('utf-8', 'replace')[:300]}"
+                )
+                return None
+            data = out_path.read_bytes()
+            if not data:
+                return None
+            logger.info(
+                f"mp4 built from {len(all_frames)} frames at {fps}fps, "
+                f"size={len(data) / 1024:.1f}KB"
+            )
+            return data, "video/mp4"
+        except subprocess.TimeoutExpired:
+            logger.warning("_build_mp4_from_frames: ffmpeg timed out (>120s)")
+            return None
+        except Exception as e:
+            logger.exception(f"_build_mp4_from_frames: ffmpeg crashed: {e}")
+            return None
+
+
+def _build_animated_gif_from_frames(
+    frames_dir: Path, max_frames: int = 60, fps: int = 2,
+) -> Optional[Tuple[bytes, str]]:
+    """🎞 Fallback for hosts without ffmpeg — build animated GIF via Pillow.
+
+    Telegram's `sendAnimation` DOES play GIF inline (unlike WebP). GIFs are
+    larger than MP4 for the same content but they work without ffmpeg.
+    """
+    if not frames_dir.exists():
+        return None
+    all_frames = (
+        sorted(frames_dir.glob("frame_*.png"))
+        + sorted(frames_dir.glob("frame_*.jpg"))
+    )
+    if not all_frames:
+        return None
+    if len(all_frames) > max_frames:
+        step = len(all_frames) / max_frames
+        all_frames = [all_frames[int(i * step)] for i in range(max_frames)]
+    try:
+        from PIL import Image
+    except ImportError:
+        logger.warning("Pillow not installed — cannot build GIF either")
+        return None
+    try:
+        images = []
+        for fp in all_frames:
+            img = Image.open(fp).convert("RGB")
+            # Downscale longer side to 960 so GIF stays manageable
+            max_dim = 960
+            w, h = img.size
+            if max(w, h) > max_dim:
+                scale = max_dim / max(w, h)
+                img = img.resize(
+                    (int(w * scale), int(h * scale)), Image.LANCZOS,
+                )
+            # GIF needs palette mode; quantize each frame
+            images.append(img.quantize(colors=128, method=Image.MEDIANCUT))
+        if not images:
+            return None
+        duration_ms = int(1000 / max(1, fps))
+        buf = io.BytesIO()
+        images[0].save(
+            buf,
+            format="GIF",
+            save_all=True,
+            append_images=images[1:],
+            duration=duration_ms,
+            loop=0,
+            optimize=True,
+            disposal=2,
+        )
+        data = buf.getvalue()
+        for img in images:
+            try:
+                img.close()
+            except Exception:
+                pass
+        logger.info(
+            f"gif built from {len(all_frames)} frames, "
+            f"size={len(data) / 1024:.1f}KB (fallback — ffmpeg not available)"
+        )
+        return data, "image/gif"
+    except Exception as e:
+        logger.exception(f"_build_animated_gif_from_frames failed: {e}")
+        return None
+
+
+def _build_video_for_telegram(
+    frames_dir: Path,
+) -> Optional[Tuple[bytes, str, str]]:
+    """Build the best Telegram-deliverable artifact from a frames dir.
+
+    Returns (bytes, filename, mime) or None. Order of preference:
+      1. MP4 via ffmpeg — Telegram plays inline, smallest file
+      2. GIF via Pillow — Telegram plays inline, larger but no ffmpeg dep
+
+    Animated WebP is intentionally NOT produced — Telegram's
+    sendAnimation/sendVideo APIs both render it as a static sticker
+    instead of playing it (the bug the user reported).
+    """
+    mp4 = _build_mp4_from_frames(frames_dir)
+    if mp4:
+        data, _mime = mp4
+        return data, "recording.mp4", "video/mp4"
+    gif = _build_animated_gif_from_frames(frames_dir)
+    if gif:
+        data, _mime = gif
+        return data, "recording.gif", "image/gif"
+    return None
+
+
 def _build_animated_webp_from_frames(
     frames_dir: Path, max_frames: int = 60, fps: int = 2
 ) -> Optional[Tuple[bytes, str]]:
@@ -544,14 +736,22 @@ async def finalize_recording_session(
         else:
             result["warnings"].append("video chunks خالی بود (mode B)")
     else:
-        # mode A: animated webp از frames
-        anim = _build_animated_webp_from_frames(session.frames_dir)
-        if anim:
-            data, _mime = anim
-            name = f"recording_{session.session_id[:8]}.webp"
-            media_items.append((data, name, "animation"))
+        # mode A: 🎬 Build MP4 (preferred) or GIF (fallback) from frames.
+        # Animated WebP is NOT used — Telegram renders it as a static
+        # sticker instead of playing the video (user-reported bug).
+        built = _build_video_for_telegram(session.frames_dir)
+        if built:
+            data, fname, _mime = built
+            # Keep the session-id prefix so multi-recording threads stay
+            # distinguishable in the chat history.
+            ext = fname.rsplit(".", 1)[-1]
+            name = f"recording_{session.session_id[:8]}.{ext}"
+            kind = "animation" if ext == "gif" else "video"
+            media_items.append((data, name, kind))
         else:
-            result["warnings"].append("frames خالی بود (mode A) — animation ساخته نشد")
+            result["warnings"].append(
+                "frames خالی بود یا ffmpeg/Pillow ناموجود — ویدیو ساخته نشد"
+            )
 
     # audio (جداگانه، اگر موجود)
     from .inspector_recording_processor import _assemble_audio
