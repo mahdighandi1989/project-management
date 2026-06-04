@@ -592,7 +592,42 @@ async def _verify_then_chain(
     elif vstatus == "regressed":
         action = "regressed_todo"
     elif vstatus == "error" or "_crash" in verify_result:
+        # 🚨 (sweeper loop fix) — verify خراب شد (AI fail, balance، یا crash).
+        # status را force به "error" کن تا sweeper این تسک را در
+        # applied_externally_pending_verify ندیده و دوباره پیک نکند.
+        try:
+            async with service._lock:
+                if task.verification_status != "error":
+                    task.verification_status = "error"
+                    task.updated_at = now_iso()
+                    service._save_tasks()
+        except Exception:
+            pass
         action = "chain_next"  # verify crash → keep going (manual review)
+    elif vstatus == "applied_externally_pending_verify":
+        # 🚨 (sweeper loop fix CRITICAL) — این حالت یعنی verify_task اجرا
+        # شد ولی نتوانست به یک verdict برسد (احتمالاً AI fail). اگر اینجا
+        # status را عوض نکنیم، sweeper این تسک را در همان حالت می‌بیند و
+        # برای همیشه دوباره verify-then-chain trigger می‌کند (loop).
+        # کاربر این loop را گزارش داد: workflow های Cancelled به دلیل
+        # chain_next های مکرر روی همان تسک.
+        # status را force به "error" کن — این تسک باید توسط کاربر دستی
+        # مرور و verify شود.
+        logger.warning(
+            f"_verify_then_chain: task={task_id} still in "
+            f"applied_externally_pending_verify after verify run — "
+            f"verify likely failed silently. Forcing status to 'error' "
+            f"to prevent sweeper loop."
+        )
+        try:
+            async with service._lock:
+                task.verification_status = "error"
+                task.updated_at = now_iso()
+                service._save_tasks()
+            vstatus = "error"
+        except Exception:
+            pass
+        action = "chain_next"
 
     logger.info(
         f"_verify_then_chain: task={task_id} vstatus={vstatus} "

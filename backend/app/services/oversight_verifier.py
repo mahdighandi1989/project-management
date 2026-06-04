@@ -3486,7 +3486,27 @@ async def verify_task(
         async with service._lock:
             service.reports.insert(0, report)
             service._save_reports()
-        return {"task": task.to_dict(), "report": report.to_dict()}
+            # 🚨 (sweeper loop fix CRITICAL) — task.verification_status باید
+            # به یک حالت terminal برسد. اگر در applied_externally_pending_verify
+            # بماند، sweeper آن را دوباره و دوباره پیک می‌کند → workflow های
+            # cancelled bin می‌شوند (کاربر این loop را گزارش داد). status=error
+            # سیگنال صریح به consumer ها می‌دهد که verify خراب شد و باید
+            # دستی review شود.
+            task.verification_status = "error"
+            task.updated_at = now_iso()
+            service._save_tasks()
+        return {
+            "task": task.to_dict(),
+            "report": report.to_dict(),
+            # 🚨 schema لازم برای _verify_then_chain — اگر این فیلدها نباشند،
+            # caller exception می‌خورد یا default های اشتباه می‌گیرد.
+            "status_val": "error",
+            "final": False,
+            "streak": getattr(task, "confirmation_streak", 0),
+            "streak_required": 2,
+            "followup_available": False,
+            "followup_round": getattr(task, "followup_round", 0),
+        }
 
     parsed = service._extract_json(response) or {}
     # 🆕 partial JSON recovery — اگر کل parse fail کرد یا فیلدهای مهم ناقص است،
