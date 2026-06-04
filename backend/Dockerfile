@@ -10,6 +10,10 @@ RUN apt-get update && apt-get install -y \
     curl \
     gnupg \
     lsb-release \
+    # 🎬 ffmpeg — required to build MP4 from inspector recording frames
+    # so iframe-mode recordings play inline in Telegram (not a static
+    # sticker). Also used by oversight_extraction for av chunking.
+    ffmpeg \
     # Playwright dependencies
     libnss3 \
     libnspr4 \

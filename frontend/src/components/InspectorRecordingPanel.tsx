@@ -232,7 +232,16 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
         const hasRealAudio = audioStream.getAudioTracks().some((t) => t.enabled && t.readyState === 'live');
         audioStreamRef.current = audioStream;
         if (!hasRealAudio) {
-          console.info('skipping audio recorder — no live audio tracks');
+          // 🚨 (user-reported: "صدا کامل استخراج نشد") — previously this
+          // failed silently; user saw the "mic" checkbox ticked, recorded
+          // 1m45s, and got an empty transcript on the backend. Now we
+          // surface a clear warning so the user knows to check mic
+          // permissions BEFORE recording the whole session.
+          console.warn('inspector recording: no live audio tracks — recording will be silent');
+          const reason = mode === 'A'
+            ? 'حالت بازرس ویژه فقط می‌تواند میکروفون را ضبط کند (نه صدای سیستم — محدودیت مرورگر برای iframe). اگر مجوز میکروفون را رد کرده‌اید یا میکروفونی متصل نیست، transcript خالی خواهد بود.'
+            : 'هیچ track صوتی فعال نیست — transcript خالی خواهد بود. مجوز میکروفون را بررسی کنید.';
+          setErrorMsg(`⚠️ ${reason}`);
         } else {
         const rec = new MediaRecorder(audioStream, {
           mimeType: pickSupportedMime(['audio/webm;codecs=opus', 'audio/webm']),
@@ -474,11 +483,39 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
   function attachPostMessageBridge() {
     const handler = (event: MessageEvent) => {
       const d = event.data;
-      if (!d || typeof d !== 'object' || !d.__inspector_event) return;
+      if (!d || typeof d !== 'object') return;
+      // 🚨 Accept BOTH formats:
+      //   (a) {__inspector_event: true, type, details, selector, x, y}
+      //       — legacy/loose shape used by any caller that just wants to
+      //       forward an event
+      //   (b) {type: "inspector-bridge-event", action, elementInfo,
+      //       position, pageUrl, ...}
+      //       — what InspectorBridge actually sends. Without recognising
+      //       this shape, mode-A iframe interactions were silently
+      //       dropped (user reported "تعاملات و صدا کامل استخراج نشد").
+      const isInspectorEvent =
+        d.__inspector_event === true ||
+        d.type === 'inspector-bridge-event';
+      if (!isInspectorEvent) return;
+      // Map to a unified shape so the backend extractor sees consistent
+      // events regardless of which bridge they came from.
+      const action = String(d.action || d.type || 'unknown');
+      const elementInfo = d.elementInfo || '';
+      const pos = d.position || {};
       interactionEventsRef.current.push({
         ts_ms: Math.max(0, Date.now() - startedAtRef.current),
-        type: String(d.type || 'unknown'),
-        details: { ...(d.details || {}), selector: d.selector, x: d.x, y: d.y },
+        type: action,
+        details: {
+          ...(d.details || {}),
+          elementInfo,
+          selector: d.selector,
+          pageUrl: d.pageUrl,
+          level: d.level,
+          xPercent: pos.xPercent,
+          yPercent: pos.yPercent,
+          x: d.x,
+          y: d.y,
+        },
         source: 'postmessage',
       });
     };
