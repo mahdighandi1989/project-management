@@ -26,6 +26,12 @@ from typing import Any, Dict, List, Optional
 
 import aiohttp
 
+# 🛡 hoisted to module level so a single forgotten local-import can't crash
+# a whole handler (see test_telegram_compose_imports_hoisted.py — this
+# regressed in _start_reminder_flow when the local import was missed and
+# the bot returned NameError on /reminder).
+from .oversight_telegram_compose import get_compose_service, ComposeItem  # noqa: E402,F401
+
 logger = logging.getLogger(__name__)
 
 
