@@ -67,10 +67,11 @@ interface TaskType {
 }
 
 // 🆕 (Cloud Code centralization — UX fix) — task type های اختصاصی Cloud Code.
-// این 4 key فقط برای ردیف cloud_code معنا دارند: helper مرکزی فقط همین‌ها را
+// این 5 key فقط برای ردیف cloud_code معنا دارند: helper مرکزی فقط همین‌ها را
 // می‌خواند. tic زدن «چت/تولید کد/...» برای cloud_code اثری ندارد و کاربر را
-// گیج می‌کرد. در edit modal ردیف cloud_code فقط همین 4 گزینه را نشان می‌دهیم؛
-// در ردیف سایر مدل‌ها این 4 گزینه را پنهان می‌کنیم (برای آن‌ها هم بی‌معنا است).
+// گیج می‌کرد. در edit modal ردیف cloud_code فقط همین 5 گزینه را نشان می‌دهیم؛
+// در ردیف سایر مدل‌ها این 5 گزینه را پنهان می‌کنیم (برای آن‌ها هم بی‌معنا است).
+// (file_extraction در audit2 اضافه شد — مجموع 5 شد.)
 const CLOUD_CODE_TASK_KEYS = new Set([
   'claude_auto_runner',
   'claude_single_task',
