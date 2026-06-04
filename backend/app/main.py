@@ -32,6 +32,24 @@ from .api.routes import external_prompts  # 🆕 External Prompts (Cloud Code in
 from .api.routes import screen_recording  # 🆕 Screen Recording (ضبط ویدئو بازرس ویژه)
 from .api.routes import audio  # 🆕 Audio Transcription (تبدیل گفتار به متن)
 
+# 🚨 (audit critical fix) — eager import to register OAuth dispatchers.
+# `cloud_code_service` self-registers in oauth_model_registry at import time.
+# Without this eager import, a fresh worker process that hasn't yet handled
+# an inspector chat / capability test / models page request leaves the
+# registry empty. Then `_ai_generate(model_id="cloud_code")` (from selected_models
+# in the oversight monitoring picker) silently falls back to the first
+# ai_manager-available model (e.g. DeepSeek) — user thinks Cloud Code is
+# doing monitoring but it isn't. Importing here forces registration at
+# app startup so the parity claim holds from request #1.
+try:
+    from .services import cloud_code_service  # noqa: F401
+except Exception as _cc_e:
+    logging.getLogger(__name__).warning(
+        "eager cloud_code_service import failed: %s — OAuth dispatcher "
+        "will not be registered until first cloud_code-related request",
+        _cc_e,
+    )
+
 # Defensive import for oversight (mustn't block app boot if storage/AI deps misbehave)
 try:
     from .api.routes import oversight  # 🆕 Oversight (مرکز نظارت پروژه‌های GitHub)

@@ -60,6 +60,40 @@ logger = logging.getLogger(__name__)
 OAuthDispatcher = Callable[..., Awaitable[str]]
 
 _REGISTRY: Dict[str, OAuthDispatcher] = {}
+_BOOTSTRAP_DONE: bool = False
+_KNOWN_DISPATCHER_MODULES: tuple = (
+    "app.services.cloud_code_service",
+    # add future OAuth model modules here; they'll be eagerly imported
+    # on first registry access so their `register_oauth_dispatcher` runs
+)
+
+
+def _bootstrap_known_dispatchers() -> None:
+    """🚨 (audit fix) — Belt-and-suspenders eager import.
+
+    `cloud_code_service` (and future OAuth model modules) self-register
+    via `register_oauth_dispatcher` at import time. Normally the eager
+    import in `app/main.py` ensures this happens at startup. But if that
+    line is ever removed or a different entry-point bypasses main.py,
+    consumers of this registry would silently see "no dispatcher" and
+    fall back to the wrong model.
+
+    This bootstrap runs ONCE on first registry access and imports each
+    known module. Import errors are swallowed (the dispatcher just won't
+    register, which the existing tests/consumers handle gracefully).
+    """
+    global _BOOTSTRAP_DONE
+    if _BOOTSTRAP_DONE:
+        return
+    _BOOTSTRAP_DONE = True
+    for mod_path in _KNOWN_DISPATCHER_MODULES:
+        try:
+            __import__(mod_path)
+        except Exception as e:
+            logger.debug(
+                "oauth_model_registry: lazy-bootstrap of %s failed: %s",
+                mod_path, e,
+            )
 
 
 def register_oauth_dispatcher(model_id: str, dispatcher: OAuthDispatcher) -> None:
@@ -79,14 +113,17 @@ def register_oauth_dispatcher(model_id: str, dispatcher: OAuthDispatcher) -> Non
 def get_oauth_dispatcher(model_id: str) -> Optional[OAuthDispatcher]:
     """Return the dispatcher for this model_id, or None if it's a regular
     API-key model (caller should fall through to ai_manager)."""
+    _bootstrap_known_dispatchers()
     return _REGISTRY.get(model_id)
 
 
 def is_oauth_model(model_id: str) -> bool:
     """Quick predicate: is this model_id served by an OAuth dispatcher?"""
+    _bootstrap_known_dispatchers()
     return model_id in _REGISTRY
 
 
 def list_registered_oauth_models() -> list:
     """For diagnostics — returns a list of registered OAuth model ids."""
+    _bootstrap_known_dispatchers()
     return sorted(_REGISTRY.keys())
