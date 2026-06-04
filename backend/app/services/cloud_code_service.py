@@ -689,79 +689,108 @@ async def cloud_code_stream_chat(
         "system": _build_system_blocks(system_prompt),
     }
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        async with client.stream(
-            "POST",
-            CLOUD_CODE_API_URL,
-            headers=_build_headers(token),
-            json=payload,
-        ) as response:
-            if response.status_code != 200:
-                body = await response.aread()
-                snippet = body[:500].decode("utf-8", errors="replace")
-                logger.warning(
-                    "cloud_code stream error %s: %s",
-                    response.status_code,
-                    snippet,
-                )
-                # Helpful Persian guidance per status code — کاربر باید بفهمد
-                # 429 با message="Error" یعنی شناسایی Claude Code ناموفق بوده
-                # (نه quota exhaustion).
-                if response.status_code == 401:
-                    hint = (
-                        "توکن `CLAUDE_CODE_OAUTH_TOKEN` نامعتبر یا منقضی است. "
-                        "با `claude setup-token` یک توکن تازه بساز."
-                    )
-                elif response.status_code == 429:
-                    hint = (
-                        "Anthropic این درخواست را به‌عنوان non-CLI تشخیص داد "
-                        "(rate_limit anti-abuse). اگر این پیام بعد از دیپلوی "
-                        "این فیکس دیدی، چند ثانیه صبر کن و دوباره امتحان کن. "
-                        "اگر تکرار شد، sandbox/IP رو از Anthropic رفع‌محدودیت "
-                        "بخواه یا quota اشتراک Claude Code رو چک کن."
-                    )
-                else:
-                    hint = "جزئیات در پاسخ Anthropic."
-                raise RuntimeError(
-                    f"cloud_code API returned {response.status_code}: "
-                    f"{snippet} | راهنما: {hint}"
-                )
+    # 🚨 (audit fix CRITICAL) — برخی مدل‌های جدید Claude (مثل Opus 4.8+ با
+    # extended thinking) صراحتاً پارامتر `temperature` را reject می‌کنند با
+    # 400 «`temperature` is deprecated for this model». این بدون retry
+    # کل feature های Cloud Code (regenerate prompt، auto-runner verify،
+    # monitoring، …) را silently break می‌کند. حالا اگر این خطای خاص را
+    # گرفتیم، payload را بدون temperature retry می‌کنیم.
+    _attempt_payloads = [payload]
+    _no_temp_payload = {k: v for k, v in payload.items() if k != "temperature"}
+    _attempt_payloads.append(_no_temp_payload)
 
-            async for line in response.aiter_lines():
-                if not line or not line.startswith("data: "):
-                    continue
-                data_str = line[6:].strip()
-                if data_str == "[DONE]":
-                    break
-                try:
-                    data = json.loads(data_str)
-                except json.JSONDecodeError:
-                    continue
-                ev_type = data.get("type")
-                if ev_type == "message_start" and metadata_sink is not None:
-                    # Anthropic streaming first event: message.model = actual
-                    # model served (may differ from requested if Anthropic
-                    # routed to a fallback). Capture for UI display.
-                    msg = data.get("message") or {}
-                    if msg.get("model"):
-                        metadata_sink["actual_model"] = msg["model"]
-                    if msg.get("id"):
-                        metadata_sink["message_id"] = msg["id"]
-                    if msg.get("usage"):
-                        metadata_sink["usage_start"] = msg["usage"]
-                elif ev_type == "message_delta" and metadata_sink is not None:
-                    usage = (data.get("usage") or {})
-                    if usage:
-                        metadata_sink["usage"] = usage
-                    stop_reason = (data.get("delta") or {}).get("stop_reason")
-                    if stop_reason:
-                        metadata_sink["stop_reason"] = stop_reason
-                elif ev_type == "content_block_delta":
-                    delta = data.get("delta") or {}
-                    if delta.get("type") == "text_delta":
-                        text = delta.get("text", "")
-                        if text:
-                            yield text
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for _attempt_idx, _try_payload in enumerate(_attempt_payloads):
+            _is_last_attempt = _attempt_idx == len(_attempt_payloads) - 1
+            async with client.stream(
+                "POST",
+                CLOUD_CODE_API_URL,
+                headers=_build_headers(token),
+                json=_try_payload,
+            ) as response:
+                if response.status_code != 200:
+                    body = await response.aread()
+                    snippet = body[:500].decode("utf-8", errors="replace")
+                    # 🚨 (temperature deprecation retry) — اگر مدل
+                    # temperature را reject کرد و این اولین تلاش است، با
+                    # payload بدون temperature retry می‌کنیم.
+                    if (
+                        response.status_code == 400
+                        and not _is_last_attempt
+                        and ("temperature" in snippet.lower()
+                             and "deprecated" in snippet.lower())
+                    ):
+                        logger.info(
+                            "cloud_code: model %s rejected temperature param "
+                            "(400 deprecated). Retrying without temperature.",
+                            model,
+                        )
+                        continue
+                    logger.warning(
+                        "cloud_code stream error %s: %s",
+                        response.status_code,
+                        snippet,
+                    )
+                    # Helpful Persian guidance per status code — کاربر باید بفهمد
+                    # 429 با message="Error" یعنی شناسایی Claude Code ناموفق بوده
+                    # (نه quota exhaustion).
+                    if response.status_code == 401:
+                        hint = (
+                            "توکن `CLAUDE_CODE_OAUTH_TOKEN` نامعتبر یا منقضی است. "
+                            "با `claude setup-token` یک توکن تازه بساز."
+                        )
+                    elif response.status_code == 429:
+                        hint = (
+                            "Anthropic این درخواست را به‌عنوان non-CLI تشخیص داد "
+                            "(rate_limit anti-abuse). اگر این پیام بعد از دیپلوی "
+                            "این فیکس دیدی، چند ثانیه صبر کن و دوباره امتحان کن. "
+                            "اگر تکرار شد، sandbox/IP رو از Anthropic رفع‌محدودیت "
+                            "بخواه یا quota اشتراک Claude Code رو چک کن."
+                        )
+                    else:
+                        hint = "جزئیات در پاسخ Anthropic."
+                    raise RuntimeError(
+                        f"cloud_code API returned {response.status_code}: "
+                        f"{snippet} | راهنما: {hint}"
+                    )
+
+                # ✅ 200 OK — stream the response then exit the retry loop.
+                async for line in response.aiter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data_str = line[6:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    ev_type = data.get("type")
+                    if ev_type == "message_start" and metadata_sink is not None:
+                        # Anthropic streaming first event: message.model = actual
+                        # model served (may differ from requested if Anthropic
+                        # routed to a fallback). Capture for UI display.
+                        msg = data.get("message") or {}
+                        if msg.get("model"):
+                            metadata_sink["actual_model"] = msg["model"]
+                        if msg.get("id"):
+                            metadata_sink["message_id"] = msg["id"]
+                        if msg.get("usage"):
+                            metadata_sink["usage_start"] = msg["usage"]
+                    elif ev_type == "message_delta" and metadata_sink is not None:
+                        usage = (data.get("usage") or {})
+                        if usage:
+                            metadata_sink["usage"] = usage
+                        stop_reason = (data.get("delta") or {}).get("stop_reason")
+                        if stop_reason:
+                            metadata_sink["stop_reason"] = stop_reason
+                    elif ev_type == "content_block_delta":
+                        delta = data.get("delta") or {}
+                        if delta.get("type") == "text_delta":
+                            text = delta.get("text", "")
+                            if text:
+                                yield text
+                return  # success — exit retry loop
 
 
 async def cloud_code_complete(
@@ -879,14 +908,35 @@ async def cloud_code_message(
     if tools:
         payload["tools"] = tools
 
+    # 🚨 (temperature deprecation retry) — مثل cloud_code_stream_chat،
+    # اگر مدل temperature را reject کرد با 400، بدون temperature retry کن.
+    _attempt_payloads = [payload]
+    _attempt_payloads.append({k: v for k, v in payload.items() if k != "temperature"})
+
+    response = None
     async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(
-            CLOUD_CODE_API_URL,
-            headers=_build_headers(token),
-            json=payload,
-        )
-        if response.status_code != 200:
+        for _attempt_idx, _try_payload in enumerate(_attempt_payloads):
+            _is_last_attempt = _attempt_idx == len(_attempt_payloads) - 1
+            response = await client.post(
+                CLOUD_CODE_API_URL,
+                headers=_build_headers(token),
+                json=_try_payload,
+            )
+            if response.status_code == 200:
+                break
             snippet = response.text[:500]
+            if (
+                response.status_code == 400
+                and not _is_last_attempt
+                and ("temperature" in snippet.lower()
+                     and "deprecated" in snippet.lower())
+            ):
+                logger.info(
+                    "cloud_code_message: model %s rejected temperature param "
+                    "(400 deprecated). Retrying without temperature.",
+                    model,
+                )
+                continue
             if response.status_code == 401:
                 hint = "OAuth token نامعتبر یا منقضی. با `claude setup-token` تازه بساز."
             elif response.status_code == 429:
@@ -896,6 +946,7 @@ async def cloud_code_message(
             raise RuntimeError(
                 f"cloud_code API returned {response.status_code}: {snippet} | {hint}"
             )
+        # success
         data = response.json()
         if metadata_sink is not None:
             metadata_sink["actual_model"] = data.get("model") or model
