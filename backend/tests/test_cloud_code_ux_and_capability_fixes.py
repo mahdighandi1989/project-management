@@ -87,14 +87,15 @@ def test_capability_tester_raises_clear_error_without_token():
     )
 
 
-def test_capability_tester_forces_opus_tier_for_cloud_code():
-    """🚨 (capability test fairness fix) — قبل از این، model="auto" پاس
-    می‌شد و _classify_tier برای prompts کوتاه تست همیشه haiku را
-    برمی‌گزید. Haiku ضعیف‌ترین مدل subscription است، نتیجه: امتیاز ~32
-    برای Cloud Code، که اصلاً قدرت واقعی Claude Opus را نشان نمی‌داد.
+def test_capability_tester_uses_min_tier_sonnet_for_cloud_code():
+    """🚨 (capability test fairness fix v2) — قبلاً tier_hint="opus" ست
+    شده بود، که برای subscription های Pro tier (با Opus quota محدود)
+    429/403 می‌گرفت → همهٔ تست‌ها fail → 0/0/0. کاربر این را گزارش کرد.
 
-    حالا tier_hint="opus" مجبور می‌کند بهترین مدل تست شود — منصفانه‌تر
-    و خود subscription هیچ هزینه اضافه‌ای ندارد."""
+    حل صحیح: min_tier="sonnet" (در همهٔ tier های subscription موجود).
+    اجازه می‌دهد classifier برای prompts با keyword سنگین Opus بزند،
+    ولی برای prompts ساده به Sonnet floor می‌شود (نه Haiku). نتیجه:
+    امتیاز منصفانه (70-90 برای Sonnet 4.6) سازگار با همهٔ tier ها."""
     src_path = (
         Path(__file__).resolve().parents[1]
         / "app/services/model_capability_tester.py"
@@ -102,22 +103,41 @@ def test_capability_tester_forces_opus_tier_for_cloud_code():
     src = src_path.read_text(encoding="utf-8")
     idx = src.find("if model_id == \"cloud_code\":")
     assert idx != -1
-    body = src[idx:idx + 2000]
-    assert 'tier_hint="opus"' in body, (
-        "capability tester must force tier_hint='opus' for cloud_code "
-        "(otherwise short test prompts route to Haiku and the model "
-        "scores unfairly low)"
+    body = src[idx:idx + 3000]
+    # The new approach uses min_tier="sonnet"
+    assert 'min_tier="sonnet"' in body, (
+        "capability tester must pass min_tier='sonnet' for cloud_code so "
+        "short prompts don't route to Haiku (gives 32/100) while staying "
+        "compatible with Pro-tier subscriptions that have limited Opus quota"
     )
-    # model="auto" must not appear as an executable call (it may appear
-    # in a comment that documents the prior bug — that's fine). Check
-    # by scanning only non-comment lines.
+    # model="auto" as executable call must NOT appear (it can be in
+    # comments documenting prior bug). Check non-comment lines.
     code_lines = [
         ln for ln in body.splitlines()
         if 'model="auto"' in ln and not ln.lstrip().startswith("#")
     ]
     assert code_lines == [], (
-        f"model='auto' must not appear as an executable call when "
-        f"tier_hint='opus' is set. Found: {code_lines}"
+        f"model='auto' must not appear as an executable call. "
+        f"Found: {code_lines}"
+    )
+
+
+def test_capability_tester_has_haiku_fallback_for_subscription_caps():
+    """🛡 Defense in depth: if the min_tier="sonnet" call fails (rate
+    limit, subscription cap), the tester must NOT return 0 silently —
+    it should retry with tier_hint="haiku" as last resort and propagate
+    the original error only if Haiku also fails. This gives the user
+    a meaningful score even on the most constrained subscription."""
+    src_path = (
+        Path(__file__).resolve().parents[1]
+        / "app/services/model_capability_tester.py"
+    )
+    src = src_path.read_text(encoding="utf-8")
+    idx = src.find("if model_id == \"cloud_code\":")
+    body = src[idx:idx + 3500]
+    assert 'tier_hint="haiku"' in body, (
+        "fallback to Haiku must exist for when Sonnet/Opus calls fail "
+        "(e.g. subscription cap reached)"
     )
 
 

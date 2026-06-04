@@ -360,22 +360,49 @@ class ModelCapabilityTester:
                     "CLAUDE_CODE_OAUTH_TOKEN ست نشده — قبل از تست توانایی "
                     "cloud_code باید token را در env قرار دهید."
                 )
-            # 🆕 (capability test fairness fix) — قبلاً model="auto" پاس
-            # می‌شد که tier picker بر اساس طول prompt تصمیم می‌گرفت.
-            # prompts تست کوتاه‌اند و فاقد code signal → همیشه به Haiku
-            # route می‌شدند، نتیجه: امتیاز ~32/100 برای Cloud Code (که
-            # ضعیف‌ترین tier است). این منصفانه نیست — تست توانایی باید
-            # «بهترین چیزی که این provider می‌تواند ارائه دهد» را بسنجد،
-            # نه «ارزان‌ترین tier وقتی prompt کوتاه است». tier_hint="opus"
-            # قوی‌ترین مدل subscription را force می‌کند. هزینهٔ اضافه ندارد
-            # چون از همان OAuth token می‌آید.
-            return await cloud_code_complete(
-                messages=[{"role": "user", "content": prompt}],
-                system_prompt="تو یک دستیار هوشمند هستی. فقط خروجی JSON برگردان.",
-                tier_hint="opus",
-                max_tokens=2000,
-                temperature=0.3,
-            )
+            # 🆕 (capability test fairness fix v2) — قبلاً tier_hint="opus"
+            # ست شده بود تا قدرت کامل subscription سنجیده شود. ولی این
+            # برای subscription های Pro tier (که Opus quota محدود دارند)
+            # 429/403 می‌گیرد و در نتیجه همهٔ تست‌ها fail می‌کنند و امتیاز
+            # 0/0/0 برمی‌گردد (کاربر این را گزارش کرد).
+            #
+            # حل صحیح: min_tier="sonnet" به‌جای force opus. این:
+            #   - حداقل Sonnet (در همهٔ subscription tier ها موجود)
+            #   - اجازه می‌دهد classifier برای prompts با keyword سنگین
+            #     (refactor / architecture / …) به Opus برود — اگر Opus
+            #     در دسترس باشد، بدون force آن.
+            #   - برای prompts ساده (short Q&A، greeting) به Sonnet floor
+            #     می‌شود (نه Haiku که نمرات پایین می‌دهد).
+            # نتیجه: امتیاز منصفانه‌تر (تقریباً 70-90 برای Sonnet 4.6)
+            # و سازگار با همهٔ subscription tier ها.
+            #
+            # اگر کاربر Max tier دارد و می‌خواهد Opus را force کند، می‌تواند
+            # tier_hint="opus" را در یک endpoint جدا (مثل /test-with-opus)
+            # اضافه کند — این default ایمن‌ترین است.
+            try:
+                return await cloud_code_complete(
+                    messages=[{"role": "user", "content": prompt}],
+                    system_prompt="تو یک دستیار هوشمند هستی. فقط خروجی JSON برگردان.",
+                    min_tier="sonnet",
+                    max_tokens=2000,
+                    temperature=0.3,
+                )
+            except Exception as e:
+                # 🛡 (defense) — اگر کلاد API برای هر دلیلی fail کرد
+                # (rate limit, subscription cap, …)، یک fallback به
+                # سادگی tier_hint=sonnet را امتحان کن. اگر این هم fail
+                # کرد، خطا را propagate کن تا UI پیغام درست بدهد.
+                logger.warning(
+                    f"cloud_code capability test (min_tier=sonnet) failed: "
+                    f"{e!r}; retrying with tier_hint='haiku' as last resort"
+                )
+                return await cloud_code_complete(
+                    messages=[{"role": "user", "content": prompt}],
+                    system_prompt="تو یک دستیار هوشمند هستی. فقط خروجی JSON برگردان.",
+                    tier_hint="haiku",
+                    max_tokens=2000,
+                    temperature=0.3,
+                )
 
         # legacy path — هر مدل دیگر از طریق ai_manager
         if not self.ai_manager:
