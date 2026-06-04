@@ -437,3 +437,206 @@ async def test_verify_then_chain_regressed_archives_with_regressed_reason():
     assert task.status == "abandoned"
     # chain_next, not retry
     assert dispatched["args"]["target_task_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# 🚨 TODO file content richness — the user explicitly asked for "what
+# remains" to be enumerated in the file itself, not just a generic
+# placeholder. These tests render `_write_todo_for_task` against a
+# realistic verify_result and assert the markdown contains the actual
+# remaining_parts, done_parts, next_actions, AC list, etc. — so the user
+# can read the TODO file standalone and know what to do.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_write_todo_includes_remaining_and_done_parts():
+    """When verify_result has rich report data, the TODO must surface:
+    - remaining_parts as a checkable list (the user's main question)
+    - done_parts so the user knows where Claude got to
+    - next_actions as concrete next steps
+    - confidence / verifier model / report id
+
+    Generic placeholder text is NOT enough."""
+    from app.api.routes import external_prompts
+
+    captured = {}
+
+    async def fake_create_or_update_file(*, owner, repo, path, content, **kw):
+        captured["path"] = path
+        captured["content"] = content
+        return {"ok": True}
+
+    fake_pr = SimpleNamespace(create_or_update_file=fake_create_or_update_file)
+
+    task = SimpleNamespace(
+        id="task_abcdef1234",
+        watched_id="w1",
+        title="Add /metrics endpoint",
+        raw_idea="کاربر می‌خواهد روی /metrics آمار ببیند",
+        prompt="Add a /metrics endpoint that returns json…",
+        verification_status="partial",
+        followup_round=3,
+        archived_reason="max_retries",
+        last_summary="",
+        acceptance_criteria=[
+            "/metrics endpoint exists and returns 200",
+            {"text": "metrics endpoint exposes p50/p95 latency"},
+            "GET /metrics is documented in README",
+        ],
+        followup_prompt="Continue: implement p95 calculation in MetricsAggregator…",
+        last_verification_report_id="rep_123",
+    )
+
+    watched = SimpleNamespace(
+        id="w1", repo_full_name="acme/api",
+    )
+
+    verify_result = {
+        "report": {
+            "id": "rep_999",
+            "done_parts": [
+                "FastAPI route /metrics registered",
+                "Returns 200 OK with json body",
+            ],
+            "remaining_parts": [
+                "p95 latency calculation missing — only p50 implemented",
+                "README docs not updated with the new endpoint",
+            ],
+            "next_actions": [
+                "Wire p95 into MetricsAggregator.compute()",
+                "Add `## /metrics` section to README.md",
+            ],
+            "confidence_score": 0.62,
+            "model_id": "gemini-2.5-flash",
+            "evidence": {
+                "commits": ["abc1234", "def5678"],
+                "files": ["app/api/routes/metrics.py", "tests/test_metrics.py"],
+                "issues": [],
+            },
+            "raw_response": (
+                '{"summary": "Endpoint exists but p95 missing and README '
+                'untouched.", "done_parts": [], "remaining_parts": []}'
+            ),
+        },
+    }
+
+    with patch(
+        "app.services.github_pr_service.get_github_pr_service",
+        return_value=fake_pr,
+    ), patch(
+        "app.services.prompt_github_sync._resolve_repo_and_branch",
+        return_value=("acme", "api", "main"),
+    ), patch(
+        "app.services.prompt_github_sync._commit_message",
+        return_value="todo: …",
+    ), patch(
+        "app.services.oversight_service.get_github_token",
+        return_value="ghp_x",
+    ):
+        await external_prompts._write_todo_for_task(
+            task=task, watched=watched, verify_result=verify_result,
+        )
+
+    assert "content" in captured, "TODO file was not written"
+    body = captured["content"]
+
+    # Headline section: remaining_parts must appear verbatim as checklist
+    assert "p95 latency calculation missing" in body, (
+        "remaining_parts text must appear in TODO file so the user can read "
+        "what's left without opening the panel"
+    )
+    assert "README docs not updated" in body
+    assert "- [ ] p95 latency" in body, (
+        "remaining items must be formatted as unchecked checklist items"
+    )
+
+    # Done parts shown so user knows the starting point
+    assert "FastAPI route /metrics registered" in body
+    assert "- [x] " in body, "done_parts must be formatted as checked items"
+
+    # Next actions enumerated
+    assert "Wire p95 into MetricsAggregator" in body
+    assert "Add `## /metrics` section to README.md" in body
+
+    # Acceptance criteria reference — including dict form
+    assert "/metrics endpoint exists and returns 200" in body
+    assert "metrics endpoint exposes p50/p95 latency" in body
+
+    # Verifier metadata
+    assert "0.62" in body, "confidence score must surface"
+    assert "gemini-2.5-flash" in body, "verifier model must be visible"
+    assert "rep_999" in body or "rep_123" in body, "report id must be visible"
+
+    # Evidence section
+    assert "abc1234" in body, "commits must be listed"
+    assert "app/api/routes/metrics.py" in body, "touched files must be listed"
+
+    # Verifier summary extracted from raw_response
+    assert "Endpoint exists but p95 missing" in body
+
+    # Original task context
+    assert "Add /metrics endpoint" in body, "title must appear"
+    assert "کاربر می‌خواهد روی /metrics آمار ببیند" in body, (
+        "raw_idea must be carried over so the file is self-contained"
+    )
+
+    # Followup prompt for copy/paste
+    assert "MetricsAggregator" in body, "followup prompt must be included"
+
+    # Archive reason must be explained in Persian
+    assert "max_retries" in body
+    assert "سقف retry" in body or "retry" in body.lower()
+
+
+@pytest.mark.asyncio
+async def test_write_todo_handles_missing_report_gracefully():
+    """If verify crashed and there's no rich report, the TODO must still
+    be written but tell the user clearly that the verifier didn't return
+    a verdict — pointing them to the AC list as the manual checklist."""
+    from app.api.routes import external_prompts
+
+    captured = {}
+
+    async def fake_create_or_update_file(*, owner, repo, path, content, **kw):
+        captured["content"] = content
+        return {"ok": True}
+
+    fake_pr = SimpleNamespace(create_or_update_file=fake_create_or_update_file)
+
+    task = SimpleNamespace(
+        id="task_xxxxx", watched_id="w1", title="Fix login bug",
+        raw_idea="", prompt="",
+        verification_status="error", followup_round=1,
+        archived_reason="max_retries", last_summary="",
+        acceptance_criteria=["Login form submits without 500"],
+        followup_prompt="",
+        last_verification_report_id=None,
+    )
+    watched = SimpleNamespace(id="w1", repo_full_name="acme/api")
+
+    # Verify crashed → no report
+    verify_result = {"verification_status": "error", "_crash": "boom"}
+
+    with patch(
+        "app.services.github_pr_service.get_github_pr_service",
+        return_value=fake_pr,
+    ), patch(
+        "app.services.prompt_github_sync._resolve_repo_and_branch",
+        return_value=("acme", "api", "main"),
+    ), patch(
+        "app.services.prompt_github_sync._commit_message",
+        return_value="todo: …",
+    ), patch(
+        "app.services.oversight_service.get_github_token",
+        return_value="ghp_x",
+    ):
+        await external_prompts._write_todo_for_task(
+            task=task, watched=watched, verify_result=verify_result,
+        )
+
+    body = captured["content"]
+    # Even with no report, AC list must be present as the fallback checklist
+    assert "Login form submits without 500" in body
+    # And the user must see a clear "no remaining returned" note
+    assert "remaining_part" in body or "AC" in body or "Acceptance" in body

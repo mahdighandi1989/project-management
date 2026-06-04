@@ -760,7 +760,8 @@ async def _write_todo_for_task(
     """نوشتن فایل TO-DO/todo-task-{id}.md به ریپوی watched.
 
     این مسیر فقط برای تسک‌هایی است که Claude نتوانست در سقف retry تمام کند.
-    کاربر بعداً این TODO file ها را در پنل می‌بیند یا روی GitHub نگاه می‌کند.
+    فایل باید *self-contained* باشد — کاربر با خواندن همین فایل بفهمد دقیقاً
+    چه چیزی مانده و چه قدم‌هایی باید بردارد، بدون نیاز به مراجعه به پنل.
     """
     try:
         from ...services.github_pr_service import get_github_pr_service
@@ -768,6 +769,7 @@ async def _write_todo_for_task(
             _resolve_repo_and_branch, _commit_message,
         )
         from ...services.oversight_service import get_github_token
+        from ...services.oversight_verifier import _ac_text_of
         resolved = _resolve_repo_and_branch(watched)
         if not resolved:
             return
@@ -777,30 +779,194 @@ async def _write_todo_for_task(
             return
         short_id = (task.id or "")[:8]
         path = f"TO-DO/todo-task-{short_id}.md"
-        # محتوای فایل TODO
+
+        # ------------------------------------------------------------------
+        # Pull rich data from verify_result
+        # ------------------------------------------------------------------
         vstatus = getattr(task, "verification_status", "?")
         retries = getattr(task, "followup_round", 0) or 0
-        lines = [
-            f"# TODO — Task {short_id} (manual completion needed)",
+        archived_reason = getattr(task, "archived_reason", None) or "max_retries"
+
+        report = verify_result.get("report") or {}
+        done_parts: List[str] = list(report.get("done_parts") or [])
+        remaining_parts: List[str] = list(report.get("remaining_parts") or [])
+        next_actions: List[str] = list(report.get("next_actions") or [])
+        confidence = float(report.get("confidence_score") or 0.0)
+        evidence = report.get("evidence") or {}
+        report_id = report.get("id") or getattr(
+            task, "last_verification_report_id", None
+        )
+        verifier_model = report.get("model_id") or "—"
+
+        # Extract summary text from raw_response (verifier's narrative).
+        # OversightReport doesn't have a `summary` field directly, but the
+        # JSON inside raw_response has one — pull it for human context.
+        summary_text = ""
+        try:
+            import re as _re
+            raw = str(report.get("raw_response") or "")
+            m = _re.search(
+                r'"summary"\s*:\s*"((?:[^"\\]|\\.)*)"', raw
+            )
+            if m:
+                summary_text = m.group(1).replace('\\n', '\n').replace('\\"', '"')
+        except Exception:
+            summary_text = ""
+        if not summary_text:
+            summary_text = (getattr(task, "last_summary", "") or "").strip()
+
+        # Original task context
+        title = (getattr(task, "title", "") or "").strip()
+        raw_idea = (getattr(task, "raw_idea", "") or "").strip()
+        original_prompt = (getattr(task, "prompt", "") or "").strip()
+        acs = list(getattr(task, "acceptance_criteria", []) or [])
+        ac_texts = [t for t in (_ac_text_of(a) for a in acs) if t]
+        followup_prompt = (getattr(task, "followup_prompt", "") or "").strip()
+
+        # Evidence breakdown
+        ev_commits = list(evidence.get("commits") or []) if isinstance(evidence, dict) else []
+        ev_files = list(evidence.get("files") or []) if isinstance(evidence, dict) else []
+        ev_issues = list(evidence.get("issues") or []) if isinstance(evidence, dict) else []
+
+        # ------------------------------------------------------------------
+        # Build markdown
+        # ------------------------------------------------------------------
+        reason_fa = {
+            "max_retries": "Claude به سقف retry رسید بدون اینکه verify=done شود",
+            "regressed":   "verify تشخیص داد تسک نسبت به وضعیت قبلی regress کرده",
+        }.get(archived_reason, f"archived_reason={archived_reason}")
+
+        lines: List[str] = [
+            f"# TODO — Task {short_id} (نیاز به تکمیل دستی)",
+            "",
+            f"> **{title}**",
+            "",
+            "## 🔎 خلاصه وضعیت",
             "",
             f"- **task_id**: `{task.id}`",
-            f"- **title**: {task.title}",
+            f"- **repo**: `{watched.repo_full_name}`",
             f"- **verification_status**: `{vstatus}`",
+            f"- **archived_reason**: `{archived_reason}` — {reason_fa}",
             f"- **retries_done**: {retries}",
+            f"- **verifier confidence**: {confidence:.2f}",
+            f"- **verifier model**: `{verifier_model}`",
+            f"- **report_id**: `{report_id or '—'}`",
             f"- **created_at**: {now_iso()}",
             "",
-            "## چرا در TO-DO قرار گرفت",
-            "",
-            f"Claude Auto-Runner نتوانست این تسک را در سقف retry به verify=done"
-            f" برساند (verification_status={vstatus}). برای ادامه نیاز به",
-            "بازنگری انسانی است.",
-            "",
-            "## آخرین خطا/خلاصه",
-            "",
-            "```",
-            str(verify_result.get("verification_status") or "")[:500],
-            "```",
         ]
+
+        # --- Headline section: what remains (the user's main question) ---
+        lines += [
+            "## 🚧 چه چیزی باقی مانده (مهم‌ترین بخش)",
+            "",
+        ]
+        if remaining_parts:
+            lines += [f"- [ ] {item}" for item in remaining_parts]
+        else:
+            lines += [
+                "_verifier هیچ remaining_part صریحی برنگرداند._ "
+                "احتمالاً verify نتوانست clear verdict بدهد — به Acceptance "
+                "Criteria پایین مراجعه و دستی چک کنید کدام AC هنوز satisfy نیست.",
+            ]
+        lines.append("")
+
+        # --- Concrete next actions (verifier's suggestions) ---
+        if next_actions:
+            lines += [
+                "## 👉 قدم‌های بعدی پیشنهادی (از verifier)",
+                "",
+            ]
+            lines += [f"{i+1}. {a}" for i, a in enumerate(next_actions)]
+            lines.append("")
+
+        # --- What Claude DID finish (so user knows where to start) ---
+        if done_parts:
+            lines += [
+                "## ✅ چه چیزی Claude انجام داد",
+                "",
+            ]
+            lines += [f"- [x] {item}" for item in done_parts]
+            lines.append("")
+
+        # --- Verifier narrative ---
+        if summary_text:
+            lines += [
+                "## 📝 خلاصهٔ verifier",
+                "",
+                summary_text.strip()[:2000],
+                "",
+            ]
+
+        # --- Full acceptance criteria for reference ---
+        if ac_texts:
+            lines += [
+                "## 📋 Acceptance Criteria (مرجع کامل)",
+                "",
+                "این لیست معیار done شدن تسک است — هر آیتمی که هنوز satisfy نیست",
+                "باید توسط انسان تکمیل شود.",
+                "",
+            ]
+            lines += [f"- {t}" for t in ac_texts]
+            lines.append("")
+
+        # --- Evidence: what the verifier saw ---
+        if ev_commits or ev_files or ev_issues:
+            lines += ["## 🔬 Evidence که verifier پیدا کرد", ""]
+            if ev_commits:
+                lines.append("**Commits:**")
+                lines += [f"- `{c}`" for c in ev_commits[:20]]
+                lines.append("")
+            if ev_files:
+                lines.append("**Files lams شده:**")
+                lines += [f"- `{f}`" for f in ev_files[:30]]
+                lines.append("")
+            if ev_issues:
+                lines.append("**Issues:**")
+                lines += [f"- {i}" for i in ev_issues[:20]]
+                lines.append("")
+
+        # --- Original task description (so file is self-contained) ---
+        if raw_idea:
+            lines += [
+                "## 💡 ایدهٔ اصلی تسک",
+                "",
+                raw_idea[:1500],
+                "",
+            ]
+        if original_prompt and original_prompt != raw_idea:
+            excerpt = original_prompt[:2000]
+            if len(original_prompt) > 2000:
+                excerpt += "\n\n_[truncated — full prompt در پنل]_"
+            lines += [
+                "## 📜 پرامپت اصلی (excerpt)",
+                "",
+                "```",
+                excerpt,
+                "```",
+                "",
+            ]
+
+        # --- Last regenerated follow-up prompt (ready to copy/paste) ---
+        if followup_prompt:
+            lines += [
+                "## 🔁 آخرین followup prompt تولیدشده",
+                "",
+                "_می‌توانید این را در یک agent جدید paste کنید تا کار را ادامه دهد._",
+                "",
+                "```",
+                followup_prompt[:3000],
+                "```",
+                "",
+            ]
+
+        # --- Footer ---
+        lines += [
+            "---",
+            "",
+            f"_این فایل توسط Claude Auto-Runner تولید شده است. تسک با حالت_ "
+            f"`{archived_reason}` _آرشیو شده و دیگر به‌صورت خودکار pickup نمی‌شود._",
+        ]
+
         content = "\n".join(lines)
         pr = get_github_pr_service()
         await pr.create_or_update_file(
