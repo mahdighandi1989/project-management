@@ -1552,7 +1552,45 @@ class OversightService:
     async def _ai_generate(
         self, prompt: str, model_id: Optional[str] = None, max_tokens: int = 3000, temperature: float = 0.3
     ) -> str:
-        """تولید پاسخ با AI Manager موجود (یک مدل)."""
+        """تولید پاسخ با AI Manager موجود (یک مدل).
+
+        🆕 (Cloud Code parity) — اگر model_id="cloud_code" باشد، به جای
+        ai_manager.generate (که cloud_code را نمی‌شناسد و silently fall
+        back می‌کند به اولین مدل API-key دار)، مستقیماً cloud_code_complete
+        را با tier picker auto صدا می‌زنیم. این یک تغییر = همهٔ 19 caller
+        (verify, scan, monitor, deep_scan, consensus mode، …) خودکار با
+        cloud_code کار می‌کنند — همان‌طور که با DeepSeek/Gemini کار می‌کردند.
+
+        Fallback: اگر cloud_code call راحت fail کرد (rate limit, subscription
+        cap, OAuth token خالی)، caller معمولاً consensus mode دارد و سایر
+        مدل‌های selected_models را به‌صورت طبیعی استفاده می‌کند. exception
+        را propagate می‌کنیم تا caller تصمیم بگیرد.
+        """
+        if model_id == "cloud_code":
+            try:
+                from .cloud_code_service import (
+                    cloud_code_complete,
+                    cloud_code_is_configured,
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"cloud_code service import failed: {e}"
+                )
+            if not cloud_code_is_configured():
+                raise RuntimeError(
+                    "CLAUDE_CODE_OAUTH_TOKEN ست نشده — برای استفاده از "
+                    "Cloud Code به‌عنوان مدل نظارت، توکن را در env قرار دهید."
+                )
+            # tier picker auto: کلاسیفایر بر اساس prompt حساسیت مدل را انتخاب
+            # می‌کند. برای prompt های scan/verify طولانی و فنی، معمولاً Sonnet
+            # یا Opus انتخاب می‌شود. هزینهٔ اضافه ندارد — همان OAuth subscription.
+            return await cloud_code_complete(
+                messages=[{"role": "user", "content": prompt}],
+                model="auto",
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+
         from .ai_manager import get_ai_manager
         from .ai_base import Message
 
@@ -1591,19 +1629,44 @@ class OversightService:
 
         manager = get_ai_manager()
         available = {m.id: m for m in manager.get_available_models()}
-        if not available:
+
+        # 🆕 (Cloud Code parity) — cloud_code در ai_manager._services نیست
+        # ولی یک مدل معتبر است (از OAuth کار می‌کند). اگر در model_ids بود
+        # و env token هست، آن را به‌عنوان معتبر بپذیر تا silently drop نشود.
+        try:
+            from .cloud_code_service import cloud_code_is_configured
+            cc_ok = cloud_code_is_configured()
+        except Exception:
+            cc_ok = False
+
+        if not available and not cc_ok:
             raise RuntimeError("هیچ مدل AI فعالی نیست.")
 
         targets: List[str] = []
         for mid in model_ids or []:
             if mid in available:
                 targets.append(mid)
+            elif mid == "cloud_code" and cc_ok:
+                targets.append(mid)
         if not targets:
-            # fallback: اولین مدل
-            targets = [next(iter(available))]
+            # fallback: اولین مدل موجود (یا cloud_code اگر فقط آن باشد)
+            if available:
+                targets = [next(iter(available))]
+            elif cc_ok:
+                targets = ["cloud_code"]
 
         async def _run_one(mid: str) -> Dict[str, str]:
             try:
+                if mid == "cloud_code":
+                    # 🆕 مسیر OAuth — همان منطق _ai_generate.
+                    from .cloud_code_service import cloud_code_complete
+                    content = await cloud_code_complete(
+                        messages=[{"role": "user", "content": prompt}],
+                        model="auto",
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    )
+                    return {"model_id": mid, "content": content, "error": ""}
                 resp = await manager.generate(
                     model_id=mid,
                     messages=[Message(role="user", content=prompt)],
