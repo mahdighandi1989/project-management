@@ -150,7 +150,12 @@ async def append_video_chunk(
     seq: int = Form(...),
     chunk: UploadFile = File(...),
 ):
-    """آپلود یک chunk ویدئو (فقط در حالت B — getDisplayMedia سمت کلاینت)."""
+    """آپلود یک chunk ویدئو از سمت کلاینت.
+
+    هر دو حالت A (canvas-crop از getDisplayMedia) و B (getDisplayMedia
+    مستقیم) chunkهای webm/MediaRecorder می‌فرستند. تمایز سرور لازم
+    نیست — فقط mode A یک frame size متفاوت دارد (فقط iframe، نه کل tab).
+    """
     svc = get_inspector_recording_service()
     try:
         chunk_bytes = await chunk.read()

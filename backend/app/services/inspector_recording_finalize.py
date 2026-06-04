@@ -722,36 +722,44 @@ async def finalize_recording_session(
     media_items: List[Tuple[bytes, str, str]] = []  # [(bytes, filename, kind)]
 
     # video / animation
-    if session.mode == "B":
-        video_bytes = _assemble_video_from_chunks(session.video_dir)
-        if video_bytes:
-            chunks = _split_bytes(video_bytes, MAX_TELEGRAM_FILE_MB)
-            for i, ch in enumerate(chunks):
-                name = (
-                    f"recording_{session.session_id[:8]}.webm"
-                    if len(chunks) == 1
-                    else f"recording_{session.session_id[:8]}_part{i+1}of{len(chunks)}.webm"
-                )
-                media_items.append((ch, name, "video"))
-        else:
-            result["warnings"].append("video chunks خالی بود (mode B)")
-    else:
-        # mode A: 🎬 Build MP4 (preferred) or GIF (fallback) from frames.
-        # Animated WebP is NOT used — Telegram renders it as a static
-        # sticker instead of playing the video (user-reported bug).
+    # 🎬 Both modes now produce real .webm via MediaRecorder. Mode A used
+    # to be a screenshot slideshow synthesized to MP4/GIF — that was a
+    # bandage, not a real fix. The new mode A captures the iframe with
+    # getDisplayMedia + canvas crop, producing the same webm chunk
+    # format as mode B. The pipeline below is identical for both.
+    video_bytes = _assemble_video_from_chunks(session.video_dir)
+    if video_bytes:
+        chunks = _split_bytes(video_bytes, MAX_TELEGRAM_FILE_MB)
+        for i, ch in enumerate(chunks):
+            name = (
+                f"recording_{session.session_id[:8]}.webm"
+                if len(chunks) == 1
+                else f"recording_{session.session_id[:8]}_part{i+1}of{len(chunks)}.webm"
+            )
+            media_items.append((ch, name, "video"))
+    elif session.mode == "A":
+        # Legacy fallback: if a mode-A session somehow has zero video
+        # chunks (very old session created before the real-capture
+        # rewrite, or browser refused getDisplayMedia and we slipped
+        # through), synthesize from frames as a last resort so the user
+        # at least gets *something* in Telegram. New mode-A sessions
+        # should never hit this branch.
         built = _build_video_for_telegram(session.frames_dir)
         if built:
             data, fname, _mime = built
-            # Keep the session-id prefix so multi-recording threads stay
-            # distinguishable in the chat history.
             ext = fname.rsplit(".", 1)[-1]
             name = f"recording_{session.session_id[:8]}.{ext}"
             kind = "animation" if ext == "gif" else "video"
             media_items.append((data, name, kind))
+            result["warnings"].append(
+                "video chunks خالی بود — slideshow از frames به‌عنوان fallback ساخته شد"
+            )
         else:
             result["warnings"].append(
-                "frames خالی بود یا ffmpeg/Pillow ناموجود — ویدیو ساخته نشد"
+                "نه video chunk و نه frames موجود بود — هیچ ویدیویی ارسال نشد"
             )
+    else:
+        result["warnings"].append("video chunks خالی بود")
 
     # audio (جداگانه، اگر موجود)
     from .inspector_recording_processor import _assemble_audio
