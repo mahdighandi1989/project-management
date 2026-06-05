@@ -11,6 +11,10 @@ interface ProjectFile {
   path: string;
   content?: string;
   size?: number;
+  // 🆕 (model attribution) — which AI model produced this file +
+  // when. Empty for legacy projects created before attribution shipped.
+  generated_by?: string;
+  generated_at?: string;
 }
 
 interface Project {
@@ -128,6 +132,23 @@ export default function ProjectPage() {
     }
   };
 
+  // 🆕 (model attribution) — honor the user's model selection from
+  // /creator. Without this, audit/apply-fixes used all active models,
+  // which the user (rightly) complained about: "آیا وقتی روی دکمه
+  // بررسی می‌زنم همون مدلی که انتخاب شده در صفحه اصلی موتور خالق کار
+  // انجام می‌ده؟". Read the same localStorage key the creator page
+  // writes so the choice carries over.
+  const getSelectedModelIds = (): string[] => {
+    try {
+      const saved = localStorage.getItem('creator_selected_models');
+      if (!saved) return [];
+      const parsed = JSON.parse(saved);
+      return Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string') : [];
+    } catch {
+      return [];
+    }
+  };
+
   const runAudit = async () => {
     setAuditing(true);
     setAuditError('');
@@ -139,7 +160,8 @@ export default function ProjectPage() {
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model_ids: [] }),  // [] → use all active
+          // 🆕 honor user's selection (parity with create flow)
+          body: JSON.stringify({ model_ids: getSelectedModelIds() }),
         },
       );
       const data = await res.json();
@@ -182,7 +204,8 @@ export default function ProjectPage() {
     setFixing(true);
     setFixResult(null);
     try {
-      const body: any = { model_ids: [] };
+      // 🆕 honor user's model selection from /creator (same as audit)
+      const body: any = { model_ids: getSelectedModelIds() };
       // If user explicitly chose "promote to fullstack" we pass it,
       // otherwise pass the missing-files list extracted from audit.
       if (opts?.upgradeFullstack) {
@@ -505,6 +528,8 @@ export default function ProjectPage() {
                 <div className="space-y-1 max-h-[65vh] overflow-auto">
                   {files.map((file, idx) => {
                     const filePath = typeof file === 'string' ? file : file.path;
+                    const generatedBy = typeof file === 'object' && file.generated_by
+                      ? file.generated_by : '';
                     return (
                       <button
                         key={idx}
@@ -515,8 +540,22 @@ export default function ProjectPage() {
                             : 'bg-white/5 hover:bg-white/10 border border-transparent'
                         }`}
                       >
-                        <span className="ml-2">{getFileIcon(filePath)}</span>
-                        <span className="truncate">{filePath}</span>
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center min-w-0 flex-1">
+                            <span className="ml-2">{getFileIcon(filePath)}</span>
+                            <span className="truncate">{filePath}</span>
+                          </div>
+                          {/* 🆕 model attribution badge — answers user's
+                              question "امضاشون پای کار ثبت می‌شه؟" */}
+                          {generatedBy && (
+                            <span
+                              className="px-2 py-0.5 bg-blue-500/20 text-blue-300 rounded text-[10px] font-sans whitespace-nowrap"
+                              title={`تولیدشده توسط: ${generatedBy}`}
+                            >
+                              {generatedBy.length > 18 ? generatedBy.slice(0, 16) + '…' : generatedBy}
+                            </span>
+                          )}
+                        </div>
                       </button>
                     );
                   })}
@@ -699,6 +738,26 @@ export default function ProjectPage() {
                       </div>
                     </div>
                   </div>
+
+                  {/* 🆕 (model attribution) — show WHICH models did the
+                      audit so user can confirm their /creator selection
+                      was honored, not just "all active models". */}
+                  {auditResult.aggregated.model_ids_used?.length > 0 && (
+                    <div className="text-xs text-gray-400 flex items-center gap-2 flex-wrap">
+                      <span>🔖 audit توسط:</span>
+                      {auditResult.aggregated.model_ids_used.map((id: string) => (
+                        <span
+                          key={id}
+                          className="px-2 py-0.5 bg-blue-500/20 text-blue-200 rounded-full font-mono"
+                        >
+                          {id}
+                        </span>
+                      ))}
+                      <span className="text-gray-500">
+                        (انتخاب شما از صفحهٔ موتور خالق)
+                      </span>
+                    </div>
+                  )}
 
                   {auditResult.aggregated.missing_critical_files?.length > 0 && (
                     <div className="bg-red-500/10 border border-red-500/30 rounded p-3">

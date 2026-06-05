@@ -90,19 +90,34 @@ class ProjectResponse(BaseModel):
 # AI Generate Function
 # ================================
 
-async def ai_generate(prompt: str, model_ids: Optional[List[str]] = None) -> str:
-    """تولید متن با AI - با fallback chain روی model_ids."""
+async def ai_generate_with_meta(
+    prompt: str, model_ids: Optional[List[str]] = None,
+) -> tuple:
+    """🆕 (model attribution) — same as ai_generate but returns a
+    (content, used_model_id) tuple so callers can record which model
+    actually answered. The fallback chain semantics are unchanged: try
+    each model_id in order, return on first success.
+
+    The simple_creator's _tracked_ai_generate unpacks this tuple to
+    populate ProjectFile.generated_by, which the UI then displays per
+    file. Without this attribution the user couldn't tell which of
+    their selected models produced which file."""
     from ...services.ai_manager import get_ai_manager
     from ...services.ai_base import Message
 
     ai_manager = get_ai_manager()
     available_models = ai_manager.get_available_models()
     if not available_models:
-        raise HTTPException(status_code=400, detail="هیچ مدل AI فعالی نیست! اول از تنظیمات کلید وارد کنید.")
+        raise HTTPException(
+            status_code=400,
+            detail="هیچ مدل AI فعالی نیست! اول از تنظیمات کلید وارد کنید.",
+        )
 
     available_by_id = {m.id: m for m in available_models}
 
-    # ساخت ترتیب مدل‌ها برای امتحان
+    # Build the order to try. The user's selected list wins (honoring
+    # their choice on the Creator page); if empty/all-invalid, fall
+    # back to the first available so the call doesn't fail outright.
     target_ids: List[str] = []
     if model_ids:
         for mid in model_ids:
@@ -120,7 +135,12 @@ async def ai_generate(prompt: str, model_ids: Optional[List[str]] = None) -> str
                 max_tokens=4000,
                 temperature=0.7,
             )
-            return response.content if hasattr(response, "content") else str(response)
+            content = response.content if hasattr(response, "content") else str(response)
+            # If ai_manager substituted a fallback model under the hood
+            # (model_id disabled, etc.), prefer the EFFECTIVE model id
+            # so the user sees what actually generated the content.
+            effective_id = getattr(response, "model_id", None) or mid
+            return content, effective_id
         except Exception as e:
             last_error = e
             logger.warning(f"ai_generate: model {mid} failed: {e}; trying next")
@@ -130,6 +150,17 @@ async def ai_generate(prompt: str, model_ids: Optional[List[str]] = None) -> str
         status_code=500,
         detail=f"همهٔ مدل‌های انتخابی شکست خوردند. آخرین خطا: {last_error}",
     )
+
+
+async def ai_generate(prompt: str, model_ids: Optional[List[str]] = None) -> str:
+    """Back-compat shim — returns just the content string.
+
+    Existing callers (audit prompt generation, _detect_project_type,
+    idea_to_prompt) don't care which model answered; they only need
+    the text. For attribution-aware callers use ai_generate_with_meta.
+    """
+    content, _model = await ai_generate_with_meta(prompt, model_ids)
+    return content
 
 
 def _extract_json(text: str) -> Optional[dict]:
@@ -400,9 +431,11 @@ async def create_project(request: CreateProjectRequest):
     if project_type == "full-stack":
         project_type = "fullstack"
 
-    # closure برای ai_generate که model_ids را capture می‌کند
-    async def gen(prompt: str) -> str:
-        return await ai_generate(prompt, model_ids=request.model_ids)
+    # closure برای ai_generate که model_ids را capture می‌کند.
+    # 🆕 (model attribution) — returns (content, model_id) tuple so
+    # simple_creator can record per-file which model wrote it.
+    async def gen(prompt: str):
+        return await ai_generate_with_meta(prompt, model_ids=request.model_ids)
 
     # 🆕 (Reference Projects) — نرمال‌سازی selected_projects برای persist:
     # حذف self-references و آیتم‌های غیرمعتبر. (در این مرحله پروژهٔ جدید
@@ -1106,6 +1139,10 @@ async def audit_project(
 
     aggregated = {
         "models_consulted": len(audit_ids),
+        # 🆕 expose the actual model IDs so frontend can show
+        # "این audit توسط: claude, gemini انجام شد" — answer to the
+        # user's question "همون مدلی که انتخاب شده کار انجام می‌ده؟"
+        "model_ids_used": list(audit_ids),
         "models_succeeded": len(successful),
         "overall_score_avg": avg_score,
         "ready_to_push_majority": ready_votes > len(successful) / 2,
@@ -1285,8 +1322,25 @@ async def apply_audit_fixes(
     files_deleted: List[Dict[str, str]] = []
     files_skipped: List[Dict[str, str]] = []
 
-    async def _ai_gen(prompt: str) -> str:
-        return await ai_generate(prompt, model_ids=req.model_ids)
+    # 🆕 (model attribution) — wrap ai_generate_with_meta and capture
+    # which model actually answered each call. We snapshot the last
+    # used model right before each _generate_file invocation so we
+    # know which model produced THAT file. Defensive against test
+    # mocks / future utils that may not return the (content, model)
+    # tuple — fall back gracefully to no-attribution.
+    _last_model: Dict[str, str] = {"id": ""}
+
+    async def _ai_gen(prompt: str):
+        result = await ai_generate_with_meta(
+            prompt, model_ids=req.model_ids,
+        )
+        if isinstance(result, tuple) and len(result) == 2:
+            content, used = result
+            _last_model["id"] = str(used or "")
+            return content
+        # Mock or legacy util returned a bare string
+        _last_model["id"] = ""
+        return result
 
     project_dir = creator.workspace / project.id
     project_dir.mkdir(parents=True, exist_ok=True)
@@ -1356,6 +1410,7 @@ async def apply_audit_fixes(
             # _generate_file takes (name, desc, type, path, file_desc, ai_gen);
             # we pass the regeneration context as file_desc so it lands
             # inside the AI prompt.
+            _last_model["id"] = ""
             new_content = await creator._generate_file(
                 project.name,
                 project.description + mod_prompt_extra,
@@ -1364,16 +1419,21 @@ async def apply_audit_fixes(
                 f"regenerate to address: {issue}",
                 _ai_gen,
             )
+            used_model = _last_model["id"]
             full_path = project_dir / target_path
             full_path.parent.mkdir(parents=True, exist_ok=True)
             import aiofiles as _aiofiles
             async with _aiofiles.open(full_path, "w") as fh:
                 await fh.write(new_content)
+            from datetime import datetime as _dt_mod
             existing.content = new_content
+            existing.generated_by = used_model
+            existing.generated_at = _dt_mod.now().isoformat()
             files_modified.append({
                 "path": target_path,
                 "size": len(new_content),
                 "issue_addressed": issue[:200],
+                "generated_by": used_model,
             })
         except Exception as e:
             files_skipped.append({
@@ -1388,6 +1448,7 @@ async def apply_audit_fixes(
             files_skipped.append({"path": path, "reason": "already exists"})
             continue
         try:
+            _last_model["id"] = ""
             content = await creator._generate_file(
                 project.name,
                 project.description,
@@ -1396,22 +1457,27 @@ async def apply_audit_fixes(
                 "",  # file_desc — audit didn't always give one
                 _ai_gen,
             )
+            used_model = _last_model["id"]
             full_path = project_dir / path
             full_path.parent.mkdir(parents=True, exist_ok=True)
             import aiofiles as _aiofiles
             async with _aiofiles.open(full_path, "w") as fh:
                 await fh.write(content)
             from ...services.simple_creator import ProjectFile as _ProjectFile
+            from datetime import datetime as _dt_now
             project.files.append(_ProjectFile(
                 path=path,
                 content=content,
                 language=creator._detect_language(path),
+                generated_by=used_model,
+                generated_at=_dt_now.now().isoformat(),
             ))
             existing_paths_set.add(path)
             files_added.append({
                 "path": path,
                 "language": creator._detect_language(path),
                 "size": len(content),
+                "generated_by": used_model,
             })
         except Exception as e:
             files_skipped.append({"path": path, "reason": str(e)[:300]})
