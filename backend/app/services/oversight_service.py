@@ -948,33 +948,63 @@ class OversightService:
             except Exception:
                 continue
 
+        # 🐛 (throttle-eligibility fix) — partition into "syncable now" vs
+        # "skipped" BEFORE the throttle. Previously throttle sorted ALL
+        # dirty tasks by priority and took the top N; if all N happened
+        # to have missing/disabled watched, the cycle dispatched ZERO
+        # and lower-priority syncable tasks never got a turn. User saw:
+        #    "5 dirty task(s) found but ALL skipped"
+        # for hours, while tasks they actually wanted synced (regenerates,
+        # super-task consolidations) waited indefinitely.
+        # Now: filter to syncable first → throttle within that set.
+        syncable: List["OversightTask"] = []
+        skipped_no_watched = 0
+        skipped_disabled_count = 0
+        for t in dirty:
+            watched = self._find_watched(t.watched_id) if t.watched_id else None
+            if watched is None:
+                skipped_no_watched += 1
+                continue
+            if not getattr(watched, "prompt_sync_enabled", True):
+                skipped_disabled_count += 1
+                continue
+            syncable.append(t)
+
+        if not syncable:
+            if skipped_no_watched or skipped_disabled_count:
+                logger.info(
+                    f"prompt-sync: {len(dirty)} dirty task(s) — all skipped "
+                    f"(no_watched={skipped_no_watched}, "
+                    f"sync_disabled={skipped_disabled_count}). "
+                    f"Check PROMPT_SYNC_EXCLUDE_REPOS env var or watched config."
+                )
+            return
+
         # 🚨 (backend overload fix) — حداکثر N تسک per save dispatch تا از
         # flood GitHub API و saturate شدن CPU/network روی Render free tier
         # جلوگیری شود. بقیه در save بعدی pickup می‌شوند. priority بالاتر
         # (عدد کمتر) اولویت دارد.
         _MAX_DISPATCH_PER_TICK = 5
-        if len(dirty) > _MAX_DISPATCH_PER_TICK:
-            dirty.sort(
+        if len(syncable) > _MAX_DISPATCH_PER_TICK:
+            syncable.sort(
                 key=lambda t: (
                     getattr(t, "execution_priority", 100),
                     getattr(t, "updated_at", "") or "",
                 )
             )
             logger.info(
-                f"prompt-sync: throttling — {len(dirty)} dirty tasks, "
+                f"prompt-sync: throttling — {len(syncable)} syncable tasks, "
                 f"dispatching top {_MAX_DISPATCH_PER_TICK} this cycle"
             )
-            dirty = dirty[:_MAX_DISPATCH_PER_TICK]
+            syncable = syncable[:_MAX_DISPATCH_PER_TICK]
 
         dispatched = 0
-        skipped_disabled = 0
+        skipped_disabled = skipped_no_watched + skipped_disabled_count
         affected_wids: set = set()
-        for t in dirty:
-            watched = self._find_watched(t.watched_id) if t.watched_id else None
+        for t in syncable:
+            watched = self._find_watched(t.watched_id)
             if watched is None:
-                skipped_disabled += 1
-                continue
-            if not getattr(watched, "prompt_sync_enabled", True):
+                # Defensive — should be impossible since we filtered above
                 skipped_disabled += 1
                 continue
             # 🆕 inflight tracking — قبل از dispatch، task_id را در set ثبت کن
