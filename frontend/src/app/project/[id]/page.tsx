@@ -155,7 +155,30 @@ export default function ProjectPage() {
     }
   };
 
-  const applyAuditFixes = async (opts?: { upgradeFullstack?: boolean }) => {
+  // 🆕 Per-item selection — user picks which modifies/deletes to apply.
+  // Defaults: modify = all selected (safe, AI-driven content rewrite);
+  // delete = none selected (destructive, opt-in only).
+  const [selectedModifies, setSelectedModifies] = useState<Set<string>>(new Set());
+  const [selectedDeletes, setSelectedDeletes] = useState<Set<string>>(new Set());
+
+  // Reset selections each time a fresh audit lands so the UI doesn't
+  // carry over choices from a prior audit.
+  useEffect(() => {
+    if (auditResult?.aggregated) {
+      const mods = new Set<string>(
+        (auditResult.aggregated.files_to_modify || []).map((m: any) => m.path),
+      );
+      setSelectedModifies(mods);
+      setSelectedDeletes(new Set());  // delete is opt-in only
+    }
+  }, [auditResult]);
+
+  const applyAuditFixes = async (opts?: {
+    upgradeFullstack?: boolean;
+    includeModifies?: boolean;
+    includeDeletes?: boolean;
+    onlyMissing?: boolean;
+  }) => {
     setFixing(true);
     setFixResult(null);
     try {
@@ -166,6 +189,17 @@ export default function ProjectPage() {
         body.upgrade_to_fullstack = true;
       } else if (auditResult?.aggregated?.missing_critical_files?.length) {
         body.missing_files = auditResult.aggregated.missing_critical_files;
+      }
+      // Modify and delete intents are explicit — not auto-applied.
+      // Default behaviour: include checked modifies, exclude all deletes
+      // unless the caller explicitly requests them.
+      if (opts?.includeModifies !== false && !opts?.onlyMissing) {
+        const mods = (auditResult?.aggregated?.files_to_modify || [])
+          .filter((m: any) => selectedModifies.has(m.path));
+        if (mods.length > 0) body.files_to_modify = mods;
+      }
+      if (opts?.includeDeletes && selectedDeletes.size > 0) {
+        body.files_to_delete = Array.from(selectedDeletes);
       }
       const res = await fetch(
         `${API_BASE}/api/simple/projects/${projectId}/apply-fixes`,
@@ -181,12 +215,16 @@ export default function ProjectPage() {
         return;
       }
       setFixResult(data);
-      // Reload the project to pick up the newly created files
+      // Reload the project to pick up the new + modified + deleted files
       await loadProject();
+      const parts: string[] = [];
+      if (data.files_added?.length) parts.push(`${data.files_added.length} اضافه`);
+      if (data.files_modified?.length) parts.push(`${data.files_modified.length} ویرایش`);
+      if (data.files_deleted?.length) parts.push(`${data.files_deleted.length} حذف`);
       showSuccess(
-        data.files_added?.length > 0
-          ? `${data.files_added.length} فایل جدید تولید شد.`
-          : 'هیچ فایل جدیدی لازم نبود.',
+        parts.length > 0
+          ? `✅ ${parts.join('، ')} انجام شد.`
+          : 'هیچ تغییری لازم نبود.',
       );
     } catch (e: any) {
       showError(e?.message || 'خطا در ارتباط با سرور');
@@ -748,10 +786,107 @@ export default function ProjectPage() {
                     </div>
                   </details>
 
+                  {/* 🆕 Files-to-modify section — user picks per-file
+                      which to regenerate with audit context */}
+                  {auditResult.aggregated.files_to_modify?.length > 0 && (
+                    <div className="bg-yellow-500/10 border border-yellow-500/30 rounded p-3 space-y-2">
+                      <h4 className="font-bold text-yellow-300">
+                        ✏️ فایل‌های نیازمند ویرایش
+                      </h4>
+                      <p className="text-xs text-gray-400">
+                        AI تشخیص داد محتوای این فایل‌ها مطابق هدف نیست. تیک بزن
+                        تا regenerate شوند (محتوای فعلی به‌عنوان context
+                        به prompt اضافه می‌شود).
+                      </p>
+                      <ul className="space-y-2">
+                        {auditResult.aggregated.files_to_modify.map(
+                          (m: any, i: number) => (
+                            <li key={i} className="bg-black/20 rounded p-2 text-sm">
+                              <label className="flex items-start gap-2 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedModifies.has(m.path)}
+                                  onChange={(e) => {
+                                    const next = new Set(selectedModifies);
+                                    if (e.target.checked) next.add(m.path);
+                                    else next.delete(m.path);
+                                    setSelectedModifies(next);
+                                  }}
+                                  className="mt-1"
+                                />
+                                <div className="flex-1">
+                                  <div className="font-mono text-yellow-200">{m.path}</div>
+                                  {m.issue && (
+                                    <div className="text-gray-300 mt-1">
+                                      <span className="text-yellow-300">مشکل:</span> {m.issue}
+                                    </div>
+                                  )}
+                                  {m.suggestion && (
+                                    <div className="text-gray-300 mt-0.5">
+                                      <span className="text-blue-300">پیشنهاد:</span> {m.suggestion}
+                                    </div>
+                                  )}
+                                </div>
+                              </label>
+                            </li>
+                          ),
+                        )}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* 🆕 Files-to-delete section — opt-in only because
+                      destructive. Defaults to all unchecked. */}
+                  {auditResult.aggregated.files_to_delete?.length > 0 && (
+                    <div className="bg-red-500/10 border border-red-500/30 rounded p-3 space-y-2">
+                      <h4 className="font-bold text-red-300">
+                        🗑 فایل‌های پیشنهادی برای حذف
+                      </h4>
+                      <p className="text-xs text-gray-400">
+                        ⚠️ این فایل‌ها بنا به نظر AI زائد/اشتباه‌اند. حذف **فقط
+                        با تیک صریح شما** انجام می‌شود — هیچ‌چیز خودکار حذف
+                        نمی‌شود.
+                      </p>
+                      <ul className="space-y-2">
+                        {auditResult.aggregated.files_to_delete.map(
+                          (d: any, i: number) => (
+                            <li key={i} className="bg-black/20 rounded p-2 text-sm">
+                              <label className="flex items-start gap-2 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedDeletes.has(d.path)}
+                                  onChange={(e) => {
+                                    const next = new Set(selectedDeletes);
+                                    if (e.target.checked) next.add(d.path);
+                                    else next.delete(d.path);
+                                    setSelectedDeletes(next);
+                                  }}
+                                  className="mt-1"
+                                />
+                                <div className="flex-1">
+                                  <div className="font-mono text-red-200">{d.path}</div>
+                                  {d.reason && (
+                                    <div className="text-gray-300 mt-1">
+                                      <span className="text-red-300">دلیل:</span> {d.reason}
+                                    </div>
+                                  )}
+                                </div>
+                              </label>
+                            </li>
+                          ),
+                        )}
+                      </ul>
+                    </div>
+                  )}
+
                   {/* 🆕 Auto-fix action buttons — the user asked for this
                       explicitly. Audit was previously report-only; now
-                      the missing files can be generated in-place. */}
+                      missing files can be added, existing modified, and
+                      flagged files deleted (all per-item opt-in for
+                      destructive actions). */}
                   {(auditResult.aggregated.missing_critical_files?.length > 0 ||
+                    auditResult.aggregated.files_to_modify?.length > 0 ||
+                    auditResult.aggregated.files_to_delete?.length > 0 ||
                     !auditResult.aggregated.matches_goal_majority) && (
                     <div className="bg-green-500/10 border border-green-500/30 rounded p-4 space-y-3">
                       <h4 className="font-bold text-green-300">
@@ -763,15 +898,49 @@ export default function ProjectPage() {
                         جدید اضافه می‌شوند.
                       </p>
                       <div className="flex flex-wrap gap-2">
+                        {/* 1. Just add missing files (no modify, no delete) */}
                         {auditResult.aggregated.missing_critical_files?.length > 0 && (
                           <button
-                            onClick={() => applyAuditFixes()}
+                            onClick={() => applyAuditFixes({ onlyMissing: true })}
                             disabled={fixing}
                             className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600 disabled:opacity-50 text-sm font-medium"
                           >
                             {fixing
                               ? '... در حال تولید'
-                              : `📄 تولید ${auditResult.aggregated.missing_critical_files.length} فایل مفقود`}
+                              : `📄 فقط تولید ${auditResult.aggregated.missing_critical_files.length} فایل مفقود`}
+                          </button>
+                        )}
+                        {/* 2. Apply checked modifies (and missing) */}
+                        {(auditResult.aggregated.files_to_modify?.length > 0
+                          || auditResult.aggregated.missing_critical_files?.length > 0) && (
+                          <button
+                            onClick={() => applyAuditFixes({ includeModifies: true })}
+                            disabled={fixing || selectedModifies.size === 0
+                              && (auditResult.aggregated.missing_critical_files?.length || 0) === 0}
+                            className="px-4 py-2 bg-yellow-500/90 text-black rounded hover:bg-yellow-400 disabled:opacity-50 text-sm font-medium"
+                          >
+                            {fixing
+                              ? '... در حال اعمال'
+                              : `✏️ افزودن مفقود + ویرایش ${selectedModifies.size} فایل`}
+                          </button>
+                        )}
+                        {/* 3. Apply EVERYTHING including deletes */}
+                        {selectedDeletes.size > 0 && (
+                          <button
+                            onClick={() => {
+                              if (!confirm(
+                                `حذف ${selectedDeletes.size} فایل قابل بازگشت نیست. مطمئنی؟`,
+                              )) return;
+                              applyAuditFixes({
+                                includeModifies: true, includeDeletes: true,
+                              });
+                            }}
+                            disabled={fixing}
+                            className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 disabled:opacity-50 text-sm font-medium"
+                          >
+                            {fixing
+                              ? '... در حال اعمال'
+                              : `🗑 حذف ${selectedDeletes.size} + ویرایش + افزودن`}
                           </button>
                         )}
                         {project?.project_type !== 'fullstack' && (
@@ -788,35 +957,54 @@ export default function ProjectPage() {
                         )}
                       </div>
                       {fixResult && (
-                        <div className="text-sm bg-black/20 rounded p-3 space-y-1">
-                          <div className="text-green-300 font-medium">
-                            ✅ نتیجه:
-                          </div>
+                        <div className="text-sm bg-black/20 rounded p-3 space-y-2">
+                          <div className="text-green-300 font-medium">✅ نتیجه:</div>
                           {fixResult.promoted_to_fullstack && (
                             <div>↗ پروژه به fullstack ارتقا یافت</div>
                           )}
-                          <div>
-                            فایل‌های تولیدشده: {fixResult.files_added?.length || 0}
-                          </div>
                           {fixResult.files_added?.length > 0 && (
-                            <ul className="list-disc pr-5 text-green-200">
-                              {fixResult.files_added.slice(0, 10).map((f: any, i: number) => (
-                                <li key={i} className="font-mono">{f.path}</li>
-                              ))}
-                              {fixResult.files_added.length > 10 && (
-                                <li>... +{fixResult.files_added.length - 10} فایل دیگر</li>
-                              )}
-                            </ul>
+                            <div>
+                              <div className="text-green-300">📄 اضافه‌شده ({fixResult.files_added.length}):</div>
+                              <ul className="list-disc pr-5 text-green-200">
+                                {fixResult.files_added.slice(0, 10).map((f: any, i: number) => (
+                                  <li key={i} className="font-mono">{f.path}</li>
+                                ))}
+                                {fixResult.files_added.length > 10 && (
+                                  <li>... +{fixResult.files_added.length - 10} فایل دیگر</li>
+                                )}
+                              </ul>
+                            </div>
+                          )}
+                          {fixResult.files_modified?.length > 0 && (
+                            <div>
+                              <div className="text-yellow-300">✏️ ویرایش‌شده ({fixResult.files_modified.length}):</div>
+                              <ul className="list-disc pr-5 text-yellow-200">
+                                {fixResult.files_modified.slice(0, 10).map((f: any, i: number) => (
+                                  <li key={i} className="font-mono">{f.path}</li>
+                                ))}
+                                {fixResult.files_modified.length > 10 && (
+                                  <li>... +{fixResult.files_modified.length - 10} فایل دیگر</li>
+                                )}
+                              </ul>
+                            </div>
+                          )}
+                          {fixResult.files_deleted?.length > 0 && (
+                            <div>
+                              <div className="text-red-300">🗑 حذف‌شده ({fixResult.files_deleted.length}):</div>
+                              <ul className="list-disc pr-5 text-red-200">
+                                {fixResult.files_deleted.slice(0, 10).map((f: any, i: number) => (
+                                  <li key={i} className="font-mono">{f.path}</li>
+                                ))}
+                              </ul>
+                            </div>
                           )}
                           {fixResult.files_skipped?.length > 0 && (
                             <div className="text-amber-300">
-                              {fixResult.files_skipped.length} فایل skip شد
-                              (موجود بود یا خطا)
+                              ⚠️ {fixResult.files_skipped.length} مورد skip شد
                             </div>
                           )}
                           <div className="text-xs text-gray-400 pt-1">
-                            بعد از تولید، می‌توانی audit را دوباره اجرا کنی
-                            تا confirm شود.
+                            می‌توانی "🔄 audit دوباره" بزنی تا تأیید شود.
                           </div>
                         </div>
                       )}

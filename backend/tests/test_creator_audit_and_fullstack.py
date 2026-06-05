@@ -688,6 +688,297 @@ def test_parse_clean_path_extracts_paths_from_audit_findings():
     assert _parse_clean_path("just a sentence") is None
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Full CRUD: modify + delete (user explicitly asked for this in audit pass 3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_audit_prompt_requests_modify_and_delete_lists():
+    """The audit prompt must explicitly ask each AI for files_to_modify
+    (existing files with wrong content) AND files_to_delete (extra
+    files that shouldn't exist). Without this, the AI only ever flags
+    missing files — user can't get edit/delete from the audit."""
+    src = (
+        _BACKEND_ROOT / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def audit_project")
+    body = src[idx:idx + 8000]
+    assert "files_to_modify" in body, (
+        "audit prompt must request files_to_modify so the AI flags existing "
+        "files with wrong content (not just missing ones)"
+    )
+    assert "files_to_delete" in body, (
+        "audit prompt must request files_to_delete so the AI flags extra "
+        "files that should be removed"
+    )
+    # The prompt must give the AI a structured format for each so the
+    # apply-fixes step can parse it correctly
+    assert "issue" in body and "suggestion" in body, (
+        "modify entries must have 'issue' and 'suggestion' fields so "
+        "regeneration can target the specific problem the AI flagged"
+    )
+    assert "reason" in body, (
+        "delete entries must include 'reason' so user sees WHY before "
+        "approving the destructive action"
+    )
+
+
+def test_aggregation_includes_modify_and_delete_categories():
+    """The aggregated response shape must expose files_to_modify and
+    files_to_delete so the frontend can render them and accept user
+    selections."""
+    src = (
+        _BACKEND_ROOT / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("aggregated = {")
+    assert idx != -1
+    body = src[idx:idx + 1500]
+    assert '"files_to_modify"' in body
+    assert '"files_to_delete"' in body
+
+
+@pytest.mark.asyncio
+async def test_apply_fixes_regenerates_existing_files_with_audit_context(tmp_path):
+    """🚨 The user's specific concern: 'ویرایش و حذف و اضافه انجام میده؟'
+    — does it edit existing files, not just add missing ones?
+
+    When files_to_modify is passed, the existing file content must be
+    OVERWRITTEN with regenerated content. The regeneration prompt must
+    include the audit's 'issue' and 'suggestion' so the new content
+    addresses what was wrong, not just a fresh generation."""
+    from app.api.routes.simple_projects import (
+        apply_audit_fixes, ApplyAuditFixesRequest, FileToModify,
+    )
+    from app.services.simple_creator import (
+        get_simple_creator, Project, ProjectFile,
+    )
+
+    creator = get_simple_creator()
+    creator.workspace = tmp_path
+    proj = Project(
+        id="proj_modify_333",
+        name="ModTest",
+        description="needs proper routes",
+        project_type="fastapi",
+        files=[
+            ProjectFile(
+                path="backend/app/main.py",
+                content="# stub — no routes registered",
+                language="python",
+            ),
+        ],
+    )
+    creator.projects[proj.id] = proj
+    # Pre-write the file to disk so the modify path has something to
+    # overwrite (would normally have been written at create time).
+    proj_dir = tmp_path / proj.id
+    (proj_dir / "backend/app").mkdir(parents=True, exist_ok=True)
+    (proj_dir / "backend/app/main.py").write_text("# stub")
+
+    captured_prompts: List[str] = []
+
+    async def fake_ai_generate(prompt, model_ids=None):
+        captured_prompts.append(prompt)
+        return "from fastapi import FastAPI\napp = FastAPI()\napp.include_router(...)"
+
+    with patch(
+        "app.api.routes.simple_projects.ai_generate",
+        new=fake_ai_generate,
+    ):
+        result = await apply_audit_fixes(
+            proj.id,
+            ApplyAuditFixesRequest(
+                files_to_modify=[
+                    FileToModify(
+                        path="backend/app/main.py",
+                        issue="routes not registered",
+                        suggestion="add include_router for auth, users",
+                    ),
+                ],
+            ),
+        )
+
+    modified_paths = [f["path"] for f in result["files_modified"]]
+    assert "backend/app/main.py" in modified_paths, (
+        "modify request must update the existing file, not skip it"
+    )
+    # The new content must have actually replaced the old
+    updated = next(f for f in proj.files if f.path == "backend/app/main.py")
+    assert "include_router" in updated.content
+    assert "stub" not in updated.content
+    # Disk must reflect the new content too
+    on_disk = (proj_dir / "backend/app/main.py").read_text()
+    assert "include_router" in on_disk
+    # Crucially: the regeneration prompt must mention the audit's
+    # `issue` so the AI doesn't just write a generic main.py
+    assert any("routes not registered" in p for p in captured_prompts), (
+        "the regen prompt must include the audit's `issue` note so the "
+        "new content addresses what was specifically wrong"
+    )
+    assert any("include_router for auth" in p for p in captured_prompts), (
+        "the regen prompt must include the audit's `suggestion` so the "
+        "AI knows what the fix should look like"
+    )
+
+
+@pytest.mark.asyncio
+async def test_apply_fixes_deletes_listed_files(tmp_path):
+    """When files_to_delete is provided, those paths must be removed
+    from disk AND from project.files metadata. Files not listed must
+    remain untouched."""
+    from app.api.routes.simple_projects import (
+        apply_audit_fixes, ApplyAuditFixesRequest,
+    )
+    from app.services.simple_creator import (
+        get_simple_creator, Project, ProjectFile,
+    )
+
+    creator = get_simple_creator()
+    creator.workspace = tmp_path
+    proj = Project(
+        id="proj_delete_444",
+        name="DelTest",
+        description="cleanup test",
+        project_type="fastapi",
+        files=[
+            ProjectFile(path="keep.py", content="# keep me", language="python"),
+            ProjectFile(path="remove.py", content="# delete me", language="python"),
+        ],
+    )
+    creator.projects[proj.id] = proj
+    proj_dir = tmp_path / proj.id
+    proj_dir.mkdir(parents=True, exist_ok=True)
+    (proj_dir / "keep.py").write_text("# keep me")
+    (proj_dir / "remove.py").write_text("# delete me")
+
+    result = await apply_audit_fixes(
+        proj.id,
+        ApplyAuditFixesRequest(files_to_delete=["remove.py"]),
+    )
+
+    deleted_paths = [f["path"] for f in result["files_deleted"]]
+    assert "remove.py" in deleted_paths
+    # Disk: removed
+    assert not (proj_dir / "remove.py").exists()
+    # Disk: kept
+    assert (proj_dir / "keep.py").exists()
+    # Metadata: removed
+    paths_now = [f.path for f in proj.files]
+    assert "remove.py" not in paths_now
+    assert "keep.py" in paths_now
+
+
+@pytest.mark.asyncio
+async def test_apply_fixes_delete_rejects_path_traversal(tmp_path):
+    """Safety: deleting `../../etc/passwd` must NOT escape the project
+    workspace. Path-traversal must be rejected with a skip reason."""
+    from app.api.routes.simple_projects import (
+        apply_audit_fixes, ApplyAuditFixesRequest,
+    )
+    from app.services.simple_creator import (
+        get_simple_creator, Project,
+    )
+
+    creator = get_simple_creator()
+    creator.workspace = tmp_path
+    proj = Project(
+        id="proj_traversal_555",
+        name="SafetyTest",
+        description="x",
+        project_type="fastapi",
+    )
+    creator.projects[proj.id] = proj
+    (tmp_path / proj.id).mkdir(parents=True, exist_ok=True)
+    # Plant a file outside the project workspace
+    (tmp_path / "outside_target.txt").write_text("DO NOT DELETE")
+
+    result = await apply_audit_fixes(
+        proj.id,
+        ApplyAuditFixesRequest(files_to_delete=["../outside_target.txt"]),
+    )
+
+    # The file outside the project MUST still exist
+    assert (tmp_path / "outside_target.txt").exists(), (
+        "path traversal must be blocked — files outside the project "
+        "workspace must never be deleted via this endpoint"
+    )
+    # The traversal attempt must be reported as skipped
+    skipped_reasons = " ".join(s.get("reason", "") for s in result["files_skipped"])
+    assert "outside" in skipped_reasons.lower(), (
+        "the skip reason must mention 'outside' so frontend can show "
+        "a clear error"
+    )
+
+
+@pytest.mark.asyncio
+async def test_apply_fixes_treats_missing_target_as_add_not_modify(tmp_path):
+    """Soft promotion: if user requests modify on a path that doesn't
+    exist (audit can be stale, or user picked the wrong category),
+    treat it as an "add" — don't silently drop the request."""
+    from app.api.routes.simple_projects import (
+        apply_audit_fixes, ApplyAuditFixesRequest, FileToModify,
+    )
+    from app.services.simple_creator import (
+        get_simple_creator, Project,
+    )
+
+    creator = get_simple_creator()
+    creator.workspace = tmp_path
+    proj = Project(
+        id="proj_softpromo_666",
+        name="SoftTest",
+        description="x",
+        project_type="fastapi",
+    )
+    creator.projects[proj.id] = proj
+    (tmp_path / proj.id).mkdir(parents=True, exist_ok=True)
+
+    async def fake_ai_generate(prompt, model_ids=None):
+        return "new content"
+
+    with patch(
+        "app.api.routes.simple_projects.ai_generate",
+        new=fake_ai_generate,
+    ):
+        result = await apply_audit_fixes(
+            proj.id,
+            ApplyAuditFixesRequest(
+                files_to_modify=[
+                    FileToModify(path="new_file.py", issue="x", suggestion="y"),
+                ],
+            ),
+        )
+
+    # Should appear in files_added (not skipped or lost)
+    added_paths = [f["path"] for f in result["files_added"]]
+    assert "new_file.py" in added_paths, (
+        "modify request on non-existent path must fall through to add — "
+        "otherwise stale audit silently drops user intent"
+    )
+
+
+def test_frontend_audit_modal_has_modify_and_delete_sections():
+    """Source check — the modal must surface the new modify and delete
+    categories with checkboxes (per-item opt-in, especially for delete)."""
+    src = (
+        _FRONTEND_ROOT / "app/project/[id]/page.tsx"
+    ).read_text(encoding="utf-8")
+    assert "files_to_modify" in src and "files_to_delete" in src, (
+        "modal must render both new categories from aggregated audit"
+    )
+    # Per-item checkboxes
+    assert "selectedModifies" in src and "selectedDeletes" in src, (
+        "per-item state for which modifies/deletes to apply"
+    )
+    # Destructive action MUST have explicit confirmation
+    assert "confirm(" in src, (
+        "delete action must wrap in confirm() — destructive ops need "
+        "explicit acknowledgement before submitting"
+    )
+    # Default: delete is OPT-IN (selectedDeletes starts empty)
+    assert "new Set()" in src or "Set<string>(new Set())" in src or "setSelectedDeletes(new Set" in src
+
+
 def test_frontend_audit_modal_has_apply_fixes_buttons():
     """Source-grep: the audit modal must surface the auto-fix buttons,
     not just report findings. User: 'این موضوع رو هم بررسی و در صورت
