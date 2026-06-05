@@ -58,8 +58,21 @@ export default function KnowledgeCenterPage() {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [models, setModels] = useState<Model[]>([]);
   const [selectedModelIds, setSelectedModelIds] = useState<string[]>([]);
+  // 🆕 KC settings panel — auto-sync interval, processing models,
+  // skip_unchanged, etc. Persisted via PATCH /knowledge-center/settings.
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [kcSettings, setKcSettings] = useState<any>({
+    auto_sync_enabled: true,
+    auto_sync_interval_minutes: 60,
+    processing_model_ids: [],
+    skip_unchanged: true,
+    max_indexed_entries: 5000,
+  });
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settingsSaved, setSettingsSaved] = useState('');
 
-  // Load active models (parity with /creator)
+  // Load active models + persisted KC settings (so processing_model_ids
+  // shows the user's saved selection, not hardcoded defaults)
   useEffect(() => {
     (async () => {
       try {
@@ -67,12 +80,75 @@ export default function KnowledgeCenterPage() {
         const j = await res.json();
         setModels(j?.models || []);
       } catch { /* */ }
+      try {
+        const res = await fetch(`${API_BASE}/api/knowledge-center/settings`);
+        const j = await res.json();
+        if (j && typeof j === 'object') setKcSettings(j);
+      } catch { /* */ }
     })();
     try {
       const saved = localStorage.getItem('creator_selected_models');
       if (saved) setSelectedModelIds(JSON.parse(saved));
     } catch { /* */ }
   }, []);
+
+  const saveSettings = async (patch: any) => {
+    setSettingsLoading(true);
+    setSettingsSaved('');
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/knowledge-center/settings`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(patch),
+        },
+      );
+      const j = await res.json();
+      if (res.ok) {
+        setKcSettings(j);
+        setSettingsSaved('✅ ذخیره شد');
+        setTimeout(() => setSettingsSaved(''), 2000);
+      } else {
+        setSettingsSaved('❌ خطا: ' + (j?.detail || res.status));
+      }
+    } catch (e: any) {
+      setSettingsSaved('❌ خطا: ' + (e?.message || 'unknown'));
+    } finally {
+      setSettingsLoading(false);
+    }
+  };
+
+  const triggerManualProcess = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/knowledge-center/process`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model_ids: kcSettings.processing_model_ids || [],
+            force: false,
+          }),
+        },
+      );
+      const j = await res.json();
+      if (j?.ok) {
+        alert(
+          `✅ پردازش انجام شد — ${j.processed || 0} پردازش، ${j.skipped || 0} skip ` +
+          `(تغییری نداشتند). از ${j.total || 0} entry کل.`,
+        );
+        loadEntries();
+      } else {
+        alert('❌ خطا: ' + (j?.detail || 'unknown'));
+      }
+    } catch (e: any) {
+      alert('خطا: ' + e?.message);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const loadEntries = useCallback(async () => {
     setLoading(true);
@@ -244,6 +320,21 @@ export default function KnowledgeCenterPage() {
               title="در همهٔ پروژه‌های تحت نظارت پوشهٔ experiences + README می‌سازد"
             >
               🛠 ساخت پوشهٔ تجربیات (همه پروژه‌ها)
+            </button>
+            <button
+              onClick={triggerManualProcess}
+              disabled={loading}
+              className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded-lg disabled:opacity-50"
+              title="با مدل‌های تنظیم‌شده در ⚙️ پردازش AI رو دستی اجرا کن (تغییرنکرده‌ها skip می‌شوند)"
+            >
+              🧠 پردازش با AI
+            </button>
+            <button
+              onClick={() => setSettingsOpen(true)}
+              className="px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded-lg"
+              title="تنظیمات: مدل‌های پردازش، interval auto-sync، skip-if-unchanged"
+            >
+              ⚙️ تنظیمات
             </button>
           </div>
         </div>
@@ -508,6 +599,178 @@ export default function KnowledgeCenterPage() {
           onClose={() => setUploadOpen(false)}
           onDone={() => { setUploadOpen(false); loadEntries(); }}
         />
+      )}
+
+      {/* Settings modal */}
+      {settingsOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onClick={() => !settingsLoading && setSettingsOpen(false)}
+        >
+          <div
+            className="bg-gray-900 border border-white/10 rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="sticky top-0 bg-gray-900 p-4 border-b border-white/10 flex items-center justify-between">
+              <h3 className="font-bold text-lg">⚙️ تنظیمات مرکز دانش</h3>
+              <button
+                onClick={() => setSettingsOpen(false)}
+                disabled={settingsLoading}
+                className="px-3 py-1 bg-white/10 rounded hover:bg-white/20 disabled:opacity-50"
+              >
+                بستن
+              </button>
+            </div>
+            <div className="p-6 space-y-6">
+              {/* Auto-sync section */}
+              <div className="space-y-3">
+                <h4 className="font-bold text-blue-300">🔁 سینک خودکار</h4>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={kcSettings.auto_sync_enabled !== false}
+                    onChange={(e) => saveSettings({ auto_sync_enabled: e.target.checked })}
+                    disabled={settingsLoading}
+                  />
+                  <span className="text-sm">
+                    فعال‌سازی سینک خودکار از repo‌ها + پردازش AI
+                  </span>
+                </label>
+                <div className="flex items-center gap-2">
+                  <label className="text-sm">Interval (دقیقه):</label>
+                  <input
+                    type="number"
+                    min={5}
+                    max={1440}
+                    value={kcSettings.auto_sync_interval_minutes || 60}
+                    onChange={(e) => {
+                      const v = parseInt(e.target.value);
+                      if (v >= 5) {
+                        setKcSettings({ ...kcSettings, auto_sync_interval_minutes: v });
+                      }
+                    }}
+                    onBlur={(e) => {
+                      const v = parseInt(e.target.value);
+                      if (v >= 5 && v !== kcSettings.auto_sync_interval_minutes) {
+                        saveSettings({ auto_sync_interval_minutes: v });
+                      }
+                    }}
+                    disabled={settingsLoading}
+                    className="px-3 py-1 bg-black/40 border border-white/10 rounded text-sm w-24"
+                  />
+                  <span className="text-xs text-gray-400">
+                    حداقل ۵ دقیقه (محافظت از rate-limit GitHub)
+                  </span>
+                </div>
+              </div>
+
+              {/* Processing model picker — THE thing the user asked for */}
+              <div className="space-y-3">
+                <h4 className="font-bold text-purple-300">
+                  🤖 مدل‌های پردازش AI
+                </h4>
+                <p className="text-xs text-gray-400">
+                  هر مدل فعالی از صفحهٔ "مدل‌ها" می‌توانی انتخاب کنی. این
+                  انتخاب در هر سیکل auto-sync و دکمهٔ "پردازش با AI" استفاده
+                  می‌شود. اگر هیچ‌کدام تیک نخورد، پیش‌فرض ai_manager (همه
+                  مدل‌های available) به‌کار می‌رود.
+                </p>
+                {models.length === 0 ? (
+                  <p className="text-sm text-amber-300">
+                    ⚠️ هیچ مدل فعالی پیدا نشد. ابتدا در صفحهٔ مدل‌ها API key یا
+                    OAuth token را فعال کن.
+                  </p>
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    {models.map((m) => {
+                      const checked = (kcSettings.processing_model_ids || [])
+                        .includes(m.id);
+                      return (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => {
+                            const cur = kcSettings.processing_model_ids || [];
+                            const next = checked
+                              ? cur.filter((x: string) => x !== m.id)
+                              : [...cur, m.id];
+                            saveSettings({ processing_model_ids: next });
+                          }}
+                          disabled={settingsLoading}
+                          className={`px-3 py-1.5 rounded text-xs ${
+                            checked
+                              ? 'bg-purple-600 text-white'
+                              : 'bg-white/10 hover:bg-white/20'
+                          }`}
+                        >
+                          {checked ? '✓ ' : ''}{m.name || m.id}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+                <div className="text-xs text-gray-400">
+                  انتخاب فعلی:{' '}
+                  {(kcSettings.processing_model_ids || []).length === 0
+                    ? '(هیچ — auto)'
+                    : (kcSettings.processing_model_ids || []).join(', ')}
+                </div>
+              </div>
+
+              {/* Optimization toggles */}
+              <div className="space-y-3">
+                <h4 className="font-bold text-green-300">⚡ بهینه‌سازی</h4>
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={kcSettings.skip_unchanged !== false}
+                    onChange={(e) => saveSettings({ skip_unchanged: e.target.checked })}
+                    disabled={settingsLoading}
+                    className="mt-1"
+                  />
+                  <div>
+                    <div className="text-sm">skip-if-unchanged</div>
+                    <div className="text-xs text-gray-400">
+                      فایل‌هایی که content_hash تغییر نکرده دوباره پردازش
+                      نمی‌شوند. صرفه‌جویی در token + جلوگیری از کار تکراری.
+                    </div>
+                  </div>
+                </label>
+                <div className="flex items-center gap-2">
+                  <label className="text-sm">سقف entry‌های ایندکس:</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={50000}
+                    value={kcSettings.max_indexed_entries || 0}
+                    onChange={(e) => {
+                      setKcSettings({
+                        ...kcSettings,
+                        max_indexed_entries: parseInt(e.target.value) || 0,
+                      });
+                    }}
+                    onBlur={(e) => {
+                      const v = parseInt(e.target.value) || 0;
+                      if (v !== kcSettings.max_indexed_entries) {
+                        saveSettings({ max_indexed_entries: v });
+                      }
+                    }}
+                    disabled={settingsLoading}
+                    className="px-3 py-1 bg-black/40 border border-white/10 rounded text-sm w-28"
+                  />
+                  <span className="text-xs text-gray-400">
+                    ۰ = نامحدود. مازاد، قدیمی‌ترها de-index می‌شوند (فایل در
+                    repo می‌ماند).
+                  </span>
+                </div>
+              </div>
+
+              {settingsSaved && (
+                <div className="text-sm text-green-300">{settingsSaved}</div>
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
