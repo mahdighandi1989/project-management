@@ -146,7 +146,68 @@ def test_throttle_marker_present_in_source():
     assert "_MAX_DISPATCH_PER_TICK = 5" in src, (
         "cap value must stay at 5 — higher saturates Render free tier"
     )
-    # The cap must actually be applied (dirty list trimmed).
-    assert "dirty[:_MAX_DISPATCH_PER_TICK]" in src, (
+    # The cap must actually be applied (syncable list trimmed). The
+    # variable was renamed from `dirty` to `syncable` when the
+    # eligibility filter was hoisted above the throttle.
+    assert (
+        "syncable[:_MAX_DISPATCH_PER_TICK]" in src
+        or "dirty[:_MAX_DISPATCH_PER_TICK]" in src
+    ), (
         "cap must trim the dispatch list, not just be defined"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🚨 Throttle-eligibility regression: user-reported bug
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_throttle_picks_only_from_syncable_tasks():
+    """🚨 User reported: 'چند تا تسک رو باز تولید زدم و همینطور بوک
+    وریفای تلفیق کردم، ولی تو فولدر گیتهاب آپدیت نشده.'
+
+    Root cause: previous dispatcher sorted ALL dirty tasks by
+    execution_priority and took top N. If the top N happened to have
+    missing watched or prompt_sync_enabled=False, the cycle
+    dispatched ZERO tasks even when there were perfectly-syncable
+    tasks waiting (just at lower priority).
+
+    The fix partitions dirty into syncable+skipped BEFORE the throttle,
+    so the throttle window always contains real candidates.
+
+    Source-level guard: the eligibility filter (watched + sync_enabled
+    check) must happen BEFORE the throttle (dispatch cap)."""
+    src_path = (
+        Path(__file__).resolve().parents[1]
+        / "app/services/oversight_service.py"
+    )
+    src = src_path.read_text(encoding="utf-8")
+    idx_dirty = src.find("dirty: List[\"OversightTask\"] = []")
+    assert idx_dirty != -1, "dirty list construction must exist"
+    # Locate the throttle and the eligibility check
+    idx_throttle = src.find("_MAX_DISPATCH_PER_TICK", idx_dirty)
+    idx_eligibility = src.find('"prompt_sync_enabled", True', idx_dirty)
+    assert idx_throttle != -1 and idx_eligibility != -1
+    assert idx_eligibility < idx_throttle, (
+        "eligibility check (watched + prompt_sync_enabled) must happen "
+        "BEFORE the per-tick throttle so the throttle window is always "
+        "filled with real candidates. Otherwise top-priority tasks with "
+        "missing watched silently consume the dispatch budget and lower-"
+        "priority syncable tasks never get a turn."
+    )
+
+
+def test_throttle_logs_breakdown_of_skipped_reasons():
+    """The diagnostic log when ALL dirty tasks are skipped must
+    distinguish 'no watched' from 'sync_disabled' so the user can tell
+    whether their problem is orphaned tasks vs disabled projects."""
+    src_path = (
+        Path(__file__).resolve().parents[1]
+        / "app/services/oversight_service.py"
+    )
+    src = src_path.read_text(encoding="utf-8")
+    assert "no_watched=" in src, (
+        "diagnostic log must break out 'no_watched=N' so the user can "
+        "distinguish orphaned tasks from disabled projects"
+    )
+    assert "sync_disabled=" in src
