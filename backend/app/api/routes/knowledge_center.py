@@ -37,6 +37,9 @@ async def list_entries(
     tag: str = Query("", description="filter by single tag"),
     project_id: str = Query("", description="filter by watched project id"),
     source_type: str = Query("", description="manual / chat-import / claude-code-task"),
+    resolution_status: str = Query(
+        "", description="solved | partial | open | regressed | unknown",
+    ),
     sort: str = Query(
         "updated_desc",
         description="updated_desc | updated_asc | title_asc | title_desc | created_desc | size_desc",
@@ -46,7 +49,8 @@ async def list_entries(
     svc = get_knowledge_center_service()
     return svc.list_entries(
         page=page, per_page=per_page, search=search, tag=tag,
-        project_id=project_id, source_type=source_type, sort=sort,
+        project_id=project_id, source_type=source_type,
+        resolution_status=resolution_status, sort=sort,
     )
 
 

@@ -254,6 +254,12 @@ class KnowledgeEntry:
     # the same topic_canonical. Populated by process_synced_entries.
     # Each item: {"entry_id", "project_full_name", "path", "title"}
     cross_references: List[Dict[str, str]] = field(default_factory=list)
+    # 🆕 (two-pass extraction quality) — surfaced from frontmatter so the
+    # catalog UI can show resolution badges + filter by "solved only".
+    # solved | partial | open | regressed | unknown
+    resolution_status: str = "unknown"
+    recurrence_count: int = 1
+    user_confirmed: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -607,6 +613,26 @@ class KnowledgeCenterService:
                 source = meta.get("source") or {}
                 if isinstance(source, str):
                     source = {"type": source}
+                # Resolution fields — read from frontmatter (lower-cased
+                # for status, normalized booleans/ints) so the catalog
+                # can show badges + filter without re-parsing every file.
+                raw_status = str(meta.get("resolution_status") or "").lower()
+                if raw_status not in {
+                    "solved", "partial", "open", "regressed", "unknown",
+                }:
+                    raw_status = "unknown"
+                raw_rec = meta.get("recurrence_count")
+                try:
+                    rec_count = int(raw_rec) if raw_rec is not None else 1
+                except (TypeError, ValueError):
+                    rec_count = 1
+                raw_uc = meta.get("user_confirmed")
+                if isinstance(raw_uc, str):
+                    user_confirmed = raw_uc.strip().lower() in (
+                        "true", "yes", "1",
+                    )
+                else:
+                    user_confirmed = bool(raw_uc)
                 entry_data = {
                     "id": existing["id"] if existing else uuid.uuid4().hex,
                     "project_id": w.id,
@@ -627,6 +653,9 @@ class KnowledgeCenterService:
                     "imported_at": meta.get("imported_at") or (existing or {}).get("imported_at", ""),
                     "merged_from": meta.get("merged_from") or [],
                     "generated_by": meta.get("generated_by") or (existing or {}).get("generated_by", ""),
+                    "resolution_status": raw_status,
+                    "recurrence_count": rec_count,
+                    "user_confirmed": user_confirmed,
                 }
                 if existing:
                     existing.update(entry_data)
@@ -671,6 +700,7 @@ class KnowledgeCenterService:
         tag: str = "",
         project_id: str = "",
         source_type: str = "",
+        resolution_status: str = "",
         sort: str = "updated_desc",
     ) -> Dict[str, Any]:
         """Catalog endpoint with full search/sort/filter/pagination."""
@@ -684,6 +714,11 @@ class KnowledgeCenterService:
             items = [x for x in items if tag in (x.get("tags") or [])]
         if source_type:
             items = [x for x in items if x.get("source_type") == source_type]
+        if resolution_status:
+            items = [
+                x for x in items
+                if (x.get("resolution_status") or "unknown") == resolution_status
+            ]
         if search:
             needle = search.lower()
             def _hit(x: Dict[str, Any]) -> bool:
@@ -723,6 +758,7 @@ class KnowledgeCenterService:
         all_tags: Dict[str, int] = {}
         all_sources: Dict[str, int] = {}
         all_projects: Dict[str, int] = {}
+        all_resolutions: Dict[str, int] = {}
         for x in index.get("entries", []):
             for t in (x.get("tags") or []):
                 all_tags[t] = all_tags.get(t, 0) + 1
@@ -730,6 +766,8 @@ class KnowledgeCenterService:
             all_sources[s] = all_sources.get(s, 0) + 1
             p = x.get("project_full_name") or "—"
             all_projects[p] = all_projects.get(p, 0) + 1
+            r = x.get("resolution_status") or "unknown"
+            all_resolutions[r] = all_resolutions.get(r, 0) + 1
 
         return {
             "items": page_items,
@@ -746,6 +784,9 @@ class KnowledgeCenterService:
                 ),
                 "projects": sorted(
                     all_projects.items(), key=lambda kv: kv[1], reverse=True,
+                ),
+                "resolutions": sorted(
+                    all_resolutions.items(), key=lambda kv: kv[1], reverse=True,
                 ),
             },
         }
@@ -1422,6 +1463,11 @@ class KnowledgeCenterService:
             size_bytes=len(body.encode("utf-8")),
             imported_at=now_iso(),
             generated_by=used_model or "",
+            resolution_status=str(
+                item.get("resolution_status") or "unknown"
+            ).lower(),
+            recurrence_count=int(item.get("recurrence_count") or 1),
+            user_confirmed=bool(item.get("user_confirmed")),
         ).to_dict()
         return entry
 
