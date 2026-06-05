@@ -5065,6 +5065,135 @@ class NotificationService:
                 await tg.send(f"❌ خطا در حذف: {str(de)[:200]}", silent=False)
             return {"ok": True, "handled": "creator_project_deleted", "project_id": pid}
 
+        # 🆕 (telegram parity — audit + apply-fixes) — bring the
+        # /creator web page's "re-review + auto-fix" workflow into
+        # Telegram. The user explicitly asked for this: "از اون جا هم
+        # می‌شد از طریق موتور خالق پروژه ساخت" — so they should be
+        # able to audit + repair from there too.
+        if data.startswith("creator_audit:"):
+            pid = data.split(":", 1)[1]
+            try:
+                from ..api.routes.simple_projects import (
+                    audit_project, AuditProjectRequest,
+                )
+                # honor the user's model selection if any was stored in
+                # the most recent creator state for this chat
+                _state = _chat_state.get(chat_id_str) or {}
+                _cdata = _state.get("creator_data") or {}
+                _mids = list(_cdata.get("model_ids", []) or [])
+                await tg.send(
+                    "🔎 در حال بررسی پروژه توسط مدل‌های انتخابی...\n"
+                    "این ممکن است 30–90 ثانیه طول بکشد.",
+                    silent=True,
+                )
+                result = await audit_project(
+                    pid, AuditProjectRequest(model_ids=_mids),
+                )
+                agg = (result or {}).get("aggregated") or {}
+                lines = [
+                    f"🔎 *audit پروژه* `{pid[:12]}...`",
+                    "",
+                    f"📊 امتیاز میانگین: *{agg.get('overall_score_avg', '—')}/100*",
+                    f"✅ آماده push: {'بله' if agg.get('ready_to_push_majority') else 'خیر'}",
+                    f"🎯 با هدف می‌خواند: {'بله' if agg.get('matches_goal_majority') else 'خیر'}",
+                    f"🤖 مدل‌ها: {agg.get('models_succeeded', 0)}/{agg.get('models_consulted', 0)}",
+                ]
+                miss = agg.get("missing_critical_files") or []
+                mods = agg.get("files_to_modify") or []
+                dels = agg.get("files_to_delete") or []
+                if miss:
+                    lines.append(f"\n🚫 فایل‌های مفقود: *{len(miss)}*")
+                    for x in miss[:5]:
+                        lines.append(f"  • {str(x)[:80]}")
+                    if len(miss) > 5:
+                        lines.append(f"  ... و {len(miss) - 5} مورد دیگر")
+                if mods:
+                    lines.append(f"\n✏️ فایل‌های نیازمند ویرایش: *{len(mods)}*")
+                    for m in mods[:5]:
+                        p = m.get("path", "?") if isinstance(m, dict) else "?"
+                        lines.append(f"  • `{p}`")
+                if dels:
+                    lines.append(f"\n🗑 فایل‌های پیشنهادی برای حذف: *{len(dels)}*")
+                lines.append(
+                    "\nبرای اعمال اصلاحات خودکار، دکمهٔ ✨ اعمال اصلاحات "
+                    "را بزنید."
+                )
+                # action row: apply-fixes button on the result message
+                rows = [[
+                    {
+                        "text": "✨ اعمال اصلاحات کامل",
+                        "callback_data": f"creator_apply_fixes:{pid}",
+                    },
+                ]]
+                await tg.send(
+                    "\n".join(lines), silent=False,
+                    reply_markup={"inline_keyboard": rows},
+                )
+            except Exception as ae:
+                await tg.send(f"❌ خطا در audit: {str(ae)[:300]}", silent=False)
+            return {"ok": True, "handled": "creator_audit_done", "project_id": pid}
+
+        if data.startswith("creator_apply_fixes:"):
+            pid = data.split(":", 1)[1]
+            try:
+                from ..api.routes.simple_projects import (
+                    apply_audit_fixes, ApplyAuditFixesRequest,
+                )
+                _state = _chat_state.get(chat_id_str) or {}
+                _cdata = _state.get("creator_data") or {}
+                _mids = list(_cdata.get("model_ids", []) or [])
+                await tg.send(
+                    "✨ در حال اعمال اصلاحات کامل (افزودن مفقود + ویرایش + "
+                    "ارتقا fullstack در صورت نیاز)...\n"
+                    "این مرحله شامل audit + تولید فایل‌های جدید است و "
+                    "ممکن است چند دقیقه طول بکشد.",
+                    silent=True,
+                )
+                # For Telegram parity, we run the "recommended" intent:
+                # add audit's missing + regen issue files + promote to
+                # fullstack if applicable. We don't auto-delete via
+                # Telegram (no per-item checkboxes available here);
+                # delete remains an explicit action via the web UI.
+                from .simple_creator import get_simple_creator
+                creator = get_simple_creator()
+                proj = creator.get_project(pid)
+                upgrade = bool(
+                    proj and proj.project_type != "fullstack"
+                )
+                req = ApplyAuditFixesRequest(
+                    upgrade_to_fullstack=upgrade,
+                    model_ids=_mids,
+                )
+                result = await apply_audit_fixes(pid, req)
+                added = len(result.get("files_added") or [])
+                modified = len(result.get("files_modified") or [])
+                deleted = len(result.get("files_deleted") or [])
+                skipped = len(result.get("files_skipped") or [])
+                promoted = result.get("promoted_to_fullstack")
+                msg = (
+                    f"✅ *اصلاحات اعمال شد* — `{pid[:12]}...`\n\n"
+                    f"📄 اضافه‌شده: *{added}*\n"
+                    f"✏️ ویرایش‌شده: *{modified}*\n"
+                    f"🗑 حذف‌شده: *{deleted}*\n"
+                    f"⚠️ skip شده: *{skipped}*"
+                )
+                if promoted:
+                    msg += f"\n🚀 پروژه به *fullstack* ارتقا یافت"
+                msg += (
+                    "\n\nبرای حذف فایل‌های زائد (مثل duplicate config) "
+                    "یا audit مجدد، از پنل وب استفاده کنید."
+                )
+                await tg.send(msg, silent=False)
+            except Exception as fe:
+                await tg.send(
+                    f"❌ خطا در apply-fixes: {str(fe)[:300]}",
+                    silent=False,
+                )
+            return {
+                "ok": True, "handled": "creator_apply_fixes_done",
+                "project_id": pid,
+            }
+
         # 🆕 (telegram parity v1) — ویرایش نام repo قبل از push
         if data == "creator_edit_repo_name":
             state = _chat_state.get(chat_id_str)
@@ -7366,6 +7495,19 @@ class NotificationService:
                     lines.append(f"  🔗 GitHub: {github_url}")
 
                 rows: List[List[Dict[str, str]]] = []
+                # 🆕 (parity with /creator web page) — audit + apply-fixes
+                # buttons so the user can review and refine projects right
+                # from Telegram without switching to the web UI.
+                rows.append([
+                    {
+                        "text": "🔎 بررسی مجدد",
+                        "callback_data": f"creator_audit:{pid}",
+                    },
+                    {
+                        "text": "✨ اعمال اصلاحات",
+                        "callback_data": f"creator_apply_fixes:{pid}",
+                    },
+                ])
                 # دکمهٔ push اگر هنوز push نشده
                 if not github_url:
                     rows.append([{
@@ -7545,8 +7687,12 @@ class NotificationService:
         return {"ok": True, "handled": "creator_unknown_phase"}
 
     def _render_project_type_picker(self) -> Dict[str, Any]:
-        """inline keyboard برای انتخاب نوع پروژه (۸ گزینه)."""
+        """inline keyboard برای انتخاب نوع پروژه (۹ گزینه)."""
         types = [
+            # 🆕 fullstack added for parity with /creator web page where
+            # the user can build dashboards / OSINT / CRM that need
+            # both backend + frontend in one project.
+            ("🌐 fullstack", "fullstack"),
             ("🐍 fastapi", "fastapi"),
             ("⚛️ nextjs", "nextjs"),
             ("⚛️ react", "react"),
@@ -7575,20 +7721,40 @@ class NotificationService:
         description = data.get("description", "")
         project_type = data.get("project_type", "fastapi")
         technologies = data.get("technologies", []) or []
+        # 🆕 (parity with web Creator Engine) — pull the user's model
+        # selection from creator_data so it gets passed to auto-detect
+        # AND to file generation. Without this, Telegram-created
+        # projects ignored the user's model choice and used the default
+        # available model.
+        model_ids = list(data.get("model_ids", []) or [])
 
         # auto-detect خاص: project_type=="auto" → endpoint detect-type را call کن
         if project_type == "auto":
             try:
                 from ..api.routes.simple_projects import _detect_project_type
-                # signature: _detect_project_type(description, name="", model_ids=None)
+                # 🆕 pass model_ids so detection uses the user's choice
                 detected = await _detect_project_type(
                     description=description,
                     name=name,
+                    model_ids=model_ids or None,
                 )
-                project_type = (detected or {}).get("project_type") or "fastapi"
+                # The detect endpoint returns `primary_type`, not
+                # `project_type` — match the web Creator Engine's key.
+                project_type = (
+                    (detected or {}).get("primary_type")
+                    or (detected or {}).get("project_type")
+                    or "fullstack"
+                )
             except Exception as _e:
-                logger.warning(f"auto-detect failed, fallback to fastapi: {_e}")
-                project_type = "fastapi"
+                # 🆕 (parity) — fallback to fullstack, NOT fastapi.
+                # User selecting "auto" usually expects a complete web
+                # app; if detect fails, deliver both halves and let the
+                # user delete what they don't need.
+                logger.warning(f"auto-detect failed, fallback to fullstack: {_e}")
+                project_type = "fullstack"
+        # 🆕 (parity) — normalize hyphen alias regardless of source
+        if project_type == "full-stack":
+            project_type = "fullstack"
 
         await tg.send(
             f"⏳ در حال ساخت پروژه `{name}` ...\n"
@@ -7599,9 +7765,20 @@ class NotificationService:
 
         try:
             from .simple_creator import get_simple_creator
-            # استفاده از helper موجود در route (که signature درست را می‌داند)
-            from ..api.routes.simple_projects import ai_generate as _ai_gen
+            # 🆕 (parity with /creator web page) — use the attribution-
+            # aware variant so simple_creator can stamp generated_by /
+            # generated_at on each ProjectFile. Wrapping in a closure so
+            # the user's model selection (model_ids) is preserved across
+            # every per-file generation call.
+            from ..api.routes.simple_projects import ai_generate_with_meta
             creator = get_simple_creator()
+
+            async def _ai_gen(prompt: str):
+                # Returns (content, used_model_id) tuple. simple_creator's
+                # _tracked_ai_generate unpacks this to attribute files.
+                return await ai_generate_with_meta(
+                    prompt, model_ids=model_ids or None,
+                )
 
             project = await creator.create_project(
                 name=name,
@@ -7987,13 +8164,25 @@ class NotificationService:
 
         try:
             from .simple_creator import get_simple_creator
-            from ..api.routes.simple_projects import ai_generate, push_to_github, PushToGitHubRequest
+            # 🆕 (parity) — use attribution-aware variant so generated_by
+            # gets stamped on each ProjectFile. The full flow previously
+            # honored model_ids but lost attribution because it used the
+            # plain string-returning ai_generate.
+            from ..api.routes.simple_projects import (
+                ai_generate_with_meta, push_to_github, PushToGitHubRequest,
+            )
 
             creator = get_simple_creator()
 
-            # closure برای ai_generate با model_ids
-            async def _gen(prompt: str) -> str:
-                return await ai_generate(prompt, model_ids=model_ids)
+            # closure که هم model_ids را capture می‌کند هم tuple می‌دهد
+            async def _gen(prompt: str):
+                return await ai_generate_with_meta(
+                    prompt, model_ids=model_ids,
+                )
+
+            # 🆕 normalize hyphen alias regardless of source
+            if project_type == "full-stack":
+                project_type = "fullstack"
 
             # ساخت پروژه با structured prompt
             full_desc = structured.get("full_prompt_text") or structured.get("structured_description") or idea
