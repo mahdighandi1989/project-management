@@ -230,6 +230,34 @@ async def test_ai_manager_generate_routes_cloud_code_through_oauth_dispatcher():
         omr._REGISTRY.pop("test_oauth_model", None)
 
 
+def test_get_available_models_hides_cloud_code_when_token_missing():
+    """Parity with API-key providers: if DEEPSEEK_API_KEY is missing,
+    DeepSeek models don't appear. Same for cloud_code without
+    CLAUDE_CODE_OAUTH_TOKEN — otherwise user sees a pill, clicks it,
+    and gets a runtime error 'CLAUDE_CODE_OAUTH_TOKEN ست نشده' which
+    is bad UX. Hide it from the list when not configured."""
+    from app.services.ai_manager import get_ai_manager
+    from app.services import oauth_model_registry as omr
+
+    omr._BOOTSTRAP_DONE = False
+    omr.is_oauth_model("cloud_code")
+
+    # Explicitly clear the token
+    import os as _os
+    saved = _os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+    try:
+        mgr = get_ai_manager()
+        models = mgr.get_available_models()
+        ids = [m.id for m in models]
+        assert "cloud_code" not in ids, (
+            "cloud_code must be hidden when CLAUDE_CODE_OAUTH_TOKEN is missing "
+            "— parity with API-key providers that hide when key is missing"
+        )
+    finally:
+        if saved is not None:
+            _os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = saved
+
+
 @pytest.mark.asyncio
 async def test_ai_manager_generate_combines_multi_turn_messages_for_oauth():
     """The OAuth dispatcher takes a single prompt string but ai_manager's
