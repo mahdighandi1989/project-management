@@ -197,26 +197,30 @@ export default function ProjectPage() {
 
   const applyAuditFixes = async (opts?: {
     upgradeFullstack?: boolean;
-    includeModifies?: boolean;
-    includeDeletes?: boolean;
-    onlyMissing?: boolean;
+    includeMissing?: boolean;   // add audit's missing_critical_files
+    includeModifies?: boolean;  // regenerate selected modifies
+    includeDeletes?: boolean;   // delete selected files
   }) => {
     setFixing(true);
     setFixResult(null);
     try {
       // 🆕 honor user's model selection from /creator (same as audit)
       const body: any = { model_ids: getSelectedModelIds() };
-      // If user explicitly chose "promote to fullstack" we pass it,
-      // otherwise pass the missing-files list extracted from audit.
+      // 🐛 (bug fix v2) — switched from negative-flag opts (onlyMissing,
+      // upgradeOnly) to positive include* flags. The old form let "فقط
+      // حذف" accidentally still send missing_files because the inclusion
+      // condition was `!opts.upgradeOnly`. Now each intent is opt-in
+      // explicit so granular buttons can't silently send extra work.
       if (opts?.upgradeFullstack) {
         body.upgrade_to_fullstack = true;
-      } else if (auditResult?.aggregated?.missing_critical_files?.length) {
+      }
+      if (
+        opts?.includeMissing
+        && auditResult?.aggregated?.missing_critical_files?.length
+      ) {
         body.missing_files = auditResult.aggregated.missing_critical_files;
       }
-      // Modify and delete intents are explicit — not auto-applied.
-      // Default behaviour: include checked modifies, exclude all deletes
-      // unless the caller explicitly requests them.
-      if (opts?.includeModifies !== false && !opts?.onlyMissing) {
+      if (opts?.includeModifies) {
         const mods = (auditResult?.aggregated?.files_to_modify || [])
           .filter((m: any) => selectedModifies.has(m.path));
         if (mods.length > 0) body.files_to_modify = mods;
@@ -956,65 +960,117 @@ export default function ProjectPage() {
                         نمی‌شود، فقط آن‌چه که هست نگه داشته می‌شود و فایل‌های
                         جدید اضافه می‌شوند.
                       </p>
-                      <div className="flex flex-wrap gap-2">
-                        {/* 1. Just add missing files (no modify, no delete) */}
-                        {auditResult.aggregated.missing_critical_files?.length > 0 && (
-                          <button
-                            onClick={() => applyAuditFixes({ onlyMissing: true })}
-                            disabled={fixing}
-                            className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600 disabled:opacity-50 text-sm font-medium"
-                          >
-                            {fixing
-                              ? '... در حال تولید'
-                              : `📄 فقط تولید ${auditResult.aggregated.missing_critical_files.length} فایل مفقود`}
-                          </button>
-                        )}
-                        {/* 2. Apply checked modifies (and missing) */}
-                        {(auditResult.aggregated.files_to_modify?.length > 0
-                          || auditResult.aggregated.missing_critical_files?.length > 0) && (
-                          <button
-                            onClick={() => applyAuditFixes({ includeModifies: true })}
-                            disabled={fixing || selectedModifies.size === 0
-                              && (auditResult.aggregated.missing_critical_files?.length || 0) === 0}
-                            className="px-4 py-2 bg-yellow-500/90 text-black rounded hover:bg-yellow-400 disabled:opacity-50 text-sm font-medium"
-                          >
-                            {fixing
-                              ? '... در حال اعمال'
-                              : `✏️ افزودن مفقود + ویرایش ${selectedModifies.size} فایل`}
-                          </button>
-                        )}
-                        {/* 3. Apply EVERYTHING including deletes */}
-                        {selectedDeletes.size > 0 && (
-                          <button
-                            onClick={() => {
-                              if (!confirm(
-                                `حذف ${selectedDeletes.size} فایل قابل بازگشت نیست. مطمئنی؟`,
-                              )) return;
-                              applyAuditFixes({
-                                includeModifies: true, includeDeletes: true,
-                              });
-                            }}
-                            disabled={fixing}
-                            className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 disabled:opacity-50 text-sm font-medium"
-                          >
-                            {fixing
-                              ? '... در حال اعمال'
-                              : `🗑 حذف ${selectedDeletes.size} + ویرایش + افزودن`}
-                          </button>
-                        )}
-                        {project?.project_type !== 'fullstack' && (
-                          <button
-                            onClick={() => applyAuditFixes({ upgradeFullstack: true })}
-                            disabled={fixing}
-                            className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50 text-sm font-medium"
-                            title="پروژه را به fullstack تبدیل کن و هر فایل مفقود از template fullstack را تولید کن"
-                          >
-                            {fixing
-                              ? '... در حال ارتقا'
-                              : '🚀 ارتقا به fullstack + تولید کامل'}
-                          </button>
-                        )}
+                      {/* ⭐ THE ONE BUTTON: do everything user wants in one
+                          go — promote if applicable + add all audit
+                          missing + modify all selected + delete all selected.
+                          This is the "right" button for users who reviewed
+                          the findings and want everything applied. */}
+                      <div className="bg-purple-500/15 border border-purple-500/40 rounded p-3 space-y-2">
+                        <h5 className="font-bold text-purple-200 text-sm">
+                          ⭐ توصیه شده: یک‌بار همه را اعمال کن
+                        </h5>
+                        <p className="text-xs text-gray-300">
+                          ارتقا (اگر لازم) + همهٔ فایل‌های مفقود audit + همهٔ
+                          ویرایش‌های تیک‌خورده + همهٔ حذف‌های تیک‌خورده. این
+                          دکمه دقیقاً همان کاری را می‌کند که از audit
+                          انتظار داشتی.
+                        </p>
+                        <button
+                          onClick={() => {
+                            const delN = selectedDeletes.size;
+                            if (delN > 0 && !confirm(
+                              `این عملیات شامل حذف ${delN} فایل است که قابل ` +
+                              `بازگشت نیست. مطمئنی؟`,
+                            )) return;
+                            applyAuditFixes({
+                              upgradeFullstack:
+                                project?.project_type !== 'fullstack'
+                                && !auditResult.aggregated.matches_goal_majority,
+                              includeMissing: true,
+                              includeModifies: true,
+                              includeDeletes: true,
+                            });
+                          }}
+                          disabled={fixing}
+                          className="w-full px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700 disabled:opacity-50 text-sm font-bold"
+                        >
+                          {fixing
+                            ? '... در حال اعمال کامل'
+                            : `✅ اعمال کامل: ${
+                                (auditResult.aggregated.missing_critical_files?.length || 0)
+                              } افزودن + ${selectedModifies.size} ویرایش + ${selectedDeletes.size} حذف${
+                                project?.project_type !== 'fullstack'
+                                && !auditResult.aggregated.matches_goal_majority
+                                  ? ' + ارتقا fullstack' : ''
+                              }`}
+                        </button>
                       </div>
+
+                      {/* Granular actions — for users who want to apply
+                          only one category at a time (preview each effect
+                          before committing). */}
+                      <details className="bg-white/5 rounded">
+                        <summary className="cursor-pointer text-xs text-gray-300 px-3 py-2">
+                          ↓ گزینه‌های جداگانه (پیشرفته)
+                        </summary>
+                        <div className="p-3 space-y-2">
+                          <div className="text-xs text-gray-400">
+                            هر دکمه فقط یک نوع عملیات انجام می‌دهد. برای
+                            دیدن اثر هر بخش به‌تنهایی قبل از اعمال کامل
+                            مفید است.
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            {/* 1. Just add missing files (no modify, no delete) */}
+                            {auditResult.aggregated.missing_critical_files?.length > 0 && (
+                              <button
+                                onClick={() => applyAuditFixes({ includeMissing: true })}
+                                disabled={fixing}
+                                className="px-3 py-1.5 bg-green-500/80 text-white rounded hover:bg-green-500 disabled:opacity-50 text-xs"
+                                title="فقط افزودن. هیچ ویرایش، حذف یا ارتقا انجام نمی‌شود."
+                              >
+                                📄 فقط افزودن {auditResult.aggregated.missing_critical_files.length} فایل
+                              </button>
+                            )}
+                            {auditResult.aggregated.files_to_modify?.length > 0 && (
+                              <button
+                                onClick={() => applyAuditFixes({ includeModifies: true })}
+                                disabled={fixing || selectedModifies.size === 0}
+                                className="px-3 py-1.5 bg-yellow-500/80 text-black rounded hover:bg-yellow-400 disabled:opacity-50 text-xs"
+                                title="فقط ویرایش فایل‌های تیک‌خورده. افزودن یا حذف انجام نمی‌شود."
+                              >
+                                ✏️ فقط ویرایش {selectedModifies.size}
+                              </button>
+                            )}
+                            {project?.project_type !== 'fullstack' && (
+                              <button
+                                onClick={() => applyAuditFixes({
+                                  upgradeFullstack: true,
+                                })}
+                                disabled={fixing}
+                                className="px-3 py-1.5 bg-blue-500/80 text-white rounded hover:bg-blue-500 disabled:opacity-50 text-xs"
+                                title="فقط ارتقا به fullstack با template پیش‌فرض. فایل‌های خاص audit و ویرایش‌ها اعمال نمی‌شوند."
+                              >
+                                🚀 فقط ارتقا به fullstack
+                              </button>
+                            )}
+                            {selectedDeletes.size > 0 && (
+                              <button
+                                onClick={() => {
+                                  if (!confirm(
+                                    `حذف ${selectedDeletes.size} فایل قابل بازگشت نیست. مطمئنی؟`,
+                                  )) return;
+                                  applyAuditFixes({ includeDeletes: true });
+                                }}
+                                disabled={fixing}
+                                className="px-3 py-1.5 bg-red-500/80 text-white rounded hover:bg-red-500 disabled:opacity-50 text-xs"
+                                title="فقط حذف فایل‌های تیک‌خورده. افزودن یا ویرایش انجام نمی‌شود."
+                              >
+                                🗑 فقط حذف {selectedDeletes.size}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </details>
                       {fixResult && (
                         <div className="text-sm bg-black/20 rounded p-3 space-y-2">
                           <div className="text-green-300 font-medium">✅ نتیجه:</div>
