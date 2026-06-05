@@ -898,3 +898,321 @@ def test_frontend_has_manual_process_button():
     assert "triggerManualProcess" in src
     assert "/knowledge-center/process" in src
     assert "🧠 پردازش با AI" in src or "پردازش با AI" in src
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🆕 Two-pass extraction quality — covers the voice-recorded asks about
+# topic separation, thread following, resolution detection, recurrence,
+# and project-agnostic reusability.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_outline_parser_handles_well_formed_json():
+    """Pass-1 parser must extract topic list with all expected fields."""
+    from app.services.knowledge_center_service import KnowledgeCenterService
+    svc = KnowledgeCenterService()
+    out = svc._parse_topic_outline(
+        '{"topics": [{"topic_canonical":"x","title":"X",'
+        '"message_anchors":["a","b"],"resolution_signal":"solved",'
+        '"recurrence_count":3,"value_score":7}]}'
+    )
+    assert len(out["topics"]) == 1
+    t = out["topics"][0]
+    assert t["topic_canonical"] == "x"
+    assert t["resolution_signal"] == "solved"
+    assert t["recurrence_count"] == 3
+    assert t["value_score"] == 7
+
+
+def test_outline_parser_handles_code_fences_and_prose():
+    """Models sometimes wrap JSON in ```json fences or add prefix prose.
+    Parser must still recover."""
+    from app.services.knowledge_center_service import KnowledgeCenterService
+    svc = KnowledgeCenterService()
+    resp = (
+        "Sure! Here is the outline you asked for:\n\n"
+        "```json\n"
+        '{"topics": [{"topic_canonical":"y","title":"Y",'
+        '"message_anchors":[],"resolution_signal":"open",'
+        '"recurrence_count":1,"value_score":5}]}\n'
+        "```\n\nLet me know if you need more."
+    )
+    out = svc._parse_topic_outline(resp)
+    assert len(out["topics"]) == 1
+
+
+def test_outline_parser_returns_empty_on_garbage():
+    """No crash on non-JSON / empty / wrong shape."""
+    from app.services.knowledge_center_service import KnowledgeCenterService
+    svc = KnowledgeCenterService()
+    assert svc._parse_topic_outline("") == {"topics": []}
+    assert svc._parse_topic_outline("not json at all") == {"topics": []}
+    assert svc._parse_topic_outline('{"wrong": "shape"}') == {"topics": []}
+
+
+def test_deep_response_parser_returns_none_for_null_reply():
+    """Pass-2 model says 'this topic isn't worth keeping' → null. Parser
+    must return None so we skip it instead of creating a junk entry."""
+    from app.services.knowledge_center_service import KnowledgeCenterService
+    svc = KnowledgeCenterService()
+    assert svc._parse_topic_deep_response("null") is None
+    assert svc._parse_topic_deep_response("```json\nnull\n```") is None
+    assert svc._parse_topic_deep_response("") is None
+
+
+def test_deep_response_parser_extracts_resolution_fields():
+    """The pass-2 schema added resolution_status / evidence / recurrence
+    / user_confirmed. Parser must surface them so they reach the
+    rendered markdown."""
+    from app.services.knowledge_center_service import KnowledgeCenterService
+    svc = KnowledgeCenterService()
+    obj = svc._parse_topic_deep_response(
+        '{"title":"T","topic_canonical":"t","challenge":"c",'
+        '"solution":"s","resolution_status":"solved",'
+        '"resolution_evidence":"user said it works",'
+        '"recurrence_count":2,"user_confirmed":true,"confidence":0.9}'
+    )
+    assert obj is not None
+    assert obj["resolution_status"] == "solved"
+    assert obj["user_confirmed"] is True
+    assert obj["recurrence_count"] == 2
+
+
+def test_render_experience_md_includes_resolution_section():
+    """The user wants the saved file to record HOW we know the topic was
+    solved. Render must include the resolution block + applies_when
+    bullets so the next reader can judge applicability."""
+    from app.services.knowledge_center_service import KnowledgeCenterService
+    md = KnowledgeCenterService._render_experience_md(
+        title="OAuth", canonical="oauth", item={
+            "challenge": "c", "solution": "s",
+            "resolution_status": "solved",
+            "resolution_evidence": "user confirmed",
+            "recurrence_count": 2, "user_confirmed": True,
+            "applies_when": ["building login", "need 3rd-party auth"],
+            "applies_when_not": ["internal-only tool"],
+            "prerequisites": ["OAuth2 lib"],
+        }, source_file="chat.txt", used_model="m1",
+        created_at="2026-06-05T10:00:00Z",
+    )
+    assert "resolution_status: \"solved\"" in md
+    assert "user_confirmed: true" in md
+    assert "user confirmed" in md  # evidence
+    assert "Applies when" in md
+    assert "building login" in md
+    assert "anti-pattern" in md.lower()
+    assert "Prerequisites" in md
+    assert "OAuth2 lib" in md
+
+
+def test_format_readme_documents_resolution_workflow():
+    """README is the AI contract. If it doesn't mention the resolution
+    fields, any new model writing experiences will skip them."""
+    from app.services.knowledge_center_service import EXPERIENCE_FORMAT_README
+    assert "resolution_status" in EXPERIENCE_FORMAT_README
+    assert "regressed" in EXPERIENCE_FORMAT_README
+    assert "user_confirmed" in EXPERIENCE_FORMAT_README
+    assert "Applies when" in EXPERIENCE_FORMAT_README
+    assert "anti-pattern" in EXPERIENCE_FORMAT_README.lower()
+    assert "interleaved" in EXPERIENCE_FORMAT_README.lower() or (
+        "پراکنده" in EXPERIENCE_FORMAT_README
+    )
+
+
+@pytest.mark.asyncio
+async def test_import_chat_uses_two_pass_when_outline_returns_topics(
+    tmp_path, monkeypatch,
+):
+    """Two-pass extraction: pass-1 outline returns N topics → pass-2 runs
+    once per topic. Verifies orchestration."""
+    import json
+    from app.services import knowledge_center_service as kcs
+    monkeypatch.setattr(kcs, "INDEX_FILE", tmp_path / "kc.json")
+    (tmp_path / "kc.json").write_text(
+        json.dumps({"version": 1, "entries": []}), encoding="utf-8",
+    )
+    svc = kcs.KnowledgeCenterService()
+
+    call_log = []
+
+    async def fake_ai(prompt, model_ids=None):
+        # Outline prompt asks for value_score; deep prompt asks for
+        # resolution_evidence. Use those as unambiguous markers.
+        if "value_score" in prompt and "resolution_evidence" not in prompt:
+            call_log.append("outline")
+            return (
+                '{"topics": ['
+                '{"topic_canonical":"oauth-flow","title":"OAuth Flow",'
+                '"message_anchors":["need login"],'
+                '"resolution_signal":"solved","recurrence_count":1,"value_score":8},'
+                '{"topic_canonical":"rate-limit","title":"Rate Limiting",'
+                '"message_anchors":["429 errors"],'
+                '"resolution_signal":"partial","recurrence_count":2,"value_score":6}'
+                ']}',
+                "outline-model",
+            )
+        call_log.append("deep")
+        return (
+            '{"title":"Result","topic_canonical":"new-canonical",'
+            '"tags":[],"challenge":"x","solution":"y","code_examples":"",'
+            '"pitfalls":"","apply_elsewhere":"",'
+            '"applies_when":["a"],"applies_when_not":[],"prerequisites":[],'
+            '"resolution_status":"solved","resolution_evidence":"works",'
+            '"recurrence_count":1,"user_confirmed":true,"confidence":0.9}',
+            "deep-model",
+        )
+
+    with patch(
+        "app.api.routes.simple_projects.ai_generate_with_meta", new=fake_ai,
+    ), patch(
+        "app.services.oversight_service.get_github_token", return_value=None,
+    ):
+        result = await svc.import_chat_file(
+            filename="chat.txt",
+            content_bytes=b"long enough chat content " * 30,
+            target_project_id=None, target_project_full_name=None,
+        )
+
+    assert result["ok"] is True
+    assert result["pass_mode"] == "two_pass"
+    assert result["topics_identified"] == 2
+    assert call_log == ["outline", "deep", "deep"]
+    assert result["created"] == 2
+
+
+@pytest.mark.asyncio
+async def test_import_chat_skips_low_value_topics(tmp_path, monkeypatch):
+    """value_score < 4 → topic dropped before pass-2. Saves AI cost and
+    keeps the catalog clean."""
+    import json
+    from app.services import knowledge_center_service as kcs
+    monkeypatch.setattr(kcs, "INDEX_FILE", tmp_path / "kc.json")
+    (tmp_path / "kc.json").write_text(
+        json.dumps({"version": 1, "entries": []}), encoding="utf-8",
+    )
+    svc = kcs.KnowledgeCenterService()
+
+    deep_calls = {"n": 0}
+
+    async def fake_ai(prompt, model_ids=None):
+        if "value_score" in prompt and "resolution_evidence" not in prompt:
+            return (
+                '{"topics": ['
+                '{"topic_canonical":"junk","title":"trivial",'
+                '"message_anchors":[],"resolution_signal":"open",'
+                '"recurrence_count":1,"value_score":2}'
+                ']}',
+                "outline-model",
+            )
+        deep_calls["n"] += 1
+        return ('{"title":"x"}', "deep-model")
+
+    with patch(
+        "app.api.routes.simple_projects.ai_generate_with_meta", new=fake_ai,
+    ), patch(
+        "app.services.oversight_service.get_github_token", return_value=None,
+    ):
+        result = await svc.import_chat_file(
+            filename="chat.txt",
+            content_bytes=b"long enough chat content " * 30,
+            target_project_id=None, target_project_full_name=None,
+        )
+
+    assert result["topics_identified"] == 1
+    assert deep_calls["n"] == 0, "low-value topic must not trigger pass-2"
+    assert result["created"] == 0
+
+
+@pytest.mark.asyncio
+async def test_import_chat_falls_back_to_chunking_when_outline_fails(
+    tmp_path, monkeypatch,
+):
+    """If pass-1 errors, fall back to chunk + single-pass so we don't
+    lose data."""
+    import json
+    from app.services import knowledge_center_service as kcs
+    monkeypatch.setattr(kcs, "INDEX_FILE", tmp_path / "kc.json")
+    (tmp_path / "kc.json").write_text(
+        json.dumps({"version": 1, "entries": []}), encoding="utf-8",
+    )
+    svc = kcs.KnowledgeCenterService()
+
+    call_count = {"n": 0}
+
+    async def fake_ai(prompt, model_ids=None):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("rate limited")
+        return (
+            '{"experiences": [{"title":"Fallback Topic",'
+            '"topic_canonical":"fallback","tags":[],"challenge":"x",'
+            '"solution":"y","code_examples":"","pitfalls":"",'
+            '"apply_elsewhere":""}]}',
+            "fallback-model",
+        )
+
+    with patch(
+        "app.api.routes.simple_projects.ai_generate_with_meta", new=fake_ai,
+    ), patch(
+        "app.services.oversight_service.get_github_token", return_value=None,
+    ):
+        result = await svc.import_chat_file(
+            filename="chat.txt",
+            content_bytes=b"long enough chat content " * 30,
+            target_project_id=None, target_project_full_name=None,
+        )
+
+    assert result["pass_mode"] == "single_pass_fallback"
+    assert result["created"] >= 1
+    assert any("outline pass" in e for e in result.get("errors", []))
+
+
+@pytest.mark.asyncio
+async def test_import_chat_two_pass_dedups_against_existing_canonical(
+    tmp_path, monkeypatch,
+):
+    """Two-pass path must respect the same dedup contract as single-pass:
+    matching canonical → merge, not duplicate."""
+    import json
+    from app.services import knowledge_center_service as kcs
+    monkeypatch.setattr(kcs, "INDEX_FILE", tmp_path / "kc.json")
+    (tmp_path / "kc.json").write_text(
+        json.dumps({"version": 1, "entries": [{
+            "id": "e-existing", "project_full_name": "",
+            "path": "experiences/oauth-flow.md", "title": "Old OAuth",
+            "topic_canonical": "oauth-flow", "tags": [],
+            "source_type": "manual", "merged_from": [],
+        }]}),
+        encoding="utf-8",
+    )
+    svc = kcs.KnowledgeCenterService()
+
+    async def fake_ai(prompt, model_ids=None):
+        if "value_score" in prompt and "resolution_evidence" not in prompt:
+            return (
+                '{"topics":[{"topic_canonical":"oauth-flow",'
+                '"title":"OAuth","message_anchors":[],'
+                '"resolution_signal":"solved","recurrence_count":1,'
+                '"value_score":7}]}',
+                "outline-model",
+            )
+        return (
+            '{"title":"OAuth v2","topic_canonical":"oauth-flow",'
+            '"tags":[],"challenge":"x","solution":"y",'
+            '"code_examples":"","pitfalls":"","apply_elsewhere":""}',
+            "deep-model",
+        )
+
+    with patch(
+        "app.api.routes.simple_projects.ai_generate_with_meta", new=fake_ai,
+    ), patch(
+        "app.services.oversight_service.get_github_token", return_value=None,
+    ):
+        result = await svc.import_chat_file(
+            filename="chat-dup.txt",
+            content_bytes=b"long enough chat content " * 30,
+            target_project_id=None, target_project_full_name=None,
+        )
+
+    assert result["created"] == 0
+    assert result["merged"] >= 1

@@ -117,6 +117,9 @@ source:
 created_at: "2026-06-05T10:00:00Z"
 updated_at: "2026-06-05T10:00:00Z"
 merged_from: []
+resolution_status: "solved"   # solved | partial | open | regressed | unknown
+recurrence_count: 1            # چند بار همین موضوع در چت بازگشته
+user_confirmed: true           # آیا کاربر صریحاً «حل شد» گفت
 ---
 ```
 
@@ -135,10 +138,25 @@ merged_from: []
 [snippet با نام‌های عمومی، نه مال این پروژه]
 
 ## ⚠️ نکات حیاتی / Pitfalls
-[خطاهای رایج وقتی این الگو را در جای دیگر استفاده می‌کنی]
+[خطاهای رایج وقتی این الگو را در جای دیگر استفاده می‌کنی، شامل
+تلاش‌هایی که در چت اصلی شکست خوردند]
+
+## ✅ Resolution
+- Status: solved | partial | open | regressed
+- Evidence: نقل‌قول کوتاه از چت که اثبات می‌کند مشکل واقعاً حل شد
+  (مثلاً «کاربر گفت ‘حالا کار می‌کنه’» یا «کد فاینال run شد و خطا نداد»)
 
 ## 🔁 چطور در جای دیگر اعمال کنیم / How to Apply Elsewhere
 [ترجمهٔ این الگو به پروژه‌های دیگر — generic checklist]
+
+### Applies when
+- سناریوهای concrete که این الگو در آن‌ها کاربرد دارد
+
+### Does NOT apply when (anti-pattern)
+- سناریوهایی که نباید این الگو را اعمال کرد
+
+### Prerequisites
+- پیش‌نیازهای فنی (versions, frameworks, …)
 
 ## 🔗 References
 - منبع اولیه: [chat-export-2026-06-04.txt, line 42]
@@ -169,6 +187,21 @@ merged_from: []
 
 5. **References صادق باشن**: اگر مطلب از یک چت import شد، منبع را در
    `source:` و در پایان فایل ذکر کن.
+
+6. **تشخیص resolution را بر اساس شواهد ثبت کن** — نه حدس:
+   - `solved` ⇐ کاربر صریحاً تأیید کرد ("کار کرد"، "ممنون") یا کد
+     فاینال ارائه شد و کاربر بدون اعتراض موضوع را عوض کرد
+   - `partial` ⇐ راه‌حل ارائه شد ولی کاربر یک sub-question باقی‌مانده داشت
+   - `open` ⇐ تلاش شد، شواهد روشنی برای حل وجود ندارد
+   - `regressed` ⇐ موضوع بعداً در همین چت دوباره ظاهر شد
+   - **اگر مطمئن نیستی → `partial` بزن، نه `solved`.**
+   - فقط راه‌حلِ **موفق** را در `solution` بیاور؛ تلاش‌های شکست‌خورده
+     را در `pitfalls` ثبت کن تا خوانندهٔ بعدی آن‌ها را تکرار نکند.
+
+7. **رشتهٔ یک موضوع را در میان پیام‌های متفرقه دنبال کن** — چت‌های
+   طولانی معمولاً interleaved اند. یک موضوع شروع می‌شود، یک سؤال
+   نامرتبط وسطش می‌آید، بعد بازمی‌گردد. این پراکندگی نباید باعث شود
+   آن را به دو تجربهٔ مجزا تقسیم کنی.
 
 ## 📤 سینک با Knowledge Center
 
@@ -807,13 +840,6 @@ class KnowledgeCenterService:
         if not text or len(text.strip()) < 50:
             return {"ok": False, "error": "file_too_small_or_empty"}
 
-        # Chunk to respect token limits (target ~12k chars per chunk,
-        # roughly 3-4k tokens — well inside most models' contexts).
-        chunks = self._chunk_text(text, max_chars=12000, overlap=300)
-        logger.info(
-            f"knowledge_center.import: {filename} → {len(chunks)} chunks"
-        )
-
         # Use the API route's ai_generate_with_meta for parity with the
         # rest of the Creator/Audit flow.
         from ..api.routes.simple_projects import ai_generate_with_meta
@@ -823,61 +849,121 @@ class KnowledgeCenterService:
             e.get("topic_canonical"): e for e in index.get("entries", [])
         }
 
-        from .github_pr_service import get_github_pr_service
         from .oversight_service import get_github_token
-        pr = get_github_pr_service()
         token = get_github_token()
 
         created_entries: List[Dict[str, Any]] = []
         merged_entries: List[Dict[str, Any]] = []
         errors: List[str] = []
+        chunks: List[str] = []  # populated only on fallback path
+        pass_mode = "two_pass"
 
-        for ci, chunk in enumerate(chunks):
-            prompt = self._build_extraction_prompt(
-                chunk_text=chunk, chunk_index=ci, total_chunks=len(chunks),
-                target_project=target_project_full_name or "?",
-                existing_topics=list(existing_canonicals.keys())[:50],
-            )
+        # 🆕 Two-pass extraction (outline → per-topic deep):
+        # Pass 1 sees the whole chat (or its head if huge) and identifies
+        # distinct topics + tracks each one across interleaved messages.
+        # Pass 2 takes ONE topic at a time, follows its thread across
+        # the whole chat, determines resolution_status with evidence,
+        # and writes a reusable project-agnostic experience.
+        #
+        # For very long chats (>80k chars), we still chunk + use the
+        # single-pass fallback so we never lose data. The outline pass
+        # is best-effort: if it errors, single-pass per chunk runs.
+        OUTLINE_MAX_CHARS = 80_000
+        topics: List[Dict[str, Any]] = []
+        outline_used_model = ""
+        if len(text) <= OUTLINE_MAX_CHARS:
             try:
-                content, used_model = await ai_generate_with_meta(
-                    prompt, model_ids=model_ids,
+                outline_prompt = self._build_outline_prompt(
+                    chat_text=text,
+                    target_project=target_project_full_name or "?",
+                )
+                outline_resp, outline_used_model = await ai_generate_with_meta(
+                    outline_prompt, model_ids=model_ids,
+                )
+                outline_obj = self._parse_topic_outline(outline_resp)
+                topics = outline_obj.get("topics") or []
+                logger.info(
+                    f"knowledge_center.import: outline → {len(topics)} topics"
                 )
             except Exception as e:
-                errors.append(f"chunk {ci}: ai call failed: {str(e)[:200]}")
-                continue
-            extracted_list = self._parse_extracted_experiences(content)
-            for item in extracted_list:
+                errors.append(f"outline pass: {str(e)[:200]}")
+                topics = []
+
+        if topics:
+            # Two-pass succeeded — do focused per-topic extraction
+            for ti, topic in enumerate(topics):
+                # Skip low-value topics (outline pre-filters but be defensive)
+                if int(topic.get("value_score") or 0) < 4:
+                    continue
                 try:
-                    canonical = item.get("topic_canonical") or _slugify(
-                        item.get("title", "")
+                    deep_prompt = self._build_topic_deep_prompt(
+                        chat_text=text, topic=topic,
+                        target_project=target_project_full_name or "?",
+                        existing_topics=list(existing_canonicals.keys())[:50],
                     )
-                    item["topic_canonical"] = canonical
-                    if canonical in existing_canonicals:
-                        # Merge mode (req #14 from voice notes)
-                        target = existing_canonicals[canonical]
-                        merged = await self._merge_into_existing(
-                            target=target, new_item=item,
-                            source_file=filename, used_model=used_model,
-                            target_project_full_name=(
-                                target_project_full_name or target.get("project_full_name", "")
-                            ),
-                            github_token=token,
-                        )
-                        merged_entries.append(merged)
-                    else:
-                        # New entry
-                        created = await self._create_new_entry(
-                            item=item, source_file=filename,
-                            used_model=used_model,
+                    deep_resp, used_model = await ai_generate_with_meta(
+                        deep_prompt, model_ids=model_ids,
+                    )
+                    item = self._parse_topic_deep_response(deep_resp)
+                    if item is None:
+                        continue
+                    # Outline owns the canonical — pass-2 may suggest one
+                    # but we always pin to outline so we don't accidentally
+                    # split the same topic across two entries because
+                    # the two passes disagreed on the slug.
+                    outline_canonical = (
+                        topic.get("topic_canonical")
+                        or _slugify(item.get("title", ""))
+                    )
+                    item["topic_canonical"] = outline_canonical
+                    await self._dispatch_extracted_item(
+                        item=item, used_model=used_model,
+                        existing_canonicals=existing_canonicals,
+                        target_project_id=target_project_id,
+                        target_project_full_name=target_project_full_name,
+                        github_token=token, source_file=filename,
+                        created_entries=created_entries,
+                        merged_entries=merged_entries,
+                    )
+                except Exception as e:
+                    errors.append(f"topic {ti}: {str(e)[:200]}")
+        else:
+            # Fallback: chunk + single-pass per chunk
+            pass_mode = "single_pass_fallback"
+            chunks = self._chunk_text(text, max_chars=12000, overlap=300)
+            logger.info(
+                f"knowledge_center.import: fallback single-pass → "
+                f"{len(chunks)} chunks"
+            )
+            for ci, chunk in enumerate(chunks):
+                prompt = self._build_extraction_prompt(
+                    chunk_text=chunk, chunk_index=ci,
+                    total_chunks=len(chunks),
+                    target_project=target_project_full_name or "?",
+                    existing_topics=list(existing_canonicals.keys())[:50],
+                )
+                try:
+                    content, used_model = await ai_generate_with_meta(
+                        prompt, model_ids=model_ids,
+                    )
+                except Exception as e:
+                    errors.append(
+                        f"chunk {ci}: ai call failed: {str(e)[:200]}"
+                    )
+                    continue
+                for item in self._parse_extracted_experiences(content):
+                    try:
+                        await self._dispatch_extracted_item(
+                            item=item, used_model=used_model,
+                            existing_canonicals=existing_canonicals,
                             target_project_id=target_project_id,
                             target_project_full_name=target_project_full_name,
-                            github_token=token,
+                            github_token=token, source_file=filename,
+                            created_entries=created_entries,
+                            merged_entries=merged_entries,
                         )
-                        if created:
-                            created_entries.append(created)
-                            existing_canonicals[canonical] = created
-                except Exception as e:
-                    errors.append(f"chunk {ci} item: {str(e)[:200]}")
+                    except Exception as e:
+                        errors.append(f"chunk {ci} item: {str(e)[:200]}")
 
         # Persist any new/merged entries in the index
         new_index = _load_index()
@@ -893,6 +979,8 @@ class KnowledgeCenterService:
         return {
             "ok": True,
             "filename": filename,
+            "pass_mode": pass_mode,
+            "topics_identified": len(topics),
             "chunks_processed": len(chunks),
             "created": len(created_entries),
             "merged": len(merged_entries),
@@ -957,41 +1045,310 @@ class KnowledgeCenterService:
         return chunks
 
     @staticmethod
+    def _build_outline_prompt(
+        *, chat_text: str, target_project: str,
+    ) -> str:
+        """Pass 1 — outline. Read the WHOLE chat (or truncated head) and
+        identify distinct topics, even when they're interleaved across
+        many messages. The model returns a list of topic seeds without
+        trying to fully solve each — that's pass 2's job.
+
+        We give the model very explicit instructions about thread-
+        following because that's what the user asked for: trace one
+        topic across non-contiguous messages."""
+        return f"""تو یک knowledge engineer هستی. یک چت طولانی export شده از AI داریم که در آن **چندین موضوع متفرقه** بحث شده. این چت‌ها معمولاً ساختار خوبی ندارند: یک موضوع شروع می‌شود، وسطش یک سؤال متفرقه می‌آید، بعد بازمی‌گردد، …
+
+# پروژهٔ مقصد (فقط context — نام پروژه نباید در خروجی بیاید)
+{target_project}
+
+# متن چت
+{chat_text}
+
+# وظیفهٔ تو (مرحلهٔ ۱ — فقط outline)
+
+اول چت را **سطر به سطر** بخوان و موضوعات مجزا را تفکیک کن. هر **موضوع** = یک challenge فنی متمایز که در چت دربارهٔ آن گفتگو شده.
+
+برای هر موضوع، یک outline بساز که شامل:
+
+1. **topic_canonical** — slug کوتاه (kebab-case) که موضوع را در سراسر سیستم یکتا شناسایی کند (مثلاً `google-oauth-login`, `nextjs-static-export`).
+2. **title** — عنوان کوتاه خوانا برای انسان.
+3. **message_anchors** — لیست لنگرهای متنی (۲-۵ مورد) که نشان می‌دهد این موضوع کجای چت بحث شده. هر لنگر یک عبارت یا جمله از خود چت است که در آن موضوع مطرح شده. این لنگرها به pass 2 کمک می‌کند موضوع را در میان پیام‌های متفرقه دنبال کند.
+4. **resolution_signal** — یکی از:
+   - `"solved"` — کاربر یا مدل صریحاً گفته مشکل حل شد، یا code فاینالی ارائه شد که کاربر تأیید کرد
+   - `"partial"` — راه‌حل پیشنهاد شد ولی کاربر تأیید کامل نکرد، یا فقط یک بخش حل شد
+   - `"open"` — مشکل مطرح شد، تلاش شد، ولی شواهد روشنی برای حل وجود ندارد
+   - `"regressed"` — موضوع بعداً در چت دوباره مطرح شد به‌نشانهٔ بازگشت مشکل
+5. **recurrence_count** — چند بار همین موضوع در چت بازمی‌گردد (۱ = یک‌بار، ۲+ = بحث چندین‌مرحله‌ای)
+6. **value_score** — ۰..۱۰، چقدر این تجربه برای پروژه‌های دیگر مفید است (۰ = صرفاً پاسخ خاص آن پروژه، ۱۰ = الگوی عمومی قابل تعمیم)
+
+# نکات بسیار مهم
+
+- **موضوعات متفرقه و پراکنده را با هم اشتباه نگیر**: اگر کاربر وسط یک موضوع چیز نامرتبط پرسیده، آن را یک موضوع جداگانه ثبت کن.
+- **اگر موضوعی در چت چند بار با شکست تلاش شد و سپس حل شد، فقط ۱ موضوع است** با `resolution_signal: "solved"` و `recurrence_count` بالاتر.
+- موضوعاتی که `value_score < 4` دارند (مثلاً سؤال خیلی خاص که قابل تعمیم نیست) را **حذف کن** — خروجی نده.
+- اگر هیچ موضوع ارزشمندی نیست، `"topics": []` برگردان.
+
+# خروجی فقط JSON
+
+{{
+  "topics": [
+    {{
+      "topic_canonical": "kebab-case-slug",
+      "title": "عنوان کوتاه",
+      "message_anchors": ["جمله یا عبارت یافت‌شده در چت", "..."],
+      "resolution_signal": "solved" | "partial" | "open" | "regressed",
+      "recurrence_count": 1,
+      "value_score": 7
+    }}
+  ]
+}}
+"""
+
+    @staticmethod
+    def _build_topic_deep_prompt(
+        *, chat_text: str, topic: Dict[str, Any], target_project: str,
+        existing_topics: List[str],
+    ) -> str:
+        """Pass 2 — focused extraction for ONE topic. Receives the topic
+        outline from pass 1 + the full chat, traces the topic across
+        all messages, determines resolution with evidence, and writes
+        a reusable experience entry.
+
+        This is where thread-following + resolution-detection + cross-
+        project-applicability come together."""
+        existing_str = ", ".join(existing_topics[:30]) if existing_topics else "—"
+        anchors_str = "\n".join(
+            f"  - «{a}»" for a in (topic.get("message_anchors") or [])
+        ) or "  (هیچ لنگری ثبت نشده — کل چت را خودت بخوان)"
+        return f"""تو یک knowledge engineer هستی. مرحلهٔ ۱ موضوعات چت را شناسایی کرد. الان وظیفهٔ توست برای **یک موضوع خاص**، تجربهٔ کامل و قابل‌استفاده‌مجدد را استخراج کنی.
+
+# پروژهٔ مقصد (فقط برای context — نام پروژه نباید در خروجی بیاید)
+{target_project}
+
+# موضوعات موجود در سیستم (برای dedup)
+{existing_str}
+
+# موضوع فعلی (از pass 1)
+- topic_canonical: {topic.get("topic_canonical", "?")}
+- title: {topic.get("title", "?")}
+- resolution_signal اولیه: {topic.get("resolution_signal", "open")}
+- recurrence_count: {topic.get("recurrence_count", 1)}
+
+# لنگرهای متنی برای این موضوع (کجای چت بحث شده)
+{anchors_str}
+
+# متن کامل چت (می‌توانی fragment های مرتبط را با لنگرها پیدا کنی)
+{chat_text}
+
+# وظیفهٔ تو
+
+۱) **رشتهٔ این موضوع را در سراسر چت دنبال کن** — حتی اگر بین موضوعات متفرقه پراکنده باشد. لنگرها نقطه‌های شروع‌اند، نه پایان.
+
+۲) **تشخیص resolution** را بر اساس **شواهد در پیام‌ها** تأیید یا اصلاح کن:
+   - آیا کاربر صریحاً گفته "کار کرد" / "حل شد" / "ممنون"؟
+   - آیا code فاینالی ارائه شد و کاربر سؤال بعدی متفاوتی پرسید (یعنی پذیرفت)؟
+   - آیا مدل گفت "این کار را بکن" ولی کاربر سؤال‌های پی‌درپی نگرانی‌ای پرسید (یعنی هنوز حل نشده)؟
+   - آیا موضوع بعداً با کلمات کلیدی مشابه دوباره مطرح شد (regressed)؟
+
+۳) **استخراج راه‌حل واقعی** — اگر چند تلاش شکست خوردند و یکی موفق شد، فقط راه‌حل **موفق** را ثبت کن. تلاش‌های شکست‌خورده را در `pitfalls` بیاور.
+
+۴) **نوشتن project-agnostic**:
+   - ❌ "در پروژهٔ MyApp ما X کردیم"
+   - ✅ "وقتی X را پیاده می‌کنیم..."
+   - نام فایل‌های خاص پروژه را با placeholder عمومی جایگزین کن (مثلاً `MyApp.tsx` → `AuthPage.tsx`)
+   - secrets/credentials/URL خاص پروژه را حذف کن
+
+۵) **بخش "apply elsewhere" را با دقت پر کن** — این مهم‌ترین بخش است که تجربه را قابل‌استفاده‌مجدد می‌کند:
+   - `applies_when`: ۲-۴ سناریوی concrete که این الگو در آن‌ها مفید است
+   - `applies_when_not`: ۱-۳ سناریو که این الگو **نباید** اعمال شود (anti-pattern)
+   - `prerequisites`: پیش‌نیازهای فنی (مثلاً "FastAPI 0.100+", "React 18 با Suspense")
+
+# خروجی فقط JSON
+
+{{
+  "title": "عنوان کوتاه قابل‌استفاده‌مجدد",
+  "topic_canonical": "{topic.get('topic_canonical', '')}",
+  "tags": ["tag1", "tag2"],
+  "challenge": "چه مشکلی بود — کلی، بدون نام پروژه، با context کافی که خواننده نوع‌مسأله را بفهمد",
+  "solution": "راه‌حل قدم‌به‌قدم موفق — قابل تعمیم. اگر چند مرحله است، شماره‌گذاری کن.",
+  "code_examples": "snippet با نام‌های عمومی (نه نام پروژه). اگر چند فایل لازم است، با header مشخص کن.",
+  "pitfalls": "خطاهای رایج (شامل تلاش‌های شکست‌خوردهٔ این چت). هر کدام: «این کار را نکن چون…»",
+  "applies_when": ["سناریو ۱ که این الگو در آن مناسب است", "سناریو ۲", ...],
+  "applies_when_not": ["سناریو که این الگو **نباید** اعمال شود", ...],
+  "prerequisites": ["پیش‌نیاز فنی ۱", ...],
+  "apply_elsewhere": "خلاصه پاراگرافی از applies_when + applies_when_not + prerequisites — برای کسی که در یک نگاه می‌خواهد بفهمد کجا کاربرد دارد",
+  "resolution_status": "solved" | "partial" | "open" | "regressed",
+  "resolution_evidence": "نقل قول کوتاه از چت که نشان می‌دهد حل/جزئی/باز/regressed — مثلاً «کاربر گفت ‘حالا کار می‌کند’»",
+  "recurrence_count": {topic.get("recurrence_count", 1)},
+  "user_confirmed": true | false,
+  "confidence": 0.0..1.0
+}}
+
+اگر در طول بررسی متوجه شدی این موضوع کیفیت لازم را ندارد یا فقط یک سؤال خیلی خاص بوده، خروجی `null` بده."""
+
     def _build_extraction_prompt(
-        *, chunk_text: str, chunk_index: int, total_chunks: int,
+        self, *, chunk_text: str, chunk_index: int, total_chunks: int,
         target_project: str, existing_topics: List[str],
     ) -> str:
+        """🔻 Fallback single-pass prompt — used when the two-pass
+        outline+deep flow isn't applicable (e.g., one tiny chunk).
+
+        Kept for backward compatibility with tests that mock the
+        single-call path. New code should prefer
+        extract_with_outline()."""
         existing_str = ", ".join(existing_topics[:30]) if existing_topics else "—"
-        return f"""تو یک knowledge engineer هستی. این بخش (chunk {chunk_index+1}/{total_chunks}) از یک چت export شده از AI است. وظیفهٔ تو:
+        return f"""تو یک knowledge engineer هستی. این بخش (chunk {chunk_index+1}/{total_chunks}) از یک چت export شده از AI است.
 
-۱) چالش‌ها و راه‌حل‌های مفید/قابل‌استفاده‌مجدد را استخراج کن
-۲) برای هر مورد یک تجربهٔ **project-agnostic** (مستقل از نام پروژه) بنویس
-۳) با topic های موجود `{existing_str}` تطابق بده — اگر مشابه است، topic_canonical یکسان بزن (سیستم خودکار merge می‌کند)
+۱) چالش‌ها و راه‌حل‌های مفید/قابل‌استفاده‌مجدد را استخراج کن.
+۲) برای هر مورد یک تجربهٔ **project-agnostic** بنویس.
+۳) با topic های موجود `{existing_str}` تطابق بده — اگر مشابه است، topic_canonical یکسان بزن.
+۴) رشتهٔ هر موضوع را در سراسر چت دنبال کن حتی اگر بین موضوعات متفرقه باشد.
+۵) `resolution_status` (solved/partial/open/regressed) را بر اساس شواهد متن تعیین کن.
 
-# پروژهٔ مقصد (فقط برای context — در نوشتن تجربه نام پروژه را نیاور)
+# پروژهٔ مقصد (نام پروژه را در خروجی نیاور)
 {target_project}
 
 # متن چت
 {chunk_text}
 
-خروجی **فقط JSON** با این فرمت:
+خروجی فقط JSON:
 {{
   "experiences": [
     {{
-      "title": "عنوان کوتاه و خوانا",
-      "topic_canonical": "kebab-case-slug",
-      "tags": ["tag1", "tag2"],
-      "challenge": "چه مشکلی بود — کلی، بدون نام پروژه",
-      "solution": "راه‌حل قدم‌به‌قدم — قابل تعمیم",
-      "code_examples": "snippet با نام‌های عمومی (نه نام پروژه)",
-      "pitfalls": "خطاهای رایج وقتی این الگو را جای دیگر استفاده می‌کنیم",
-      "apply_elsewhere": "چطور این الگو را در پروژه‌های دیگر اعمال کنیم — generic checklist",
+      "title": "...", "topic_canonical": "kebab-slug",
+      "tags": [], "challenge": "...", "solution": "...",
+      "code_examples": "", "pitfalls": "",
+      "applies_when": ["..."], "applies_when_not": ["..."],
+      "prerequisites": [],
+      "apply_elsewhere": "...",
+      "resolution_status": "solved" | "partial" | "open" | "regressed",
+      "resolution_evidence": "نقل قول کوتاه از چت",
+      "recurrence_count": 1,
+      "user_confirmed": true | false,
       "confidence": 0.85
     }}
   ]
 }}
 
-اگر این chunk هیچ تجربهٔ ارزشمندی ندارد، `"experiences": []` برگردان."""
+اگر هیچ تجربهٔ ارزشمندی نیست، `"experiences": []` برگردان."""
+
+    @staticmethod
+    def _parse_topic_outline(response: str) -> Dict[str, Any]:
+        """Parse pass-1 outline JSON. Defensive against fences + prose."""
+        if not response:
+            return {"topics": []}
+        cleaned = response.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[-1]
+            if "```" in cleaned:
+                cleaned = cleaned.rsplit("```", 1)[0]
+        candidates = [cleaned]
+        if "{" in cleaned and "}" in cleaned:
+            candidates.append(cleaned[cleaned.find("{"):cleaned.rfind("}") + 1])
+        for candidate in candidates:
+            try:
+                obj = json.loads(candidate)
+            except Exception:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            topics = obj.get("topics")
+            if not isinstance(topics, list):
+                continue
+            # Normalize each topic (defensive)
+            clean_topics: List[Dict[str, Any]] = []
+            for t in topics:
+                if not isinstance(t, dict):
+                    continue
+                clean_topics.append({
+                    "topic_canonical": str(t.get("topic_canonical") or "").strip(),
+                    "title": str(t.get("title") or "").strip(),
+                    "message_anchors": [
+                        str(a) for a in (t.get("message_anchors") or [])
+                        if isinstance(a, (str, int, float))
+                    ],
+                    "resolution_signal": str(
+                        t.get("resolution_signal") or "open"
+                    ).lower().strip(),
+                    "recurrence_count": int(t.get("recurrence_count") or 1),
+                    "value_score": int(t.get("value_score") or 0),
+                })
+            return {"topics": clean_topics}
+        return {"topics": []}
+
+    @staticmethod
+    def _parse_topic_deep_response(response: str) -> Optional[Dict[str, Any]]:
+        """Parse pass-2 single-topic JSON. Returns None if the model
+        decided the topic isn't worth keeping (`null` reply)."""
+        if not response:
+            return None
+        cleaned = response.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[-1]
+            if "```" in cleaned:
+                cleaned = cleaned.rsplit("```", 1)[0]
+        cleaned = cleaned.strip()
+        if cleaned.lower() in ("null", "none", ""):
+            return None
+        candidates = [cleaned]
+        if "{" in cleaned and "}" in cleaned:
+            candidates.append(cleaned[cleaned.find("{"):cleaned.rfind("}") + 1])
+        for candidate in candidates:
+            try:
+                obj = json.loads(candidate)
+            except Exception:
+                continue
+            if obj is None:
+                return None
+            if isinstance(obj, dict) and obj.get("title"):
+                return obj
+        return None
+
+    async def _dispatch_extracted_item(
+        self,
+        *,
+        item: Dict[str, Any],
+        used_model: str,
+        existing_canonicals: Dict[str, Dict[str, Any]],
+        target_project_id: Optional[str],
+        target_project_full_name: Optional[str],
+        github_token: Optional[str],
+        source_file: str,
+        created_entries: List[Dict[str, Any]],
+        merged_entries: List[Dict[str, Any]],
+    ) -> None:
+        """Shared dispatch — either merge into an existing canonical or
+        create a brand-new entry. Used by both two-pass and fallback
+        paths so they stay perfectly in sync on dedup behavior."""
+        canonical = (
+            item.get("topic_canonical") or _slugify(item.get("title", ""))
+        )
+        item["topic_canonical"] = canonical
+        existing = existing_canonicals.get(canonical)
+        if existing:
+            merged = await self._merge_into_existing(
+                target=existing, new_item=item,
+                source_file=source_file, used_model=used_model,
+                target_project_full_name=(
+                    existing.get("project_full_name")
+                    or target_project_full_name or ""
+                ),
+                github_token=github_token,
+            )
+            # Replace in-place so subsequent merges in this run see latest
+            existing_canonicals[canonical] = merged
+            merged_entries.append(merged)
+            return
+        entry = await self._create_new_entry(
+            item=item, source_file=source_file, used_model=used_model,
+            target_project_id=target_project_id,
+            target_project_full_name=target_project_full_name,
+            github_token=github_token,
+        )
+        if entry is None:
+            return
+        existing_canonicals[canonical] = entry
+        created_entries.append(entry)
 
     @staticmethod
     def _parse_extracted_experiences(response: str) -> List[Dict[str, Any]]:
@@ -1116,6 +1473,22 @@ class KnowledgeCenterService:
     ) -> str:
         tags = item.get("tags") or []
         tags_yaml = "[" + ", ".join(f'"{t}"' for t in tags) + "]"
+        resolution_status = (item.get("resolution_status") or "unknown").lower()
+        resolution_evidence = item.get("resolution_evidence") or "—"
+        recurrence_count = int(item.get("recurrence_count") or 1)
+        user_confirmed = bool(item.get("user_confirmed"))
+
+        def _bullets(values: Any) -> str:
+            if not values:
+                return "—"
+            if isinstance(values, str):
+                values = [values]
+            return "\n".join(f"- {v}" for v in values if v)
+
+        applies_when = _bullets(item.get("applies_when"))
+        applies_when_not = _bullets(item.get("applies_when_not"))
+        prerequisites = _bullets(item.get("prerequisites"))
+
         return f"""---
 title: "{title}"
 tags: {tags_yaml}
@@ -1128,6 +1501,9 @@ created_at: "{created_at}"
 updated_at: "{created_at}"
 merged_from: []
 generated_by: "{used_model}"
+resolution_status: "{resolution_status}"
+recurrence_count: {recurrence_count}
+user_confirmed: {str(user_confirmed).lower()}
 ---
 
 # {title}
@@ -1150,9 +1526,26 @@ generated_by: "{used_model}"
 
 {item.get("pitfalls", "—")}
 
+## ✅ Resolution
+
+- **Status**: `{resolution_status}` (recurrence: {recurrence_count} ×{', user confirmed' if user_confirmed else ''})
+- **Evidence**: {resolution_evidence}
+
 ## 🔁 چطور در جای دیگر اعمال کنیم / How to Apply Elsewhere
 
 {item.get("apply_elsewhere", "—")}
+
+### Applies when
+
+{applies_when}
+
+### Does NOT apply when (anti-pattern)
+
+{applies_when_not}
+
+### Prerequisites
+
+{prerequisites}
 
 ## 🔗 References
 
