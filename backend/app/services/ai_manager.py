@@ -139,6 +139,12 @@ class AIManager:
                 # so the Creator/Inspector/etc. UIs surface it as a pill
                 # just like DeepSeek/Gemini. The same DB enabled/allowed_tasks
                 # filters apply.
+                #
+                # Parity with API-key providers: we also check whether the
+                # OAuth model is actually CONFIGURED (token present in env).
+                # Otherwise the user sees a pill, clicks it, and gets a
+                # runtime error — same UX failure mode as showing
+                # DeepSeek when DEEPSEEK_API_KEY is missing.
                 try:
                     from .oauth_model_registry import get_oauth_dispatcher
                     has_dispatcher = get_oauth_dispatcher(model.id) is not None
@@ -146,6 +152,22 @@ class AIManager:
                     has_dispatcher = False
                 if not has_dispatcher:
                     continue
+                # cloud_code-specific configuration check. Future OAuth
+                # models can either register a similar check here or
+                # raise from their dispatcher; we lean conservative for
+                # the current single known case.
+                if model.id == "cloud_code":
+                    try:
+                        from .cloud_code_service import cloud_code_is_configured
+                        if not cloud_code_is_configured():
+                            logger.debug(
+                                "cloud_code dispatcher registered but "
+                                "CLAUDE_CODE_OAUTH_TOKEN missing — hiding "
+                                "from available models"
+                            )
+                            continue
+                    except Exception:
+                        continue
                 db_setting = db_settings_map.get(model.id)
                 if db_setting:
                     if not db_setting.enabled:

@@ -96,6 +96,33 @@ class SimpleProjectCreator:
                     workspace = "/tmp/projects"
         self.workspace = Path(workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
+        # 🆕 visibility: log the chosen workspace + a hint whether it's
+        # on a persistent disk. Important for diagnosing
+        # "projects disappeared after redeploy" — if this prints
+        # /tmp or /app/projects, persistence is broken.
+        try:
+            import logging as _logging
+            _logger = _logging.getLogger(__name__)
+            _resolved = str(self.workspace.resolve())
+            _is_persistent = (
+                "/app/storage" in _resolved
+                or "storage/projects" in _resolved
+                or bool(os.environ.get("SIMPLE_CREATOR_WORKSPACE"))
+            )
+            _logger.info(
+                "📁 SimpleProjectCreator workspace=%s persistent=%s",
+                _resolved, _is_persistent,
+            )
+            if not _is_persistent:
+                _logger.warning(
+                    "⚠️ SimpleProjectCreator using EPHEMERAL workspace "
+                    "(%s) — projects will vanish on container restart. "
+                    "On Render, ensure /app/storage disk is mounted "
+                    "(see render.yaml) so ./storage/projects becomes "
+                    "persistent.", _resolved,
+                )
+        except Exception:
+            pass
         self.projects: Dict[str, Project] = {}
         self._load_existing_projects()
 
