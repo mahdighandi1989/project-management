@@ -65,6 +65,8 @@ async def describe_screenshot_with_vision(
             "anthropic": ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"],
             "gemini": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
             "google": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+            # 🆕 cloud_code: vision via OAuth image content blocks
+            "cloud_code": ["CLAUDE_CODE_OAUTH_TOKEN"],
         }
         with_key = set()
         for p, ks in env_keys.items():
