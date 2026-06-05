@@ -1933,6 +1933,18 @@ class OversightService:
                     )
         except Exception as _e:
             logger.warning(f"claude_runner auto-enable failed: {_e}")
+
+        # 📚 (Knowledge Center) — هر پروژهٔ جدیدی که تحت نظارت قرار می‌گیرد
+        # بلافاصله باید پوشهٔ `experiences/` در مخزنش ساخته شود تا تجربیات
+        # در آن ثبت و با صفحهٔ مرکز دانش سینک شوند. best-effort + background:
+        # اگر شکست خورد، watched ساخته می‌ماند و کاربر می‌تواند بعداً از
+        # دکمهٔ «ساخت پوشه‌ها» در مرکز دانش دوباره تلاش کند.
+        try:
+            from .knowledge_center_service import get_knowledge_center_service
+            _kc = get_knowledge_center_service()
+            asyncio.create_task(_kc.ensure_experiences_folder(w.to_dict()))
+        except Exception as _e:
+            logger.debug(f"knowledge_center ensure_experiences_folder schedule failed: {_e}")
         return w.to_dict()
 
     async def autodetect_runtime_for_all_watched(self) -> Dict[str, Any]:

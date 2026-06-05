@@ -30,6 +30,7 @@ export default function HomePage() {
 
   const menuItems = [
     { href: '/oversight', icon: '🛰️', title: 'مرکز نظارت پروژه‌ها', desc: 'مدیریت یکپارچه مخازن GitHub با AI' },
+    { href: '/knowledge-center', icon: '📚', title: 'مرکز دانش', desc: 'دانشنامهٔ تجربیات + ایمپورت چت' },
     { href: '/creator', icon: '🚀', title: 'موتور خالق', desc: 'ساخت پروژه جدید' },
     { href: '/projects', icon: '📁', title: 'پروژه‌ها', desc: 'مدیریت پروژه‌ها' },
     { href: '/debate', icon: '💬', title: 'مناظره', desc: 'مناظره هوش مصنوعی' },

@@ -31,6 +31,7 @@ from .api.routes import ai_usage  # 🆕 AI Usage tracking (token consumption + 
 from .api.routes import external_prompts  # 🆕 External Prompts (Cloud Code integration)
 from .api.routes import screen_recording  # 🆕 Screen Recording (ضبط ویدئو بازرس ویژه)
 from .api.routes import audio  # 🆕 Audio Transcription (تبدیل گفتار به متن)
+from .api.routes import knowledge_center  # 🆕 Knowledge Center (مرکز دانش / دانشنامهٔ تجربیات)
 
 # 🚨 (audit critical fix) — eager import to register OAuth dispatchers.
 # `cloud_code_service` self-registers in oauth_model_registry at import time.
@@ -746,6 +747,7 @@ app.include_router(ai_usage.router, prefix="/api")  # 🆕 AI Usage tracking
 app.include_router(external_prompts.router, prefix="/api")  # 🆕 External Prompts (Cloud Code)
 app.include_router(screen_recording.router, prefix="/api")  # 🆕 Screen Recording (ضبط ویدئو)
 app.include_router(audio.router, prefix="/api")  # 🆕 Audio Transcription (گفتار به متن)
+app.include_router(knowledge_center.router, prefix="/api")  # 🆕 Knowledge Center (مرکز دانش)
 if OVERSIGHT_AVAILABLE and oversight is not None:
     app.include_router(oversight.router, prefix="/api")  # 🆕 Oversight (مرکز نظارت GitHub)
     # bridge endpoints under /api/projects/{project_id}/{apply-oversight-task,verify-task,oversight-summary}
