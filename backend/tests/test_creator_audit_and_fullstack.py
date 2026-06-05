@@ -549,9 +549,15 @@ async def test_apply_fixes_endpoint_generates_missing_files(tmp_path):
     async def fake_ai_generate(prompt, model_ids=None):
         return f"# generated content for: {prompt[:40]}"
 
+    async def fake_ai_generate_with_meta(prompt, model_ids=None):
+        return (await fake_ai_generate(prompt, model_ids), "fake-test-model")
+
     with patch(
         "app.api.routes.simple_projects.ai_generate",
         new=fake_ai_generate,
+    ), patch(
+        "app.api.routes.simple_projects.ai_generate_with_meta",
+        new=fake_ai_generate_with_meta,
     ):
         result = await apply_audit_fixes(
             proj.id,
@@ -619,9 +625,15 @@ async def test_apply_fixes_can_promote_to_fullstack(tmp_path):
     async def fake_ai_generate(prompt, model_ids=None):
         return "// generated\n"
 
+    async def fake_ai_generate_with_meta(prompt, model_ids=None):
+        return ("// generated\n", "fake-test-model")
+
     with patch(
         "app.api.routes.simple_projects.ai_generate",
         new=fake_ai_generate,
+    ), patch(
+        "app.api.routes.simple_projects.ai_generate_with_meta",
+        new=fake_ai_generate_with_meta,
     ):
         result = await apply_audit_fixes(
             proj.id,
@@ -781,9 +793,16 @@ async def test_apply_fixes_regenerates_existing_files_with_audit_context(tmp_pat
         captured_prompts.append(prompt)
         return "from fastapi import FastAPI\napp = FastAPI()\napp.include_router(...)"
 
+    async def fake_ai_generate_with_meta(prompt, model_ids=None):
+        content = await fake_ai_generate(prompt, model_ids)
+        return (content, "fake-test-model")
+
     with patch(
         "app.api.routes.simple_projects.ai_generate",
         new=fake_ai_generate,
+    ), patch(
+        "app.api.routes.simple_projects.ai_generate_with_meta",
+        new=fake_ai_generate_with_meta,
     ):
         result = await apply_audit_fixes(
             proj.id,
@@ -936,9 +955,15 @@ async def test_apply_fixes_treats_missing_target_as_add_not_modify(tmp_path):
     async def fake_ai_generate(prompt, model_ids=None):
         return "new content"
 
+    async def fake_ai_generate_with_meta(prompt, model_ids=None):
+        return ("new content", "fake-test-model")
+
     with patch(
         "app.api.routes.simple_projects.ai_generate",
         new=fake_ai_generate,
+    ), patch(
+        "app.api.routes.simple_projects.ai_generate_with_meta",
+        new=fake_ai_generate_with_meta,
     ):
         result = await apply_audit_fixes(
             proj.id,
@@ -1001,6 +1026,233 @@ def test_frontend_audit_modal_has_apply_fixes_buttons():
         "the auto-fix button must be labeled clearly in Persian so user "
         "knows what it does"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Model attribution — user asked: "امضاشون پای کار ثبت می‌شه؟"
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_project_file_dataclass_has_attribution_fields():
+    """The ProjectFile dataclass must have generated_by + generated_at
+    so the per-file attribution can be persisted. Without these, UI
+    can't show 'این فایل توسط claude نوشته شد' even if the backend
+    knows."""
+    from app.services.simple_creator import ProjectFile
+    from dataclasses import fields
+    field_names = {f.name for f in fields(ProjectFile)}
+    assert "generated_by" in field_names, (
+        "ProjectFile must have generated_by — user explicitly asked "
+        "'امضاشون پای کار ثبت می‌شه؟'"
+    )
+    assert "generated_at" in field_names
+
+
+def test_project_file_to_dict_includes_attribution():
+    """The JSON serialization must include the attribution fields so
+    the frontend receives them via /api/simple/projects/{id}."""
+    from app.services.simple_creator import ProjectFile
+    f = ProjectFile(
+        path="main.py", content="x", language="python",
+        generated_by="claude-sonnet-4-6", generated_at="2026-06-05T12:00",
+    )
+    d = f.to_dict()
+    assert d.get("generated_by") == "claude-sonnet-4-6"
+    assert d.get("generated_at") == "2026-06-05T12:00"
+
+
+def test_ai_generate_with_meta_returns_tuple():
+    """The new meta variant must return (content, model_id) — not just
+    a string. This is the contract simple_creator's
+    _tracked_ai_generate relies on for attribution."""
+    src = (
+        _BACKEND_ROOT / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    assert "async def ai_generate_with_meta" in src, (
+        "ai_generate_with_meta must exist — that's the attribution-aware "
+        "variant. Without it, no per-file model recording is possible."
+    )
+    # The function must return a tuple. Cheapest source check:
+    idx = src.find("async def ai_generate_with_meta")
+    body = src[idx:idx + 3000]
+    assert "return content, effective_id" in body or "return content, mid" in body, (
+        "ai_generate_with_meta must return a tuple of (content, model_id)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_apply_fixes_records_model_attribution_on_new_files(tmp_path):
+    """When apply-fixes generates a missing file, the generated_by
+    field on the new ProjectFile must contain the model that produced
+    it. This is the audit trail the user explicitly asked for."""
+    from app.api.routes.simple_projects import (
+        apply_audit_fixes, ApplyAuditFixesRequest,
+    )
+    from app.services.simple_creator import (
+        get_simple_creator, Project,
+    )
+
+    creator = get_simple_creator()
+    creator.workspace = tmp_path
+    proj = Project(
+        id="proj_attribution_777",
+        name="AttrTest",
+        description="x",
+        project_type="fastapi",
+    )
+    creator.projects[proj.id] = proj
+    (tmp_path / proj.id).mkdir(parents=True, exist_ok=True)
+
+    async def fake_with_meta(prompt, model_ids=None):
+        # Simulate the real contract: return (content, used_model_id)
+        return ("// new content", "test-model-claude")
+
+    async def fake_legacy(prompt, model_ids=None):
+        return "// new content"
+
+    with patch(
+        "app.api.routes.simple_projects.ai_generate",
+        new=fake_legacy,
+    ), patch(
+        "app.api.routes.simple_projects.ai_generate_with_meta",
+        new=fake_with_meta,
+    ):
+        result = await apply_audit_fixes(
+            proj.id,
+            ApplyAuditFixesRequest(missing_files=["src/app/page.tsx"]),
+        )
+
+    # The result must surface the attribution
+    added = next(
+        (f for f in result["files_added"] if f["path"] == "src/app/page.tsx"),
+        None,
+    )
+    assert added is not None
+    assert added.get("generated_by") == "test-model-claude", (
+        "files_added entry must include generated_by so the UI can "
+        "display which model produced each file"
+    )
+    # And the ProjectFile in memory must carry it too
+    pf = next((f for f in proj.files if f.path == "src/app/page.tsx"), None)
+    assert pf is not None
+    assert pf.generated_by == "test-model-claude"
+
+
+@pytest.mark.asyncio
+async def test_apply_fixes_records_attribution_on_modify(tmp_path):
+    """Same attribution on the regenerate path — when an existing file
+    is rewritten, generated_by updates to the model that did the
+    rewrite."""
+    from app.api.routes.simple_projects import (
+        apply_audit_fixes, ApplyAuditFixesRequest, FileToModify,
+    )
+    from app.services.simple_creator import (
+        get_simple_creator, Project, ProjectFile,
+    )
+
+    creator = get_simple_creator()
+    creator.workspace = tmp_path
+    proj = Project(
+        id="proj_attribution_modify_888",
+        name="ModAttrTest",
+        description="x",
+        project_type="fastapi",
+        files=[
+            ProjectFile(
+                path="main.py",
+                content="# old",
+                language="python",
+                generated_by="old-model",
+            ),
+        ],
+    )
+    creator.projects[proj.id] = proj
+    proj_dir = tmp_path / proj.id
+    proj_dir.mkdir(parents=True, exist_ok=True)
+    (proj_dir / "main.py").write_text("# old")
+
+    async def fake_legacy(prompt, model_ids=None):
+        return "# new"
+
+    async def fake_with_meta(prompt, model_ids=None):
+        return ("# new", "new-model-gemini")
+
+    with patch(
+        "app.api.routes.simple_projects.ai_generate",
+        new=fake_legacy,
+    ), patch(
+        "app.api.routes.simple_projects.ai_generate_with_meta",
+        new=fake_with_meta,
+    ):
+        await apply_audit_fixes(
+            proj.id,
+            ApplyAuditFixesRequest(
+                files_to_modify=[
+                    FileToModify(path="main.py", issue="needs upgrade", suggestion="add typing"),
+                ],
+            ),
+        )
+
+    pf = next(f for f in proj.files if f.path == "main.py")
+    assert pf.generated_by == "new-model-gemini", (
+        "after a regenerate, generated_by must reflect the model that "
+        "did the rewrite — not the original model"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Frontend honors creator's model selection
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_frontend_audit_reads_selected_models_from_localstorage():
+    """🚨 The bug the user spotted: frontend was sending model_ids=[]
+    which means 'use all active'. The fix must read the same
+    localStorage key the /creator page writes so the user's selection
+    carries over to audit + apply-fixes."""
+    src = (
+        _FRONTEND_ROOT / "app/project/[id]/page.tsx"
+    ).read_text(encoding="utf-8")
+    assert "creator_selected_models" in src, (
+        "project page must read the same localStorage key the /creator "
+        "page uses so user's model selection is honored on the project "
+        "detail page (audit / apply-fixes)"
+    )
+    assert "getSelectedModelIds" in src
+    # The audit POST and apply-fixes POST must use it
+    runaudit_idx = src.find("const runAudit")
+    fix_idx = src.find("applyAuditFixes")
+    # Both should call getSelectedModelIds
+    assert "getSelectedModelIds()" in src
+    # And the body should NOT hardcode `model_ids: []`
+    # (search around the audit + apply fetches)
+    assert "body: JSON.stringify({ model_ids: [] })" not in src, (
+        "must not hardcode model_ids:[] — that bypasses the user's "
+        "Creator-page model selection"
+    )
+
+
+def test_frontend_shows_per_file_model_badge():
+    """File tree must show the generated_by badge so user can see
+    which model wrote each file (their question:
+    'امضاشون پای کار ثبت می‌شه؟')."""
+    src = (
+        _FRONTEND_ROOT / "app/project/[id]/page.tsx"
+    ).read_text(encoding="utf-8")
+    assert "generated_by" in src, (
+        "frontend must use the generated_by field from the project "
+        "files response to render a model badge"
+    )
+
+
+def test_frontend_audit_modal_shows_models_consulted():
+    """The audit modal should display which models did the audit so
+    the user can verify their selection was honored end-to-end."""
+    src = (
+        _FRONTEND_ROOT / "app/project/[id]/page.tsx"
+    ).read_text(encoding="utf-8")
+    assert "model_ids_used" in src
+    assert "audit توسط" in src or "audit توسط:" in src or "موتور خالق" in src
 
 
 def test_structure_prompt_demands_both_halves_for_fullstack():

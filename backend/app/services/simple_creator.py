@@ -27,9 +27,23 @@ class ProjectFile:
     path: str
     content: str = ""
     language: str = ""
+    # 🆕 (model attribution) — کدام مدل این فایل را تولید کرد. وقتی کاربر
+    # چند مدل انتخاب می‌کند، fallback chain روی selected models اجرا می‌شود
+    # و اولین مدلی که موفق پاسخ بدهد اینجا ثبت می‌شود. خالی یعنی legacy
+    # (قبل از معرفی attribution).
+    generated_by: str = ""
+    # 🆕 timestamp آخرین تولید/regen این فایل — برای UI که می‌خواهد بگوید
+    # «این فایل توسط model X در زمان T نوشته شد».
+    generated_at: str = ""
 
     def to_dict(self):
-        return {"path": self.path, "content": self.content, "language": self.language}
+        return {
+            "path": self.path,
+            "content": self.content,
+            "language": self.language,
+            "generated_by": self.generated_by,
+            "generated_at": self.generated_at,
+        }
 
 
 @dataclass
@@ -185,9 +199,26 @@ class SimpleProjectCreator:
         # اگه AI داریم، فایل‌ها رو تولید کن
         if ai_generate:
             try:
+                # 🆕 (model attribution) — wrap the ai_generate callable so
+                # we can capture WHICH model actually responded to each
+                # call. The callable contract is now best-effort
+                # tuple-return: if it returns (content, model_id) we use
+                # both; if it returns just a string we fall back to "".
+                # Backward-compatible with old callers.
+                _last_used_model: Dict[str, str] = {"id": ""}
+
+                async def _tracked_ai_generate(prompt: str):
+                    res = await ai_generate(prompt)
+                    if isinstance(res, tuple) and len(res) == 2:
+                        content, used = res
+                        _last_used_model["id"] = str(used or "")
+                        return content
+                    return res
+
                 # مرحله 1: تولید ساختار
                 structure = await self._generate_structure(
-                    name, description, project_type, technologies, ai_generate
+                    name, description, project_type, technologies,
+                    _tracked_ai_generate,
                 )
                 project.structure = structure
 
@@ -197,8 +228,10 @@ class SimpleProjectCreator:
                     file_path = file_info.get("path") if isinstance(file_info, dict) else file_info
                     file_desc = file_info.get("description", "") if isinstance(file_info, dict) else ""
 
+                    _last_used_model["id"] = ""  # reset per file
                     content = await self._generate_file(
-                        name, description, project_type, file_path, file_desc, ai_generate
+                        name, description, project_type, file_path, file_desc,
+                        _tracked_ai_generate,
                     )
 
                     # ذخیره فایل
@@ -211,7 +244,9 @@ class SimpleProjectCreator:
                     project.files.append(ProjectFile(
                         path=file_path,
                         content=content,
-                        language=self._detect_language(file_path)
+                        language=self._detect_language(file_path),
+                        generated_by=_last_used_model["id"],
+                        generated_at=datetime.now().isoformat(),
                     ))
 
                 project.status = "created"
