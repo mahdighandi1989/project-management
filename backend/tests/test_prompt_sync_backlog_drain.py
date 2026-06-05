@@ -146,9 +146,9 @@ def test_throttle_marker_present_in_source():
     assert "_MAX_DISPATCH_PER_TICK = 5" in src, (
         "cap value must stay at 5 — higher saturates Render free tier"
     )
-    # The cap must actually be applied (syncable list trimmed). The
-    # variable was renamed from `dirty` to `syncable` when the
-    # eligibility filter was hoisted above the throttle.
+    # The cap must actually be applied (list trimmed). Variable name
+    # may be `dirty` (legacy) or `syncable` (post-eligibility-fix); both
+    # are acceptable as long as the slice happens.
     assert (
         "syncable[:_MAX_DISPATCH_PER_TICK]" in src
         or "dirty[:_MAX_DISPATCH_PER_TICK]" in src

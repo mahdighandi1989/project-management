@@ -57,7 +57,26 @@ logger = logging.getLogger(__name__)
 
 
 INDEX_FILE: Path = STORAGE_DIR / "knowledge_center.json"
+SETTINGS_FILE: Path = STORAGE_DIR / "knowledge_center_settings.json"
 EXPERIENCES_FOLDER_NAME = "experiences"
+
+# Default Knowledge Center settings — persisted to SETTINGS_FILE.
+# User can edit via PATCH /api/knowledge-center/settings.
+_DEFAULT_KC_SETTINGS: Dict[str, Any] = {
+    # Background sync — runs periodic pull + AI processing
+    "auto_sync_enabled": True,
+    "auto_sync_interval_minutes": 60,  # every hour by default
+    # Which models run the cross-repo AI processor. Empty list → use
+    # all available (parity with creator engine semantics).
+    "processing_model_ids": [],
+    # Skip AI processing for an entry whose content_hash hasn't changed
+    # since last_processed_hash. Saves tokens + avoids duplicate work.
+    "skip_unchanged": True,
+    # Soft cap so the catalog doesn't grow unbounded over time. Older
+    # entries past this cap are archived (de-indexed but file stays in
+    # repo). 0 = unlimited.
+    "max_indexed_entries": 5000,
+}
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -191,6 +210,17 @@ class KnowledgeEntry:
     # backend records which AI model wrote/extracted this (parity with
     # /creator engine's per-file attribution).
     generated_by: str = ""
+    # 🆕 (skip-if-unchanged) — last content_hash that the AI cross-repo
+    # processor analyzed. If equal to current content_hash, the next
+    # process cycle skips AI for this entry → no duplicate work, no
+    # wasted tokens.
+    last_processed_hash: str = ""
+    last_processed_at: str = ""
+    last_processed_by: str = ""
+    # 🆕 (cross-repo references) — entries in OTHER projects that have
+    # the same topic_canonical. Populated by process_synced_entries.
+    # Each item: {"entry_id", "project_full_name", "path", "title"}
+    cross_references: List[Dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -218,6 +248,37 @@ def _save_index(data: Dict[str, Any]) -> None:
         json.dumps(data, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def load_settings() -> Dict[str, Any]:
+    """Return current KC settings merged over defaults so missing keys
+    in the persisted file don't crash callers."""
+    if not SETTINGS_FILE.exists():
+        return dict(_DEFAULT_KC_SETTINGS)
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        merged = dict(_DEFAULT_KC_SETTINGS)
+        if isinstance(data, dict):
+            merged.update(data)
+        return merged
+    except Exception as e:
+        logger.warning(f"knowledge_center settings load failed: {e}")
+        return dict(_DEFAULT_KC_SETTINGS)
+
+
+def save_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge updates into persisted settings (PATCH semantics)."""
+    current = load_settings()
+    for k, v in (updates or {}).items():
+        # Reject unknown keys so a typo doesn't shadow a real setting
+        if k in _DEFAULT_KC_SETTINGS:
+            current[k] = v
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS_FILE.write_text(
+        json.dumps(current, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return current
 
 
 def _slugify(text: str) -> str:
@@ -1119,6 +1180,172 @@ generated_by: "{used_model}"
 > یکسان بود — داده‌های جدید مفید بالا اضافه شد. data اصلی دست‌نخورده است.
 """
 
+    # ─────────────────────────────────────────────────────────────────────
+    # Cross-repo AI processing (skip-if-unchanged + cross_references)
+    # ─────────────────────────────────────────────────────────────────────
+
+    async def process_synced_entries(
+        self,
+        *,
+        model_ids: Optional[List[str]] = None,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        """🧠 The cross-repo brain — runs AFTER sync_from_projects has
+        populated/refreshed the index. For each entry:
+
+          1. If skip_unchanged is on and content_hash == last_processed_hash
+             AND not force → SKIP (no AI call, no wasted tokens).
+          2. Otherwise compute cross_references: entries in OTHER projects
+             whose topic_canonical matches → record pointer (no content
+             duplication; the file stays in its original repo).
+          3. If summary is empty or stale, ask the AI for a one-paragraph
+             "what this experience is about, project-agnostic" summary
+             so the catalog cards have meaningful text.
+          4. Persist last_processed_hash/at/by per entry so the next
+             cycle skips it.
+
+        Honors the user's seven explicit requirements:
+          - Model selection: model_ids passed through; if empty, falls
+            back to settings.processing_model_ids; if that's also empty,
+            uses whatever ai_manager exposes.
+          - No duplicate work: skip_unchanged short-circuits on hash match.
+          - No bloat: only the summary string and cross_references list
+            are stored; full content stays in the repo.
+        """
+        settings = load_settings()
+        if not model_ids:
+            model_ids = list(settings.get("processing_model_ids") or []) or None
+        skip_unchanged = bool(settings.get("skip_unchanged", True)) and not force
+
+        index = _load_index()
+        entries: List[Dict[str, Any]] = list(index.get("entries", []))
+        if not entries:
+            return {"ok": True, "processed": 0, "skipped": 0, "errors": 0,
+                    "reason": "empty_index"}
+
+        # Build canonical → [entries] map once for O(N) cross-ref pass
+        by_canonical: Dict[str, List[Dict[str, Any]]] = {}
+        for e in entries:
+            canon = e.get("topic_canonical") or ""
+            if canon:
+                by_canonical.setdefault(canon, []).append(e)
+
+        from ..api.routes.simple_projects import ai_generate_with_meta
+
+        processed = 0
+        skipped = 0
+        errors: List[str] = []
+        for entry in entries:
+            canon = entry.get("topic_canonical") or ""
+            current_hash = entry.get("content_hash") or ""
+            last_hash = entry.get("last_processed_hash") or ""
+
+            # 1. Cross-refs first — cheap, no AI call, always refresh
+            siblings = []
+            if canon:
+                for sib in by_canonical.get(canon, []):
+                    if sib.get("id") == entry.get("id"):
+                        continue
+                    if (
+                        sib.get("project_full_name")
+                        != entry.get("project_full_name")
+                    ):
+                        siblings.append({
+                            "entry_id": sib.get("id", ""),
+                            "project_full_name": sib.get("project_full_name", ""),
+                            "path": sib.get("path", ""),
+                            "title": sib.get("title", ""),
+                        })
+            entry["cross_references"] = siblings
+
+            # 2. AI step — gated by skip_unchanged
+            if (
+                skip_unchanged
+                and current_hash
+                and current_hash == last_hash
+            ):
+                skipped += 1
+                continue
+            try:
+                ai_prompt = self._build_processor_prompt(entry, siblings)
+                content, used_model = await ai_generate_with_meta(
+                    ai_prompt, model_ids=model_ids,
+                )
+                summary_new = (content or "").strip()
+                # First paragraph as catalog summary; full text could be
+                # stored if useful in future iterations.
+                if summary_new:
+                    entry["summary"] = self._first_paragraph(summary_new)[:600]
+                entry["last_processed_hash"] = current_hash
+                entry["last_processed_at"] = now_iso()
+                entry["last_processed_by"] = used_model or ""
+                processed += 1
+            except Exception as e:
+                errors.append(f"{entry.get('id', '?')}: {str(e)[:200]}")
+
+        # Soft cap so the catalog doesn't grow unbounded
+        cap = int(settings.get("max_indexed_entries") or 0)
+        if cap > 0 and len(entries) > cap:
+            entries.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+            entries = entries[:cap]
+            index["entries"] = entries
+        else:
+            index["entries"] = entries
+        _save_index(index)
+
+        return {
+            "ok": True,
+            "total": len(entries),
+            "processed": processed,
+            "skipped": skipped,
+            "errors": errors,
+            "models_used": model_ids or "(auto)",
+        }
+
+    @staticmethod
+    def _build_processor_prompt(
+        entry: Dict[str, Any], siblings: List[Dict[str, str]],
+    ) -> str:
+        siblings_text = (
+            "\n".join(
+                f"- [{s['project_full_name']}] {s['title']} ({s['path']})"
+                for s in siblings
+            )
+            or "(هیچ پروژهٔ دیگری همین موضوع را ثبت نکرده.)"
+        )
+        return f"""تو یک knowledge engineer هستی. این یک تجربه از پوشهٔ
+`experiences/` یک پروژه است. وظیفهٔ تو:
+
+۱) یک پاراگراف خلاصهٔ **کلی و قابل استفاده مجدد** بنویس (project-
+   agnostic — بدون نام پروژه). این متن در کارت‌های فهرست مرکز دانش
+   نشان داده می‌شود، پس باید برای خواننده‌ای که هرگز این پروژه را
+   ندیده شفاف باشد.
+
+۲) اگر پروژه‌های دیگر همین موضوع را ثبت کرده‌اند (لیست siblings
+   پایین)، بگو موارد مشترک چیست. **محتوا را تکرار نکن** — فقط اشاره
+   کن که در پروژه‌های مختلف هم بحث شده.
+
+# Title
+{entry.get("title", "?")}
+
+# topic_canonical
+{entry.get("topic_canonical", "?")}
+
+# project
+{entry.get("project_full_name", "?")}
+
+# tags
+{", ".join(entry.get("tags") or [])}
+
+# siblings (پروژه‌های دیگری که همین topic_canonical را دارند)
+{siblings_text}
+
+# محتوای فعلی فایل (اولین ۲۰۰۰ کاراکتر)
+{(entry.get("summary") or "")[:2000]}
+
+خروجی فقط متن (نه JSON). یک پاراگراف، کمتر از ۳۰۰ کلمه.
+"""
+
 
 # Singleton
 _kc_instance: Optional[KnowledgeCenterService] = None
@@ -1132,3 +1359,79 @@ def get_knowledge_center_service() -> KnowledgeCenterService:
             if _kc_instance is None:
                 _kc_instance = KnowledgeCenterService()
     return _kc_instance
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 🔁 Background auto-sync loop
+# ────────────────────────────────────────────────────────────────────────────
+# Runs `sync_from_projects()` then `process_synced_entries()` on the configured
+# interval. Wired into app/main.py lifespan startup. Respects the
+# auto_sync_enabled setting so the user can pause it from the UI.
+#
+# Why it's safe:
+#   - sync_from_projects is idempotent — re-running on unchanged files is a
+#     read-only GitHub list+get with cheap content_hash check.
+#   - process_synced_entries short-circuits via last_processed_hash == hash,
+#     so unchanged entries cost nothing (no AI tokens) on every cycle.
+#   - Initial delay (60s after boot) gives the app time to settle.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+_KC_AUTOSYNC_INITIAL_DELAY_SEC = 60
+_KC_AUTOSYNC_MIN_INTERVAL_MIN = 5  # safety floor — never poll faster than this
+
+
+async def knowledge_center_autosync_loop(stop_event: "asyncio.Event") -> None:
+    """Periodic sync + AI process. Cancel via stop_event.set()."""
+    try:
+        await asyncio.wait_for(
+            stop_event.wait(), timeout=_KC_AUTOSYNC_INITIAL_DELAY_SEC,
+        )
+        return  # stop signalled during initial delay
+    except asyncio.TimeoutError:
+        pass
+
+    while not stop_event.is_set():
+        try:
+            settings = load_settings()
+            if settings.get("auto_sync_enabled", True):
+                svc = get_knowledge_center_service()
+                try:
+                    sync_res = await svc.sync_from_projects()
+                    logger.info(
+                        f"knowledge_center.autosync: pulled "
+                        f"added={sync_res.get('added')} "
+                        f"updated={sync_res.get('updated')} "
+                        f"total={sync_res.get('total')}"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"knowledge_center.autosync: sync failed: {e}"
+                    )
+                try:
+                    proc_res = await svc.process_synced_entries()
+                    logger.info(
+                        f"knowledge_center.autosync: processed "
+                        f"processed={proc_res.get('processed')} "
+                        f"skipped={proc_res.get('skipped')} "
+                        f"errors={len(proc_res.get('errors') or [])}"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"knowledge_center.autosync: process failed: {e}"
+                    )
+        except Exception as e:
+            logger.exception(
+                f"knowledge_center.autosync: cycle crashed: {e}"
+            )
+        # Sleep — re-read interval each cycle so user changes apply
+        interval_min = max(
+            _KC_AUTOSYNC_MIN_INTERVAL_MIN,
+            int(load_settings().get("auto_sync_interval_minutes") or 60),
+        )
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(), timeout=interval_min * 60,
+            )
+        except asyncio.TimeoutError:
+            continue
