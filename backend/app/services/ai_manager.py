@@ -567,6 +567,43 @@ class AIManager:
             except ValueError:
                 raise AIServiceError(f"Unknown provider: {provider}", "manager", model_id)
 
+        # 🆕 (OAuth dispatch — fallback path) — if the FALLBACK resolved
+        # to an OAuth model (e.g., user picked DeepSeek but it's disabled,
+        # fallback chose cloud_code), route through the dispatcher here.
+        # The same check exists at the top of generate() for the
+        # original model_id; this second check covers the case where
+        # the model_id changed during fallback.
+        if used_fallback:
+            try:
+                from .oauth_model_registry import get_oauth_dispatcher
+                _fb_oauth = get_oauth_dispatcher(model_id)
+            except Exception:
+                _fb_oauth = None
+            if _fb_oauth is not None:
+                _prompt_parts: List[str] = []
+                for m in messages:
+                    role = getattr(m, "role", "user")
+                    content = getattr(m, "content", "") or ""
+                    _prompt_parts.append(
+                        f"[{role}] {content}" if role != "user" else content
+                    )
+                _prompt = "\n\n".join(_prompt_parts)
+                _started_ts = __import__("time").time()
+                content_str = await _fb_oauth(
+                    _prompt, max_tokens=max_tokens, temperature=temperature,
+                )
+                _elapsed_ms = int((__import__("time").time() - _started_ts) * 1000)
+                response = AIResponse(
+                    model_id=model_id,
+                    content=content_str or "",
+                    tokens_used=0,
+                    finish_reason="stop",
+                    latency_ms=_elapsed_ms,
+                    fallback_used=True,
+                    original_model_id=original_model_id,
+                )
+                return response
+
         service = self._services.get(provider)
         if not service:
             slog.error("Provider not available", provider=str(provider))

@@ -6393,6 +6393,10 @@ class NotificationService:
                 "google": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
                 "deepseek": ["DEEPSEEK_API_KEY"],
                 "perplexity": ["PERPLEXITY_API_KEY"],
+                # 🆕 (cloud_code parity) — OAuth subscription counts as a
+                # configured provider; without this line cloud_code is
+                # invisible to status/diagnostic enumerations.
+                "cloud_code": ["CLAUDE_CODE_OAUTH_TOKEN"],
             }
             for pname, ekeys in provider_env_keys.items():
                 if any((_os.environ.get(k) or "").strip() for k in ekeys):

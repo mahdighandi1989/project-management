@@ -247,6 +247,8 @@ async def _call_vision_with_custom_prompt(
         "anthropic": ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"],
         "gemini": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
         "google": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        # 🆕 cloud_code supports image content blocks via the OAuth API
+        "cloud_code": ["CLAUDE_CODE_OAUTH_TOKEN"],
     }
     with_key = set()
     for p, ks in env_keys.items():
@@ -562,6 +564,11 @@ async def stage_synthesize(session, *, user_note: str = "") -> Dict[str, Any]:
         "deepseek": ["DEEPSEEK_API_KEY"],
         "groq": ["GROQ_API_KEY"],
         "openrouter": ["OPENROUTER_API_KEY"],
+        # 🆕 (cloud_code parity) — Claude OAuth subscription also counts
+        # as a "key configured" provider. Without this, the synthesis
+        # fallback skips cloud_code entirely even when the user only has
+        # CLAUDE_CODE_OAUTH_TOKEN set (no API keys).
+        "cloud_code": ["CLAUDE_CODE_OAUTH_TOKEN"],
     }
     with_key = set()
     for p, ks in env_keys.items():
@@ -569,8 +576,13 @@ async def stage_synthesize(session, *, user_note: str = "") -> Dict[str, Any]:
             with_key.add(p.lower())
     enabled = get_enabled_models()
     picked = None
-    # ترجیح: مدل‌های context-طولانی (Claude، Gemini) → text-only
-    preferred_order = ["anthropic", "claude", "gemini", "google", "openai", "deepseek", "groq", "openrouter"]
+    # ترجیح: مدل‌های context-طولانی (Claude، Gemini) → text-only.
+    # cloud_code جلوی anthropic API direct نگه می‌داریم چون subscription-based
+    # است (هزینهٔ token صفر) و کاربر مدل پیش‌فرض monitoring اش است.
+    preferred_order = [
+        "cloud_code", "anthropic", "claude", "gemini", "google",
+        "openai", "deepseek", "groq", "openrouter",
+    ]
     for target_prov in preferred_order:
         if target_prov not in with_key:
             continue
