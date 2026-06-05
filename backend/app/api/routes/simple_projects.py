@@ -939,15 +939,29 @@ async def audit_project(
 # وظیفهٔ تو
 1. بررسی کن آیا فایل‌ها و ساختار با **هدف اولیه** تطبیق دارد یا نه
 2. فایل‌های **مفقود حیاتی** را شناسایی کن (مثلاً اگر OSINT platform است ولی frontend ندارد، این bug است)
-3. مشکلات **ساختاری** را پیدا کن (مثلاً Dockerfile نداشتن، dependency گم‌شده)
-4. کیفیت کد را ارزیابی کن (production-ready vs scaffolding)
-5. اگر همه چیز خوب است صریحاً بگو
+3. فایل‌های **اشتباه/زائد** را شناسایی کن (فایل‌هایی که وجود دارند ولی نباید باشند — مثلاً اگر پروژه CLI است ولی فایل web view ساخته شده، یا duplicate)
+4. فایل‌های موجود را که **محتوای نادرست** دارند شناسایی کن (مثلاً main.py فقط `pass` دارد، یا route ای که توضیحات می‌گفت لازم است ولی schema غلط دارد، یا dependency ای که در requirements.txt مفقود است)
+5. مشکلات **ساختاری** را پیدا کن (مثلاً Dockerfile entry-point اشتباه، dependency گم‌شده)
+6. کیفیت کد را ارزیابی کن (production-ready vs scaffolding)
+7. اگر همه چیز خوب است صریحاً بگو
+
+📌 برای هر فایلی که محتوایش نیاز به اصلاح دارد، در `files_to_modify` با path دقیق + توضیح *آنچه که اشتباه است* + پیشنهاد *چه باید بشود* مشخص کن. کاربر می‌تواند per-file انتخاب کند کدام را regenerate کنیم.
+
+📌 برای فایلی که نباید باشد، در `files_to_delete` با path دقیق + دلیل ذکر کن. حذف فقط با تأیید صریح کاربر انجام می‌شود.
 
 خروجی فقط JSON با این فرمت:
 {{
   "overall_score": 0-100,
   "ready_to_push": true/false,
   "missing_critical_files": ["frontend/src/app/page.tsx چون پروژه نیاز به UI دارد", ...],
+  "files_to_modify": [
+    {{"path": "backend/app/main.py", "issue": "فقط FastAPI() instance دارد، route ها register نشده", "suggestion": "router های auth, users, items را include کن"}},
+    ...
+  ],
+  "files_to_delete": [
+    {{"path": "backend/app/legacy.py", "reason": "بقایای template، در توضیحات خواسته نشده"}},
+    ...
+  ],
   "structural_issues": ["Dockerfile entry-point اشتباه است", ...],
   "quality_concerns": ["فایل foo.py فقط placeholder است، منطق واقعی ندارد", ...],
   "matches_goal": true/false,
@@ -1047,6 +1061,38 @@ async def audit_project(
                     seen.append(text)
         return seen
 
+    def _collect_objects(field: str) -> List[Dict[str, str]]:
+        """Same as _collect but for object lists (files_to_modify,
+        files_to_delete). De-duped by path. If multiple models flag the
+        same path, the first model's notes win."""
+        seen_paths: Dict[str, Dict[str, str]] = {}
+        for r in successful:
+            raw_list = r["report"].get(field) or []
+            if not isinstance(raw_list, list):
+                continue
+            for item in raw_list:
+                if not isinstance(item, dict):
+                    # Sometimes the AI emits a plain string here too —
+                    # try to salvage as a path.
+                    if isinstance(item, str):
+                        path = _parse_clean_path(item)
+                        if path and path not in seen_paths:
+                            seen_paths[path] = {"path": path}
+                    continue
+                path = str(item.get("path") or "").strip()
+                # Clean off any prose the AI tacked on
+                clean = _parse_clean_path(path) or path
+                if not clean or clean in seen_paths:
+                    continue
+                # Track which models flagged it so user sees consensus
+                seen_paths[clean] = {
+                    "path": clean,
+                    "issue": str(item.get("issue") or "").strip()[:500],
+                    "suggestion": str(item.get("suggestion") or "").strip()[:500],
+                    "reason": str(item.get("reason") or "").strip()[:500],
+                }
+        return list(seen_paths.values())
+
     avg_score = round(
         sum(_coerce_score(r["report"].get("overall_score")) for r in successful)
         / len(successful)
@@ -1066,6 +1112,8 @@ async def audit_project(
         "ready_to_push_votes": f"{ready_votes}/{len(successful)}",
         "matches_goal_majority": goal_match_votes > len(successful) / 2,
         "missing_critical_files": _collect("missing_critical_files"),
+        "files_to_modify": _collect_objects("files_to_modify"),
+        "files_to_delete": _collect_objects("files_to_delete"),
         "structural_issues": _collect("structural_issues"),
         "quality_concerns": _collect("quality_concerns"),
         "goal_mismatch_reasons": _collect("goal_mismatch_reasons"),
@@ -1080,24 +1128,34 @@ async def audit_project(
     }
 
 
+class FileToModify(BaseModel):
+    path: str
+    issue: str = ""
+    suggestion: str = ""
+
+
 class ApplyAuditFixesRequest(BaseModel):
-    """🆕 Optional inputs to drive the auto-fix.
+    """🆕 Optional inputs to drive the auto-fix. Full CRUD:
 
-    Both fields are optional:
-      - missing_files: explicit list of paths to generate. If omitted,
-        we run audit() first and use the aggregated.missing_critical_files.
-      - upgrade_to_fullstack: if True (and project_type isn't already
-        fullstack), switch the project to fullstack and generate every
-        fullstack-template file that doesn't already exist.
+      - missing_files: paths to ADD (generate via AI). If omitted and
+        upgrade_to_fullstack is False, runs audit() first to discover.
+      - files_to_modify: existing files to REGENERATE with audit context
+        (the AI's "issue" + "suggestion" notes are fed into the new
+        prompt so the regenerated content addresses the specific
+        problem the audit flagged).
+      - files_to_delete: paths to REMOVE. Both from disk and from
+        project.files metadata. Only acted on when explicitly listed —
+        never auto-derived from audit.
+      - upgrade_to_fullstack: switch to fullstack template + add any
+        missing template files (idempotent).
 
-    Use case for the user's Detective-1 scenario:
-      - project was created as fastapi → has only backend/
-      - audit said "missing frontend/src/app/page.tsx etc."
-      - frontend POSTs {upgrade_to_fullstack: true} OR posts the explicit
-        missing_files list — backend generates them, persists, saves
-        meta. No need to delete and recreate.
+    Detective-1 scenario maps to: upgrade_to_fullstack=true AND
+    files_to_modify=[{path: "backend/app/main.py", issue: "..."}, …]
+    AND files_to_delete=[] (or whatever user picks).
     """
     missing_files: List[str] = []
+    files_to_modify: List[FileToModify] = []
+    files_to_delete: List[str] = []
     upgrade_to_fullstack: bool = False
     model_ids: List[str] = []  # ai-generate fallback chain
 
@@ -1155,11 +1213,15 @@ async def apply_audit_fixes(
             clean = _parse_clean_path(raw)
             if clean and clean not in files_to_create:
                 files_to_create.append(clean)
-    elif not req.upgrade_to_fullstack:
-        # No explicit list AND not just promoting to fullstack →
-        # run a fresh audit to discover missing files. (If the user is
-        # just clicking 'upgrade to fullstack', we use the template
-        # directly without consuming AI tokens for an audit step.)
+    elif (
+        not req.upgrade_to_fullstack
+        and not req.files_to_modify
+        and not req.files_to_delete
+    ):
+        # No explicit list AND no other intent → run a fresh audit
+        # to discover missing files. Other paths (upgrade, modify,
+        # delete) have their own explicit input so we skip the
+        # audit step to save AI tokens.
         try:
             audit_resp = await audit_project(
                 project_id, AuditProjectRequest(model_ids=req.model_ids),
@@ -1197,21 +1259,30 @@ async def apply_audit_fixes(
         }
         promoted = True
 
-    if not files_to_create and not promoted:
+    if (
+        not files_to_create and not promoted
+        and not req.files_to_modify and not req.files_to_delete
+    ):
         return {
             "success": True,
             "project_id": project_id,
             "files_added": [],
+            "files_modified": [],
+            "files_deleted": [],
             "files_skipped": [],
             "promoted_to_fullstack": False,
             "audit_summary": audit_summary,
             "note": "هیچ مورد قابل‌اصلاحی پیدا نشد.",
         }
 
-    # 3) For each file to create, skip if it already exists, otherwise
-    # generate via the same _generate_file path the original create used.
+    # 3) Per-category execution. Order: delete → modify → add. Deletes
+    # first so the modify/add steps see an accurate "already exists"
+    # state. Modify before add so an existing file the user wanted to
+    # regenerate doesn't accidentally get treated as "already exists".
     existing_paths_set = {f.path for f in project.files}
     files_added: List[Dict[str, str]] = []
+    files_modified: List[Dict[str, str]] = []
+    files_deleted: List[Dict[str, str]] = []
     files_skipped: List[Dict[str, str]] = []
 
     async def _ai_gen(prompt: str) -> str:
@@ -1220,6 +1291,98 @@ async def apply_audit_fixes(
     project_dir = creator.workspace / project.id
     project_dir.mkdir(parents=True, exist_ok=True)
 
+    # 3a) DELETE — remove from disk + drop from project.files. Only
+    # acted on when explicitly listed by the caller; we never auto-derive
+    # delete intent from audit (too destructive to do silently).
+    for raw_path in (req.files_to_delete or []):
+        clean = _parse_clean_path(raw_path) or raw_path
+        # Defense against path traversal: stay inside project_dir
+        full_path = (project_dir / clean).resolve()
+        try:
+            full_path.relative_to(project_dir.resolve())
+        except ValueError:
+            files_skipped.append({
+                "path": clean, "reason": "path outside project workspace",
+            })
+            continue
+        if not full_path.exists():
+            files_skipped.append({
+                "path": clean, "reason": "file not found",
+            })
+            continue
+        try:
+            if full_path.is_file():
+                full_path.unlink()
+            # Drop from project.files
+            project.files = [f for f in project.files if f.path != clean]
+            existing_paths_set.discard(clean)
+            files_deleted.append({"path": clean})
+        except Exception as e:
+            files_skipped.append({
+                "path": clean, "reason": f"delete failed: {str(e)[:200]}",
+            })
+
+    # 3b) MODIFY — regenerate existing files with audit context. We feed
+    # the AI a prompt that includes the issue + suggestion notes so the
+    # regenerated content addresses the specific problem the audit
+    # flagged, not just a fresh "write me main.py" prompt.
+    for spec in (req.files_to_modify or []):
+        # `spec` is a FileToModify (pydantic model)
+        target_path = (
+            _parse_clean_path(spec.path) or spec.path
+        ) if hasattr(spec, "path") else None
+        if not target_path:
+            files_skipped.append({"path": "?", "reason": "no path"})
+            continue
+        existing = next(
+            (f for f in project.files if f.path == target_path), None,
+        )
+        if existing is None:
+            # Not present — fall back to "add" behavior so the user's
+            # intent isn't silently dropped.
+            files_to_create.append(target_path)
+            continue
+        try:
+            issue = (spec.issue or "").strip() if hasattr(spec, "issue") else ""
+            sugg = (spec.suggestion or "").strip() if hasattr(spec, "suggestion") else ""
+            mod_prompt_extra = (
+                f"\n\n📌 این فایل قبلاً وجود دارد و audit مشخص کرد:\n"
+                f"- مشکل: {issue or '(ذکر نشد)'}\n"
+                f"- پیشنهاد: {sugg or '(ذکر نشد)'}\n"
+                f"محتوای فعلی (مرجع):\n```\n{(existing.content or '')[:2000]}\n```\n"
+                f"محتوای جدید را بنویس که مشکل را برطرف کند ولی منطق درست "
+                f"قبلی را حفظ کند."
+            )
+            # _generate_file takes (name, desc, type, path, file_desc, ai_gen);
+            # we pass the regeneration context as file_desc so it lands
+            # inside the AI prompt.
+            new_content = await creator._generate_file(
+                project.name,
+                project.description + mod_prompt_extra,
+                project.project_type,
+                target_path,
+                f"regenerate to address: {issue}",
+                _ai_gen,
+            )
+            full_path = project_dir / target_path
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            import aiofiles as _aiofiles
+            async with _aiofiles.open(full_path, "w") as fh:
+                await fh.write(new_content)
+            existing.content = new_content
+            files_modified.append({
+                "path": target_path,
+                "size": len(new_content),
+                "issue_addressed": issue[:200],
+            })
+        except Exception as e:
+            files_skipped.append({
+                "path": target_path,
+                "reason": f"modify failed: {str(e)[:200]}",
+            })
+
+    # 3c) ADD — generate missing files. Skip silently if a path now
+    # exists (might be the case if delete+add raced on the same path).
     for path in files_to_create:
         if path in existing_paths_set:
             files_skipped.append({"path": path, "reason": "already exists"})
@@ -1233,7 +1396,6 @@ async def apply_audit_fixes(
                 "",  # file_desc — audit didn't always give one
                 _ai_gen,
             )
-            # Persist file on disk + in project metadata
             full_path = project_dir / path
             full_path.parent.mkdir(parents=True, exist_ok=True)
             import aiofiles as _aiofiles
@@ -1264,6 +1426,8 @@ async def apply_audit_fixes(
         "success": True,
         "project_id": project_id,
         "files_added": files_added,
+        "files_modified": files_modified,
+        "files_deleted": files_deleted,
         "files_skipped": files_skipped,
         "promoted_to_fullstack": promoted,
         "new_project_type": project.project_type,
