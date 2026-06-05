@@ -1,271 +1,539 @@
-# -*- coding: utf-8 -*-
-"""Tests for the Knowledge Center (مرکز دانش) feature.
+"""🧠 Knowledge Center — pins all 7 explicit user requirements + the
+two phases of the voice-recorded request.
 
-پوشش:
-  - parsing فرمت‌های مختلف (txt/md/html) و chunking برای فایل حجیم
-  - منطق merge/dedup هنگام افزودن تجربهٔ تکراری (ادغام + reference)
-  - ساختار خروجی entries (TOC + categories) برای صفحهٔ دانشنامه‌ای
-  - ensure_experiences_folder برای پروژهٔ local
-  - ایمپورت چت (با fallback heuristic وقتی AI فعال نیست)
-  - endpoint GET /api/knowledge-center/entries با status 200
+User's seven explicit requirements (from this session's message):
+  1. می‌توانم انتخاب کنم توسط کدوم مدل فعال موجود کار انجام بشه
+  2. می‌توانم چیزایی که اضافه شده رو حذف کنم
+  3. در پروژه‌های حاضر این پوشه ایجاد بشه
+  4. برای پروژه‌های آینده به محض تحت نظارت قرار گرفتن ایجاد بشه
+  5. صفحه‌بندی، فهرست‌بندی، نمایش عالی، جستجو، سورت، فیلتر، صفحه‌بندی
+  6. در هر پوشه یه دفترچهٔ راهنما باشه (format guide)
+  7. وقتی فایلی از داخل پنل آپلود می‌کنم، در همون فرمت ذخیره بشه
 """
 
 from __future__ import annotations
 
-import os
 import sys
-import tempfile
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
-# 🔒 ایزوله کردن storage قبل از import سرویس (تا روی repo ننویسد)
-os.environ["KNOWLEDGE_CENTER_STORAGE"] = tempfile.mkdtemp(prefix="kc_test_")
-
-import pytest  # noqa: E402
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.services import knowledge_center_service as kc  # noqa: E402
-from app.services.knowledge_center_service import (  # noqa: E402
-    KnowledgeCenterService,
-    parse_file_to_text,
-    chunk_text,
-    _normalize_topic_key,
-)
+_BACKEND_ROOT = Path(__file__).resolve().parents[1]
+_FRONTEND_ROOT = Path(__file__).resolve().parents[2] / "frontend/src"
 
 
-@pytest.fixture
-def svc(tmp_path, monkeypatch):
-    """نمونهٔ تازهٔ سرویس با storage ایزوله per-test."""
-    entries_file = tmp_path / "entries.json"
-    monkeypatch.setattr(kc, "ENTRIES_FILE", entries_file)
-    return KnowledgeCenterService()
+# ─────────────────────────────────────────────────────────────────────────────
+# Service exists + format guide is non-empty + contains AI instructions
+# ─────────────────────────────────────────────────────────────────────────────
 
 
-# ---------------------------------------------------------------------------
-# parsing + chunking
-# ---------------------------------------------------------------------------
-
-def test_parse_txt():
-    text = parse_file_to_text("note.txt", "سلام دنیا".encode("utf-8"), "text/plain")
-    assert "سلام دنیا" in text
-
-
-def test_parse_md():
-    md = "# عنوان\n\nمتن تجربه".encode("utf-8")
-    text = parse_file_to_text("exp.md", md, "text/markdown")
-    assert "# عنوان" in text
-    assert "متن تجربه" in text
-
-
-def test_parse_html_strips_tags():
-    html = "<html><body><h1>سلام</h1><p>پاراگراف</p><script>x=1</script></body></html>"
-    text = parse_file_to_text("c.html", html.encode("utf-8"), "text/html")
-    assert "سلام" in text
-    assert "پاراگراف" in text
-    assert "<h1>" not in text
-    assert "x=1" not in text  # script باید حذف شود
-
-
-def test_chunk_small_text_single():
-    chunks = chunk_text("کوتاه")
-    assert chunks == ["کوتاه"]
-
-
-def test_chunk_large_text_splits():
-    big = ("پاراگراف نمونه. " * 2000)  # > DEFAULT_CHUNK_CHARS
-    chunks = chunk_text(big, max_chars=1000)
-    assert len(chunks) > 1
-    assert all(len(c) <= 1000 for c in chunks)
-
-
-def test_normalize_topic_key():
-    a = _normalize_topic_key("لاگین کردن با جیمیل!")
-    b = _normalize_topic_key("لاگین کردن با جیمیل")
-    assert a == b
-
-
-# ---------------------------------------------------------------------------
-# merge / dedup
-# ---------------------------------------------------------------------------
-
-def test_upsert_creates_entry(svc):
-    e = svc.upsert_entry({
-        "title": "اتصال به دیتابیس",
-        "content": "راه حل اول",
-        "source": "chat_import",
-        "source_ref": "chat1.txt",
-    })
-    assert e["id"]
-    assert e["title"] == "اتصال به دیتابیس"
-    assert len(svc.get_entries()["entries"]) == 1
-
-
-def test_upsert_merges_same_topic(svc):
-    svc.upsert_entry({
-        "title": "لاگین با جیمیل",
-        "content": "راه حل قدیمی",
-        "source": "chat_import",
-        "source_ref": "chatA.txt",
-    })
-    merged = svc.upsert_entry({
-        "title": "لاگین با جیمیل!",  # همان موضوع، نشانه‌گذاری متفاوت
-        "content": "نکتهٔ جدید مفید",
-        "source": "chat_import",
-        "source_ref": "chatB.txt",
-    })
-    # فقط یک entry باید باشد (dedup)
-    entries = svc.get_entries()["entries"]
-    assert len(entries) == 1
-    # هر دو محتوا حفظ شده (چیزی حذف نشده)
-    assert "راه حل قدیمی" in merged["content"]
-    assert "نکتهٔ جدید مفید" in merged["content"]
-    # reference هر دو منبع ثبت شده
-    sources = {r["source"] for r in merged["references"]}
-    assert "chatA.txt" in sources
-    assert "chatB.txt" in sources
-
-
-def test_upsert_duplicate_content_not_repeated(svc):
-    svc.upsert_entry({"title": "X", "content": "همان متن", "source_ref": "a"})
-    e = svc.upsert_entry({"title": "X", "content": "همان متن", "source_ref": "a"})
-    # متن تکراری نباید دوباره append شود
-    assert e["content"].count("همان متن") == 1
-
-
-# ---------------------------------------------------------------------------
-# entries listing (TOC + categories)
-# ---------------------------------------------------------------------------
-
-def test_get_entries_toc_and_categories(svc):
-    svc.upsert_entry({"title": "ورود با OAuth", "content": "auth login oauth", "source_ref": "a"})
-    svc.upsert_entry({"title": "مهاجرت دیتابیس", "content": "database migration sql", "source_ref": "b"})
-    result = svc.get_entries()
-    assert result["total"] == 2
-    assert "categories" in result
-    assert "toc" in result
-    # TOC باید گروه‌بندی‌شده باشد
-    assert len(result["toc"]) >= 1
-    for group in result["toc"]:
-        assert "category" in group
-        assert "items" in group
-
-
-def test_get_entry_by_id(svc):
-    e = svc.upsert_entry({"title": "تست", "content": "x", "source_ref": "a"})
-    fetched = svc.get_entry(e["id"])
-    assert fetched is not None
-    assert fetched["id"] == e["id"]
-    assert svc.get_entry("nonexistent") is None
-
-
-# ---------------------------------------------------------------------------
-# ensure_experiences_folder (local) — AC4
-# ---------------------------------------------------------------------------
-
-def test_service_has_ensure_method(svc):
-    assert hasattr(svc, "ensure_experiences_folder")
-    assert callable(svc.ensure_experiences_folder)
-
-
-@pytest.mark.asyncio
-async def test_ensure_experiences_folder_local(svc, tmp_path):
-    proj_dir = tmp_path / "myproject"
-    proj_dir.mkdir()
-    result = await svc.ensure_experiences_folder({"local_path": str(proj_dir)})
-    assert result["success"] is True
-    assert result["created"] is True
-    folder = proj_dir / "experiences"
-    assert folder.is_dir()
-    assert (folder / ".gitkeep").exists()
-    # idempotent — بار دوم created=False
-    result2 = await svc.ensure_experiences_folder({"local_path": str(proj_dir)})
-    assert result2["success"] is True
-    assert result2["created"] is False
-
-
-# ---------------------------------------------------------------------------
-# import_chat (heuristic fallback — بدون AI فعال)
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_import_chat_creates_entries(svc, monkeypatch):
-    # مطمئن شو AI در دسترس نیست → heuristic
-    async def _no_ai(*a, **k):
-        return []
-    monkeypatch.setattr(svc, "_extract_with_ai", _no_ai)
-
-    content = "# لاگین با گوگل\n\nچالش: ورود کاربر. راه‌حل: استفاده از OAuth.".encode("utf-8")
-    result = await svc.import_chat("chat_export.md", content, "text/markdown")
-    assert result["success"] is True
-    assert result["extracted"] >= 1
-    assert len(svc.get_entries()["entries"]) >= 1
-
-
-@pytest.mark.asyncio
-async def test_import_chat_empty_fails(svc):
-    result = await svc.import_chat("empty.txt", b"   ", "text/plain")
-    assert result["success"] is False
-
-
-@pytest.mark.asyncio
-async def test_import_chat_chunks_large(svc, monkeypatch):
-    async def _no_ai(*a, **k):
-        return []
-    monkeypatch.setattr(svc, "_extract_with_ai", _no_ai)
-    big = ("خط نمونه برای تست chunking.\n\n" * 3000).encode("utf-8")
-    result = await svc.import_chat("big.txt", big, "text/plain")
-    assert result["success"] is True
-    assert result["chunks"] > 1
-
-
-# ---------------------------------------------------------------------------
-# endpoint — AC3: GET /api/knowledge-center/entries → 200
-# ---------------------------------------------------------------------------
-
-def test_endpoint_entries_200(monkeypatch, tmp_path):
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-    from app.api.routes import knowledge_center as kc_route
-
-    # سرویس ایزوله برای endpoint
-    monkeypatch.setattr(kc, "ENTRIES_FILE", tmp_path / "ep_entries.json")
-    fresh = KnowledgeCenterService()
-    fresh.upsert_entry({"title": "نمونه", "content": "x", "source_ref": "a"})
-    monkeypatch.setattr(kc, "get_knowledge_center_service", lambda: fresh)
-    monkeypatch.setattr(kc_route, "get_knowledge_center_service", lambda: fresh)
-
-    app = FastAPI()
-    app.include_router(kc_route.router, prefix="/api")
-    client = TestClient(app)
-
-    resp = client.get("/api/knowledge-center/entries")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert "entries" in data
-    assert "toc" in data
-    assert "categories" in data
-
-
-def test_endpoint_import(monkeypatch, tmp_path):
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-    from app.api.routes import knowledge_center as kc_route
-
-    monkeypatch.setattr(kc, "ENTRIES_FILE", tmp_path / "ep_import.json")
-    fresh = KnowledgeCenterService()
-
-    async def _no_ai(*a, **k):
-        return []
-    monkeypatch.setattr(fresh, "_extract_with_ai", _no_ai)
-    monkeypatch.setattr(kc_route, "get_knowledge_center_service", lambda: fresh)
-
-    app = FastAPI()
-    app.include_router(kc_route.router, prefix="/api")
-    client = TestClient(app)
-
-    resp = client.post(
-        "/api/knowledge-center/import",
-        files={"file": ("chat.txt", b"# Topic\n\nuseful solution", "text/plain")},
+def test_service_module_exists():
+    from app.services.knowledge_center_service import (
+        KnowledgeCenterService, get_knowledge_center_service,
+        EXPERIENCE_FORMAT_README,
     )
-    assert resp.status_code == 200
-    assert resp.json()["success"] is True
+    svc = get_knowledge_center_service()
+    assert isinstance(svc, KnowledgeCenterService)
+
+
+def test_format_readme_contains_required_sections():
+    """Req #6 — every experiences/ folder gets a README that:
+      - Documents naming/frontmatter
+      - Has explicit AI instructions for project-agnostic write-ups
+      - Tells AI to merge not replace existing canonical topics
+    Without these, the user's "any model can read and produce conformant
+    files" guarantee breaks."""
+    from app.services.knowledge_center_service import EXPERIENCE_FORMAT_README
+    txt = EXPERIENCE_FORMAT_README
+    # File naming
+    assert "topic-slug" in txt or "kebab-case" in txt
+    # Frontmatter requirements
+    assert "topic_canonical" in txt
+    assert "merged_from" in txt
+    # AI directive: project-agnostic
+    assert "project-agnostic" in txt or "بدون نام پروژه" in txt
+    # AI directive: merge not replace
+    assert "MERGE" in txt and "REPLACE" in txt
+    # Required sections in the body
+    for required in (
+        "چالش", "راه‌حل", "Pitfalls", "How to Apply Elsewhere", "References",
+    ):
+        assert required in txt, (
+            f"format README must mention '{required}' so AI models know the "
+            "section layout"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Req #5 — list_entries supports search/sort/filter/pagination
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_list_entries_supports_pagination_search_sort_filter(tmp_path, monkeypatch):
+    """The list_entries method MUST support all 4 controls. We seed a
+    fake index and verify each filter narrows the result, search
+    matches title+summary+tags, sort orders correctly, pagination
+    slices the page."""
+    import json
+    from app.services import knowledge_center_service as kcs
+    # Redirect index to tmp_path
+    monkeypatch.setattr(kcs, "INDEX_FILE", tmp_path / "knowledge_center.json")
+    entries = [
+        {
+            "id": f"e{i}", "project_id": f"p{i % 3}",
+            "project_full_name": f"owner/repo{i % 3}",
+            "path": f"experiences/topic-{i}.md",
+            "title": f"Topic {i} About Google OAuth" if i < 5 else f"Topic {i} About FastAPI",
+            "topic_canonical": f"topic-{i}",
+            "tags": ["auth", "google"] if i < 5 else ["fastapi"],
+            "source_type": "manual" if i % 2 == 0 else "chat-import",
+            "summary": f"summary {i}",
+            "size_bytes": 1000 + i * 100,
+            "created_at": f"2026-06-{(i % 28) + 1:02d}T00:00:00Z",
+            "updated_at": f"2026-06-{(i % 28) + 1:02d}T01:00:00Z",
+        }
+        for i in range(15)
+    ]
+    (tmp_path / "knowledge_center.json").write_text(
+        json.dumps({"version": 1, "entries": entries}),
+        encoding="utf-8",
+    )
+
+    svc = kcs.KnowledgeCenterService()
+
+    # Pagination
+    res = svc.list_entries(page=1, per_page=5)
+    assert len(res["items"]) == 5
+    assert res["total"] == 15
+    assert res["pages"] == 3
+
+    # Page 2
+    res2 = svc.list_entries(page=2, per_page=5)
+    assert len(res2["items"]) == 5
+    # No overlap
+    ids1 = {x["id"] for x in res["items"]}
+    ids2 = {x["id"] for x in res2["items"]}
+    assert ids1.isdisjoint(ids2)
+
+    # Search (case-insensitive across title)
+    res = svc.list_entries(page=1, per_page=20, search="OAuth")
+    assert all("oauth" in x["title"].lower() for x in res["items"])
+
+    # Tag filter
+    res = svc.list_entries(page=1, per_page=20, tag="fastapi")
+    assert all("fastapi" in (x.get("tags") or []) for x in res["items"])
+
+    # Source filter
+    res = svc.list_entries(page=1, per_page=20, source_type="chat-import")
+    assert all(x["source_type"] == "chat-import" for x in res["items"])
+
+    # Sort by title asc — first item must be lex-smallest
+    res = svc.list_entries(page=1, per_page=20, sort="title_asc")
+    titles = [x["title"] for x in res["items"]]
+    assert titles == sorted(titles)
+
+
+def test_list_entries_returns_facets():
+    """The facets (tags / sources / projects) are how the UI builds the
+    filter dropdowns. Without them, user can't discover what's filterable."""
+    from app.services.knowledge_center_service import get_knowledge_center_service
+    svc = get_knowledge_center_service()
+    res = svc.list_entries(page=1, per_page=1)
+    assert "facets" in res
+    assert "tags" in res["facets"]
+    assert "sources" in res["facets"]
+    assert "projects" in res["facets"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Req #4 — future watched projects auto-create folder via oversight hook
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_oversight_add_watched_triggers_ensure_folder():
+    """Source check — oversight_service.add_watched must schedule
+    ensure_folder_for_project so future watched projects get the
+    experiences/ folder immediately. Without this hook, the user has to
+    manually trigger /bootstrap each time they add a project."""
+    src = (
+        _BACKEND_ROOT / "app/services/oversight_service.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def add_watched")
+    assert idx != -1
+    body = src[idx:idx + 5000]
+    assert "ensure_folder_for_project" in body, (
+        "add_watched must call kc.ensure_folder_for_project (or schedule it) "
+        "so newly-watched projects get the experiences folder right away"
+    )
+    assert "knowledge_center_service" in body
+    # Must be in a try/except so a failed scaffold doesn't break add_watched
+    assert "Exception" in body and "ensure_folder_for_project" in body
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Req #3 — bootstrap_existing walks every currently-watched project
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_existing_iterates_all_watched():
+    """The /bootstrap endpoint walks the current watched list and calls
+    ensure_folder on each. Idempotent — already-present folders are
+    skipped without churning commits."""
+    from app.services.knowledge_center_service import KnowledgeCenterService
+    from types import SimpleNamespace
+
+    svc = KnowledgeCenterService()
+
+    calls = []
+
+    async def fake_ensure(project_id, project_full_name, github_token=None):
+        calls.append((project_id, project_full_name))
+        return {"created": True, "repo": project_full_name}
+
+    fake_watched = [
+        SimpleNamespace(id="w1", repo_full_name="owner/repo1"),
+        SimpleNamespace(id="w2", repo_full_name="owner/repo2"),
+        SimpleNamespace(id="w3", repo_full_name="owner/repo3"),
+    ]
+    fake_osv = SimpleNamespace(watched=fake_watched)
+
+    with patch(
+        "app.services.oversight_service.get_oversight_service",
+        return_value=fake_osv,
+    ), patch(
+        "app.services.oversight_service.get_github_token",
+        return_value="ghp_test",
+    ), patch.object(svc, "ensure_folder_for_project", new=fake_ensure):
+        result = await svc.bootstrap_existing()
+
+    assert result["total"] == 3
+    assert result["created"] == 3
+    assert {c[1] for c in calls} == {"owner/repo1", "owner/repo2", "owner/repo3"}
+
+
+@pytest.mark.asyncio
+async def test_ensure_folder_is_idempotent_when_readme_exists():
+    """If README already exists, ensure_folder must NOT call
+    create_or_update_file again — otherwise every backend restart
+    churns the repo with no-op commits."""
+    from app.services.knowledge_center_service import KnowledgeCenterService
+    svc = KnowledgeCenterService()
+
+    with patch.object(svc, "_gh_file_exists", AsyncMock(return_value=True)), \
+         patch("app.services.github_pr_service.get_github_pr_service") as mp:
+        result = await svc.ensure_folder_for_project(
+            project_id="w1", project_full_name="owner/repo",
+            github_token="ghp_x",
+        )
+        # Must NOT have called the PR service at all
+        mp.return_value.create_or_update_file.assert_not_called()
+
+    assert result["created"] is False
+    assert result["reason"] == "already_exists"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Req #2 — delete entries
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_delete_entry_removes_from_index_and_optionally_repo(
+    tmp_path, monkeypatch,
+):
+    """delete_entry must remove the entry from the index. If
+    delete_from_repo=True, also delete from the GitHub repo. If False,
+    keep file but de-index."""
+    import json
+    from app.services import knowledge_center_service as kcs
+    monkeypatch.setattr(kcs, "INDEX_FILE", tmp_path / "knowledge_center.json")
+    entries = [
+        {"id": "e1", "project_full_name": "owner/repo",
+         "path": "experiences/x.md", "title": "x"},
+        {"id": "e2", "project_full_name": "owner/repo",
+         "path": "experiences/y.md", "title": "y"},
+    ]
+    (tmp_path / "knowledge_center.json").write_text(
+        json.dumps({"version": 1, "entries": entries}),
+        encoding="utf-8",
+    )
+
+    svc = kcs.KnowledgeCenterService()
+
+    # First: delete_from_repo=False → de-index only
+    with patch(
+        "app.services.oversight_service.get_github_token", return_value="ghp_x",
+    ):
+        r = await svc.delete_entry("e1", delete_from_repo=False)
+    assert r["ok"] is True
+    assert r["deindexed"] is True
+    assert r["repo_deleted"] is False
+    # Index now has 1 entry
+    listing = svc.list_entries(page=1, per_page=20)
+    assert listing["total"] == 1
+    assert listing["items"][0]["id"] == "e2"
+
+    # Second: delete_from_repo=True → also pr.delete_file called
+    delete_called = {"n": 0}
+    async def fake_delete(**kw):
+        delete_called["n"] += 1
+        return {"ok": True}
+
+    class _FakePR:
+        delete_file = staticmethod(fake_delete)
+
+    with patch(
+        "app.services.github_pr_service.get_github_pr_service",
+        return_value=_FakePR(),
+    ), patch(
+        "app.services.oversight_service.get_github_token",
+        return_value="ghp_x",
+    ):
+        r = await svc.delete_entry("e2", delete_from_repo=True)
+    assert r["repo_deleted"] is True
+    assert delete_called["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_entry_404_on_unknown():
+    from app.services.knowledge_center_service import KnowledgeCenterService
+    svc = KnowledgeCenterService()
+    r = await svc.delete_entry("nonexistent_id")
+    assert r["ok"] is False
+    assert r["error"] == "entry_not_found"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Req #1 + #7 — import_chat_file accepts model_ids + multiple formats
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_import_chat_file_honors_model_ids(tmp_path, monkeypatch):
+    """When the user picks specific models in the upload UI, those exact
+    model_ids must be passed to ai_generate_with_meta. Without this, the
+    upload feature ignores user choice (the same bug we fixed for the
+    /creator audit flow in earlier commits)."""
+    import json
+    from app.services import knowledge_center_service as kcs
+    monkeypatch.setattr(kcs, "INDEX_FILE", tmp_path / "kc.json")
+    (tmp_path / "kc.json").write_text(
+        json.dumps({"version": 1, "entries": []}), encoding="utf-8",
+    )
+    svc = kcs.KnowledgeCenterService()
+
+    captured = []
+
+    async def fake_ai(prompt, model_ids=None):
+        captured.append({"model_ids": list(model_ids or [])})
+        return (
+            '{"experiences": [{"title": "GoogleOAuth", '
+            '"topic_canonical": "google-oauth", "tags": ["auth"], '
+            '"challenge": "x", "solution": "y", "code_examples": "", '
+            '"pitfalls": "", "apply_elsewhere": "", "confidence": 0.9}]}',
+            "test-model-claude",
+        )
+
+    with patch(
+        "app.api.routes.simple_projects.ai_generate_with_meta", new=fake_ai,
+    ), patch(
+        "app.services.oversight_service.get_github_token", return_value=None,
+    ):
+        result = await svc.import_chat_file(
+            filename="chat.txt",
+            content_bytes=b"This is a long chat export. " * 30,
+            target_project_id=None,
+            target_project_full_name=None,
+            model_ids=["claude-sonnet-4-6", "gemini-2.5-flash"],
+        )
+
+    assert result["ok"] is True
+    assert result["created"] >= 1
+    # Every AI call must have honored the user's model_ids
+    assert all(
+        c["model_ids"] == ["claude-sonnet-4-6", "gemini-2.5-flash"]
+        for c in captured
+    )
+
+
+@pytest.mark.asyncio
+async def test_import_chat_file_attributes_extracted_entry_to_model(
+    tmp_path, monkeypatch,
+):
+    """Created entry must have generated_by set to the model that
+    actually responded. This is the same per-file attribution guarantee
+    the /creator engine has."""
+    import json
+    from app.services import knowledge_center_service as kcs
+    monkeypatch.setattr(kcs, "INDEX_FILE", tmp_path / "kc.json")
+    (tmp_path / "kc.json").write_text(
+        json.dumps({"version": 1, "entries": []}), encoding="utf-8",
+    )
+    svc = kcs.KnowledgeCenterService()
+
+    async def fake_ai(prompt, model_ids=None):
+        return (
+            '{"experiences": [{"title": "T", "topic_canonical": "t-canon", '
+            '"tags": [], "challenge": "x", "solution": "y", '
+            '"code_examples": "", "pitfalls": "", "apply_elsewhere": ""}]}',
+            "specific-test-model-id",
+        )
+
+    with patch(
+        "app.api.routes.simple_projects.ai_generate_with_meta", new=fake_ai,
+    ), patch(
+        "app.services.oversight_service.get_github_token", return_value=None,
+    ):
+        result = await svc.import_chat_file(
+            filename="chat.md",
+            content_bytes=b"some chat content that is long enough to pass the 50-char minimum filter for the import endpoint",
+            target_project_id=None,
+            target_project_full_name=None,
+            model_ids=None,
+        )
+
+    created = result["created_entries"]
+    assert len(created) >= 1
+    assert created[0]["generated_by"] == "specific-test-model-id"
+
+
+@pytest.mark.asyncio
+async def test_import_chat_file_merges_existing_canonical_topic(
+    tmp_path, monkeypatch,
+):
+    """Req #14 from voice notes: if the topic_canonical already exists,
+    merge (don't add duplicate). Important so re-importing similar chats
+    doesn't bloat the catalog with duplicates."""
+    import json
+    from app.services import knowledge_center_service as kcs
+    monkeypatch.setattr(kcs, "INDEX_FILE", tmp_path / "kc.json")
+    # Pre-seed an entry with topic "google-oauth"
+    (tmp_path / "kc.json").write_text(
+        json.dumps({
+            "version": 1,
+            "entries": [
+                {
+                    "id": "existing-e1",
+                    "project_full_name": "",
+                    "path": "experiences/google-oauth.md",
+                    "title": "Google OAuth",
+                    "topic_canonical": "google-oauth",
+                    "tags": ["auth"],
+                    "source_type": "manual",
+                    "merged_from": [],
+                },
+            ],
+        }),
+        encoding="utf-8",
+    )
+    svc = kcs.KnowledgeCenterService()
+
+    async def fake_ai(prompt, model_ids=None):
+        return (
+            '{"experiences": [{"title": "Google OAuth v2", '
+            '"topic_canonical": "google-oauth", "tags": ["auth"], '
+            '"challenge": "newer perspective", "solution": "additional steps", '
+            '"code_examples": "", "pitfalls": "edge case found", '
+            '"apply_elsewhere": ""}]}',
+            "test-model",
+        )
+
+    with patch(
+        "app.api.routes.simple_projects.ai_generate_with_meta", new=fake_ai,
+    ), patch(
+        "app.services.oversight_service.get_github_token", return_value=None,
+    ):
+        result = await svc.import_chat_file(
+            filename="chat2.txt",
+            content_bytes=b"existing topic chat with enough length to pass the 50-character minimum threshold check",
+            target_project_id=None,
+            target_project_full_name=None,
+        )
+
+    assert result["created"] == 0, "duplicate canonical must NOT create new"
+    assert result["merged"] >= 1, "must MERGE into existing entry"
+    # Existing entry now has merged_from populated
+    listing = svc.list_entries(page=1, per_page=20)
+    assert listing["total"] == 1
+    existing = listing["items"][0]
+    assert any("chat2.txt" in m for m in existing.get("merged_from", []))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Frontend page exists with all the required UI elements
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_frontend_page_exists():
+    p = _FRONTEND_ROOT / "app/knowledge-center/page.tsx"
+    assert p.exists(), "Knowledge Center page must exist at this path"
+
+
+def test_sidebar_has_knowledge_center_entry():
+    src = (
+        _FRONTEND_ROOT / "components/Layout.tsx"
+    ).read_text(encoding="utf-8")
+    assert "/knowledge-center" in src
+    assert "مرکز دانش" in src
+
+
+def test_dashboard_has_knowledge_center_card():
+    """Req: 'و همینطور توی داشبورد اصلی' — the home page must surface
+    a card linking to Knowledge Center."""
+    src = (_FRONTEND_ROOT / "app/page.tsx").read_text(encoding="utf-8")
+    assert "/knowledge-center" in src
+    assert "مرکز دانش" in src
+
+
+def test_frontend_page_has_search_sort_filter_pagination():
+    src = (
+        _FRONTEND_ROOT / "app/knowledge-center/page.tsx"
+    ).read_text(encoding="utf-8")
+    # Search
+    assert "جستجو" in src or "search" in src.lower()
+    # Sort
+    assert "sort" in src.lower() and "updated_desc" in src
+    # Filter
+    assert "tagFilter" in src and "projectFilter" in src
+    # Pagination
+    assert "per_page" in src or "perPage" in src
+    assert "data.pages" in src or "result.pages" in src
+
+
+def test_frontend_page_has_upload_modal_with_model_selection():
+    """Req #1 + #7 — upload must let user pick which models do the
+    extraction. Without this the chat-import bypasses the user's
+    selection."""
+    src = (
+        _FRONTEND_ROOT / "app/knowledge-center/page.tsx"
+    ).read_text(encoding="utf-8")
+    assert "UploadChatModal" in src or "آپلود چت" in src
+    # Model picker
+    assert "selectedModels" in src or "selectedModelIds" in src
+    # File accepts multiple formats (req #7)
+    assert ".txt" in src and ".md" in src and ".pdf" in src
+    # POSTs to /import endpoint
+    assert "/knowledge-center/import" in src
+
+
+def test_frontend_page_has_delete_button():
+    """Req #2 — every entry has a delete button."""
+    src = (
+        _FRONTEND_ROOT / "app/knowledge-center/page.tsx"
+    ).read_text(encoding="utf-8")
+    assert "deleteEntry" in src
+    assert "🗑" in src
+
+
+def test_frontend_page_has_bootstrap_button():
+    """Req #3 — UI exposes a way to retroactively create folders in
+    every existing watched project."""
+    src = (
+        _FRONTEND_ROOT / "app/knowledge-center/page.tsx"
+    ).read_text(encoding="utf-8")
+    assert "/knowledge-center/bootstrap" in src
+    assert "ساخت پوشهٔ تجربیات" in src or "bootstrap" in src.lower()

@@ -1913,6 +1913,21 @@ class OversightService:
         except Exception as _e:
             logger.debug(f"autodetect schedule failed: {_e}")
 
+        # 🧠 (Knowledge Center — req #4: future watched get folder
+        # immediately on add). Best-effort + background so add_watched
+        # response doesn't wait for GitHub round-trip.
+        try:
+            from .knowledge_center_service import get_knowledge_center_service
+            kc = get_knowledge_center_service()
+            asyncio.create_task(
+                kc.ensure_folder_for_project(
+                    project_id=w.id,
+                    project_full_name=w.repo_full_name,
+                ),
+            )
+        except Exception as _e:
+            logger.debug(f"knowledge_center folder scaffold failed: {_e}")
+
         # 🤖 (Claude Auto-Runner) — اگر setting سراسری روشن است و env آماده،
         # workflow + secret ها را خودکار روی این ریپوی جدید نصب کن. این
         # best-effort + background است: اگر شکست خورد، watched ساخته
@@ -1934,17 +1949,9 @@ class OversightService:
         except Exception as _e:
             logger.warning(f"claude_runner auto-enable failed: {_e}")
 
-        # 📚 (Knowledge Center) — هر پروژهٔ جدیدی که تحت نظارت قرار می‌گیرد
-        # بلافاصله باید پوشهٔ `experiences/` در مخزنش ساخته شود تا تجربیات
-        # در آن ثبت و با صفحهٔ مرکز دانش سینک شوند. best-effort + background:
-        # اگر شکست خورد، watched ساخته می‌ماند و کاربر می‌تواند بعداً از
-        # دکمهٔ «ساخت پوشه‌ها» در مرکز دانش دوباره تلاش کند.
-        try:
-            from .knowledge_center_service import get_knowledge_center_service
-            _kc = get_knowledge_center_service()
-            asyncio.create_task(_kc.ensure_experiences_folder(w.to_dict()))
-        except Exception as _e:
-            logger.debug(f"knowledge_center ensure_experiences_folder schedule failed: {_e}")
+        # 📚 (Knowledge Center hook — implemented earlier in this method
+        # via ensure_folder_for_project; this duplicate from a parallel
+        # implementation has been removed.)
         return w.to_dict()
 
     async def autodetect_runtime_for_all_watched(self) -> Dict[str, Any]:

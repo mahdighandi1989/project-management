@@ -32,8 +32,8 @@ interface LayoutProps {
 const navItems = [
   { href: '/', label: 'خانه', icon: HomeIcon },
   { href: '/oversight', label: 'مرکز نظارت', icon: EyeIcon },
-  { href: '/knowledge-center', label: 'مرکز دانش', icon: BookOpenIcon },
   { href: '/creator', label: 'موتور خالق', icon: CommandLineIcon },
+  { href: '/knowledge-center', label: 'مرکز دانش', icon: BookOpenIcon },
   { href: '/debate', label: 'مناظره', icon: ChatBubbleLeftRightIcon },
   { href: '/projects', label: 'پروژه‌ها', icon: RocketLaunchIcon },
   { href: '/diagrams', label: 'نمودارها', icon: ChartBarIcon },
