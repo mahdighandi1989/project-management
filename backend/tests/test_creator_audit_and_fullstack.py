@@ -1423,6 +1423,315 @@ async def test_apply_fixes_handles_upgrade_plus_missing_plus_modify_plus_delete(
     assert proj.project_type == "fullstack"
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# End-to-end persistence — does each button save state correctly so a
+# page reload shows the new state? User's question:
+#   "بدون باگ و بدون هیچ خطایی تمام کار لازم رو انجام میدم؟
+#    درست ذخیره میکنن؟"
+# These tests load the project from disk after apply-fixes and verify.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _reload_project_from_disk(workspace, project_id):
+    """Spin up a fresh SimpleProjectCreator instance pointed at the
+    same workspace — this is what the backend does on cold restart
+    or when the singleton is cleared. If our metadata persistence is
+    broken, the reloaded project will be missing the changes."""
+    from app.services.simple_creator import SimpleProjectCreator
+    fresh = SimpleProjectCreator(workspace=str(workspace))
+    return fresh.get_project(project_id)
+
+
+@pytest.mark.asyncio
+async def test_e2e_add_only_button_persists(tmp_path):
+    """⭐ 📄 'فقط افزودن' button — generates missing files AND saves
+    the project meta so the additions survive a backend restart."""
+    from app.api.routes.simple_projects import (
+        apply_audit_fixes, ApplyAuditFixesRequest,
+    )
+    from app.services.simple_creator import (
+        get_simple_creator, Project, ProjectFile,
+    )
+
+    creator = get_simple_creator()
+    creator.workspace = tmp_path
+    proj = Project(
+        id="proj_e2e_add_001",
+        name="AddE2E",
+        description="add-only persistence",
+        project_type="fastapi",
+        files=[ProjectFile(path="backend/main.py", content="# old")],
+    )
+    creator.projects[proj.id] = proj
+    (tmp_path / proj.id / "backend").mkdir(parents=True, exist_ok=True)
+    (tmp_path / proj.id / "backend/main.py").write_text("# old")
+
+    async def f_legacy(p, model_ids=None): return "// new"
+    async def f_meta(p, model_ids=None): return ("// new", "test-model")
+
+    with patch(
+        "app.api.routes.simple_projects.ai_generate", new=f_legacy,
+    ), patch(
+        "app.api.routes.simple_projects.ai_generate_with_meta", new=f_meta,
+    ):
+        result = await apply_audit_fixes(
+            proj.id,
+            ApplyAuditFixesRequest(missing_files=["frontend/page.tsx"]),
+        )
+
+    assert result["success"]
+    assert (tmp_path / proj.id / "frontend/page.tsx").exists()
+
+    # Reload from disk — the meta file MUST list the new file
+    reloaded = _reload_project_from_disk(tmp_path, proj.id)
+    assert reloaded is not None
+    paths = [f.path for f in reloaded.files]
+    assert "frontend/page.tsx" in paths, (
+        "frontend/page.tsx was generated on disk but the project meta "
+        "(project.json) wasn't updated — reload shows it missing. "
+        "User would lose the addition after backend restart."
+    )
+
+
+@pytest.mark.asyncio
+async def test_e2e_modify_only_button_persists(tmp_path):
+    """✏️ 'فقط ویرایش' button — overwrites the file content AND saves
+    meta so reload shows the new content."""
+    from app.api.routes.simple_projects import (
+        apply_audit_fixes, ApplyAuditFixesRequest, FileToModify,
+    )
+    from app.services.simple_creator import (
+        get_simple_creator, Project, ProjectFile,
+    )
+
+    creator = get_simple_creator()
+    creator.workspace = tmp_path
+    proj = Project(
+        id="proj_e2e_mod_002",
+        name="ModE2E",
+        description="modify persistence",
+        project_type="fastapi",
+        files=[ProjectFile(path="main.py", content="OLD_CONTENT")],
+    )
+    creator.projects[proj.id] = proj
+    (tmp_path / proj.id).mkdir(parents=True, exist_ok=True)
+    (tmp_path / proj.id / "main.py").write_text("OLD_CONTENT")
+
+    async def f_legacy(p, model_ids=None): return "NEW_CONTENT"
+    async def f_meta(p, model_ids=None): return ("NEW_CONTENT", "test-model")
+
+    with patch(
+        "app.api.routes.simple_projects.ai_generate", new=f_legacy,
+    ), patch(
+        "app.api.routes.simple_projects.ai_generate_with_meta", new=f_meta,
+    ):
+        await apply_audit_fixes(
+            proj.id,
+            ApplyAuditFixesRequest(
+                files_to_modify=[
+                    FileToModify(path="main.py", issue="x", suggestion="y"),
+                ],
+            ),
+        )
+
+    # Disk must have the new content
+    assert (tmp_path / proj.id / "main.py").read_text() == "NEW_CONTENT"
+
+    # Reload from disk: project.json must reflect new content
+    reloaded = _reload_project_from_disk(tmp_path, proj.id)
+    main = next((f for f in reloaded.files if f.path == "main.py"), None)
+    assert main is not None
+    assert main.content == "NEW_CONTENT", (
+        "modify updated the file on disk but project.json still has the "
+        "old content — reload would show stale state"
+    )
+
+
+@pytest.mark.asyncio
+async def test_e2e_delete_only_button_persists(tmp_path):
+    """🗑 'فقط حذف' button — removes file from disk AND from project
+    meta so reload doesn't resurrect the deleted entry."""
+    from app.api.routes.simple_projects import (
+        apply_audit_fixes, ApplyAuditFixesRequest,
+    )
+    from app.services.simple_creator import (
+        get_simple_creator, Project, ProjectFile,
+    )
+
+    creator = get_simple_creator()
+    creator.workspace = tmp_path
+    proj = Project(
+        id="proj_e2e_del_003",
+        name="DelE2E",
+        description="delete persistence",
+        project_type="fastapi",
+        files=[
+            ProjectFile(path="keep.py", content="# keep"),
+            ProjectFile(path="remove.py", content="# remove"),
+        ],
+    )
+    creator.projects[proj.id] = proj
+    proj_dir = tmp_path / proj.id
+    proj_dir.mkdir(parents=True, exist_ok=True)
+    (proj_dir / "keep.py").write_text("# keep")
+    (proj_dir / "remove.py").write_text("# remove")
+
+    await apply_audit_fixes(
+        proj.id,
+        ApplyAuditFixesRequest(files_to_delete=["remove.py"]),
+    )
+
+    # Disk: remove.py is gone, keep.py is intact
+    assert not (proj_dir / "remove.py").exists()
+    assert (proj_dir / "keep.py").exists()
+
+    # Reload from disk: project.json must NOT contain remove.py
+    reloaded = _reload_project_from_disk(tmp_path, proj.id)
+    paths = [f.path for f in reloaded.files]
+    assert "remove.py" not in paths, (
+        "deleted file is gone from disk but still appears in project.json "
+        "— after reload the file tree would show a 'phantom' entry"
+    )
+    assert "keep.py" in paths
+
+
+@pytest.mark.asyncio
+async def test_e2e_promote_only_button_persists(tmp_path):
+    """🚀 'فقط ارتقا' button — updates project_type AND structure metadata
+    so reload shows the new type."""
+    from app.api.routes.simple_projects import (
+        apply_audit_fixes, ApplyAuditFixesRequest,
+    )
+    from app.services.simple_creator import (
+        get_simple_creator, Project,
+    )
+
+    creator = get_simple_creator()
+    creator.workspace = tmp_path
+    proj = Project(
+        id="proj_e2e_promote_004",
+        name="PromoteE2E",
+        description="promote persistence",
+        project_type="fastapi",
+    )
+    creator.projects[proj.id] = proj
+    (tmp_path / proj.id).mkdir(parents=True, exist_ok=True)
+
+    async def f_legacy(p, model_ids=None): return "// generated"
+    async def f_meta(p, model_ids=None): return ("// generated", "test-model")
+
+    with patch(
+        "app.api.routes.simple_projects.ai_generate", new=f_legacy,
+    ), patch(
+        "app.api.routes.simple_projects.ai_generate_with_meta", new=f_meta,
+    ):
+        await apply_audit_fixes(
+            proj.id,
+            ApplyAuditFixesRequest(upgrade_to_fullstack=True),
+        )
+
+    # Reload: project_type must persist as fullstack
+    reloaded = _reload_project_from_disk(tmp_path, proj.id)
+    assert reloaded.project_type == "fullstack", (
+        "promote updated project_type in memory but project.json still "
+        "says 'fastapi' — reload reverts the promotion"
+    )
+
+
+@pytest.mark.asyncio
+async def test_e2e_recommended_button_persists_all_four_intents(tmp_path):
+    """⭐ The recommended 'اعمال کامل' button — runs all four ops in one
+    POST. After it returns, a fresh load from disk MUST show every
+    change persisted. This is the test that proves the recommended
+    button actually does what its label promises."""
+    from app.api.routes.simple_projects import (
+        apply_audit_fixes, ApplyAuditFixesRequest, FileToModify,
+    )
+    from app.services.simple_creator import (
+        get_simple_creator, Project, ProjectFile,
+    )
+
+    creator = get_simple_creator()
+    creator.workspace = tmp_path
+    proj = Project(
+        id="proj_e2e_recommended_005",
+        name="RecommendedE2E",
+        description="full CRUD persistence",
+        project_type="fastapi",
+        files=[
+            ProjectFile(path="backend/main.py", content="STUB"),
+            ProjectFile(path="backend/legacy.py", content="REMOVE_ME"),
+        ],
+    )
+    creator.projects[proj.id] = proj
+    proj_dir = tmp_path / proj.id
+    (proj_dir / "backend").mkdir(parents=True, exist_ok=True)
+    (proj_dir / "backend/main.py").write_text("STUB")
+    (proj_dir / "backend/legacy.py").write_text("REMOVE_ME")
+
+    async def f_legacy(p, model_ids=None): return "REGENERATED"
+    async def f_meta(p, model_ids=None): return ("REGENERATED", "test-model")
+
+    with patch(
+        "app.api.routes.simple_projects.ai_generate", new=f_legacy,
+    ), patch(
+        "app.api.routes.simple_projects.ai_generate_with_meta", new=f_meta,
+    ):
+        await apply_audit_fixes(
+            proj.id,
+            ApplyAuditFixesRequest(
+                upgrade_to_fullstack=True,
+                missing_files=["frontend/src/app/dashboard.tsx"],
+                files_to_modify=[
+                    FileToModify(
+                        path="backend/main.py",
+                        issue="needs routes",
+                        suggestion="add include_router",
+                    ),
+                ],
+                files_to_delete=["backend/legacy.py"],
+            ),
+        )
+
+    # Reload from cold: every change must be there
+    reloaded = _reload_project_from_disk(tmp_path, proj.id)
+    assert reloaded is not None
+
+    # 1. Project type promoted
+    assert reloaded.project_type == "fullstack"
+
+    # 2. Delete persisted
+    paths = [f.path for f in reloaded.files]
+    assert "backend/legacy.py" not in paths
+
+    # 3. Modify persisted (new content)
+    mod = next((f for f in reloaded.files if f.path == "backend/main.py"), None)
+    assert mod is not None
+    assert mod.content == "REGENERATED", (
+        "modify updated the file on disk but project.json didn't get "
+        "the new content — reload shows stale STUB"
+    )
+
+    # 4. Audit-specific missing file added
+    assert "frontend/src/app/dashboard.tsx" in paths, (
+        "the audit-specific missing file was generated on disk but "
+        "isn't in project.json after reload"
+    )
+
+    # 5. Fullstack template files added too
+    assert "frontend/src/app/page.tsx" in paths, (
+        "fullstack template files weren't persisted in project.json"
+    )
+
+    # 6. generated_by attribution survives reload
+    page = next((f for f in reloaded.files if f.path == "frontend/src/app/page.tsx"), None)
+    assert page is not None
+    assert page.generated_by == "test-model", (
+        "model attribution must survive the disk roundtrip — without "
+        "this the UI badge would be blank after restart"
+    )
+
+
 def test_structure_prompt_demands_both_halves_for_fullstack():
     """When project_type=fullstack, the structure-generation prompt
     must explicitly REQUIRE both backend/ and frontend/ — otherwise
