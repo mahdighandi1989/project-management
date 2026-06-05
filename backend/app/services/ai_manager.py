@@ -131,6 +131,32 @@ class AIManager:
                                 continue
 
                     available.append(model)
+            else:
+                # 🆕 (OAuth dispatch) — providers like CLOUD_CODE don't have
+                # an API-key service in self._services. They register a
+                # dispatcher via oauth_model_registry. If a dispatcher
+                # exists for this model_id, treat the model as available
+                # so the Creator/Inspector/etc. UIs surface it as a pill
+                # just like DeepSeek/Gemini. The same DB enabled/allowed_tasks
+                # filters apply.
+                try:
+                    from .oauth_model_registry import get_oauth_dispatcher
+                    has_dispatcher = get_oauth_dispatcher(model.id) is not None
+                except Exception:
+                    has_dispatcher = False
+                if not has_dispatcher:
+                    continue
+                db_setting = db_settings_map.get(model.id)
+                if db_setting:
+                    if not db_setting.enabled:
+                        logger.debug(f"OAuth model {model.id} is disabled in settings")
+                        continue
+                    if task_type:
+                        allowed_tasks = db_setting.allowed_tasks or ["all"]
+                        if "all" not in allowed_tasks and task_type not in allowed_tasks:
+                            logger.debug(f"OAuth model {model.id} not allowed for task {task_type}")
+                            continue
+                available.append(model)
 
         logger.debug(f"Available models: {[m.id for m in available]}")
         return available
@@ -431,6 +457,41 @@ class AIManager:
             max_tokens=max_tokens,
             task_type=task_type
         )
+
+        # 🆕 (OAuth dispatch) — if the model is registered with the OAuth
+        # dispatcher registry (e.g., cloud_code via CLAUDE_CODE_OAUTH_TOKEN),
+        # route through that dispatcher instead of self._services. This is
+        # what makes cloud_code work end-to-end via simple_projects /
+        # Creator engine / any other ai_manager caller.
+        # The dispatcher returns a plain string, which we wrap into AIResponse
+        # to match the contract of this method.
+        try:
+            from .oauth_model_registry import get_oauth_dispatcher
+            _oauth_disp = get_oauth_dispatcher(model_id)
+        except Exception:
+            _oauth_disp = None
+        if _oauth_disp is not None:
+            # Compose a single prompt from messages (the OAuth dispatcher
+            # currently takes a prompt string; mirrors oversight's
+            # _ai_generate contract).
+            _prompt_parts: List[str] = []
+            for m in messages:
+                role = getattr(m, "role", "user")
+                content = getattr(m, "content", "") or ""
+                _prompt_parts.append(f"[{role}] {content}" if role != "user" else content)
+            _prompt = "\n\n".join(_prompt_parts)
+            _started_ts = __import__("time").time()
+            content_str = await _oauth_disp(
+                _prompt, max_tokens=max_tokens, temperature=temperature,
+            )
+            _elapsed_ms = int((__import__("time").time() - _started_ts) * 1000)
+            return AIResponse(
+                model_id=model_id,
+                content=content_str or "",
+                tokens_used=0,  # OAuth subscription — no token accounting
+                finish_reason="stop",
+                latency_ms=_elapsed_ms,
+            )
 
         model = get_model(model_id)
         if not model:

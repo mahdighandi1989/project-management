@@ -576,11 +576,23 @@ _creator_lock = threading.Lock()
 
 
 def get_simple_creator() -> SimpleProjectCreator:
-    """دریافت instance سازنده پروژه (thread-safe)"""
+    """دریافت instance سازنده پروژه (thread-safe).
+
+    🐛 (creator persistence fix v2) — قبلاً اینجا `"./projects"` هاردکد شده
+    بود که تمام منطق fallback در __init__ را دور می‌زد. روی Render مسیر
+    `./projects` می‌شود `/app/projects` که ephemeral است — هر redeploy
+    کاملاً پاک. کاربر گزارش داد: «پروژه‌ای که قبلاً ساخته بودم بازم رفته».
+
+    حالا `None` پاس می‌دهیم تا __init__ سراغ candidates (به‌ترتیب اولویت:
+    SIMPLE_CREATOR_WORKSPACE env → ./storage/projects → /app/storage/projects
+    → ./projects → /tmp/projects) برود و اولین مسیر writable را انتخاب
+    کند. روی Render، /app/storage یک persistent disk است که بین deploy ها
+    حفظ می‌شود.
+    """
     global _creator
     if _creator is None:
         with _creator_lock:
             # Double-check locking pattern
             if _creator is None:
-                _creator = SimpleProjectCreator("./projects")
+                _creator = SimpleProjectCreator()  # None → use persistence fallback
     return _creator
