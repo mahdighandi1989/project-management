@@ -1255,6 +1255,174 @@ def test_frontend_audit_modal_shows_models_consulted():
     assert "audit توسط" in src or "audit توسط:" in src or "موتور خالق" in src
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# "Do everything" button + button isolation
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_frontend_has_apply_all_recommended_button():
+    """The user explicitly asked which button does EVERYTHING. The modal
+    must have an unambiguous 'apply all' option that combines:
+    promote (if needed) + add missing + modify selected + delete selected.
+    Without this, user has to chain multiple buttons → easy to forget
+    one, or click the wrong button and skip something."""
+    src = (
+        _FRONTEND_ROOT / "app/project/[id]/page.tsx"
+    ).read_text(encoding="utf-8")
+    # Recommended-button visual marker
+    assert "توصیه شده" in src and "اعمال کامل" in src, (
+        "the recommended 'apply all' button must be present with a "
+        "clear Persian label so the user immediately knows which "
+        "button does the complete fix"
+    )
+    # Source: it must pass all four intent flags so the backend
+    # doesn't silently drop one
+    idx = src.find("توصیه شده")
+    body = src[idx:idx + 3000]
+    assert "includeMissing: true" in body
+    assert "includeModifies: true" in body
+    assert "includeDeletes: true" in body
+
+
+def test_frontend_granular_buttons_use_positive_flags():
+    """🚨 Old design used negative flags (onlyMissing, upgradeOnly).
+    The bug: 'فقط حذف' button still sent missing_files because the
+    inclusion condition was `!upgradeOnly && missing_critical_files`.
+    The fix switched to positive `include*` flags so each intent is
+    explicit. This test guards against regression."""
+    src = (
+        _FRONTEND_ROOT / "app/project/[id]/page.tsx"
+    ).read_text(encoding="utf-8")
+    # The old negative flags must not be USED as opts (comments are fine
+    # since they explain the migration). Specifically: no button passes
+    # `onlyMissing: true` or `upgradeOnly: true` anymore.
+    assert "onlyMissing: true" not in src, (
+        "no button should pass `onlyMissing: true` — that was the "
+        "negative-flag form that caused 'فقط حذف' to accidentally also "
+        "send missing_files. Use positive includeMissing."
+    )
+    assert "upgradeOnly: true" not in src, (
+        "upgradeOnly: true is gone — superseded by explicit includeMissing"
+    )
+    # Positive flags are present
+    assert "includeMissing" in src
+    assert "includeModifies" in src
+    assert "includeDeletes" in src
+
+
+def test_frontend_promote_button_now_also_sends_missing_files():
+    """🐛 Original 🚀 promote button used `else if` so missing_files
+    was NEVER sent alongside upgrade. Audit-specific paths (the 18
+    files the AI flagged for THIS project) were silently dropped —
+    only the generic fullstack template was applied. The recommended
+    button now passes both upgrade AND missing_files independently."""
+    src = (
+        _FRONTEND_ROOT / "app/project/[id]/page.tsx"
+    ).read_text(encoding="utf-8")
+    # The recommended button's options must include BOTH
+    idx = src.find("توصیه شده")
+    body = src[idx:idx + 3000]
+    assert "upgradeFullstack:" in body and "includeMissing: true" in body, (
+        "recommended button must send upgrade_to_fullstack AND "
+        "missing_files together so audit-specific paths aren't dropped"
+    )
+
+
+@pytest.mark.asyncio
+async def test_apply_fixes_handles_upgrade_plus_missing_plus_modify_plus_delete(tmp_path):
+    """🚨 End-to-end: when the recommended button sends ALL four intents,
+    the backend must execute all of them in correct order:
+      1. delete listed files (gone from disk + project.files)
+      2. modify selected files (regenerated with audit context)
+      3. add audit's missing files (generated) AND fullstack template
+         files (deduplicated)
+      4. project.project_type updates to fullstack
+    This is the most complex code path and the user's expected
+    behavior. Without this test, a regression could silently skip
+    one of the four."""
+    from app.api.routes.simple_projects import (
+        apply_audit_fixes, ApplyAuditFixesRequest, FileToModify,
+    )
+    from app.services.simple_creator import (
+        get_simple_creator, Project, ProjectFile,
+    )
+
+    creator = get_simple_creator()
+    creator.workspace = tmp_path
+    proj = Project(
+        id="proj_all_in_one_999",
+        name="AllInOneTest",
+        description="full e2e CRUD audit-fix test",
+        project_type="fastapi",
+        files=[
+            ProjectFile(
+                path="backend/app/main.py", content="# bad", language="python",
+            ),
+            ProjectFile(
+                path="backend/legacy.py", content="# to delete", language="python",
+            ),
+        ],
+    )
+    creator.projects[proj.id] = proj
+    proj_dir = tmp_path / proj.id
+    (proj_dir / "backend/app").mkdir(parents=True, exist_ok=True)
+    (proj_dir / "backend/app/main.py").write_text("# bad")
+    (proj_dir / "backend/legacy.py").write_text("# to delete")
+
+    async def fake_legacy(prompt, model_ids=None):
+        return "// new"
+
+    async def fake_with_meta(prompt, model_ids=None):
+        return ("// new content", "fake-model")
+
+    with patch(
+        "app.api.routes.simple_projects.ai_generate", new=fake_legacy,
+    ), patch(
+        "app.api.routes.simple_projects.ai_generate_with_meta",
+        new=fake_with_meta,
+    ):
+        result = await apply_audit_fixes(
+            proj.id,
+            ApplyAuditFixesRequest(
+                upgrade_to_fullstack=True,
+                missing_files=["frontend/src/app/dashboard.tsx"],
+                files_to_modify=[
+                    FileToModify(
+                        path="backend/app/main.py",
+                        issue="needs routes",
+                        suggestion="add include_router",
+                    ),
+                ],
+                files_to_delete=["backend/legacy.py"],
+            ),
+        )
+
+    # 1. Delete worked
+    deleted = [f["path"] for f in result["files_deleted"]]
+    assert "backend/legacy.py" in deleted
+    assert not (proj_dir / "backend/legacy.py").exists()
+
+    # 2. Modify worked
+    modified = [f["path"] for f in result["files_modified"]]
+    assert "backend/app/main.py" in modified
+    main_py = next(f for f in proj.files if f.path == "backend/app/main.py")
+    assert main_py.content == "// new content"
+
+    # 3. Add — both audit's specific file AND fullstack template
+    added = [f["path"] for f in result["files_added"]]
+    assert "frontend/src/app/dashboard.tsx" in added, (
+        "audit-specific missing file must be added (the regression "
+        "where 🚀 button dropped them)"
+    )
+    # Template files too (e.g., frontend/src/app/page.tsx is in the
+    # fullstack template)
+    assert "frontend/src/app/page.tsx" in added
+
+    # 4. Promotion landed
+    assert result["promoted_to_fullstack"] is True
+    assert proj.project_type == "fullstack"
+
+
 def test_structure_prompt_demands_both_halves_for_fullstack():
     """When project_type=fullstack, the structure-generation prompt
     must explicitly REQUIRE both backend/ and frontend/ — otherwise
