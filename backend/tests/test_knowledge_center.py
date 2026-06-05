@@ -830,3 +830,71 @@ def test_settings_endpoints_registered():
     # PATCH must accept processing_model_ids (so the user can set the
     # background-sync model list)
     assert "processing_model_ids" in src
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Frontend settings UI — model picker pulls from /api/simple/status
+# (user explicitly demanded: "هر مدلی که از صفحه مدل ها فعال بود")
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_frontend_has_settings_modal_with_model_picker():
+    """🚨 User asked: 'چرا مدل رو خودت هاردکد انتخاب کردی؟ قرار شد هر
+    مدلی که از صفحه مدل ها فعال بود بتونم اگر خواستم انتخاب کنم'.
+    The UI must (a) fetch active models from /api/simple/status — the
+    same source the /creator page uses — (b) render each as a
+    selectable chip, and (c) PATCH the choice to the backend."""
+    src = (
+        _FRONTEND_ROOT / "app/knowledge-center/page.tsx"
+    ).read_text(encoding="utf-8")
+    # Settings panel must exist
+    assert "settingsOpen" in src and "تنظیمات" in src
+    # Must fetch from the same status endpoint /creator uses
+    assert "/api/simple/status" in src
+    # Must render the active models as toggle chips (the same pattern
+    # the upload modal uses)
+    assert "processing_model_ids" in src
+    # PATCH path on toggle
+    assert (
+        "/api/knowledge-center/settings" in src
+        and "method: 'PATCH'" in src
+    ), (
+        "settings panel must PATCH to /api/knowledge-center/settings — "
+        "otherwise the user's model choice is never persisted"
+    )
+
+
+def test_frontend_settings_loads_current_value_on_mount():
+    """The settings modal must show the CURRENTLY saved processing
+    model selection on open, not reset to empty. Otherwise the user
+    has to re-select every time."""
+    src = (
+        _FRONTEND_ROOT / "app/knowledge-center/page.tsx"
+    ).read_text(encoding="utf-8")
+    # GET /settings on mount
+    assert "fetch(`${API_BASE}/api/knowledge-center/settings`)" in src
+    assert "setKcSettings" in src
+
+
+def test_frontend_settings_has_auto_sync_controls():
+    """The settings panel must expose auto_sync_enabled toggle and
+    interval input so user can pause/resume auto-sync without
+    redeploying."""
+    src = (
+        _FRONTEND_ROOT / "app/knowledge-center/page.tsx"
+    ).read_text(encoding="utf-8")
+    assert "auto_sync_enabled" in src
+    assert "auto_sync_interval_minutes" in src
+    assert "skip_unchanged" in src
+
+
+def test_frontend_has_manual_process_button():
+    """The user must be able to trigger AI processing manually (without
+    waiting for the next auto-sync cycle). Useful right after upload
+    or after changing the model selection."""
+    src = (
+        _FRONTEND_ROOT / "app/knowledge-center/page.tsx"
+    ).read_text(encoding="utf-8")
+    assert "triggerManualProcess" in src
+    assert "/knowledge-center/process" in src
+    assert "🧠 پردازش با AI" in src or "پردازش با AI" in src
