@@ -768,16 +768,69 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
   // ─────────────────────────────────────────────────────────────────────────
 
   async function fetchPreview(sid: string) {
-    try {
-      const res = await fetch(`${API_BASE}/api/recording/inspector/${sid}/preview`);
-      const j = await res.json();
-      if (!res.ok) throw new Error(j?.detail || `HTTP ${res.status}`);
-      setPreview(j as PreviewData);
-      setEditedTranscript(j.transcript || '');
-      setPhase('preview');
-    } catch (e: any) {
-      setErrorMsg(e?.message || 'خطا در دریافت پیش‌نمایش');
-      setPhase('error');
+    // 🚨 (race-fix) — processing can take 30-90s for long recordings
+    // (transcribe + multimodal vision + prompt synthesis). Two ways the
+    // first /preview call can hit phase=processing:
+    //   1. The previous /stop call timed out at the gateway level
+    //      (Render's 100s request limit) so the frontend got a response
+    //      while the backend kept processing.
+    //   2. /stop early-returned because the session was already past
+    //      "recording"/"stopping" (e.g., duplicate stop click).
+    // Either way, the right UX is to POLL until phase=ready_for_preview
+    // (or errored), not to immediately show "preview نیست" — the user
+    // doesn't care WHY there's a delay, only whether it eventually works.
+    const MAX_POLL_SECONDS = 180;  // 3 minutes — generous upper bound
+    const POLL_INTERVAL_MS = 2500;
+    const startedAt = Date.now();
+    setProcessingStage('در حال نهایی‌سازی پردازش...');
+    while (true) {
+      try {
+        const res = await fetch(`${API_BASE}/api/recording/inspector/${sid}/preview`);
+        if (res.ok) {
+          const j = await res.json();
+          setPreview(j as PreviewData);
+          setEditedTranscript(j.transcript || '');
+          setPhase('preview');
+          return;
+        }
+        // 409 Conflict means session isn't ready yet — keep polling
+        if (res.status === 409) {
+          // Cross-check status to detect terminal "errored" so we don't
+          // poll forever after a real failure.
+          try {
+            const sres = await fetch(`${API_BASE}/api/recording/inspector/${sid}/status`);
+            if (sres.ok) {
+              const sj = await sres.json();
+              const phase = sj?.session?.phase;
+              if (phase === 'errored') {
+                throw new Error(
+                  sj?.session?.last_error
+                    || 'پردازش روی سرور شکست خورد — لطفاً دوباره تلاش کنید.',
+                );
+              }
+              // update stage hint so the user sees progress
+              const elapsed = Math.round((Date.now() - startedAt) / 1000);
+              setProcessingStage(
+                `در حال پردازش (${elapsed}s) — phase=${phase || '...'}`,
+              );
+            }
+          } catch (_se) { /* status poll failed — continue */ }
+          if (Date.now() - startedAt > MAX_POLL_SECONDS * 1000) {
+            throw new Error(
+              `processing بیش از ${MAX_POLL_SECONDS} ثانیه طول کشید — احتمالاً روی سرور stuck شده.`,
+            );
+          }
+          await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+          continue;
+        }
+        // Any other non-2xx is a real error
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j?.detail || `HTTP ${res.status}`);
+      } catch (e: any) {
+        setErrorMsg(e?.message || 'خطا در دریافت پیش‌نمایش');
+        setPhase('error');
+        return;
+      }
     }
   }
 
