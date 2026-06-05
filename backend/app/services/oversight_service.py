@@ -1913,6 +1913,21 @@ class OversightService:
         except Exception as _e:
             logger.debug(f"autodetect schedule failed: {_e}")
 
+        # 🧠 (Knowledge Center — req #4: future watched get folder
+        # immediately on add). Best-effort + background so add_watched
+        # response doesn't wait for GitHub round-trip.
+        try:
+            from .knowledge_center_service import get_knowledge_center_service
+            kc = get_knowledge_center_service()
+            asyncio.create_task(
+                kc.ensure_folder_for_project(
+                    project_id=w.id,
+                    project_full_name=w.repo_full_name,
+                ),
+            )
+        except Exception as _e:
+            logger.debug(f"knowledge_center folder scaffold failed: {_e}")
+
         # 🤖 (Claude Auto-Runner) — اگر setting سراسری روشن است و env آماده،
         # workflow + secret ها را خودکار روی این ریپوی جدید نصب کن. این
         # best-effort + background است: اگر شکست خورد، watched ساخته

@@ -1,0 +1,1134 @@
+"""🧠 مرکز دانش — Knowledge Center
+
+Purpose (from the user's voice-recorded request):
+  - One global "knowledge center" page that aggregates experiences from
+    every watched project's `experiences/` folder.
+  - Auto-create the `experiences/` folder (+ README format guide) in
+    every watched project's repo (GitHub or local).
+  - When the user runs tasks manually via Claude Code, they can ask
+    Claude Code to record the experience as a file in that folder using
+    a STANDARDIZED format defined in the folder's README so the
+    write-up is project-agnostic and reusable.
+  - Files in the folder sync into the Knowledge Center page (a
+    catalog/encyclopedia view with TOC + categories + search/sort/
+    filter/pagination).
+  - Users can also IMPORT chat exports (txt/md/html/pdf) from
+    Claude/ChatGPT/Gemini etc.; the system extracts solved challenges
+    using the user's selected AI model(s), chunks for large files,
+    merges with existing topics, records references.
+
+Storage:
+  - Index file at STORAGE_DIR/knowledge_center.json — list of entries
+    with metadata (project_id, path, title, tags, source, etc.).
+  - Actual content files live INSIDE each watched project's repo at
+    `experiences/{slug}.md`. We never duplicate; we index pointers.
+  - The README format guide (`experiences/README.md`) is the contract
+    every AI model can read to produce conformant write-ups.
+
+Honors the user's 7 explicit requirements:
+  1. Model selection — every AI-touching method accepts `model_ids`.
+  2. Delete entries — `delete_entry()` removes from index + repo file.
+  3. Existing watched projects — `bootstrap_existing()` retroactively
+     creates folders.
+  4. Future watched projects — hook in oversight_service.add_watched
+     calls our `ensure_folder_for_project()`.
+  5. Search/sort/filter/pagination — `list_entries()` supports them.
+  6. Format guide README in every folder — `EXPERIENCE_FORMAT_README`.
+  7. Panel uploads — `import_chat_file()` uses the same format.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import logging
+import re
+import threading
+import uuid
+from dataclasses import dataclass, field, asdict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from .oversight_service import STORAGE_DIR, now_iso
+
+logger = logging.getLogger(__name__)
+
+
+INDEX_FILE: Path = STORAGE_DIR / "knowledge_center.json"
+EXPERIENCES_FOLDER_NAME = "experiences"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Format guide — the README every experiences/ folder gets.
+# This is what Claude Code (and any other AI) reads to produce a write-up.
+# Format is stable and the user's project-agnostic requirement is enforced
+# by the AI INSTRUCTIONS section.
+# ════════════════════════════════════════════════════════════════════════════
+
+EXPERIENCE_FORMAT_README = """# 📚 Experiences Folder — Format Guide
+
+این فولدر تجربیات قابل‌استفاده‌مجدد مهندسی را نگه می‌دارد. هر فایل یک
+چالش حل‌شده را به شکل **project-agnostic** (مستقل از پروژهٔ خاص) ثبت
+می‌کند تا بتوان آن را در پروژه‌های دیگر دوباره به کار برد.
+
+## 📁 نام‌گذاری فایل‌ها
+
+- یک فایل برای هر تجربه: `{topic-slug}.md` (kebab-case)
+- مثال‌های خوب:
+  - `google-oauth-login.md`
+  - `fastapi-rate-limiting.md`
+  - `nextjs-static-export-edge-cases.md`
+- مثال بد: `bug-fix-in-myproject.md` (نام پروژه ممنوع)
+
+## 📋 ساختار اجباری هر فایل
+
+هر فایل **باید** با frontmatter YAML شروع شود:
+
+```yaml
+---
+title: "عنوان کوتاه — همان slug ولی خواناتر"
+tags: ["auth", "google-oauth", "frontend"]
+topic_canonical: "google-oauth-login"
+source:
+  type: "manual" | "chat-import" | "claude-code-task"
+  origin: "claude-code" | "chatgpt" | "gemini" | "user-typed"
+  imported_at: "2026-06-05T10:00:00Z"
+created_at: "2026-06-05T10:00:00Z"
+updated_at: "2026-06-05T10:00:00Z"
+merged_from: []
+---
+```
+
+سپس بخش‌های markdown به این ترتیب:
+
+```markdown
+# Topic Title
+
+## 🎯 چالش / Challenge
+[چه مشکلی حل می‌شد — کلی، بدون نام پروژه]
+
+## 💡 راه‌حل / Solution
+[راه‌حل قدم‌به‌قدم، قابل تعمیم]
+
+## 🧪 نمونه کد (Anonymized)
+[snippet با نام‌های عمومی، نه مال این پروژه]
+
+## ⚠️ نکات حیاتی / Pitfalls
+[خطاهای رایج وقتی این الگو را در جای دیگر استفاده می‌کنی]
+
+## 🔁 چطور در جای دیگر اعمال کنیم / How to Apply Elsewhere
+[ترجمهٔ این الگو به پروژه‌های دیگر — generic checklist]
+
+## 🔗 References
+- منبع اولیه: [chat-export-2026-06-04.txt, line 42]
+- مرتبط: [other-experience-slug]
+```
+
+## 🤖 دستورالعمل برای مدل‌های AI (Claude Code, GPT, Gemini, …)
+
+وقتی کاربر از تو می‌خواهد یک تجربه را در این فولدر ثبت کنی:
+
+1. **اول بخوان**: تمام فایل‌های موجود را چک کن. اگر `topic_canonical`
+   مشابهی هست، **MERGE نه REPLACE**:
+   - محتوای اصلی را نگه دار
+   - بخش جدید زیر «## Update YYYY-MM-DD» اضافه کن
+   - `merged_from:` در frontmatter آپدیت کن
+
+2. **همیشه عمومی بنویس**:
+   - ❌ "در پروژهٔ MyApp ما X کردیم"
+   - ✅ "وقتی X را پیاده می‌کنیم..."
+   - نام فایل‌های مخصوص پروژه → جایگزین با placeholder عمومی
+     (مثلاً `MyApp.tsx` → `AuthPage.tsx`)
+
+3. **بخش "How to Apply Elsewhere" اجباری است** — این مهم‌ترین بخش است
+   که تجربه را reusable می‌کند.
+
+4. **slug را canonical نگه دار**: `topic_canonical` در frontmatter باید
+   یکپارچه باشد تا dedup در آینده کار کند.
+
+5. **References صادق باشن**: اگر مطلب از یک چت import شد، منبع را در
+   `source:` و در پایان فایل ذکر کن.
+
+## 📤 سینک با Knowledge Center
+
+این فولدر به‌صورت خودکار توسط صفحهٔ **مرکز دانش** (/knowledge-center)
+خوانده می‌شود. فایل‌هایی که فرمت بالا را رعایت کنند با metadata کامل در
+کاتالوگ ظاهر می‌شوند؛ فایل‌های بدفرمت در دسته «unparsed» می‌روند.
+
+---
+_این فایل توسط Knowledge Center سرویس به‌صورت خودکار ساخته شده.
+ویرایش کن اگر می‌خواهی template را برای پروژهٔ خاص خودت گسترش بدهی._
+"""
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Data models
+# ════════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class KnowledgeEntry:
+    """یک ورودی در مرکز دانش — اشاره به فایلی در `experiences/` یک پروژه."""
+
+    id: str
+    project_id: Optional[str]  # watched project id (None for "global")
+    project_full_name: str  # owner/repo or local name
+    path: str  # path within repo, e.g. "experiences/google-oauth-login.md"
+    title: str
+    topic_canonical: str = ""
+    tags: List[str] = field(default_factory=list)
+    source_type: str = "manual"  # manual / chat-import / claude-code-task
+    source_origin: str = ""  # claude-code / chatgpt / gemini / user-typed
+    summary: str = ""  # short excerpt for catalog display
+    content_hash: str = ""  # md5 of body — for dedup + change detection
+    size_bytes: int = 0
+    created_at: str = field(default_factory=now_iso)
+    updated_at: str = field(default_factory=now_iso)
+    imported_at: str = ""
+    merged_from: List[str] = field(default_factory=list)
+    # backend records which AI model wrote/extracted this (parity with
+    # /creator engine's per-file attribution).
+    generated_by: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Storage
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def _load_index() -> Dict[str, Any]:
+    if not INDEX_FILE.exists():
+        return {"version": 1, "entries": [], "updated_at": now_iso()}
+    try:
+        return json.loads(INDEX_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning(f"knowledge_center: index load failed: {e}")
+        return {"version": 1, "entries": [], "updated_at": now_iso()}
+
+
+def _save_index(data: Dict[str, Any]) -> None:
+    INDEX_FILE.parent.mkdir(parents=True, exist_ok=True)
+    data["updated_at"] = now_iso()
+    INDEX_FILE.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _slugify(text: str) -> str:
+    """Convert any title/topic to a safe kebab-case slug for file names."""
+    text = (text or "").strip().lower()
+    text = re.sub(r"[^\w؀-ۿ\s-]", "", text)  # keep Persian
+    text = re.sub(r"[\s_]+", "-", text)
+    text = re.sub(r"-+", "-", text).strip("-")
+    return text[:80] or f"experience-{uuid.uuid4().hex[:8]}"
+
+
+def _hash(body: str) -> str:
+    return hashlib.md5((body or "").encode("utf-8")).hexdigest()
+
+
+def _parse_frontmatter(body: str) -> Tuple[Dict[str, Any], str]:
+    """Parse YAML-ish frontmatter from a markdown body. Returns (meta, rest).
+
+    We don't pull in PyYAML for this — keep deps light. Simple line parser
+    that handles `key: value` and `key: [a, b]` and nested 1-level
+    `key:\n  sub: val`. Robust enough for the format above; anything
+    weird → empty meta + original body."""
+    if not body or not body.lstrip().startswith("---"):
+        return {}, body
+    stripped = body.lstrip()
+    rest = stripped[3:]
+    end = rest.find("\n---")
+    if end < 0:
+        return {}, body
+    fm_text = rest[:end]
+    after = rest[end + 4:].lstrip("\n")
+    meta: Dict[str, Any] = {}
+    current_key: Optional[str] = None
+    for line in fm_text.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith(" ") and current_key:
+            sub = line.strip()
+            if ":" in sub:
+                k, v = sub.split(":", 1)
+                meta.setdefault(current_key, {})
+                if isinstance(meta[current_key], dict):
+                    meta[current_key][k.strip()] = v.strip().strip('"')
+            continue
+        if ":" in line:
+            k, v = line.split(":", 1)
+            k = k.strip()
+            v = v.strip()
+            current_key = k
+            if v == "":
+                meta[k] = {}
+            elif v.startswith("[") and v.endswith("]"):
+                items = [x.strip().strip('"') for x in v[1:-1].split(",")]
+                meta[k] = [x for x in items if x]
+            else:
+                meta[k] = v.strip('"')
+    return meta, after
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Service
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class KnowledgeCenterService:
+    """مرکز دانش — single service that owns the whole feature."""
+
+    def __init__(self):
+        self._lock = asyncio.Lock()
+        self._sync_lock = threading.Lock()  # for sync-from-disk only
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Folder creation (req #3 + #4 + #6: existing + future watched + README)
+    # ─────────────────────────────────────────────────────────────────────
+
+    async def ensure_folder_for_project(
+        self,
+        project_id: str,
+        project_full_name: str,
+        github_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create `experiences/` + README.md in the project's repo.
+
+        Idempotent: if README already exists, no-op (don't churn commits).
+
+        Returns: {"created": bool, "repo": ..., "reason": ...}
+        """
+        repo = (project_full_name or "").strip()
+        if "/" not in repo:
+            return {
+                "created": False, "repo": repo,
+                "reason": "local_project_no_repo",
+            }
+        if not github_token:
+            from .oversight_service import get_github_token
+            github_token = get_github_token()
+        if not github_token:
+            return {
+                "created": False, "repo": repo,
+                "reason": "no_github_token",
+            }
+        owner, repo_name = repo.split("/", 1)
+        readme_path = f"{EXPERIENCES_FOLDER_NAME}/README.md"
+        # Check whether README already exists (idempotent — never churn)
+        if await self._gh_file_exists(owner, repo_name, readme_path, github_token):
+            return {
+                "created": False, "repo": repo,
+                "reason": "already_exists",
+            }
+        try:
+            from .github_pr_service import get_github_pr_service
+            pr = get_github_pr_service()
+            res = await pr.create_or_update_file(
+                owner=owner,
+                repo=repo_name,
+                path=readme_path,
+                content=EXPERIENCE_FORMAT_README,
+                message="🧠 chore: scaffold experiences/ folder for Knowledge Center",
+                branch=None,  # use default branch
+                token=github_token,
+            )
+            return {
+                "created": bool(res and (res.get("success", True) or res.get("ok", True))),
+                "repo": repo,
+                "result": res,
+            }
+        except Exception as e:
+            logger.warning(
+                f"ensure_folder_for_project: create README failed for {repo}: {e}"
+            )
+            return {"created": False, "repo": repo, "reason": str(e)[:200]}
+
+    # ─────────────────────────────────────────────────────────────────────
+    # GitHub HTTP helpers (read paths github_pr_service doesn't cover)
+    # ─────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    async def _gh_file_exists(
+        owner: str, repo: str, path: str, token: str,
+    ) -> bool:
+        import aiohttp
+        url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+        }
+        try:
+            timeout = aiohttp.ClientTimeout(total=20)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, headers=headers) as r:
+                    return r.status == 200
+        except Exception:
+            return False
+
+    @staticmethod
+    async def _gh_get_file_content(
+        owner: str, repo: str, path: str, token: str,
+    ) -> Optional[str]:
+        """Returns decoded UTF-8 content or None if not found / not a file."""
+        import aiohttp
+        import base64 as _b64
+        url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+        }
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, headers=headers) as r:
+                    if r.status != 200:
+                        return None
+                    data = await r.json()
+                    if not isinstance(data, dict):
+                        return None
+                    if data.get("encoding") == "base64":
+                        try:
+                            return _b64.b64decode(data.get("content", "")).decode(
+                                "utf-8", errors="replace",
+                            )
+                        except Exception:
+                            return None
+                    return data.get("content")
+        except Exception:
+            return None
+
+    @staticmethod
+    async def _gh_list_directory(
+        owner: str, repo: str, path: str, token: str,
+    ) -> List[Dict[str, Any]]:
+        """Returns list of {name, path, type} for entries under path."""
+        import aiohttp
+        url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+        }
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, headers=headers) as r:
+                    if r.status != 200:
+                        return []
+                    data = await r.json()
+                    return data if isinstance(data, list) else []
+        except Exception:
+            return []
+
+    async def bootstrap_existing(
+        self, github_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Walk every watched project and ensure its `experiences/` folder
+        exists. Used once after deploy + as a manual "rebuild" action from
+        the UI. Idempotent."""
+        from .oversight_service import get_oversight_service, get_github_token
+        svc = get_oversight_service()
+        token = github_token or get_github_token()
+        results: List[Dict[str, Any]] = []
+        for w in svc.watched:
+            try:
+                r = await self.ensure_folder_for_project(
+                    project_id=w.id,
+                    project_full_name=w.repo_full_name,
+                    github_token=token,
+                )
+                results.append({"project_id": w.id, **r})
+            except Exception as e:
+                results.append({
+                    "project_id": w.id, "created": False, "reason": str(e)[:200],
+                })
+        created = sum(1 for r in results if r.get("created"))
+        skipped = sum(1 for r in results if not r.get("created"))
+        return {
+            "total": len(results), "created": created, "skipped": skipped,
+            "results": results,
+        }
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Sync (req #1 source-of-truth: pull from repos into the index)
+    # ─────────────────────────────────────────────────────────────────────
+
+    async def sync_from_projects(
+        self, github_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Pull every experiences/*.md file from every watched repo into
+        the index. Existing entries are updated, new ones added, missing
+        ones marked stale (we don't auto-delete; user delete is explicit
+        per req #2)."""
+        from .oversight_service import get_oversight_service, get_github_token
+        from .github_pr_service import get_github_pr_service
+        svc = get_oversight_service()
+        token = github_token or get_github_token()
+        if not token:
+            return {"ok": False, "error": "no_github_token"}
+        index = _load_index()
+        entries_by_key: Dict[str, Dict[str, Any]] = {
+            f"{e.get('project_full_name')}::{e.get('path')}": e
+            for e in index.get("entries", [])
+        }
+        added = 0
+        updated = 0
+        for w in svc.watched:
+            repo = w.repo_full_name
+            if "/" not in repo:
+                continue
+            owner, name = repo.split("/", 1)
+            listing = await self._gh_list_directory(
+                owner, name, EXPERIENCES_FOLDER_NAME, token,
+            )
+            for item in (listing or []):
+                if not isinstance(item, dict):
+                    continue
+                name_f = item.get("name", "")
+                if not name_f.endswith(".md") or name_f.lower() == "readme.md":
+                    continue
+                path = item.get("path") or f"{EXPERIENCES_FOLDER_NAME}/{name_f}"
+                body = await self._gh_get_file_content(
+                    owner, name, path, token,
+                ) or ""
+                meta, content = _parse_frontmatter(body)
+                key = f"{repo}::{path}"
+                existing = entries_by_key.get(key)
+                size = len(body.encode("utf-8"))
+                ch = _hash(body)
+                tags = meta.get("tags") or []
+                if isinstance(tags, str):
+                    tags = [t.strip() for t in tags.split(",") if t.strip()]
+                title = (
+                    meta.get("title")
+                    or self._title_from_filename(name_f)
+                )
+                summary = self._first_paragraph(content)[:300]
+                source = meta.get("source") or {}
+                if isinstance(source, str):
+                    source = {"type": source}
+                entry_data = {
+                    "id": existing["id"] if existing else uuid.uuid4().hex,
+                    "project_id": w.id,
+                    "project_full_name": repo,
+                    "path": path,
+                    "title": title,
+                    "topic_canonical": meta.get("topic_canonical") or _slugify(title),
+                    "tags": tags,
+                    "source_type": source.get("type", "manual"),
+                    "source_origin": source.get("origin", ""),
+                    "summary": summary,
+                    "content_hash": ch,
+                    "size_bytes": size,
+                    "created_at": (
+                        meta.get("created_at") or (existing or {}).get("created_at") or now_iso()
+                    ),
+                    "updated_at": now_iso() if (not existing or existing.get("content_hash") != ch) else existing["updated_at"],
+                    "imported_at": meta.get("imported_at") or (existing or {}).get("imported_at", ""),
+                    "merged_from": meta.get("merged_from") or [],
+                    "generated_by": meta.get("generated_by") or (existing or {}).get("generated_by", ""),
+                }
+                if existing:
+                    existing.update(entry_data)
+                    if existing["content_hash"] != ch:
+                        updated += 1
+                else:
+                    index.setdefault("entries", []).append(entry_data)
+                    entries_by_key[key] = entry_data
+                    added += 1
+        _save_index(index)
+        return {
+            "ok": True, "added": added, "updated": updated,
+            "total": len(index.get("entries", [])),
+        }
+
+    @staticmethod
+    def _title_from_filename(name: str) -> str:
+        stem = name.rsplit(".", 1)[0]
+        return stem.replace("-", " ").replace("_", " ").strip().title()
+
+    @staticmethod
+    def _first_paragraph(body: str) -> str:
+        # Skip headings, return first non-empty paragraph
+        for chunk in (body or "").split("\n\n"):
+            stripped = "\n".join(
+                ln for ln in chunk.splitlines() if not ln.lstrip().startswith("#")
+            ).strip()
+            if stripped:
+                return stripped
+        return ""
+
+    # ─────────────────────────────────────────────────────────────────────
+    # List with search/sort/filter/pagination (req #5)
+    # ─────────────────────────────────────────────────────────────────────
+
+    def list_entries(
+        self,
+        *,
+        page: int = 1,
+        per_page: int = 20,
+        search: str = "",
+        tag: str = "",
+        project_id: str = "",
+        source_type: str = "",
+        sort: str = "updated_desc",
+    ) -> Dict[str, Any]:
+        """Catalog endpoint with full search/sort/filter/pagination."""
+        index = _load_index()
+        items = list(index.get("entries", []))
+
+        # Filter
+        if project_id:
+            items = [x for x in items if x.get("project_id") == project_id]
+        if tag:
+            items = [x for x in items if tag in (x.get("tags") or [])]
+        if source_type:
+            items = [x for x in items if x.get("source_type") == source_type]
+        if search:
+            needle = search.lower()
+            def _hit(x: Dict[str, Any]) -> bool:
+                hay = " ".join([
+                    x.get("title", ""),
+                    x.get("summary", ""),
+                    x.get("topic_canonical", ""),
+                    " ".join(x.get("tags", []) or []),
+                    x.get("project_full_name", ""),
+                ]).lower()
+                return needle in hay
+            items = [x for x in items if _hit(x)]
+
+        # Sort
+        sort_keys = {
+            "updated_desc": (lambda x: x.get("updated_at", ""), True),
+            "updated_asc": (lambda x: x.get("updated_at", ""), False),
+            "title_asc": (lambda x: (x.get("title") or "").lower(), False),
+            "title_desc": (lambda x: (x.get("title") or "").lower(), True),
+            "created_desc": (lambda x: x.get("created_at", ""), True),
+            "size_desc": (lambda x: x.get("size_bytes", 0), True),
+        }
+        key_fn, reverse = sort_keys.get(sort, sort_keys["updated_desc"])
+        try:
+            items.sort(key=key_fn, reverse=reverse)
+        except Exception:
+            pass
+
+        total = len(items)
+        per_page = max(1, min(100, int(per_page or 20)))
+        page = max(1, int(page or 1))
+        start = (page - 1) * per_page
+        end = start + per_page
+        page_items = items[start:end]
+
+        # Build facets so the UI can show "X projects, Y tags, Z sources"
+        all_tags: Dict[str, int] = {}
+        all_sources: Dict[str, int] = {}
+        all_projects: Dict[str, int] = {}
+        for x in index.get("entries", []):
+            for t in (x.get("tags") or []):
+                all_tags[t] = all_tags.get(t, 0) + 1
+            s = x.get("source_type") or "manual"
+            all_sources[s] = all_sources.get(s, 0) + 1
+            p = x.get("project_full_name") or "—"
+            all_projects[p] = all_projects.get(p, 0) + 1
+
+        return {
+            "items": page_items,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "pages": (total + per_page - 1) // per_page,
+            "facets": {
+                "tags": sorted(
+                    all_tags.items(), key=lambda kv: kv[1], reverse=True,
+                ),
+                "sources": sorted(
+                    all_sources.items(), key=lambda kv: kv[1], reverse=True,
+                ),
+                "projects": sorted(
+                    all_projects.items(), key=lambda kv: kv[1], reverse=True,
+                ),
+            },
+        }
+
+    def get_entry(self, entry_id: str) -> Optional[Dict[str, Any]]:
+        index = _load_index()
+        for e in index.get("entries", []):
+            if e.get("id") == entry_id:
+                return e
+        return None
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Delete (req #2)
+    # ─────────────────────────────────────────────────────────────────────
+
+    async def delete_entry(
+        self,
+        entry_id: str,
+        *,
+        delete_from_repo: bool = True,
+        github_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Remove an entry from the index AND from the repo (opt-in).
+
+        delete_from_repo=False keeps the file in the repo but de-indexes
+        it (useful when user wants to keep file but hide from catalog).
+        delete_from_repo=True permanently removes the file via GitHub API.
+        """
+        index = _load_index()
+        entry = None
+        for i, e in enumerate(index.get("entries", [])):
+            if e.get("id") == entry_id:
+                entry = e
+                del index["entries"][i]
+                break
+        if entry is None:
+            return {"ok": False, "error": "entry_not_found"}
+        _save_index(index)
+
+        if not delete_from_repo:
+            return {"ok": True, "deindexed": True, "repo_deleted": False}
+
+        repo = entry.get("project_full_name") or ""
+        path = entry.get("path") or ""
+        if "/" not in repo or not path:
+            return {"ok": True, "deindexed": True, "repo_deleted": False,
+                    "reason": "no_repo_or_path"}
+        from .oversight_service import get_github_token
+        from .github_pr_service import get_github_pr_service
+        token = github_token or get_github_token()
+        if not token:
+            return {"ok": True, "deindexed": True, "repo_deleted": False,
+                    "reason": "no_github_token"}
+        try:
+            owner, name = repo.split("/", 1)
+            pr = get_github_pr_service()
+            res = await pr.delete_file(
+                owner=owner, repo=name, path=path, token=token,
+                message=f"🧠 chore: remove experience '{entry.get('title', '?')}'",
+            )
+            return {"ok": True, "deindexed": True, "repo_deleted": True,
+                    "result": res}
+        except Exception as e:
+            return {"ok": True, "deindexed": True, "repo_deleted": False,
+                    "reason": str(e)[:200]}
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Import chat files (req #7 + format alignment)
+    # ─────────────────────────────────────────────────────────────────────
+
+    async def import_chat_file(
+        self,
+        *,
+        filename: str,
+        content_bytes: bytes,
+        target_project_id: Optional[str],
+        target_project_full_name: Optional[str],
+        model_ids: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Accept a chat export (txt/md/html/pdf), extract solved
+        challenges with the user-selected AI model, write project-agnostic
+        experience files into the target project's experiences/ folder
+        (or local index if no repo), and update the catalog.
+
+        Honors model_ids — uses ai_generate_with_meta for attribution.
+        Chunks large inputs to fit token limits.
+        """
+        try:
+            text = self._extract_text(filename, content_bytes)
+        except Exception as e:
+            return {"ok": False, "error": f"extract_text_failed: {e}"}
+        if not text or len(text.strip()) < 50:
+            return {"ok": False, "error": "file_too_small_or_empty"}
+
+        # Chunk to respect token limits (target ~12k chars per chunk,
+        # roughly 3-4k tokens — well inside most models' contexts).
+        chunks = self._chunk_text(text, max_chars=12000, overlap=300)
+        logger.info(
+            f"knowledge_center.import: {filename} → {len(chunks)} chunks"
+        )
+
+        # Use the API route's ai_generate_with_meta for parity with the
+        # rest of the Creator/Audit flow.
+        from ..api.routes.simple_projects import ai_generate_with_meta
+
+        index = _load_index()
+        existing_canonicals = {
+            e.get("topic_canonical"): e for e in index.get("entries", [])
+        }
+
+        from .github_pr_service import get_github_pr_service
+        from .oversight_service import get_github_token
+        pr = get_github_pr_service()
+        token = get_github_token()
+
+        created_entries: List[Dict[str, Any]] = []
+        merged_entries: List[Dict[str, Any]] = []
+        errors: List[str] = []
+
+        for ci, chunk in enumerate(chunks):
+            prompt = self._build_extraction_prompt(
+                chunk_text=chunk, chunk_index=ci, total_chunks=len(chunks),
+                target_project=target_project_full_name or "?",
+                existing_topics=list(existing_canonicals.keys())[:50],
+            )
+            try:
+                content, used_model = await ai_generate_with_meta(
+                    prompt, model_ids=model_ids,
+                )
+            except Exception as e:
+                errors.append(f"chunk {ci}: ai call failed: {str(e)[:200]}")
+                continue
+            extracted_list = self._parse_extracted_experiences(content)
+            for item in extracted_list:
+                try:
+                    canonical = item.get("topic_canonical") or _slugify(
+                        item.get("title", "")
+                    )
+                    item["topic_canonical"] = canonical
+                    if canonical in existing_canonicals:
+                        # Merge mode (req #14 from voice notes)
+                        target = existing_canonicals[canonical]
+                        merged = await self._merge_into_existing(
+                            target=target, new_item=item,
+                            source_file=filename, used_model=used_model,
+                            target_project_full_name=(
+                                target_project_full_name or target.get("project_full_name", "")
+                            ),
+                            github_token=token,
+                        )
+                        merged_entries.append(merged)
+                    else:
+                        # New entry
+                        created = await self._create_new_entry(
+                            item=item, source_file=filename,
+                            used_model=used_model,
+                            target_project_id=target_project_id,
+                            target_project_full_name=target_project_full_name,
+                            github_token=token,
+                        )
+                        if created:
+                            created_entries.append(created)
+                            existing_canonicals[canonical] = created
+                except Exception as e:
+                    errors.append(f"chunk {ci} item: {str(e)[:200]}")
+
+        # Persist any new/merged entries in the index
+        new_index = _load_index()
+        for c in created_entries:
+            new_index.setdefault("entries", []).append(c)
+        for m in merged_entries:
+            for i, e in enumerate(new_index.get("entries", [])):
+                if e.get("id") == m.get("id"):
+                    new_index["entries"][i] = m
+                    break
+        _save_index(new_index)
+
+        return {
+            "ok": True,
+            "filename": filename,
+            "chunks_processed": len(chunks),
+            "created": len(created_entries),
+            "merged": len(merged_entries),
+            "errors": errors,
+            "created_entries": created_entries,
+            "merged_entries": merged_entries,
+        }
+
+    # Text extractors per format (txt/md/html/pdf)
+    @staticmethod
+    def _extract_text(filename: str, data: bytes) -> str:
+        name = (filename or "").lower()
+        if name.endswith(".pdf"):
+            try:
+                import pdfplumber  # type: ignore
+                import io
+                with pdfplumber.open(io.BytesIO(data)) as pdf:
+                    return "\n".join(
+                        page.extract_text() or "" for page in pdf.pages
+                    )
+            except Exception:
+                pass
+            # Fallback: pypdf
+            try:
+                from pypdf import PdfReader  # type: ignore
+                import io
+                reader = PdfReader(io.BytesIO(data))
+                return "\n".join(p.extract_text() or "" for p in reader.pages)
+            except Exception as e:
+                raise RuntimeError(f"pdf parse failed: {e}")
+        if name.endswith(".html") or name.endswith(".htm"):
+            try:
+                from bs4 import BeautifulSoup  # type: ignore
+                soup = BeautifulSoup(data, "html.parser")
+                return soup.get_text("\n")
+            except Exception:
+                pass
+            # naive strip
+            return re.sub(r"<[^>]+>", "", data.decode("utf-8", errors="ignore"))
+        # txt / md / anything else: best-effort utf-8 decode
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError:
+            return data.decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _chunk_text(
+        text: str, max_chars: int = 12000, overlap: int = 300,
+    ) -> List[str]:
+        text = text or ""
+        if len(text) <= max_chars:
+            return [text]
+        chunks: List[str] = []
+        start = 0
+        while start < len(text):
+            end = min(start + max_chars, len(text))
+            chunk = text[start:end]
+            chunks.append(chunk)
+            if end >= len(text):
+                break
+            start = end - overlap
+        return chunks
+
+    @staticmethod
+    def _build_extraction_prompt(
+        *, chunk_text: str, chunk_index: int, total_chunks: int,
+        target_project: str, existing_topics: List[str],
+    ) -> str:
+        existing_str = ", ".join(existing_topics[:30]) if existing_topics else "—"
+        return f"""تو یک knowledge engineer هستی. این بخش (chunk {chunk_index+1}/{total_chunks}) از یک چت export شده از AI است. وظیفهٔ تو:
+
+۱) چالش‌ها و راه‌حل‌های مفید/قابل‌استفاده‌مجدد را استخراج کن
+۲) برای هر مورد یک تجربهٔ **project-agnostic** (مستقل از نام پروژه) بنویس
+۳) با topic های موجود `{existing_str}` تطابق بده — اگر مشابه است، topic_canonical یکسان بزن (سیستم خودکار merge می‌کند)
+
+# پروژهٔ مقصد (فقط برای context — در نوشتن تجربه نام پروژه را نیاور)
+{target_project}
+
+# متن چت
+{chunk_text}
+
+خروجی **فقط JSON** با این فرمت:
+{{
+  "experiences": [
+    {{
+      "title": "عنوان کوتاه و خوانا",
+      "topic_canonical": "kebab-case-slug",
+      "tags": ["tag1", "tag2"],
+      "challenge": "چه مشکلی بود — کلی، بدون نام پروژه",
+      "solution": "راه‌حل قدم‌به‌قدم — قابل تعمیم",
+      "code_examples": "snippet با نام‌های عمومی (نه نام پروژه)",
+      "pitfalls": "خطاهای رایج وقتی این الگو را جای دیگر استفاده می‌کنیم",
+      "apply_elsewhere": "چطور این الگو را در پروژه‌های دیگر اعمال کنیم — generic checklist",
+      "confidence": 0.85
+    }}
+  ]
+}}
+
+اگر این chunk هیچ تجربهٔ ارزشمندی ندارد، `"experiences": []` برگردان."""
+
+    @staticmethod
+    def _parse_extracted_experiences(response: str) -> List[Dict[str, Any]]:
+        """Best-effort JSON extraction. The /creator engine's
+        _extract_json could be reused but it returns Optional[dict] — we
+        need a list inside `experiences` here."""
+        if not response:
+            return []
+        cleaned = response.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[-1]
+            if "```" in cleaned:
+                cleaned = cleaned.rsplit("```", 1)[0]
+        # Try whole, then first {...} block
+        for candidate in (cleaned, cleaned[cleaned.find("{"):cleaned.rfind("}")+1] if "{" in cleaned else ""):
+            if not candidate:
+                continue
+            try:
+                obj = json.loads(candidate)
+                if isinstance(obj, dict) and isinstance(obj.get("experiences"), list):
+                    return obj["experiences"]
+            except Exception:
+                continue
+        return []
+
+    async def _create_new_entry(
+        self, *, item: Dict[str, Any], source_file: str,
+        used_model: str, target_project_id: Optional[str],
+        target_project_full_name: Optional[str],
+        github_token: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        """Build the markdown file + write to repo + return entry dict."""
+        canonical = item.get("topic_canonical") or _slugify(item.get("title", ""))
+        title = item.get("title") or canonical.replace("-", " ").title()
+        slug = _slugify(canonical)
+        path = f"{EXPERIENCES_FOLDER_NAME}/{slug}.md"
+        body = self._render_experience_md(
+            title=title, canonical=canonical, item=item,
+            source_file=source_file, used_model=used_model,
+            created_at=now_iso(),
+        )
+        # Write to repo if we have one + token
+        if (
+            target_project_full_name and "/" in target_project_full_name
+            and github_token
+        ):
+            try:
+                from .github_pr_service import get_github_pr_service
+                pr = get_github_pr_service()
+                owner, name = target_project_full_name.split("/", 1)
+                await pr.create_or_update_file(
+                    owner=owner, repo=name, path=path, content=body,
+                    message=f"🧠 add experience: {title}",
+                    branch=None, token=github_token,
+                )
+            except Exception as e:
+                logger.warning(f"create entry: github write failed: {e}")
+
+        entry = KnowledgeEntry(
+            id=uuid.uuid4().hex,
+            project_id=target_project_id,
+            project_full_name=target_project_full_name or "",
+            path=path,
+            title=title,
+            topic_canonical=canonical,
+            tags=list(item.get("tags") or []),
+            source_type="chat-import",
+            source_origin=item.get("source_origin") or "",
+            summary=(item.get("challenge") or "")[:300],
+            content_hash=_hash(body),
+            size_bytes=len(body.encode("utf-8")),
+            imported_at=now_iso(),
+            generated_by=used_model or "",
+        ).to_dict()
+        return entry
+
+    async def _merge_into_existing(
+        self, *, target: Dict[str, Any], new_item: Dict[str, Any],
+        source_file: str, used_model: str,
+        target_project_full_name: str, github_token: Optional[str],
+    ) -> Dict[str, Any]:
+        """Append a "## Update YYYY-MM-DD" section to the existing file and
+        update frontmatter (merged_from + updated_at)."""
+        merged_id = uuid.uuid4().hex[:8]
+        update_block = self._render_update_block(
+            item=new_item, source_file=source_file,
+            used_model=used_model, merge_id=merged_id,
+        )
+        # Pull existing body
+        repo = target_project_full_name or target.get("project_full_name", "")
+        path = target.get("path", "")
+        if repo and "/" in repo and github_token and path:
+            try:
+                from .github_pr_service import get_github_pr_service
+                pr = get_github_pr_service()
+                owner, name = repo.split("/", 1)
+                old_body = await self._gh_get_file_content(
+                    owner, name, path, github_token,
+                ) or ""
+                # Append update section
+                new_body = old_body.rstrip() + "\n\n" + update_block + "\n"
+                await pr.create_or_update_file(
+                    owner=owner, repo=name, path=path, content=new_body,
+                    message=f"🧠 update experience: {target.get('title', '?')} (+merge)",
+                    branch=None, token=github_token,
+                )
+                target["content_hash"] = _hash(new_body)
+                target["size_bytes"] = len(new_body.encode("utf-8"))
+            except Exception as e:
+                logger.warning(f"merge: github update failed: {e}")
+        target.setdefault("merged_from", []).append(
+            f"chat-import:{source_file}:{merged_id}"
+        )
+        target["updated_at"] = now_iso()
+        target["generated_by"] = used_model or target.get("generated_by", "")
+        return target
+
+    @staticmethod
+    def _render_experience_md(
+        *, title: str, canonical: str, item: Dict[str, Any],
+        source_file: str, used_model: str, created_at: str,
+    ) -> str:
+        tags = item.get("tags") or []
+        tags_yaml = "[" + ", ".join(f'"{t}"' for t in tags) + "]"
+        return f"""---
+title: "{title}"
+tags: {tags_yaml}
+topic_canonical: "{canonical}"
+source:
+  type: "chat-import"
+  origin: "ai-extracted"
+  imported_at: "{created_at}"
+created_at: "{created_at}"
+updated_at: "{created_at}"
+merged_from: []
+generated_by: "{used_model}"
+---
+
+# {title}
+
+## 🎯 چالش / Challenge
+
+{item.get("challenge", "—")}
+
+## 💡 راه‌حل / Solution
+
+{item.get("solution", "—")}
+
+## 🧪 نمونه کد (Anonymized)
+
+```
+{item.get("code_examples", "")}
+```
+
+## ⚠️ نکات حیاتی / Pitfalls
+
+{item.get("pitfalls", "—")}
+
+## 🔁 چطور در جای دیگر اعمال کنیم / How to Apply Elsewhere
+
+{item.get("apply_elsewhere", "—")}
+
+## 🔗 References
+
+- منبع: `{source_file}`
+- استخراج‌شده توسط: `{used_model or "?"}`
+- اعتماد: {item.get("confidence", "—")}
+"""
+
+    @staticmethod
+    def _render_update_block(
+        *, item: Dict[str, Any], source_file: str,
+        used_model: str, merge_id: str,
+    ) -> str:
+        ds = datetime.now(timezone.utc).date().isoformat()
+        return f"""## 🔄 Update {ds} (merge:{merge_id})
+
+**نکات جدید از این منبع** (`{source_file}` — توسط `{used_model or "?"}`):
+
+- **چالش**: {item.get("challenge", "—")}
+- **راه‌حل اضافی**: {item.get("solution", "—")}
+- **Pitfalls جدید**: {item.get("pitfalls", "—")}
+- **Apply elsewhere**: {item.get("apply_elsewhere", "—")}
+
+> merged because `topic_canonical` matched. ادغام شد چون موضوع canonical
+> یکسان بود — داده‌های جدید مفید بالا اضافه شد. data اصلی دست‌نخورده است.
+"""
+
+
+# Singleton
+_kc_instance: Optional[KnowledgeCenterService] = None
+_kc_lock = threading.Lock()
+
+
+def get_knowledge_center_service() -> KnowledgeCenterService:
+    global _kc_instance
+    if _kc_instance is None:
+        with _kc_lock:
+            if _kc_instance is None:
+                _kc_instance = KnowledgeCenterService()
+    return _kc_instance

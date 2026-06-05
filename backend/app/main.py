@@ -20,6 +20,7 @@ from .api.routes import github_import  # 🆕 GitHub Import
 from .api.routes import project_memory  # 🆕 Project Memory (باکس حافظه)
 from .api.routes import project_structure  # 🆕 Project Structure Diagram
 from .api.routes import inspector_recording  # 🆕 🎬 Inspector Recording (ضبط ویدئو از تب بازرس ویژه)
+from .api.routes import knowledge_center  # 🆕 🧠 Knowledge Center (مرکز دانش / تجربیات)
 from .api.routes import project_journal  # 🆕 Project Journal & Reports
 from .api.routes import analysis  # 🆕 Project Analysis & AI Profiles
 from .api.routes import project_health  # 🆕 Project Health Analysis (تحلیل سلامت پروژه)
@@ -729,6 +730,7 @@ app.include_router(config.router, prefix="/api")
 app.include_router(external.router, prefix="/api")
 app.include_router(runtime.router, prefix="/api")
 app.include_router(inspector_recording.router, prefix="/api")  # 🆕 🎬 Inspector Recording
+app.include_router(knowledge_center.router, prefix="/api")  # 🆕 🧠 Knowledge Center
 app.include_router(external_projects.router)
 app.include_router(unified_api.router)  # 🆕 Unified API
 app.include_router(simple_projects.router)  # 🆕 API ساده و کارآمد
