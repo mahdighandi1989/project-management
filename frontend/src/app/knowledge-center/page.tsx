@@ -21,12 +21,16 @@ interface Entry {
   imported_at?: string;
   merged_from?: string[];
   generated_by?: string;
+  resolution_status?: string;
+  recurrence_count?: number;
+  user_confirmed?: boolean;
 }
 
 interface Facets {
   tags: [string, number][];
   sources: [string, number][];
   projects: [string, number][];
+  resolutions?: [string, number][];
 }
 
 interface ListResponse {
@@ -53,6 +57,7 @@ export default function KnowledgeCenterPage() {
   const [tagFilter, setTagFilter] = useState('');
   const [projectFilter, setProjectFilter] = useState('');
   const [sourceFilter, setSourceFilter] = useState('');
+  const [resolutionFilter, setResolutionFilter] = useState('');
   const [sort, setSort] = useState('updated_desc');
   const [selectedEntry, setSelectedEntry] = useState<Entry | null>(null);
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -163,6 +168,7 @@ export default function KnowledgeCenterPage() {
       if (tagFilter) params.set('tag', tagFilter);
       if (projectFilter) params.set('project_id', projectFilter);
       if (sourceFilter) params.set('source_type', sourceFilter);
+      if (resolutionFilter) params.set('resolution_status', resolutionFilter);
       const res = await fetch(
         `${API_BASE}/api/knowledge-center/entries?${params.toString()}`,
       );
@@ -177,7 +183,7 @@ export default function KnowledgeCenterPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, perPage, search, tagFilter, projectFilter, sourceFilter, sort]);
+  }, [page, perPage, search, tagFilter, projectFilter, sourceFilter, resolutionFilter, sort]);
 
   useEffect(() => {
     loadEntries();
@@ -186,7 +192,7 @@ export default function KnowledgeCenterPage() {
   // Debounced search — reset to page 1 when filters change
   useEffect(() => {
     setPage(1);
-  }, [search, tagFilter, projectFilter, sourceFilter, sort]);
+  }, [search, tagFilter, projectFilter, sourceFilter, resolutionFilter, sort]);
 
   const syncFromRepos = async () => {
     setLoading(true);
@@ -401,6 +407,17 @@ export default function KnowledgeCenterPage() {
             ))}
           </select>
           <select
+            value={resolutionFilter}
+            onChange={(e) => setResolutionFilter(e.target.value)}
+            className="px-3 py-2 bg-black/40 border border-white/10 rounded text-sm"
+            title="فیلتر بر اساس وضعیت حل‌شدگی موضوع"
+          >
+            <option value="">همهٔ وضعیت‌ها</option>
+            {(data?.facets?.resolutions || []).map(([r, n]) => (
+              <option key={r} value={r}>{r} ({n})</option>
+            ))}
+          </select>
+          <select
             value={sort}
             onChange={(e) => setSort(e.target.value)}
             className="px-3 py-2 bg-black/40 border border-white/10 rounded text-sm"
@@ -465,7 +482,14 @@ export default function KnowledgeCenterPage() {
                 <p className="text-xs text-gray-400 mb-2 line-clamp-2" style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
                   {entry.summary || '—'}
                 </p>
-                <div className="flex flex-wrap gap-1 mb-2">
+                <div className="flex flex-wrap gap-1 mb-2 items-center">
+                  {entry.resolution_status && entry.resolution_status !== 'unknown' && (
+                    <ResolutionBadge
+                      status={entry.resolution_status}
+                      recurrence={entry.recurrence_count}
+                      confirmed={entry.user_confirmed}
+                    />
+                  )}
                   {(entry.tags || []).slice(0, 4).map((t) => (
                     <span
                       key={t}
@@ -568,6 +592,16 @@ export default function KnowledgeCenterPage() {
                   <span key={t} className="ml-1 px-2 py-0.5 bg-blue-500/20 text-blue-300 rounded text-xs">{t}</span>
                 ))}
               </div>
+              {selectedEntry.resolution_status && (
+                <div className="flex items-center gap-2">
+                  <span className="text-gray-400">وضعیت حل:</span>
+                  <ResolutionBadge
+                    status={selectedEntry.resolution_status}
+                    recurrence={selectedEntry.recurrence_count}
+                    confirmed={selectedEntry.user_confirmed}
+                  />
+                </div>
+              )}
               {selectedEntry.merged_from && selectedEntry.merged_from.length > 0 && (
                 <div>
                   <span className="text-gray-400">merged_from:</span>
@@ -926,7 +960,17 @@ function UploadChatModal({ models, selectedModelIds: initialSelected, onClose, o
           {result && (
             <div className="bg-green-500/10 border border-green-500/30 rounded p-3 text-sm space-y-1">
               <div className="font-bold text-green-300">✅ نتیجه:</div>
-              <div>📄 chunks پردازش‌شده: {result.chunks_processed}</div>
+              {result.pass_mode === 'two_pass' ? (
+                <>
+                  <div>🧠 حالت: دومرحله‌ای (outline → deep)</div>
+                  <div>🎯 موضوعات شناسایی‌شده: {result.topics_identified}</div>
+                </>
+              ) : (
+                <>
+                  <div>📄 حالت: تک‌مرحله‌ای (fallback chunking)</div>
+                  <div>📦 chunks پردازش‌شده: {result.chunks_processed}</div>
+                </>
+              )}
               <div>➕ تجربیات جدید: {result.created}</div>
               <div>🔀 ادغام با موجود: {result.merged}</div>
               {result.errors?.length > 0 && (
@@ -960,5 +1004,47 @@ function UploadChatModal({ models, selectedModelIds: initialSelected, onClose, o
         </div>
       </div>
     </div>
+  );
+}
+
+
+function ResolutionBadge({
+  status,
+  recurrence,
+  confirmed,
+}: {
+  status: string;
+  recurrence?: number;
+  confirmed?: boolean;
+}) {
+  const cls: Record<string, string> = {
+    solved: 'bg-green-500/20 text-green-300',
+    partial: 'bg-yellow-500/20 text-yellow-300',
+    open: 'bg-gray-500/20 text-gray-300',
+    regressed: 'bg-red-500/20 text-red-300',
+    unknown: 'bg-white/10 text-gray-400',
+  };
+  const icon: Record<string, string> = {
+    solved: '✅',
+    partial: '🟡',
+    open: '⏳',
+    regressed: '🔁',
+    unknown: '❓',
+  };
+  const c = cls[status] || cls.unknown;
+  const i = icon[status] || icon.unknown;
+  return (
+    <span
+      className={`px-1.5 py-0.5 rounded text-[10px] ${c}`}
+      title={
+        `وضعیت: ${status}` +
+        (recurrence && recurrence > 1 ? ` • تکرار: ${recurrence}×` : '') +
+        (confirmed ? ' • تأیید کاربر' : '')
+      }
+    >
+      {i} {status}
+      {recurrence && recurrence > 1 ? ` ×${recurrence}` : ''}
+      {confirmed ? ' ✓' : ''}
+    </span>
   );
 }

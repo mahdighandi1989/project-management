@@ -1216,3 +1216,170 @@ async def test_import_chat_two_pass_dedups_against_existing_canonical(
 
     assert result["created"] == 0
     assert result["merged"] >= 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Resolution fields are surfaced into the index + facets + filter
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_create_new_entry_persists_resolution_to_index(
+    tmp_path, monkeypatch,
+):
+    """When the chat-import path creates an entry, the resolution fields
+    from the AI response must end up in the index (not only in the
+    markdown body). Otherwise the catalog UI can't show badges or
+    filter by 'solved only' without re-parsing every file."""
+    import json
+    from app.services import knowledge_center_service as kcs
+    monkeypatch.setattr(kcs, "INDEX_FILE", tmp_path / "kc.json")
+    (tmp_path / "kc.json").write_text(
+        json.dumps({"version": 1, "entries": []}), encoding="utf-8",
+    )
+    svc = kcs.KnowledgeCenterService()
+
+    async def fake_ai(prompt, model_ids=None):
+        if "value_score" in prompt and "resolution_evidence" not in prompt:
+            return (
+                '{"topics":[{"topic_canonical":"oauth","title":"OAuth",'
+                '"message_anchors":[],"resolution_signal":"solved",'
+                '"recurrence_count":3,"value_score":8}]}',
+                "outline-model",
+            )
+        return (
+            '{"title":"OAuth","topic_canonical":"oauth","tags":[],'
+            '"challenge":"x","solution":"y","code_examples":"",'
+            '"pitfalls":"","apply_elsewhere":"",'
+            '"resolution_status":"solved","resolution_evidence":"works",'
+            '"recurrence_count":3,"user_confirmed":true,"confidence":0.9}',
+            "deep-model",
+        )
+
+    with patch(
+        "app.api.routes.simple_projects.ai_generate_with_meta", new=fake_ai,
+    ), patch(
+        "app.services.oversight_service.get_github_token", return_value=None,
+    ):
+        result = await svc.import_chat_file(
+            filename="chat.txt",
+            content_bytes=b"long enough chat content " * 30,
+            target_project_id=None, target_project_full_name=None,
+        )
+
+    assert result["created"] == 1
+    entry = result["created_entries"][0]
+    assert entry["resolution_status"] == "solved"
+    assert entry["recurrence_count"] == 3
+    assert entry["user_confirmed"] is True
+
+    # The index on disk also has them — list_entries surfaces them
+    listing = svc.list_entries(page=1, per_page=10)
+    assert listing["items"][0]["resolution_status"] == "solved"
+    assert listing["items"][0]["user_confirmed"] is True
+
+
+def test_list_entries_filters_by_resolution_status(tmp_path, monkeypatch):
+    """resolution_status query param must narrow the result to that
+    status only — same pattern as tag/project/source filters."""
+    import json
+    from app.services import knowledge_center_service as kcs
+    monkeypatch.setattr(kcs, "INDEX_FILE", tmp_path / "kc.json")
+    entries = [
+        {
+            "id": f"e{i}", "project_full_name": "p/r",
+            "path": f"experiences/{i}.md",
+            "title": f"T{i}", "topic_canonical": f"t{i}", "tags": [],
+            "source_type": "manual", "summary": "s",
+            "size_bytes": 100,
+            "created_at": "2026-06-01T00:00:00Z",
+            "updated_at": "2026-06-01T00:00:00Z",
+            "resolution_status": status,
+        }
+        for i, status in enumerate(
+            ["solved", "solved", "partial", "open", "regressed"]
+        )
+    ]
+    (tmp_path / "kc.json").write_text(
+        json.dumps({"version": 1, "entries": entries}), encoding="utf-8",
+    )
+    svc = kcs.KnowledgeCenterService()
+
+    res = svc.list_entries(page=1, per_page=20, resolution_status="solved")
+    assert res["total"] == 2
+    assert all(x["resolution_status"] == "solved" for x in res["items"])
+
+    res = svc.list_entries(page=1, per_page=20, resolution_status="regressed")
+    assert res["total"] == 1
+
+
+def test_list_entries_includes_resolution_facet(tmp_path, monkeypatch):
+    """Facets must include resolution counts so the UI can build the
+    dropdown without making a second request."""
+    import json
+    from app.services import knowledge_center_service as kcs
+    monkeypatch.setattr(kcs, "INDEX_FILE", tmp_path / "kc.json")
+    (tmp_path / "kc.json").write_text(
+        json.dumps({"version": 1, "entries": [
+            {"id": "a", "project_full_name": "p/r", "path": "x.md",
+             "title": "X", "tags": [], "source_type": "manual",
+             "resolution_status": "solved",
+             "created_at": "", "updated_at": "", "size_bytes": 0},
+            {"id": "b", "project_full_name": "p/r", "path": "y.md",
+             "title": "Y", "tags": [], "source_type": "manual",
+             "resolution_status": "solved",
+             "created_at": "", "updated_at": "", "size_bytes": 0},
+            {"id": "c", "project_full_name": "p/r", "path": "z.md",
+             "title": "Z", "tags": [], "source_type": "manual",
+             "resolution_status": "open",
+             "created_at": "", "updated_at": "", "size_bytes": 0},
+        ]}),
+        encoding="utf-8",
+    )
+    svc = kcs.KnowledgeCenterService()
+    res = svc.list_entries(page=1, per_page=10)
+    facets = res["facets"]
+    assert "resolutions" in facets
+    facet_dict = dict(facets["resolutions"])
+    assert facet_dict.get("solved") == 2
+    assert facet_dict.get("open") == 1
+
+
+def test_sync_from_projects_reads_resolution_from_frontmatter():
+    """The frontmatter parser must extract resolution fields, including
+    string-form booleans ('true' → True) since YAML-lite stores them
+    as strings."""
+    from app.services.knowledge_center_service import _parse_frontmatter
+    body = (
+        '---\n'
+        'title: "T"\n'
+        'topic_canonical: "t"\n'
+        'resolution_status: "regressed"\n'
+        'recurrence_count: 4\n'
+        'user_confirmed: true\n'
+        '---\n\n# T\n'
+    )
+    meta, _content = _parse_frontmatter(body)
+    assert meta.get("resolution_status") == "regressed"
+    # recurrence_count comes through as a string from the naive parser;
+    # sync_from_projects coerces. Verify the raw read still surfaces it.
+    assert str(meta.get("recurrence_count")) == "4"
+    assert str(meta.get("user_confirmed")).lower() == "true"
+
+
+def test_frontend_has_resolution_badge_and_filter():
+    """The catalog UI must (a) show a resolution badge on each card,
+    (b) expose a resolution_status filter dropdown, (c) display the
+    status in the detail panel."""
+    src = (
+        _FRONTEND_ROOT / "app/knowledge-center/page.tsx"
+    ).read_text(encoding="utf-8")
+    # Badge component exists + is used in the list
+    assert "function ResolutionBadge" in src
+    assert "<ResolutionBadge" in src
+    # Filter dropdown wires to backend query param
+    assert "resolutionFilter" in src
+    assert "resolution_status" in src
+    # Each status maps to a visible badge style
+    for status in ("solved", "partial", "open", "regressed"):
+        assert status in src
