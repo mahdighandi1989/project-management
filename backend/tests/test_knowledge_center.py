@@ -537,3 +537,296 @@ def test_frontend_page_has_bootstrap_button():
     ).read_text(encoding="utf-8")
     assert "/knowledge-center/bootstrap" in src
     assert "ساخت پوشهٔ تجربیات" in src or "bootstrap" in src.lower()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Auto-sync + AI cross-repo processor (the user's follow-up questions)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_settings_load_returns_defaults_when_file_absent(tmp_path, monkeypatch):
+    """Defaults must be returned when the settings file doesn't exist
+    yet (fresh deploy)."""
+    from app.services import knowledge_center_service as kcs
+    monkeypatch.setattr(kcs, "SETTINGS_FILE", tmp_path / "kc_settings.json")
+    settings = kcs.load_settings()
+    assert settings["auto_sync_enabled"] is True
+    assert settings["auto_sync_interval_minutes"] == 60
+    assert settings["skip_unchanged"] is True
+    assert isinstance(settings.get("processing_model_ids"), list)
+
+
+def test_settings_save_only_persists_known_keys(tmp_path, monkeypatch):
+    """save_settings must reject unknown keys so a typo (e.g., 'enabled')
+    doesn't shadow a real setting."""
+    from app.services import knowledge_center_service as kcs
+    monkeypatch.setattr(kcs, "SETTINGS_FILE", tmp_path / "kc_settings.json")
+    res = kcs.save_settings({
+        "auto_sync_enabled": False,
+        "processing_model_ids": ["claude-x", "gemini-y"],
+        "unknown_typo": "should_be_ignored",
+    })
+    assert res["auto_sync_enabled"] is False
+    assert res["processing_model_ids"] == ["claude-x", "gemini-y"]
+    assert "unknown_typo" not in res
+    # Re-load preserves the saved values
+    loaded = kcs.load_settings()
+    assert loaded["auto_sync_enabled"] is False
+    assert loaded["processing_model_ids"] == ["claude-x", "gemini-y"]
+
+
+@pytest.mark.asyncio
+async def test_process_skips_unchanged_entries(tmp_path, monkeypatch):
+    """🚨 User's "بک اند سنگین نشه" requirement — entries whose
+    content_hash matches last_processed_hash must NOT trigger AI calls.
+    Without this, every autosync cycle re-pays the AI cost for every
+    file regardless of whether it changed."""
+    import json
+    from app.services import knowledge_center_service as kcs
+    monkeypatch.setattr(kcs, "INDEX_FILE", tmp_path / "kc.json")
+    monkeypatch.setattr(kcs, "SETTINGS_FILE", tmp_path / "kc_settings.json")
+
+    # Seed entries: e1 unchanged (hash == last_processed), e2 changed
+    (tmp_path / "kc.json").write_text(
+        json.dumps({
+            "version": 1,
+            "entries": [
+                {
+                    "id": "e1", "project_full_name": "owner/repo1",
+                    "path": "experiences/x.md", "title": "X",
+                    "topic_canonical": "x", "tags": [], "summary": "old",
+                    "content_hash": "h1", "last_processed_hash": "h1",
+                },
+                {
+                    "id": "e2", "project_full_name": "owner/repo1",
+                    "path": "experiences/y.md", "title": "Y",
+                    "topic_canonical": "y", "tags": [], "summary": "old",
+                    "content_hash": "h2", "last_processed_hash": "h-old",
+                },
+            ],
+        }),
+        encoding="utf-8",
+    )
+    svc = kcs.KnowledgeCenterService()
+
+    ai_call_count = {"n": 0, "ids": []}
+
+    async def fake_ai(prompt, model_ids=None):
+        ai_call_count["n"] += 1
+        # Detect which entry was processed by searching the prompt
+        if "X" in prompt:
+            ai_call_count["ids"].append("e1")
+        elif "Y" in prompt:
+            ai_call_count["ids"].append("e2")
+        return ("new summary", "fake-model")
+
+    with patch(
+        "app.api.routes.simple_projects.ai_generate_with_meta", new=fake_ai,
+    ):
+        result = await svc.process_synced_entries()
+
+    assert result["processed"] == 1, "only e2 (changed) should be processed"
+    assert result["skipped"] == 1, "e1 (unchanged) must be skipped"
+    assert ai_call_count["n"] == 1, (
+        "AI must be called exactly once — e1 must NOT trigger an AI call"
+    )
+    assert "e2" in ai_call_count["ids"]
+    assert "e1" not in ai_call_count["ids"]
+
+
+@pytest.mark.asyncio
+async def test_process_with_force_ignores_skip_unchanged(tmp_path, monkeypatch):
+    """force=True must re-process even unchanged entries (debugging /
+    rebuild after prompt change)."""
+    import json
+    from app.services import knowledge_center_service as kcs
+    monkeypatch.setattr(kcs, "INDEX_FILE", tmp_path / "kc.json")
+    monkeypatch.setattr(kcs, "SETTINGS_FILE", tmp_path / "kc_settings.json")
+    (tmp_path / "kc.json").write_text(
+        json.dumps({
+            "version": 1,
+            "entries": [{
+                "id": "e1", "project_full_name": "owner/repo",
+                "path": "experiences/x.md", "title": "X",
+                "topic_canonical": "x", "content_hash": "h",
+                "last_processed_hash": "h",  # same → would normally skip
+            }],
+        }),
+        encoding="utf-8",
+    )
+    svc = kcs.KnowledgeCenterService()
+
+    called = {"n": 0}
+
+    async def fake_ai(prompt, model_ids=None):
+        called["n"] += 1
+        return ("re-processed", "model")
+
+    with patch(
+        "app.api.routes.simple_projects.ai_generate_with_meta", new=fake_ai,
+    ):
+        result = await svc.process_synced_entries(force=True)
+
+    assert called["n"] == 1, "force=True must trigger AI even on unchanged hash"
+    assert result["processed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_process_computes_cross_references_across_projects(tmp_path, monkeypatch):
+    """🔗 The user asked: 'اگر چند ریپو چند فایل تجربیات داشتن که در
+    جاهایی شبیه هم بود چجوری ادغام انجام میشه؟'
+
+    Answer: entries with the same topic_canonical in different projects
+    are cross-referenced (NOT duplicated). Each entry's cross_references
+    points at the others — single source of truth, full traceability."""
+    import json
+    from app.services import knowledge_center_service as kcs
+    monkeypatch.setattr(kcs, "INDEX_FILE", tmp_path / "kc.json")
+    monkeypatch.setattr(kcs, "SETTINGS_FILE", tmp_path / "kc_settings.json")
+    (tmp_path / "kc.json").write_text(
+        json.dumps({
+            "version": 1,
+            "entries": [
+                {
+                    "id": "e1", "project_full_name": "owner/repoA",
+                    "path": "experiences/google-oauth.md", "title": "Google OAuth A",
+                    "topic_canonical": "google-oauth", "content_hash": "h1",
+                    "last_processed_hash": "h1",  # skip AI but still get cross-refs
+                },
+                {
+                    "id": "e2", "project_full_name": "owner/repoB",
+                    "path": "experiences/google-oauth.md", "title": "Google OAuth B",
+                    "topic_canonical": "google-oauth", "content_hash": "h2",
+                    "last_processed_hash": "h2",
+                },
+                {
+                    "id": "e3", "project_full_name": "owner/repoC",
+                    "path": "experiences/unrelated.md", "title": "Other",
+                    "topic_canonical": "unrelated", "content_hash": "hx",
+                    "last_processed_hash": "hx",
+                },
+            ],
+        }),
+        encoding="utf-8",
+    )
+    svc = kcs.KnowledgeCenterService()
+    result = await svc.process_synced_entries()
+    assert result["ok"] is True
+
+    # Reload index — e1 must reference e2 (same canonical, diff project)
+    idx = kcs._load_index()
+    e1 = next(e for e in idx["entries"] if e["id"] == "e1")
+    e2 = next(e for e in idx["entries"] if e["id"] == "e2")
+    e3 = next(e for e in idx["entries"] if e["id"] == "e3")
+
+    assert any(
+        cr.get("entry_id") == "e2" for cr in e1.get("cross_references", [])
+    ), (
+        "e1 must have a cross-reference to e2 (same topic_canonical, "
+        "different project)"
+    )
+    assert any(
+        cr.get("entry_id") == "e1" for cr in e2.get("cross_references", [])
+    )
+    # e3 has different canonical → no cross-references
+    assert e3.get("cross_references") == []
+
+
+@pytest.mark.asyncio
+async def test_process_honors_settings_model_ids_when_none_passed(tmp_path, monkeypatch):
+    """When the caller doesn't pass model_ids, the processor must use
+    settings.processing_model_ids. This lets the user 'set once' which
+    models do background processing — without rewiring every call."""
+    import json
+    from app.services import knowledge_center_service as kcs
+    monkeypatch.setattr(kcs, "INDEX_FILE", tmp_path / "kc.json")
+    monkeypatch.setattr(kcs, "SETTINGS_FILE", tmp_path / "kc_settings.json")
+    kcs.save_settings({"processing_model_ids": ["claude-from-settings"]})
+    (tmp_path / "kc.json").write_text(
+        json.dumps({
+            "version": 1,
+            "entries": [{
+                "id": "e1", "project_full_name": "p/r", "path": "experiences/a.md",
+                "title": "A", "topic_canonical": "a", "content_hash": "h",
+                "last_processed_hash": "",  # never processed
+            }],
+        }),
+        encoding="utf-8",
+    )
+    svc = kcs.KnowledgeCenterService()
+
+    captured = {"models": None}
+
+    async def fake_ai(prompt, model_ids=None):
+        captured["models"] = list(model_ids) if model_ids else None
+        return ("ok", "claude-from-settings")
+
+    with patch(
+        "app.api.routes.simple_projects.ai_generate_with_meta", new=fake_ai,
+    ):
+        await svc.process_synced_entries()
+
+    assert captured["models"] == ["claude-from-settings"], (
+        "processing_model_ids from settings must flow into the AI call "
+        "when the caller didn't specify model_ids"
+    )
+
+
+def test_autosync_loop_function_exists_and_is_async():
+    """The lifespan registers this function — it must exist + be
+    async + accept a stop_event."""
+    import inspect
+    from app.services.knowledge_center_service import (
+        knowledge_center_autosync_loop,
+    )
+    assert inspect.iscoroutinefunction(knowledge_center_autosync_loop)
+    sig = inspect.signature(knowledge_center_autosync_loop)
+    assert "stop_event" in sig.parameters
+
+
+def test_lifespan_wires_autosync_loop():
+    """main.py must register the autosync loop in lifespan startup AND
+    set up shutdown teardown. Otherwise the loop runs only after the
+    first manual trigger (defeating the purpose of auto-sync)."""
+    src = (
+        _BACKEND_ROOT / "app/main.py"
+    ).read_text(encoding="utf-8")
+    assert "knowledge_center_autosync_loop" in src
+    # Startup
+    assert "kc_autosync_task" in src
+    assert "kc_autosync_stop" in src
+    # Shutdown teardown — graceful cancel
+    idx_stop = src.rfind("kc_autosync_stop")
+    body = src[idx_stop:idx_stop + 500]
+    assert "stop_evt.set()" in body or ".set()" in body
+
+
+def test_autosync_has_minimum_interval_floor():
+    """Safety floor: even if user sets interval to 0 or 1, we must not
+    poll faster than the floor (5 min) — protects from accidental DDoS
+    of GitHub API."""
+    from app.services.knowledge_center_service import (
+        _KC_AUTOSYNC_MIN_INTERVAL_MIN,
+    )
+    assert _KC_AUTOSYNC_MIN_INTERVAL_MIN >= 5
+
+
+def test_process_endpoint_registered():
+    """The /process route must be registered so the UI/scheduler can
+    trigger AI re-processing manually."""
+    src = (
+        _BACKEND_ROOT / "app/api/routes/knowledge_center.py"
+    ).read_text(encoding="utf-8")
+    assert '@router.post("/process")' in src
+    assert "process_synced_entries" in src
+
+
+def test_settings_endpoints_registered():
+    src = (
+        _BACKEND_ROOT / "app/api/routes/knowledge_center.py"
+    ).read_text(encoding="utf-8")
+    assert '@router.get("/settings")' in src
+    assert '@router.patch("/settings")' in src
+    # PATCH must accept processing_model_ids (so the user can set the
+    # background-sync model list)
+    assert "processing_model_ids" in src

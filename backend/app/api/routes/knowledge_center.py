@@ -163,6 +163,65 @@ async def import_chat(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Settings (persist user choices: model selection + auto-sync interval + …)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class SettingsPatch(BaseModel):
+    auto_sync_enabled: Optional[bool] = None
+    auto_sync_interval_minutes: Optional[int] = None
+    processing_model_ids: Optional[List[str]] = None
+    skip_unchanged: Optional[bool] = None
+    max_indexed_entries: Optional[int] = None
+
+
+@router.get("/settings")
+async def get_settings():
+    from ...services.knowledge_center_service import load_settings
+    return load_settings()
+
+
+@router.patch("/settings")
+async def patch_settings(payload: SettingsPatch):
+    """Partial update — only the fields the user sent are touched."""
+    from ...services.knowledge_center_service import save_settings
+    updates = {k: v for k, v in payload.dict().items() if v is not None}
+    return save_settings(updates)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AI cross-repo processor (manual trigger; auto-runs via scheduler too)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class ProcessRequest(BaseModel):
+    model_ids: List[str] = []
+    force: bool = False  # ignore skip_unchanged (re-process everything)
+
+
+@router.post("/process")
+async def process_entries(payload: Optional[ProcessRequest] = None):
+    """Run the cross-repo AI processor over the current index.
+
+    Default behavior:
+      - Settings.processing_model_ids picks the models (or payload.model_ids
+        overrides). If both empty, ai_manager's default applies.
+      - skip_unchanged: entries whose content_hash matches
+        last_processed_hash are skipped (no token cost, no duplicate work).
+      - cross_references are refreshed for every entry regardless of skip
+        (cheap, no AI call).
+
+    Pass force=true to re-process everything (debugging / forced rebuild)."""
+    svc = get_knowledge_center_service()
+    if payload is None:
+        payload = ProcessRequest()
+    return await svc.process_synced_entries(
+        model_ids=payload.model_ids or None,
+        force=payload.force,
+    )
+
+
 @router.get("/status")
 async def status():
     """Quick health check + counts for dashboard cards."""

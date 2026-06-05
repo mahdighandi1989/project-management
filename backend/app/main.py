@@ -296,6 +296,23 @@ async def lifespan(app: FastAPI):
         app.state.tg_webhook_stop = None
         app.state.tg_webhook_task = None
 
+    # 🧠 (Knowledge Center auto-sync) — periodic pull from watched repos
+    # + AI cross-repo processing (skip-if-unchanged guards against waste).
+    try:
+        import asyncio as _asyncio_kc
+        from .services.knowledge_center_service import (
+            knowledge_center_autosync_loop,
+        )
+        app.state.kc_autosync_stop = _asyncio_kc.Event()
+        app.state.kc_autosync_task = _asyncio_kc.create_task(
+            knowledge_center_autosync_loop(app.state.kc_autosync_stop),
+        )
+        logger.info("🧠 Knowledge Center auto-sync started")
+    except Exception as e:
+        logger.warning(f"Knowledge Center auto-sync failed to start: {e}")
+        app.state.kc_autosync_stop = None
+        app.state.kc_autosync_task = None
+
     yield
 
     # Shutdown
@@ -325,6 +342,17 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(task, timeout=5)
     except Exception as e:
         logger.warning(f"Telegram webhook supervisor stop error: {e}")
+
+    # Stop Knowledge Center auto-sync
+    try:
+        stop_evt = getattr(app.state, "kc_autosync_stop", None)
+        task = getattr(app.state, "kc_autosync_task", None)
+        if stop_evt:
+            stop_evt.set()
+        if task:
+            await asyncio.wait_for(task, timeout=5)
+    except Exception as e:
+        logger.warning(f"Knowledge Center auto-sync stop error: {e}")
 
     # close oversight session
     try:
