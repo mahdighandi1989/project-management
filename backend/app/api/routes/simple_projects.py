@@ -1080,6 +1080,198 @@ async def audit_project(
     }
 
 
+class ApplyAuditFixesRequest(BaseModel):
+    """🆕 Optional inputs to drive the auto-fix.
+
+    Both fields are optional:
+      - missing_files: explicit list of paths to generate. If omitted,
+        we run audit() first and use the aggregated.missing_critical_files.
+      - upgrade_to_fullstack: if True (and project_type isn't already
+        fullstack), switch the project to fullstack and generate every
+        fullstack-template file that doesn't already exist.
+
+    Use case for the user's Detective-1 scenario:
+      - project was created as fastapi → has only backend/
+      - audit said "missing frontend/src/app/page.tsx etc."
+      - frontend POSTs {upgrade_to_fullstack: true} OR posts the explicit
+        missing_files list — backend generates them, persists, saves
+        meta. No need to delete and recreate.
+    """
+    missing_files: List[str] = []
+    upgrade_to_fullstack: bool = False
+    model_ids: List[str] = []  # ai-generate fallback chain
+
+
+def _parse_clean_path(raw: str) -> Optional[str]:
+    """Audit findings are free-form strings like
+       'frontend/src/app/page.tsx چون پروژه نیاز به UI دارد'
+    Extract just the path prefix. Returns None if no plausible path."""
+    if not raw or not isinstance(raw, str):
+        return None
+    # First token that contains a '/' or ends in a known code extension
+    import re as _re
+    m = _re.match(r"[`'\"]?([A-Za-z0-9_\-./]+(?:\.[A-Za-z]{1,8}))", raw.strip())
+    if not m:
+        return None
+    candidate = m.group(1).strip(" '\"`")
+    # Reject obvious non-paths
+    if " " in candidate or candidate.startswith(".") and "/" not in candidate:
+        return None
+    if "/" not in candidate and "." not in candidate:
+        return None
+    return candidate
+
+
+@router.post("/projects/{project_id}/apply-fixes")
+async def apply_audit_fixes(
+    project_id: str, request: Optional[ApplyAuditFixesRequest] = None,
+):
+    """🛠 Apply auto-fixes from a prior audit result.
+
+    Generates the missing files (from `request.missing_files` or from a
+    fresh audit), optionally promotes the project_type to "fullstack" if
+    the audit said the goal needs a UI but the structure only had
+    backend.
+
+    Idempotent: files that already exist are skipped, NOT overwritten.
+    The user already trusted those files when they made the project; the
+    auto-fix shouldn't silently mutate them.
+    """
+    from ...services.simple_creator import get_simple_creator
+    creator = get_simple_creator()
+    project = creator.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    req = request or ApplyAuditFixesRequest()
+
+    # 1) Determine which files to generate.
+    files_to_create: List[str] = []
+    audit_summary: Optional[Dict[str, Any]] = None
+    if req.missing_files:
+        # Caller passed explicit list — use it as-is, but still parse
+        # paths defensively (the AI might have prefixed reasons).
+        for raw in req.missing_files:
+            clean = _parse_clean_path(raw)
+            if clean and clean not in files_to_create:
+                files_to_create.append(clean)
+    elif not req.upgrade_to_fullstack:
+        # No explicit list AND not just promoting to fullstack →
+        # run a fresh audit to discover missing files. (If the user is
+        # just clicking 'upgrade to fullstack', we use the template
+        # directly without consuming AI tokens for an audit step.)
+        try:
+            audit_resp = await audit_project(
+                project_id, AuditProjectRequest(model_ids=req.model_ids),
+            )
+            audit_summary = audit_resp.get("aggregated") or {}
+            for raw in audit_summary.get("missing_critical_files") or []:
+                clean = _parse_clean_path(raw)
+                if clean and clean not in files_to_create:
+                    files_to_create.append(clean)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.warning(f"apply-fixes: inline audit failed: {e}")
+
+    # 2) Promote to fullstack if requested — extends files_to_create with
+    # the fullstack template's missing entries (idempotent).
+    promoted = False
+    if req.upgrade_to_fullstack and project.project_type != "fullstack":
+        fullstack_struct = creator._get_default_structure("fullstack")
+        existing_paths = {f.path for f in project.files}
+        for spec in fullstack_struct.get("files") or []:
+            p = spec.get("path") if isinstance(spec, dict) else None
+            if p and p not in existing_paths and p not in files_to_create:
+                files_to_create.append(p)
+        # Update the type + structure metadata
+        project.project_type = "fullstack"
+        project.structure = {
+            **(project.structure or {}),
+            "directories": list(
+                set((project.structure or {}).get("directories", []) or [])
+                | set(fullstack_struct.get("directories", []) or [])
+            ),
+            "entry_point": fullstack_struct.get("entry_point"),
+            "run_command": fullstack_struct.get("run_command"),
+        }
+        promoted = True
+
+    if not files_to_create and not promoted:
+        return {
+            "success": True,
+            "project_id": project_id,
+            "files_added": [],
+            "files_skipped": [],
+            "promoted_to_fullstack": False,
+            "audit_summary": audit_summary,
+            "note": "هیچ مورد قابل‌اصلاحی پیدا نشد.",
+        }
+
+    # 3) For each file to create, skip if it already exists, otherwise
+    # generate via the same _generate_file path the original create used.
+    existing_paths_set = {f.path for f in project.files}
+    files_added: List[Dict[str, str]] = []
+    files_skipped: List[Dict[str, str]] = []
+
+    async def _ai_gen(prompt: str) -> str:
+        return await ai_generate(prompt, model_ids=req.model_ids)
+
+    project_dir = creator.workspace / project.id
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    for path in files_to_create:
+        if path in existing_paths_set:
+            files_skipped.append({"path": path, "reason": "already exists"})
+            continue
+        try:
+            content = await creator._generate_file(
+                project.name,
+                project.description,
+                project.project_type,
+                path,
+                "",  # file_desc — audit didn't always give one
+                _ai_gen,
+            )
+            # Persist file on disk + in project metadata
+            full_path = project_dir / path
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            import aiofiles as _aiofiles
+            async with _aiofiles.open(full_path, "w") as fh:
+                await fh.write(content)
+            from ...services.simple_creator import ProjectFile as _ProjectFile
+            project.files.append(_ProjectFile(
+                path=path,
+                content=content,
+                language=creator._detect_language(path),
+            ))
+            existing_paths_set.add(path)
+            files_added.append({
+                "path": path,
+                "language": creator._detect_language(path),
+                "size": len(content),
+            })
+        except Exception as e:
+            files_skipped.append({"path": path, "reason": str(e)[:300]})
+
+    # 4) Persist the updated project meta
+    try:
+        await creator._save_project_meta(project)
+    except Exception as e:
+        logger.warning(f"apply-fixes: save_project_meta failed: {e}")
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "files_added": files_added,
+        "files_skipped": files_skipped,
+        "promoted_to_fullstack": promoted,
+        "new_project_type": project.project_type,
+        "total_files_now": len(project.files),
+        "audit_summary": audit_summary,
+    }
+
+
 @router.get("/status")
 async def get_status():
     """وضعیت سیستم"""

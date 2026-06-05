@@ -509,6 +509,209 @@ def test_full_stack_hyphen_normalization_works_without_auto_detect():
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Apply-fixes endpoint — the auto-fix that user explicitly asked for
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_apply_fixes_endpoint_generates_missing_files(tmp_path):
+    """When the user clicks the auto-fix button with explicit
+    missing_files, the endpoint must generate them via _generate_file
+    and persist both on disk and in project.files. Idempotent: paths
+    that already exist must NOT be regenerated (no silent overwrite)."""
+    from app.api.routes.simple_projects import (
+        apply_audit_fixes, ApplyAuditFixesRequest,
+    )
+    from app.services.simple_creator import (
+        get_simple_creator, Project, ProjectFile,
+    )
+
+    creator = get_simple_creator()
+    # Use the test's tmp_path so we don't pollute the real workspace
+    creator.workspace = tmp_path
+
+    proj = Project(
+        id="proj_fix_test_111",
+        name="DetectiveTest",
+        description="OSINT analysis platform",
+        project_type="fastapi",
+        files=[
+            ProjectFile(
+                path="backend/app/main.py",
+                content="# existing",
+                language="python",
+            ),
+        ],
+    )
+    creator.projects[proj.id] = proj
+
+    async def fake_ai_generate(prompt, model_ids=None):
+        return f"# generated content for: {prompt[:40]}"
+
+    with patch(
+        "app.api.routes.simple_projects.ai_generate",
+        new=fake_ai_generate,
+    ):
+        result = await apply_audit_fixes(
+            proj.id,
+            ApplyAuditFixesRequest(
+                missing_files=[
+                    "frontend/src/app/page.tsx — main page",
+                    "frontend/package.json",
+                    "backend/app/main.py",  # already exists → must skip
+                ],
+            ),
+        )
+
+    assert result["success"] is True
+    added_paths = [f["path"] for f in result["files_added"]]
+    assert "frontend/src/app/page.tsx" in added_paths, (
+        "the auto-fix must parse the path out of free-form audit findings "
+        "like 'frontend/src/app/page.tsx — main page'"
+    )
+    assert "frontend/package.json" in added_paths
+    # The existing file must be skipped, not overwritten
+    skipped_paths = [s["path"] for s in result["files_skipped"]]
+    assert "backend/app/main.py" in skipped_paths, (
+        "existing files must be skipped — the auto-fix is idempotent"
+    )
+    # Files should be physically on disk now
+    assert (tmp_path / "proj_fix_test_111" / "frontend/src/app/page.tsx").exists()
+    # project.files in-memory must include the new ones
+    paths_in_proj = [f.path for f in proj.files]
+    assert "frontend/src/app/page.tsx" in paths_in_proj
+
+
+@pytest.mark.asyncio
+async def test_apply_fixes_can_promote_to_fullstack(tmp_path):
+    """The user's Detective-1 scenario: project was created as fastapi,
+    audit said "this needs frontend too". The user clicks "ارتقا به
+    fullstack" — the endpoint must:
+      1. Switch project.project_type to 'fullstack'
+      2. Generate every fullstack-template file that doesn't already
+         exist (without touching the ones that do)
+      3. Update the structure metadata"""
+    from app.api.routes.simple_projects import (
+        apply_audit_fixes, ApplyAuditFixesRequest,
+    )
+    from app.services.simple_creator import (
+        get_simple_creator, Project, ProjectFile,
+    )
+
+    creator = get_simple_creator()
+    creator.workspace = tmp_path
+    proj = Project(
+        id="proj_promote_222",
+        name="UpgradeTest",
+        description="something that needs both halves",
+        project_type="fastapi",
+        files=[
+            ProjectFile(
+                path="backend/app/main.py",
+                content="# existing backend",
+                language="python",
+            ),
+        ],
+    )
+    creator.projects[proj.id] = proj
+
+    async def fake_ai_generate(prompt, model_ids=None):
+        return "// generated\n"
+
+    with patch(
+        "app.api.routes.simple_projects.ai_generate",
+        new=fake_ai_generate,
+    ):
+        result = await apply_audit_fixes(
+            proj.id,
+            ApplyAuditFixesRequest(upgrade_to_fullstack=True),
+        )
+
+    assert result["promoted_to_fullstack"] is True
+    assert proj.project_type == "fullstack", (
+        "project_type must update so future regenerations honor fullstack"
+    )
+    added_paths = [f["path"] for f in result["files_added"]]
+    # Frontend files from the fullstack template must be added
+    assert "frontend/src/app/page.tsx" in added_paths
+    assert "frontend/package.json" in added_paths
+    # The pre-existing backend file must NOT be regenerated — verify by
+    # checking that backend/app/main.py is NOT in the added list AND the
+    # original content is intact (no silent overwrite).
+    assert "backend/app/main.py" not in added_paths, (
+        "existing files must not be re-added — the promote path skips "
+        "them before they ever enter the generation queue"
+    )
+    existing = next(
+        (f for f in proj.files if f.path == "backend/app/main.py"), None,
+    )
+    assert existing is not None
+    assert existing.content == "# existing backend", (
+        "existing file content must be preserved verbatim — auto-fix "
+        "is additive only, never destructive"
+    )
+
+
+@pytest.mark.asyncio
+async def test_apply_fixes_404_on_unknown_project():
+    """Same HTTP semantics as audit — unknown project → 404."""
+    from app.api.routes.simple_projects import (
+        apply_audit_fixes, ApplyAuditFixesRequest,
+    )
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as ei:
+        await apply_audit_fixes(
+            "proj_unknown_xyz",
+            ApplyAuditFixesRequest(missing_files=["a.py"]),
+        )
+    assert ei.value.status_code == 404
+
+
+def test_parse_clean_path_extracts_paths_from_audit_findings():
+    """Audit findings come back as free-form strings:
+       'frontend/src/app/page.tsx چون پروژه نیاز به UI دارد'
+       'docker-compose.yml باید اضافه شود'
+       '`requirements.txt` با dependency های جدید'
+    The parser must extract just the path, ignoring the prose."""
+    from app.api.routes.simple_projects import _parse_clean_path
+
+    assert _parse_clean_path("frontend/src/app/page.tsx چون UI لازم است") == (
+        "frontend/src/app/page.tsx"
+    )
+    assert _parse_clean_path("`requirements.txt` با dep جدید") == (
+        "requirements.txt"
+    )
+    assert _parse_clean_path("docker-compose.yml") == "docker-compose.yml"
+    # Garbage input → None (not a crash)
+    assert _parse_clean_path("") is None
+    assert _parse_clean_path("just a sentence") is None
+
+
+def test_frontend_audit_modal_has_apply_fixes_buttons():
+    """Source-grep: the audit modal must surface the auto-fix buttons,
+    not just report findings. User: 'این موضوع رو هم بررسی و در صورت
+    نیاز اصلاح میکنه؟' — yes, via these buttons."""
+    src = (
+        _FRONTEND_ROOT / "app/project/[id]/page.tsx"
+    ).read_text(encoding="utf-8")
+    # Must call the apply-fixes endpoint
+    assert "/apply-fixes" in src, (
+        "frontend must POST to /apply-fixes — without this the user "
+        "sees the audit findings but has no way to actually fix anything"
+    )
+    # Both action buttons (just missing files, OR promote to fullstack)
+    assert "applyAuditFixes" in src
+    assert "upgrade_to_fullstack" in src or "upgradeFullstack" in src, (
+        "must offer the 'promote to fullstack' shortcut so a backend-only "
+        "project can be upgraded in-place (Detective-1 use case)"
+    )
+    assert "تولید" in src and "فایل" in src and "مفقود" in src, (
+        "the auto-fix button must be labeled clearly in Persian so user "
+        "knows what it does"
+    )
+
+
 def test_structure_prompt_demands_both_halves_for_fullstack():
     """When project_type=fullstack, the structure-generation prompt
     must explicitly REQUIRE both backend/ and frontend/ — otherwise
