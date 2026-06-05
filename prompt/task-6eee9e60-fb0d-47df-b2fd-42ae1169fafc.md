@@ -10,7 +10,7 @@ verification_status: partial
 watched_id: 3f34a2b1-2a8d-4ad2-904a-9835a8a5b7c9
 project: mahdighandi1989/project-management
 created_at: '2026-05-15T16:47:34.404794+00:00'
-updated_at: '2026-06-02T17:48:26.540638+00:00'
+updated_at: '2026-06-03T18:13:46.492073+00:00'
 target_files:
 - backend/app/api/routes/notifications.py
 ---

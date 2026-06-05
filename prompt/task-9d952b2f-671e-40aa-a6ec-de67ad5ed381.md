@@ -10,7 +10,7 @@ verification_status: pending
 watched_id: 3f34a2b1-2a8d-4ad2-904a-9835a8a5b7c9
 project: mahdighandi1989/project-management
 created_at: '2026-05-31T09:08:17.003371+00:00'
-updated_at: '2026-06-01T17:08:47.833739+00:00'
+updated_at: '2026-06-03T18:38:20.072513+00:00'
 ---
 
 # [منطق] عدم تطابق بین expected_inputs و interacts_with در ai_log

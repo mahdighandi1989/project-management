@@ -1948,6 +1948,10 @@ class OversightService:
                     )
         except Exception as _e:
             logger.warning(f"claude_runner auto-enable failed: {_e}")
+
+        # 📚 (Knowledge Center hook — implemented earlier in this method
+        # via ensure_folder_for_project; this duplicate from a parallel
+        # implementation has been removed.)
         return w.to_dict()
 
     async def autodetect_runtime_for_all_watched(self) -> Dict[str, Any]:

@@ -343,6 +343,25 @@ PUT    /api/settings/api-keys         # ذخیره کلید AI
 PUT    /api/settings/deploy-keys      # ذخیره کلید Render
 ```
 
+### مرکز دانش (Knowledge Center)
+
+دانشنامهٔ تجربیات: برای هر پروژهٔ تحت نظارت یک پوشهٔ `experiences/` در مخزن
+ساخته می‌شود (هنگام افزودن به مرکز نظارت، به‌صورت خودکار و idempotent).
+محتوای این پوشه‌ها با صفحهٔ مرکز دانش سینک می‌شود و کاربر می‌تواند فایل‌های
+چت (txt/md/html/pdf) را ایمپورت کند تا تجربیات با AI استخراج، دسته‌بندی و
+با منطق merge/dedup (همراه ثبت reference منبع) به دانشنامه افزوده شوند.
+
+```
+GET    /api/knowledge-center/entries          # لیست + TOC + دسته‌بندی
+GET    /api/knowledge-center/entries/{id}     # جزئیات یک تجربه
+POST   /api/knowledge-center/sync             # سینک پوشه‌های experiences
+POST   /api/knowledge-center/ensure-folders   # ساخت پوشهٔ experiences همهٔ پروژه‌ها
+POST   /api/knowledge-center/import           # ایمپورت فایل چت + استخراج با AI
+```
+
+مسیر ذخیرهٔ index قابل تنظیم با env اختیاری `KNOWLEDGE_CENTER_STORAGE`
+(پیش‌فرض: `./storage/knowledge_center` با fallback به `/tmp`).
+
 ### مستندات کامل
 
 - Swagger UI: `http://localhost:8000/docs`
