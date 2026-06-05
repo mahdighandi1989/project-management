@@ -43,6 +43,22 @@ export default function ProjectPage() {
   const [deploying, setDeploying] = useState(false);
   const [deployUrl, setDeployUrl] = useState('');
 
+  // 🆕 Description modal — long descriptions shouldn't be dumped onto the
+  // page; user reported the raw idea text was unreadable. Show a truncated
+  // preview + "show full" button → modal with proper markdown.
+  const [descModalOpen, setDescModalOpen] = useState(false);
+
+  // 🆕 Pre-push audit — user repeatedly asked for this: re-review generated
+  // files against the original goal BEFORE pushing to GitHub.
+  const [auditOpen, setAuditOpen] = useState(false);
+  const [auditing, setAuditing] = useState(false);
+  const [auditResult, setAuditResult] = useState<any>(null);
+  const [auditError, setAuditError] = useState('');
+
+  // 🆕 Push-to-GitHub button (was missing from this page entirely)
+  const [pushing, setPushing] = useState(false);
+  const [pushResult, setPushResult] = useState<any>(null);
+
   useEffect(() => {
     if (projectId) {
       loadProject();
@@ -100,6 +116,59 @@ export default function ProjectPage() {
       showError('خطا در ارتباط');
     } finally {
       setFileLoading(false);
+    }
+  };
+
+  const runAudit = async () => {
+    setAuditing(true);
+    setAuditError('');
+    setAuditResult(null);
+    setAuditOpen(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/simple/projects/${projectId}/audit`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model_ids: [] }),  // [] → use all active
+        },
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        setAuditError(data?.detail || `خطای سرور (${res.status})`);
+        return;
+      }
+      setAuditResult(data);
+    } catch (e: any) {
+      setAuditError(e?.message || 'خطا در ارتباط با سرور');
+    } finally {
+      setAuditing(false);
+    }
+  };
+
+  const pushToGithub = async () => {
+    setPushing(true);
+    setPushResult(null);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/simple/projects/${projectId}/push-to-github`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ private: true }),
+        },
+      );
+      const data = await res.json();
+      if (data?.success) {
+        setPushResult(data);
+        showSuccess('پروژه با موفقیت به GitHub push شد.');
+      } else {
+        showError(data?.detail || data?.error || 'خطا در push به GitHub');
+      }
+    } catch (e: any) {
+      showError(e?.message || 'خطا در ارتباط با سرور');
+    } finally {
+      setPushing(false);
     }
   };
 
@@ -216,21 +285,61 @@ export default function ProjectPage() {
 
       <div className="max-w-7xl mx-auto p-6">
         {/* هدر */}
-        <div className="flex items-center justify-between mb-6">
-          <div>
+        <div className="flex items-start justify-between mb-6 gap-4 flex-wrap">
+          <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2 text-sm text-gray-400 mb-1">
               <Link href="/creator" className="hover:text-blue-400">موتور خالق</Link>
               <span>/</span>
               <span>{project.name}</span>
             </div>
             <h1 className="text-2xl font-bold">{project.name}</h1>
-            <p className="text-gray-400 mt-1">{project.description}</p>
+            {/* 🆕 (description fix) — clamp the description to 2 lines and
+                offer a "نمایش کامل" button that opens a modal with the full
+                formatted text. Previously the raw description was dumped
+                onto the header and wrapped awkwardly. */}
+            <div className="mt-1 flex items-start gap-3 max-w-3xl">
+              <p
+                className="text-gray-400 text-sm overflow-hidden"
+                style={{
+                  display: '-webkit-box',
+                  WebkitLineClamp: 2,
+                  WebkitBoxOrient: 'vertical',
+                }}
+              >
+                {project.description}
+              </p>
+              {project.description && project.description.length > 100 && (
+                <button
+                  onClick={() => setDescModalOpen(true)}
+                  className="shrink-0 text-xs px-2 py-1 bg-blue-500/20 text-blue-300 rounded hover:bg-blue-500/30 whitespace-nowrap"
+                >
+                  📄 نمایش کامل
+                </button>
+              )}
+            </div>
           </div>
-          <div className="flex gap-3">
+          <div className="flex gap-2 flex-wrap shrink-0">
+            {/* 🆕 Pre-push audit button — re-review with active models */}
+            <button
+              onClick={runAudit}
+              disabled={auditing}
+              className="px-4 py-2 bg-amber-500/90 text-black rounded-lg hover:bg-amber-400 disabled:opacity-50 font-medium"
+              title="قبل از push، توسط همهٔ مدل‌های فعال audit شود"
+            >
+              {auditing ? '🔎 در حال بررسی...' : '🔎 بررسی مجدد قبل از push'}
+            </button>
+            {/* 🆕 Push to GitHub — was missing from this page entirely */}
+            <button
+              onClick={pushToGithub}
+              disabled={pushing}
+              className="px-4 py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 disabled:opacity-50 font-medium"
+            >
+              {pushing ? '... در حال push' : '🐙 push به GitHub'}
+            </button>
             <button
               onClick={deployToRender}
               disabled={deploying}
-              className="px-5 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 disabled:opacity-50 font-medium"
+              className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 disabled:opacity-50 font-medium"
             >
               {deploying ? '... در حال Deploy' : 'Deploy به Render'}
             </button>
@@ -404,6 +513,216 @@ export default function ProjectPage() {
           </div>
         </div>
       </div>
+
+      {/* 🆕 Description modal */}
+      {descModalOpen && project && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onClick={() => setDescModalOpen(false)}
+        >
+          <div
+            className="bg-gray-900 border border-white/10 rounded-2xl max-w-3xl w-full max-h-[85vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="sticky top-0 flex items-center justify-between p-4 bg-gray-900 border-b border-white/10">
+              <h3 className="font-bold text-lg">📄 توضیحات کامل — {project.name}</h3>
+              <button
+                onClick={() => setDescModalOpen(false)}
+                className="px-3 py-1 bg-white/10 rounded hover:bg-white/20"
+              >
+                بستن
+              </button>
+            </div>
+            <div className="p-6">
+              <pre className="whitespace-pre-wrap text-gray-200 text-sm leading-7 font-sans">
+                {project.description}
+              </pre>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 🆕 Pre-push audit modal */}
+      {auditOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onClick={() => !auditing && setAuditOpen(false)}
+        >
+          <div
+            className="bg-gray-900 border border-white/10 rounded-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="sticky top-0 flex items-center justify-between p-4 bg-gray-900 border-b border-white/10 z-10">
+              <h3 className="font-bold text-lg">🔎 بررسی مجدد قبل از push</h3>
+              <button
+                onClick={() => setAuditOpen(false)}
+                disabled={auditing}
+                className="px-3 py-1 bg-white/10 rounded hover:bg-white/20 disabled:opacity-50"
+              >
+                بستن
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              {auditing && (
+                <div className="text-center py-10">
+                  <p className="text-gray-300">
+                    در حال بررسی توسط همهٔ مدل‌های فعال... این ممکن است ۳۰-۹۰ ثانیه طول بکشد.
+                  </p>
+                </div>
+              )}
+              {auditError && (
+                <div className="bg-red-500/20 border border-red-500/50 rounded p-3 text-red-200">
+                  ❌ {auditError}
+                </div>
+              )}
+              {auditResult?.aggregated && (
+                <>
+                  <div className="bg-white/5 rounded-lg p-4 grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div>
+                      <div className="text-xs text-gray-400">امتیاز میانگین</div>
+                      <div className="text-2xl font-bold text-blue-300">
+                        {auditResult.aggregated.overall_score_avg}/100
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-gray-400">آماده push؟</div>
+                      <div className={`text-lg font-bold ${
+                        auditResult.aggregated.ready_to_push_majority
+                          ? 'text-green-300' : 'text-amber-300'
+                      }`}>
+                        {auditResult.aggregated.ready_to_push_majority ? '✅ بله' : '⚠️ خیر'}
+                      </div>
+                      <div className="text-xs text-gray-500">
+                        ({auditResult.aggregated.ready_to_push_votes})
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-gray-400">با هدف می‌خواند؟</div>
+                      <div className={`text-lg font-bold ${
+                        auditResult.aggregated.matches_goal_majority
+                          ? 'text-green-300' : 'text-amber-300'
+                      }`}>
+                        {auditResult.aggregated.matches_goal_majority ? 'بله' : 'خیر'}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-gray-400">مدل‌ها</div>
+                      <div className="text-lg font-bold">
+                        {auditResult.aggregated.models_succeeded}/{auditResult.aggregated.models_consulted}
+                      </div>
+                    </div>
+                  </div>
+
+                  {auditResult.aggregated.missing_critical_files?.length > 0 && (
+                    <div className="bg-red-500/10 border border-red-500/30 rounded p-3">
+                      <h4 className="font-bold text-red-300 mb-2">
+                        🚫 فایل‌های حیاتی مفقود
+                      </h4>
+                      <ul className="text-sm space-y-1 list-disc pr-5">
+                        {auditResult.aggregated.missing_critical_files.map((x: string, i: number) => (
+                          <li key={i} className="text-red-200">{x}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {auditResult.aggregated.structural_issues?.length > 0 && (
+                    <div className="bg-amber-500/10 border border-amber-500/30 rounded p-3">
+                      <h4 className="font-bold text-amber-300 mb-2">
+                        🏗 مشکلات ساختاری
+                      </h4>
+                      <ul className="text-sm space-y-1 list-disc pr-5">
+                        {auditResult.aggregated.structural_issues.map((x: string, i: number) => (
+                          <li key={i} className="text-amber-200">{x}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {auditResult.aggregated.goal_mismatch_reasons?.length > 0 && (
+                    <div className="bg-orange-500/10 border border-orange-500/30 rounded p-3">
+                      <h4 className="font-bold text-orange-300 mb-2">
+                        🎯 ناهماهنگی با هدف اولیه
+                      </h4>
+                      <ul className="text-sm space-y-1 list-disc pr-5">
+                        {auditResult.aggregated.goal_mismatch_reasons.map((x: string, i: number) => (
+                          <li key={i} className="text-orange-200">{x}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {auditResult.aggregated.quality_concerns?.length > 0 && (
+                    <div className="bg-white/5 border border-white/10 rounded p-3">
+                      <h4 className="font-bold text-gray-300 mb-2">
+                        🧪 نگرانی‌های کیفیت
+                      </h4>
+                      <ul className="text-sm space-y-1 list-disc pr-5">
+                        {auditResult.aggregated.quality_concerns.map((x: string, i: number) => (
+                          <li key={i} className="text-gray-300">{x}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {auditResult.aggregated.suggestions_before_push?.length > 0 && (
+                    <div className="bg-blue-500/10 border border-blue-500/30 rounded p-3">
+                      <h4 className="font-bold text-blue-300 mb-2">
+                        💡 پیشنهادات قبل از push
+                      </h4>
+                      <ul className="text-sm space-y-1 list-disc pr-5">
+                        {auditResult.aggregated.suggestions_before_push.map((x: string, i: number) => (
+                          <li key={i} className="text-blue-200">{x}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  <details className="bg-white/5 rounded p-3">
+                    <summary className="cursor-pointer text-gray-300 font-medium">
+                      نظر هر مدل به‌تفکیک ({auditResult.per_model?.length || 0})
+                    </summary>
+                    <div className="mt-3 space-y-3">
+                      {auditResult.per_model?.map((r: any, i: number) => (
+                        <div key={i} className="bg-black/30 rounded p-3 text-sm">
+                          <div className="font-mono text-blue-300 mb-1">
+                            {r.model_id} {r.ok ? '✅' : '❌'}
+                          </div>
+                          {r.ok && r.report?.summary && (
+                            <p className="text-gray-300 whitespace-pre-wrap">{r.report.summary}</p>
+                          )}
+                          {!r.ok && (
+                            <p className="text-red-300">{r.error}</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+
+                  <div className="flex justify-end gap-2 pt-4 border-t border-white/10">
+                    <button
+                      onClick={() => setAuditOpen(false)}
+                      className="px-4 py-2 bg-white/10 rounded hover:bg-white/20"
+                    >
+                      بستن
+                    </button>
+                    <button
+                      onClick={() => {
+                        setAuditOpen(false);
+                        pushToGithub();
+                      }}
+                      disabled={pushing}
+                      className="px-4 py-2 bg-purple-500 text-white rounded hover:bg-purple-600 disabled:opacity-50"
+                    >
+                      🐙 push با وجود این یافته‌ها
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
