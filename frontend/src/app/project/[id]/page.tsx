@@ -59,6 +59,15 @@ export default function ProjectPage() {
   const [pushing, setPushing] = useState(false);
   const [pushResult, setPushResult] = useState<any>(null);
 
+  // 🆕 Auto-fix: apply missing files / upgrade to fullstack based on
+  // the audit result. The user's question that motivated this:
+  // "این دکمه بررسی مجدد علاوه بر همه مواردی که گفته شد، این موضوع
+  // رو هم بررسی و در صورت نیاز اصلاح میکنه؟"
+  // Answer: now yes — after viewing audit findings, user can click
+  // اعمال اصلاحات and missing files are generated in-place.
+  const [fixing, setFixing] = useState(false);
+  const [fixResult, setFixResult] = useState<any>(null);
+
   useEffect(() => {
     if (projectId) {
       loadProject();
@@ -143,6 +152,46 @@ export default function ProjectPage() {
       setAuditError(e?.message || 'خطا در ارتباط با سرور');
     } finally {
       setAuditing(false);
+    }
+  };
+
+  const applyAuditFixes = async (opts?: { upgradeFullstack?: boolean }) => {
+    setFixing(true);
+    setFixResult(null);
+    try {
+      const body: any = { model_ids: [] };
+      // If user explicitly chose "promote to fullstack" we pass it,
+      // otherwise pass the missing-files list extracted from audit.
+      if (opts?.upgradeFullstack) {
+        body.upgrade_to_fullstack = true;
+      } else if (auditResult?.aggregated?.missing_critical_files?.length) {
+        body.missing_files = auditResult.aggregated.missing_critical_files;
+      }
+      const res = await fetch(
+        `${API_BASE}/api/simple/projects/${projectId}/apply-fixes`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        showError(data?.detail || `خطای سرور (${res.status})`);
+        return;
+      }
+      setFixResult(data);
+      // Reload the project to pick up the newly created files
+      await loadProject();
+      showSuccess(
+        data.files_added?.length > 0
+          ? `${data.files_added.length} فایل جدید تولید شد.`
+          : 'هیچ فایل جدیدی لازم نبود.',
+      );
+    } catch (e: any) {
+      showError(e?.message || 'خطا در ارتباط با سرور');
+    } finally {
+      setFixing(false);
     }
   };
 
@@ -699,7 +748,82 @@ export default function ProjectPage() {
                     </div>
                   </details>
 
-                  <div className="flex justify-end gap-2 pt-4 border-t border-white/10">
+                  {/* 🆕 Auto-fix action buttons — the user asked for this
+                      explicitly. Audit was previously report-only; now
+                      the missing files can be generated in-place. */}
+                  {(auditResult.aggregated.missing_critical_files?.length > 0 ||
+                    !auditResult.aggregated.matches_goal_majority) && (
+                    <div className="bg-green-500/10 border border-green-500/30 rounded p-4 space-y-3">
+                      <h4 className="font-bold text-green-300">
+                        ✨ اعمال اصلاحات خودکار
+                      </h4>
+                      <p className="text-sm text-gray-300">
+                        می‌توانی فایل‌های مفقود را همین‌جا تولید کنی — پروژه پاک
+                        نمی‌شود، فقط آن‌چه که هست نگه داشته می‌شود و فایل‌های
+                        جدید اضافه می‌شوند.
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        {auditResult.aggregated.missing_critical_files?.length > 0 && (
+                          <button
+                            onClick={() => applyAuditFixes()}
+                            disabled={fixing}
+                            className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600 disabled:opacity-50 text-sm font-medium"
+                          >
+                            {fixing
+                              ? '... در حال تولید'
+                              : `📄 تولید ${auditResult.aggregated.missing_critical_files.length} فایل مفقود`}
+                          </button>
+                        )}
+                        {project?.project_type !== 'fullstack' && (
+                          <button
+                            onClick={() => applyAuditFixes({ upgradeFullstack: true })}
+                            disabled={fixing}
+                            className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50 text-sm font-medium"
+                            title="پروژه را به fullstack تبدیل کن و هر فایل مفقود از template fullstack را تولید کن"
+                          >
+                            {fixing
+                              ? '... در حال ارتقا'
+                              : '🚀 ارتقا به fullstack + تولید کامل'}
+                          </button>
+                        )}
+                      </div>
+                      {fixResult && (
+                        <div className="text-sm bg-black/20 rounded p-3 space-y-1">
+                          <div className="text-green-300 font-medium">
+                            ✅ نتیجه:
+                          </div>
+                          {fixResult.promoted_to_fullstack && (
+                            <div>↗ پروژه به fullstack ارتقا یافت</div>
+                          )}
+                          <div>
+                            فایل‌های تولیدشده: {fixResult.files_added?.length || 0}
+                          </div>
+                          {fixResult.files_added?.length > 0 && (
+                            <ul className="list-disc pr-5 text-green-200">
+                              {fixResult.files_added.slice(0, 10).map((f: any, i: number) => (
+                                <li key={i} className="font-mono">{f.path}</li>
+                              ))}
+                              {fixResult.files_added.length > 10 && (
+                                <li>... +{fixResult.files_added.length - 10} فایل دیگر</li>
+                              )}
+                            </ul>
+                          )}
+                          {fixResult.files_skipped?.length > 0 && (
+                            <div className="text-amber-300">
+                              {fixResult.files_skipped.length} فایل skip شد
+                              (موجود بود یا خطا)
+                            </div>
+                          )}
+                          <div className="text-xs text-gray-400 pt-1">
+                            بعد از تولید، می‌توانی audit را دوباره اجرا کنی
+                            تا confirm شود.
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="flex justify-end gap-2 pt-4 border-t border-white/10 flex-wrap">
                     <button
                       onClick={() => setAuditOpen(false)}
                       className="px-4 py-2 bg-white/10 rounded hover:bg-white/20"
@@ -709,9 +833,19 @@ export default function ProjectPage() {
                     <button
                       onClick={() => {
                         setAuditOpen(false);
+                        runAudit();
+                      }}
+                      disabled={auditing || fixing}
+                      className="px-4 py-2 bg-amber-500/80 text-black rounded hover:bg-amber-400 disabled:opacity-50"
+                    >
+                      🔄 audit دوباره
+                    </button>
+                    <button
+                      onClick={() => {
+                        setAuditOpen(false);
                         pushToGithub();
                       }}
-                      disabled={pushing}
+                      disabled={pushing || fixing}
                       className="px-4 py-2 bg-purple-500 text-white rounded hover:bg-purple-600 disabled:opacity-50"
                     >
                       🐙 push با وجود این یافته‌ها
