@@ -383,7 +383,16 @@ async def create_project(request: CreateProjectRequest):
         except Exception as e:
             logger.warning(f"auto-detect failed (continuing with user choice): {e}")
             if project_type == "auto":
-                project_type = "python"  # fallback
+                # 🐛 (auto-detect fallback fix) — previously this fell to
+                # "python" which was wrong for the most common case (user
+                # wants a web app). When auto-detect fails, lean to
+                # fullstack so we generate both halves — much easier for
+                # the user to delete unused files than to have to add
+                # missing frontend manually.
+                project_type = "fullstack"
+        # Normalize aliases that the AI might emit
+        if project_type == "full-stack":
+            project_type = "fullstack"
 
     # closure برای ai_generate که model_ids را capture می‌کند
     async def gen(prompt: str) -> str:
@@ -501,22 +510,34 @@ async def _detect_project_type(
 
 # انواع موجود
 - python      (اسکریپت یا CLI)
-- fastapi     (API سرور Python)
+- fastapi     (API سرور Python — فقط backend)
 - flask       (وب‌اپ ساده Python)
-- nextjs      (وب‌اپ React/TypeScript)
+- nextjs      (وب‌اپ React/TypeScript — فقط frontend)
 - react       (فقط فرانت‌اند SPA)
 - node        (بک‌اند JavaScript / Express)
+- fullstack   (هم backend (FastAPI) هم frontend (Next.js) — برای dashboard‌ها،
+                CRM، OSINT analysis، پلتفرم‌هایی که UI + API می‌خواهند)
 
 # وظیفه
-بهترین نوع را به‌عنوان primary_type انتخاب کن. اگر پروژه ترکیبی است (مثل full-stack)، یکی را primary بگذار و سایر را در alternative_types بگذار.
+بهترین نوع را به‌عنوان primary_type انتخاب کن.
+
+📌 **مهم — اگر پروژه هم UI و هم API می‌خواهد**:
+  - "fullstack" را انتخاب کن (نه "fastapi" به‌تنهایی)
+  - علائم نیاز به fullstack: کلمات «داشبورد»، «پنل کاربری»، «dashboard»،
+    «تحلیل بصری»، «نمودار»، «گزارش‌گیری تعاملی»، «OSINT»، «CRM»،
+    «admin panel»، «UI for ...»، «وب‌اپ»، یا توضیح هر چیزی که از کاربر
+    تعامل گرافیکی می‌خواهد + داده‌ای روی backend ذخیره می‌کند.
+  - حتی اگر کاربر صریحاً نگفته "frontend"، اگر منطق پروژه برای کاربر
+    نهایی UI لازم دارد، fullstack بزن.
+
 تکنولوژی‌های ضروری (دیتابیس، احراز هویت، redis، …) را در technologies لیست کن.
 
 # خروجی فقط JSON
 {{
-  "primary_type": "fastapi",
-  "alternative_types": ["nextjs"],
-  "technologies": ["PostgreSQL", "JWT"],
-  "reasoning": "یک پاراگراف کوتاه چرا این انتخاب بهترینه"
+  "primary_type": "fullstack",
+  "alternative_types": [],
+  "technologies": ["PostgreSQL", "JWT", "Tailwind"],
+  "reasoning": "یک پاراگراف کوتاه چرا این انتخاب بهترینه — خصوصاً اگر fullstack انتخاب کردی، چرا نه فقط fastapi"
 }}"""
 
     response = await ai_generate(prompt, model_ids=model_ids)
@@ -524,7 +545,12 @@ async def _detect_project_type(
     if not parsed or "primary_type" not in parsed:
         raise HTTPException(status_code=500, detail="پاسخ AI قابل تجزیه نبود")
 
-    valid_types = {"python", "fastapi", "flask", "nextjs", "react", "node"}
+    valid_types = {
+        "python", "fastapi", "flask", "nextjs", "react", "node", "fullstack",
+    }
+    # Normalize hyphen variants
+    if parsed["primary_type"] == "full-stack":
+        parsed["primary_type"] = "fullstack"
     if parsed["primary_type"] not in valid_types:
         parsed["primary_type"] = "python"
 
@@ -816,6 +842,174 @@ async def deploy_project(project_id: str, request: DeployRequest = None):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"خطا در Deploy: {str(e)}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🆕 Pre-push audit — re-check generated files against the original goal
+# ─────────────────────────────────────────────────────────────────────────────
+# User explicitly asked for this: "وقتی پروژه ساخته میشه بتونم توسط مدل های
+# فعال حاضر دوباره بررسی بشن فایل ها و همه چیز و ساختار همه چیزش با هدف
+# ساخت تطبیق داده بشه و کلا یه بررسی مجدد اساسی انجام بشه ... قبل از اینکه
+# بفرستمش تو گیت هاب".
+# Each selected model independently audits the project. Findings are
+# aggregated so the user can see consensus issues vs single-model nitpicks.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class AuditProjectRequest(BaseModel):
+    """Optional override: which models perform the audit. If empty, uses
+    all currently active models (parity with the create flow)."""
+    model_ids: List[str] = []
+
+
+@router.post("/projects/{project_id}/audit")
+async def audit_project(
+    project_id: str, request: Optional[AuditProjectRequest] = None,
+):
+    """بررسی مجدد پروژهٔ ساخته‌شده توسط همهٔ مدل‌های فعال قبل از push به GitHub.
+
+    هر مدل به‌صورت مستقل پروژه را در برابر هدف اولیه audit می‌کند و
+    findings ها aggregate می‌شوند تا کاربر هم نظر هر مدل و هم اجماع را
+    ببیند.
+    """
+    creator = get_simple_creator()
+    project = creator.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    # Pick the audit models. If caller didn't specify, use all available.
+    from ...services.ai_manager import get_ai_manager
+    ai_manager = get_ai_manager()
+    available = ai_manager.get_available_models()
+    available_by_id = {m.id: m for m in available}
+    if request and request.model_ids:
+        audit_ids = [m for m in request.model_ids if m in available_by_id]
+        if not audit_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="هیچ‌کدام از model_ids درخواست‌شده فعال نیستند.",
+            )
+    else:
+        # Use all available models so user gets multi-perspective audit
+        audit_ids = [m.id for m in available]
+    if not audit_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="هیچ مدل AI فعالی برای audit نیست.",
+        )
+
+    # Build the audit prompt — original goal + generated structure.
+    # Cap each file body to keep prompt size sane (the audit doesn't need
+    # to re-read every line — just structure + key signals).
+    file_summaries: List[str] = []
+    for f in project.files[:80]:  # ceiling so 200-file projects don't blow up
+        body = (f.content or "")[:800]
+        file_summaries.append(
+            f"### `{f.path}` ({f.language or '?'})\n```\n{body}\n```"
+        )
+    file_text = "\n\n".join(file_summaries)
+
+    audit_prompt = f"""تو یک معمار نرم‌افزاری ارشد هستی. این پروژه به‌تازگی توسط AI ساخته شده. وظیفهٔ تو یک **audit مستقل** قبل از push به GitHub است.
+
+# هدف اولیهٔ کاربر
+نام پروژه: {project.name}
+نوع: {project.project_type}
+تکنولوژی‌ها: {', '.join(project.technologies or []) or '—'}
+
+توضیحات کاربر (هدف اصلی):
+{project.description}
+
+# ساختار خروجی AI
+دایرکتوری‌ها: {', '.join(project.structure.get('directories', []) or [])}
+نقطهٔ ورود: {project.structure.get('entry_point', '—')}
+دستور اجرا: {project.structure.get('run_command', '—')}
+
+# فایل‌های تولیدشده ({len(project.files)} فایل)
+{file_text}
+
+# وظیفهٔ تو
+1. بررسی کن آیا فایل‌ها و ساختار با **هدف اولیه** تطبیق دارد یا نه
+2. فایل‌های **مفقود حیاتی** را شناسایی کن (مثلاً اگر OSINT platform است ولی frontend ندارد، این bug است)
+3. مشکلات **ساختاری** را پیدا کن (مثلاً Dockerfile نداشتن، dependency گم‌شده)
+4. کیفیت کد را ارزیابی کن (production-ready vs scaffolding)
+5. اگر همه چیز خوب است صریحاً بگو
+
+خروجی فقط JSON با این فرمت:
+{{
+  "overall_score": 0-100,
+  "ready_to_push": true/false,
+  "missing_critical_files": ["frontend/src/app/page.tsx چون پروژه نیاز به UI دارد", ...],
+  "structural_issues": ["Dockerfile entry-point اشتباه است", ...],
+  "quality_concerns": ["فایل foo.py فقط placeholder است، منطق واقعی ندارد", ...],
+  "matches_goal": true/false,
+  "goal_mismatch_reasons": ["..."],
+  "suggestions_before_push": ["..."],
+  "summary": "یک پاراگراف نظر کلی"
+}}"""
+
+    # Run each model independently
+    results_per_model: List[Dict[str, Any]] = []
+    for mid in audit_ids:
+        try:
+            response_text = await ai_generate(audit_prompt, model_ids=[mid])
+            parsed = _extract_json(response_text) or {}
+            results_per_model.append({
+                "model_id": mid,
+                "ok": True,
+                "report": parsed,
+                "raw_response_excerpt": response_text[:600],
+            })
+        except Exception as e:
+            results_per_model.append({
+                "model_id": mid,
+                "ok": False,
+                "error": str(e)[:300],
+            })
+
+    # Aggregate: union of issues, average score, majority verdict on ready
+    successful = [r for r in results_per_model if r["ok"] and r.get("report")]
+    if not successful:
+        raise HTTPException(
+            status_code=500,
+            detail="هیچ مدلی نتوانست audit را تکمیل کند.",
+        )
+
+    def _collect(field: str) -> List[str]:
+        seen: List[str] = []
+        for r in successful:
+            for item in (r["report"].get(field) or []):
+                if isinstance(item, str) and item.strip() and item not in seen:
+                    seen.append(item.strip())
+        return seen
+
+    avg_score = round(
+        sum(int(r["report"].get("overall_score") or 0) for r in successful)
+        / len(successful)
+    )
+    ready_votes = sum(1 for r in successful if r["report"].get("ready_to_push"))
+    goal_match_votes = sum(
+        1 for r in successful if r["report"].get("matches_goal")
+    )
+
+    aggregated = {
+        "models_consulted": len(audit_ids),
+        "models_succeeded": len(successful),
+        "overall_score_avg": avg_score,
+        "ready_to_push_majority": ready_votes > len(successful) / 2,
+        "ready_to_push_votes": f"{ready_votes}/{len(successful)}",
+        "matches_goal_majority": goal_match_votes > len(successful) / 2,
+        "missing_critical_files": _collect("missing_critical_files"),
+        "structural_issues": _collect("structural_issues"),
+        "quality_concerns": _collect("quality_concerns"),
+        "goal_mismatch_reasons": _collect("goal_mismatch_reasons"),
+        "suggestions_before_push": _collect("suggestions_before_push"),
+    }
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "aggregated": aggregated,
+        "per_model": results_per_model,
+    }
 
 
 @router.get("/status")

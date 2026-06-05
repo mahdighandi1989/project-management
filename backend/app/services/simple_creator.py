@@ -235,12 +235,30 @@ class SimpleProjectCreator:
     ) -> Dict:
         """تولید ساختار پروژه با AI"""
 
+        # 📌 type-specific guidance — most important for "fullstack" so the
+        # AI doesn't generate only backend files (the user's repeated
+        # complaint: "OSINT platform got only backend, no frontend").
+        type_guidance = ""
+        if project_type in ("fullstack", "full-stack"):
+            type_guidance = (
+                "\n\n⚠️ این یک پروژهٔ **fullstack** است. ساختار خروجی **باید**\n"
+                "هر دو بخش `backend/` و `frontend/` را داشته باشد:\n"
+                "  - backend/ → FastAPI با api/routes، models، services، config،\n"
+                "    requirements.txt، Dockerfile\n"
+                "  - frontend/ → Next.js (App Router) با src/app/page.tsx،\n"
+                "    src/components/، src/lib/api.ts (برای call کردن backend)،\n"
+                "    package.json، tsconfig.json، Dockerfile\n"
+                "  - root → README.md، docker-compose.yml\n"
+                "بدون فایل‌های frontend پروژه ناقص است — حتماً صفحات UI لازم\n"
+                "برای feature های توصیف‌شده را در src/app/ ایجاد کن.\n"
+            )
+
         prompt = f"""یک پروژه {project_type} با مشخصات زیر طراحی کن:
 
 نام: {name}
 توضیحات: {description}
 تکنولوژی‌ها: {', '.join(technologies or [])}
-
+{type_guidance}
 خروجی باید JSON باشه با این فرمت:
 {{
     "directories": ["src", "tests", "config"],
@@ -503,8 +521,51 @@ class SimpleProjectCreator:
                 "entry_point": "src/App.tsx",
                 "run_command": "npm start"
             },
+            # 🆕 (full-stack default) — برای پروژه‌هایی که هم backend هم
+            # frontend می‌خواهند (مثل OSINT platform، dashboard، CRM, …).
+            # قبلاً وقتی auto detect نوع را "fullstack" برمی‌گرداند، چون این
+            # کلید نبود به python fallback می‌شد و فقط backend ساخته می‌شد.
+            "fullstack": {
+                "directories": [
+                    "backend", "backend/app", "backend/app/api",
+                    "backend/app/api/routes", "backend/app/models",
+                    "backend/app/services", "backend/app/core", "backend/tests",
+                    "frontend", "frontend/src", "frontend/src/app",
+                    "frontend/src/components", "frontend/src/lib",
+                    "frontend/public",
+                ],
+                "files": [
+                    # Backend (FastAPI)
+                    {"path": "backend/app/main.py", "description": "FastAPI entry"},
+                    {"path": "backend/app/api/routes/__init__.py", "description": "routes pkg"},
+                    {"path": "backend/app/api/routes/health.py", "description": "health check"},
+                    {"path": "backend/app/models/schemas.py", "description": "Pydantic schemas"},
+                    {"path": "backend/app/services/__init__.py", "description": "services pkg"},
+                    {"path": "backend/app/core/config.py", "description": "settings"},
+                    {"path": "backend/requirements.txt", "description": "Python deps"},
+                    {"path": "backend/Dockerfile", "description": "Docker for API"},
+                    # Frontend (Next.js)
+                    {"path": "frontend/src/app/page.tsx", "description": "home page"},
+                    {"path": "frontend/src/app/layout.tsx", "description": "root layout"},
+                    {"path": "frontend/src/components/Header.tsx", "description": "header"},
+                    {"path": "frontend/src/lib/api.ts", "description": "API client"},
+                    {"path": "frontend/package.json", "description": "Node deps"},
+                    {"path": "frontend/tsconfig.json", "description": "TypeScript config"},
+                    {"path": "frontend/Dockerfile", "description": "Docker for UI"},
+                    # Root
+                    {"path": "README.md", "description": "project docs"},
+                    {"path": "docker-compose.yml", "description": "orchestration"},
+                ],
+                "entry_point": "backend/app/main.py",
+                "run_command": (
+                    "docker compose up  # یا backend: uvicorn app.main:app, "
+                    "frontend: npm run dev"
+                ),
+            },
         }
-
+        # Accept hyphen alias too
+        if project_type == "full-stack":
+            project_type = "fullstack"
         return structures.get(project_type, structures["python"])
 
     def _detect_language(self, file_path: str) -> str:
