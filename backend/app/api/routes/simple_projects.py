@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
+import asyncio
 import os
 import json
 import base64
@@ -390,9 +391,14 @@ async def create_project(request: CreateProjectRequest):
                 # the user to delete unused files than to have to add
                 # missing frontend manually.
                 project_type = "fullstack"
-        # Normalize aliases that the AI might emit
-        if project_type == "full-stack":
-            project_type = "fullstack"
+
+    # 🆕 Normalize the hyphen alias REGARDLESS of how project_type got set:
+    # AI detect might emit "full-stack", user form might post "full-stack",
+    # or some legacy code path. Single canonical form: "fullstack".
+    # (Was previously inside the auto-detect branch — missed the case
+    # where the user supplies the hyphen form explicitly.)
+    if project_type == "full-stack":
+        project_type = "fullstack"
 
     # closure برای ai_generate که model_ids را capture می‌کند
     async def gen(prompt: str) -> str:
@@ -871,6 +877,10 @@ async def audit_project(
     findings ها aggregate می‌شوند تا کاربر هم نظر هر مدل و هم اجماع را
     ببیند.
     """
+    # 🐛 (audit-pass fix) — get_simple_creator wasn't imported at module
+    # level; every other route does the same lazy import. Without this,
+    # the audit endpoint crashed with NameError on first call.
+    from ...services.simple_creator import get_simple_creator
     creator = get_simple_creator()
     project = creator.get_project(project_id)
     if not project:
@@ -946,48 +956,106 @@ async def audit_project(
   "summary": "یک پاراگراف نظر کلی"
 }}"""
 
-    # Run each model independently
-    results_per_model: List[Dict[str, Any]] = []
-    for mid in audit_ids:
+    # Helper: coerce whatever the AI gave us into a usable dict.
+    # _extract_json can return None or a non-dict (if AI emitted an array
+    # at the top level). Defensive coercion so the aggregation step
+    # below doesn't crash on `.get()` against a list.
+    def _to_report_dict(raw) -> Dict[str, Any]:
+        parsed = _extract_json(raw) if raw else None
+        return parsed if isinstance(parsed, dict) else {}
+
+    # Helper: parse a score that might be "85", "85/100", "85.5", or "high"
+    # into 0-100 int. Returns 0 on unparseable input — keeps the average
+    # math going without crashing.
+    def _coerce_score(v) -> int:
+        if isinstance(v, bool):  # bool is a subclass of int, exclude first
+            return 0
+        if isinstance(v, (int, float)):
+            try:
+                return max(0, min(100, int(v)))
+            except (ValueError, TypeError):
+                return 0
+        if isinstance(v, str):
+            import re as _re
+            m = _re.search(r"-?\d+(?:\.\d+)?", v)
+            if m:
+                try:
+                    return max(0, min(100, int(float(m.group(0)))))
+                except (ValueError, TypeError):
+                    return 0
+        return 0
+
+    # Run all models in parallel — sequential would take 30s × N models
+    # which exceeds Render's gateway timeout (~100s) for any N > 3.
+    # asyncio.gather with return_exceptions=True so a single slow/failing
+    # model doesn't kill the whole audit.
+    async def _audit_one(mid: str) -> Dict[str, Any]:
         try:
             response_text = await ai_generate(audit_prompt, model_ids=[mid])
-            parsed = _extract_json(response_text) or {}
-            results_per_model.append({
+            return {
                 "model_id": mid,
                 "ok": True,
-                "report": parsed,
-                "raw_response_excerpt": response_text[:600],
-            })
+                "report": _to_report_dict(response_text),
+                "raw_response_excerpt": (response_text or "")[:600],
+            }
         except Exception as e:
-            results_per_model.append({
+            return {
                 "model_id": mid,
                 "ok": False,
                 "error": str(e)[:300],
-            })
+            }
 
-    # Aggregate: union of issues, average score, majority verdict on ready
-    successful = [r for r in results_per_model if r["ok"] and r.get("report")]
+    raw_results = await asyncio.gather(
+        *[_audit_one(mid) for mid in audit_ids],
+        return_exceptions=True,
+    )
+    results_per_model: List[Dict[str, Any]] = []
+    for mid, res in zip(audit_ids, raw_results):
+        if isinstance(res, Exception):
+            results_per_model.append({
+                "model_id": mid,
+                "ok": False,
+                "error": str(res)[:300],
+            })
+        else:
+            results_per_model.append(res)
+
+    # Aggregate: union of issues, average score, majority verdict on ready.
+    # A model is "successful" only if it returned a non-empty dict report.
+    successful = [
+        r for r in results_per_model
+        if r["ok"] and isinstance(r.get("report"), dict) and r["report"]
+    ]
     if not successful:
         raise HTTPException(
             status_code=500,
-            detail="هیچ مدلی نتوانست audit را تکمیل کند.",
+            detail="هیچ مدلی نتوانست audit را به JSON قابل تجزیه برساند.",
         )
 
     def _collect(field: str) -> List[str]:
         seen: List[str] = []
         for r in successful:
-            for item in (r["report"].get(field) or []):
-                if isinstance(item, str) and item.strip() and item not in seen:
-                    seen.append(item.strip())
+            raw_list = r["report"].get(field) or []
+            if not isinstance(raw_list, list):
+                continue
+            for item in raw_list:
+                text = item if isinstance(item, str) else (
+                    str(item) if item is not None else ""
+                )
+                text = text.strip()
+                if text and text not in seen:
+                    seen.append(text)
         return seen
 
     avg_score = round(
-        sum(int(r["report"].get("overall_score") or 0) for r in successful)
+        sum(_coerce_score(r["report"].get("overall_score")) for r in successful)
         / len(successful)
     )
-    ready_votes = sum(1 for r in successful if r["report"].get("ready_to_push"))
+    ready_votes = sum(
+        1 for r in successful if bool(r["report"].get("ready_to_push"))
+    )
     goal_match_votes = sum(
-        1 for r in successful if r["report"].get("matches_goal")
+        1 for r in successful if bool(r["report"].get("matches_goal"))
     )
 
     aggregated = {

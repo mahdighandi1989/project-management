@@ -264,6 +264,251 @@ def test_valid_types_includes_fullstack():
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Issue 2 end-to-end: audit endpoint executes without crashing on edge cases
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _make_fake_project(monkeypatch):
+    """Stash a fake project in the singleton creator's in-memory dict."""
+    from app.services.simple_creator import get_simple_creator, Project, ProjectFile
+    creator = get_simple_creator()
+    proj = Project(
+        id="proj_audit_test_123",
+        name="TestApp",
+        description="A test project for auditing.",
+        project_type="fullstack",
+        technologies=["FastAPI", "Next.js"],
+        status="created",
+        files=[
+            ProjectFile(
+                path="backend/app/main.py",
+                content="from fastapi import FastAPI\napp = FastAPI()\n",
+                language="python",
+            ),
+            ProjectFile(
+                path="frontend/src/app/page.tsx",
+                content="export default function Page() { return <div/>; }",
+                language="typescript",
+            ),
+        ],
+        structure={
+            "directories": ["backend", "frontend"],
+            "entry_point": "backend/app/main.py",
+            "run_command": "docker compose up",
+        },
+    )
+    creator.projects[proj.id] = proj
+    return proj
+
+
+@pytest.mark.asyncio
+async def test_audit_endpoint_handles_well_formed_json_responses(monkeypatch):
+    """The happy path: each model returns valid JSON. Endpoint should
+    aggregate cleanly and return the expected response shape."""
+    from app.api.routes.simple_projects import audit_project, AuditProjectRequest
+    from app.services.simple_creator import Project, ProjectFile
+
+    proj = _make_fake_project(monkeypatch)
+
+    async def fake_ai_generate(prompt, model_ids=None):
+        return (
+            '{"overall_score": 85, "ready_to_push": true, '
+            '"matches_goal": true, '
+            '"missing_critical_files": ["docker-compose.yml"], '
+            '"structural_issues": [], "quality_concerns": [], '
+            '"goal_mismatch_reasons": [], '
+            '"suggestions_before_push": ["add CI"], '
+            '"summary": "Solid."}'
+        )
+
+    class _FakeModel:
+        def __init__(self, mid): self.id = mid
+
+    class _FakeMgr:
+        def get_available_models(self, task_type=None):
+            return [_FakeModel("m1"), _FakeModel("m2")]
+
+    with patch(
+        "app.services.ai_manager.get_ai_manager",
+        return_value=_FakeMgr(),
+    ), patch(
+        "app.api.routes.simple_projects.ai_generate",
+        side_effect=fake_ai_generate,
+    ):
+        result = await audit_project(proj.id, AuditProjectRequest(model_ids=[]))
+
+    assert result["success"] is True
+    assert result["aggregated"]["models_succeeded"] == 2
+    assert result["aggregated"]["overall_score_avg"] == 85
+    assert result["aggregated"]["ready_to_push_majority"] is True
+    assert "docker-compose.yml" in result["aggregated"]["missing_critical_files"]
+
+
+@pytest.mark.asyncio
+async def test_audit_endpoint_survives_string_score_and_list_response(monkeypatch):
+    """🚨 Edge cases the previous version would CRASH on:
+      - score returned as '85/100' string → int() raised
+      - AI returns a JSON list at top level instead of dict → .get() raised
+      - score field is missing entirely → None × 0 raised TypeError
+
+    Defensive coercion must keep the endpoint working."""
+    from app.api.routes.simple_projects import audit_project, AuditProjectRequest
+
+    proj = _make_fake_project(monkeypatch)
+
+    call_count = {"n": 0}
+
+    async def fake_ai_generate(prompt, model_ids=None):
+        call_count["n"] += 1
+        # Model 1: score as fraction string + missing some keys
+        if call_count["n"] == 1:
+            return (
+                '{"overall_score": "85/100", "ready_to_push": true, '
+                '"missing_critical_files": ["x"]}'
+            )
+        # Model 2: AI emitted a list at top level (bad model behavior)
+        if call_count["n"] == 2:
+            return '[{"this": "is an array"}]'
+        # Model 3: score missing, lists of non-strings
+        return (
+            '{"matches_goal": false, '
+            '"structural_issues": [42, null, "real string"], '
+            '"summary": "..."}'
+        )
+
+    class _FakeModel:
+        def __init__(self, mid): self.id = mid
+
+    class _FakeMgr:
+        def get_available_models(self, task_type=None):
+            return [_FakeModel("m1"), _FakeModel("m2"), _FakeModel("m3")]
+
+    with patch(
+        "app.services.ai_manager.get_ai_manager",
+        return_value=_FakeMgr(),
+    ), patch(
+        "app.api.routes.simple_projects.ai_generate",
+        side_effect=fake_ai_generate,
+    ):
+        result = await audit_project(proj.id, AuditProjectRequest(model_ids=[]))
+
+    # Must NOT have crashed
+    assert result["success"] is True
+    # Model 1 gave 85 (parsed from "85/100"), Model 3 gave 0 (missing),
+    # Model 2's list response was skipped as non-dict → not counted
+    assert result["aggregated"]["models_succeeded"] == 2
+    # avg = (85 + 0) / 2 = 42-43
+    assert 40 <= result["aggregated"]["overall_score_avg"] <= 45
+    # The string item in structural_issues must survive; non-strings filtered
+    assert "real string" in result["aggregated"]["structural_issues"]
+    # Non-strings shouldn't appear as literal "42" only if we coerced ok
+    # (the defensive code keeps str-coerced numbers; both behaviors fine,
+    # but it must NOT have crashed)
+
+
+@pytest.mark.asyncio
+async def test_audit_endpoint_runs_models_in_parallel():
+    """🚨 Sequential audit would take >100s for 5 models which exceeds
+    Render's gateway timeout. The endpoint must use asyncio.gather so
+    all model calls happen concurrently."""
+    import asyncio as _asyncio
+    import time
+    from app.api.routes.simple_projects import audit_project, AuditProjectRequest
+    from app.services.simple_creator import get_simple_creator, Project, ProjectFile
+
+    proj = Project(
+        id="proj_parallel_test_999",
+        name="ParTest",
+        description="parallel audit test",
+        project_type="fullstack",
+        files=[ProjectFile(path="a.py", content="x", language="python")],
+    )
+    creator = get_simple_creator()
+    creator.projects[proj.id] = proj
+
+    async def slow_ai_generate(prompt, model_ids=None):
+        await _asyncio.sleep(0.5)  # each call takes 0.5s
+        return '{"overall_score": 70, "ready_to_push": true}'
+
+    class _FakeModel:
+        def __init__(self, mid): self.id = mid
+
+    class _FakeMgr:
+        def get_available_models(self, task_type=None):
+            return [_FakeModel(f"m{i}") for i in range(5)]
+
+    started = time.time()
+    with patch(
+        "app.services.ai_manager.get_ai_manager",
+        return_value=_FakeMgr(),
+    ), patch(
+        "app.api.routes.simple_projects.ai_generate",
+        new=slow_ai_generate,
+    ):
+        result = await audit_project(proj.id, AuditProjectRequest(model_ids=[]))
+    elapsed = time.time() - started
+
+    assert result["aggregated"]["models_succeeded"] == 5
+    # Sequential: 5 × 0.5s = 2.5s+. Parallel: ~0.5s + overhead.
+    # Allow some slack but enforce < 1.5s (clearly parallel).
+    assert elapsed < 1.5, (
+        f"audit took {elapsed:.2f}s for 5 models × 0.5s — must be parallel "
+        f"(asyncio.gather), not sequential, or Render gateway times out"
+    )
+
+
+@pytest.mark.asyncio
+async def test_audit_endpoint_404_on_unknown_project():
+    """If project doesn't exist, must return 404 — not 500 or crash."""
+    from app.api.routes.simple_projects import audit_project, AuditProjectRequest
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as ei:
+        await audit_project(
+            "proj_does_not_exist_xyz",
+            AuditProjectRequest(model_ids=[]),
+        )
+    assert ei.value.status_code == 404
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hyphen alias normalization at the create-route level (not only detect)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_full_stack_hyphen_normalization_works_without_auto_detect():
+    """🚨 Bug found during audit pass: the 'full-stack' → 'fullstack'
+    normalization was INSIDE the auto-detect branch. If a user posted
+    project_type='full-stack' with auto_detect_type=False, the
+    normalization never ran and the structure lookup fell to python.
+    Source check: the normalization must be OUTSIDE that branch."""
+    src = (
+        _BACKEND_ROOT / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    # Find the normalization line
+    idx = src.find('if project_type == "full-stack"')
+    assert idx != -1
+    # Walk back to find the enclosing `if request.auto_detect_type`
+    before = src[:idx]
+    block_start = before.rfind("if request.auto_detect_type")
+    assert block_start != -1
+    # Count indent of both blocks
+    block_indent = len(src[block_start:].split("\n")[0]) - len(
+        src[block_start:].split("\n")[0].lstrip()
+    )
+    norm_indent = len(src[idx:].split("\n")[0]) - len(
+        src[idx:].split("\n")[0].lstrip()
+    )
+    # Normalization indent must be <= block indent (i.e., not deeper into
+    # the auto-detect branch).
+    assert norm_indent <= block_indent, (
+        "the full-stack→fullstack normalization must NOT be nested inside "
+        "the `if request.auto_detect_type` branch — otherwise users posting "
+        "project_type='full-stack' directly bypass it"
+    )
+
+
 def test_structure_prompt_demands_both_halves_for_fullstack():
     """When project_type=fullstack, the structure-generation prompt
     must explicitly REQUIRE both backend/ and frontend/ — otherwise
