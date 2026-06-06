@@ -1071,19 +1071,37 @@ async def audit_project(
 {file_text}
 
 # وظیفهٔ تو
-1. بررسی کن آیا فایل‌ها و ساختار با **هدف اولیه** تطبیق دارد یا نه
-2. فایل‌های **مفقود حیاتی** را شناسایی کن (مثلاً اگر OSINT platform است ولی frontend ندارد، این bug است)
-3. فایل‌های **اشتباه/زائد** را شناسایی کن (فایل‌هایی که وجود دارند ولی نباید باشند — مثلاً اگر پروژه CLI است ولی فایل web view ساخته شده، یا duplicate)
-4. فایل‌های موجود را که **محتوای نادرست** دارند شناسایی کن (مثلاً main.py فقط `pass` دارد، یا route ای که توضیحات می‌گفت لازم است ولی schema غلط دارد، یا dependency ای که در requirements.txt مفقود است)
-5. مشکلات **ساختاری** را پیدا کن (مثلاً Dockerfile entry-point اشتباه، dependency گم‌شده)
-6. کیفیت کد را ارزیابی کن (production-ready vs scaffolding)
-7. اگر همه چیز خوب است صریحاً بگو
 
-⚠️ **نکات مهم برای دقت بیشتر:**
-- اگر یک فایل با `[TRUNCATED]` نشان داده شد، نتیجه‌گیری «محتوا کم است» **ممنوع** است — فقط بر اساس بخش نمایش‌داده‌شده قضاوت کن، یا اگر نمی‌توانی، در `files_to_modify` نیار.
-- قبل از flag کردن یک فایل به‌عنوان "stub" یا "ناقص"، حتماً مطمئن شو که محتوای واقعی را دیده‌ای، نه فقط prefix.
-- اگر تاریخچه نشان می‌دهد فایلی قبلاً apply شده، دوباره مرور کن که آیا واقعاً مشکل برطرف شده. اگر هنوز مشکل دارد، **regression** بنویس نه issue جدید.
-- `overall_score` باید نسبت به audit قبلی منطقی باشد. اگر apply اجرا شد و چیزی بهبود یافت ولی تو امتیاز کمتر می‌دهی، در `summary` دلیل دقیق بنویس.
+تو در یک **حلقه‌ی iterative** کار می‌کنی. کاربر هر بار audit می‌زند، apply می‌کند، دوباره audit. اگر تو هر بار چیز جدیدی پیدا کنی، کاربر در حلقه‌ی بی‌پایان می‌افتد. **هدف اصلی این است که این حلقه را قطع کنی** — فقط مشکلات **واقعاً blocking** را گزارش کن.
+
+## ✅ چه چیزی **باید** flag بشود (و فقط همین‌ها):
+1. فایل **مفقود حیاتی** که بدون آن پروژه run نمی‌شود یا قابلیت اصلی هدف کار نمی‌کند
+2. فایل با **syntax error / import error** که run را می‌شکند
+3. فایل که **placeholder خام** است (مثل `# TODO` یا `pass` به‌تنهایی)
+4. **dependency حیاتی** که در requirements/package.json نیست ولی import شده
+5. **contract mismatch** آشکار بین فایل‌ها (مثل endpoint frontend → backend که وجود ندارد)
+
+## ❌ چه چیزی **نباید** flag بشود (مهم! این‌ها باعث حلقهٔ بی‌پایان می‌شوند):
+- "می‌تواند کامل‌تر/بهتر/جامع‌تر باشد" — این subjective است
+- "محتوای فایل کوتاه است" — اگر کار می‌کند، کافی است
+- "کلاس X می‌تواند فیلدهای بیشتری داشته باشد" — اگر کاربر چیز خاصی نخواسته، فعلی کافی است
+- "ممکن است در production مشکل ایجاد کند" — مگر اینکه قطعی باشد
+- "بهتر است error handling قوی‌تری اضافه شود" — نه مگر اینکه فاجعه‌بار باشد
+- موارد stylistic، naming، code formatting
+
+## 🎯 درجهٔ سختگیری امتیاز
+- **80-100**: کار می‌کند و هدف کاربر را برآورده می‌کند. مشکل blocking ندارد → **ready_to_push = true**
+- **60-79**: کار می‌کند ولی یک یا دو فایل واقعاً ناقص است
+- **40-59**: مشکل واقعی دارد (run نمی‌شود یا قابلیت اصلی غایب)
+- **0-39**: پروژه خراب است
+
+**اگر بین دو امتیاز شک داری، امتیاز بالاتر را بده.** سختگیری بی‌مورد = حلقهٔ بی‌پایان.
+
+## ⚠️ نکات مهم
+- اگر یک فایل با `[TRUNCATED]` نشان داده شد، **هرگز** آن را به‌عنوان «ناقص» flag نکن. فقط محتوای ظاهر شده را بخوان.
+- اگر تاریخچه نشان می‌دهد فایلی **همین الان** apply شده، آن را در `files_to_modify` نیار مگر اینکه واقعاً broken باشد.
+- اگر تاریخچه نشان می‌دهد که قبلاً همان issue را flag کرده‌ای و apply شده، **مجدداً flag نکن** — مدل ممکن است متفاوت اجرا کرده باشد، ولی اگر کار می‌کند، رهایش کن.
+- اگر امتیاز قبلی بالای ۷۵ بود، **نباید** الان زیر ۷۵ بدهی مگر اینکه فاجعهٔ آشکاری رخ داده.
 
 📌 برای هر فایلی که محتوایش نیاز به اصلاح دارد، در `files_to_modify` با path دقیق + توضیح *آنچه که اشتباه است* + پیشنهاد *چه باید بشود* مشخص کن. کاربر می‌تواند per-file انتخاب کند کدام را regenerate کنیم.
 
@@ -1297,6 +1315,55 @@ async def audit_project(
                 f"بخوان و در صورت تردید با مدل‌های متفاوت دوباره audit کن."
             )
 
+    # 🆕 (oscillation / convergence detection) — user reported screen
+    # of audit→apply→audit→apply cycle where scores oscillated 58→62→58
+    # and modify_count grew 15→16→19. The audit kept finding "new"
+    # issues because no concrete bar for "done" existed.
+    #
+    # Detect this: look at the last 3 audit events. If their scores are
+    # within ±5 of each other and modify_count is similar, the user is
+    # stuck. Emit a convergence_notice telling them the project is
+    # probably good enough and further auditing won't help.
+    convergence_notice = None
+    recent_audits = [
+        ev for ev in (project.audit_history or [])
+        if ev.get("kind") == "audit"
+    ][-3:]
+    if len(recent_audits) >= 2:
+        # include the current audit's score in the comparison
+        recent_scores = [
+            ev.get("overall_score") or 0 for ev in recent_audits
+        ] + [avg_score]
+        recent_mod_counts = [
+            ev.get("modify_count") or 0 for ev in recent_audits
+        ] + [len(modify_collected)]
+        score_range = max(recent_scores) - min(recent_scores)
+        mod_range = max(recent_mod_counts) - min(recent_mod_counts)
+        # All scores within ±5, modify counts within ±5, and at least
+        # one apply happened between them → we're oscillating.
+        applies_between = sum(
+            1 for ev in (project.audit_history or [])
+            if ev.get("kind") == "apply"
+            and ev.get("run_at", "") >= (recent_audits[0].get("run_at") or "")
+        )
+        if (
+            score_range <= 5
+            and mod_range <= 5
+            and applies_between >= 1
+            and avg_score >= 50
+        ):
+            convergence_notice = (
+                f"🎯 **پروژه به همگرایی رسیده.** ۳ audit آخر امتیاز "
+                f"{recent_scores[0]}-{recent_scores[-1]} داده و تعداد "
+                f"اصلاحات بین {min(recent_mod_counts)} تا "
+                f"{max(recent_mod_counts)} نوسان دارد. این یعنی AI هر "
+                f"بار چیز جدیدی پیدا می‌کند ولی پروژه واقعاً بهبود ندارد "
+                f"— احتمالاً به کیفیت قابل قبول رسیده و audit بیشتر فقط "
+                f"نظر شخصی مدل را اضافه می‌کند. می‌توانی push کنی، یا "
+                f"چند issue واقعاً مهم را دستی انتخاب کنی و بقیه را "
+                f"نادیده بگیری."
+            )
+
     # Pull a representative summary from the highest-scoring model so the
     # history entry stays informative without storing per-model raw text.
     rep = max(
@@ -1323,7 +1390,8 @@ async def audit_project(
         "quality_concerns": _collect("quality_concerns"),
         "goal_mismatch_reasons": _collect("goal_mismatch_reasons"),
         "suggestions_before_push": _collect("suggestions_before_push"),
-        # 🆕 regression context for the UI
+        # 🆕 regression + convergence context for the UI
+        "convergence_notice": convergence_notice,
         "previous_score": previous_audit.get("overall_score") if previous_audit else None,
         "score_delta": (
             avg_score - (previous_audit.get("overall_score") or 0)

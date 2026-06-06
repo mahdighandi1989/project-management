@@ -850,6 +850,22 @@ export default function ProjectPage() {
                     </div>
                   )}
 
+                  {/* 🆕 (convergence notice) — وقتی ۳ audit اخیر نوسان دارند
+                      و amount کلی issue ها مشابه است، یعنی پروژه به یک
+                      «کیفیت قابل قبول» رسیده و audit بیشتر فقط نظر شخصی
+                      مدل را اضافه می‌کند. این پیام سبز به کاربر می‌گوید
+                      حلقهٔ بی‌پایان نیافتند، آماده push است. */}
+                  {auditResult.aggregated.convergence_notice && (
+                    <div className="bg-green-500/15 border border-green-500/40 rounded-lg p-4">
+                      <h4 className="font-bold text-green-300 mb-1 flex items-center gap-2">
+                        🎯 پروژه آماده‌ی push است
+                      </h4>
+                      <p className="text-sm text-green-100 leading-relaxed whitespace-pre-line">
+                        {auditResult.aggregated.convergence_notice}
+                      </p>
+                    </div>
+                  )}
+
                   {/* 🆕 (audit history) — نشان دادن چند audit/apply اخیر
                       تا کاربر روند را ببیند (افزایش/کاهش امتیاز در طول
                       چند iteration) و metric های مهم را tracking کند. */}
