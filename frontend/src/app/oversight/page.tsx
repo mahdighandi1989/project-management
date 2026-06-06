@@ -2234,6 +2234,12 @@ export default function OversightPage() {
             focus_notes: (referenceFocusNotes[id] || '').trim(),
           };
         });
+      // 🚨 (Render edge timeout fix) — وقتی attachments یا reference projects
+      // هست، کار بیش از 100s طول می‌کشد و Render edge connection را می‌بندد
+      // (403 خام). با async_mode=true، backend بلافاصله track_id برمی‌گرداند
+      // و کار را در background ادامه می‌دهد؛ ما همان progress endpoint را
+      // poll می‌کنیم تا completed شود، سپس result را از همان snapshot برمی‌داریم.
+      const wantAsync = validSessionIds.length > 0 || refPayload.length > 0;
       const res = await fetch(`${API_BASE}/api/oversight/tasks/from-idea`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2246,16 +2252,65 @@ export default function OversightPage() {
           model_ids: selectedModelIds.length > 1 ? selectedModelIds : undefined,
           multi_pass_mode: effectiveMultiPassMode,
           upload_session_ids: validSessionIds.length ? validSessionIds : undefined,
-          progress_track_id: validSessionIds.length ? taskDraftId : undefined,
+          progress_track_id: wantAsync ? taskDraftId : undefined,
           selected_projects: refPayload.length ? refPayload : undefined,
+          async_mode: wantAsync,
         }),
       });
       if (pollInterval) {
         clearInterval(pollInterval);
         pollInterval = null;
       }
+      let data: any = null;
       if (res.ok) {
-        const data = await res.json();
+        const initial = await res.json();
+        if (initial?.async && initial?.track_id) {
+          // Poll progress endpoint until completed=true
+          setGenPhase('در حال پردازش (در پس‌زمینه)...');
+          const pollOnce = async (): Promise<any> => {
+            const pr = await fetch(`${API_BASE}/api/oversight/progress/${initial.track_id}`);
+            if (!pr.ok) throw new Error(`HTTP ${pr.status}`);
+            return pr.json();
+          };
+          // up to 5 minutes
+          const maxAttempts = 150;
+          for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            await new Promise((r) => setTimeout(r, 2000));
+            const snap = await pollOnce();
+            if (snap?.found) {
+              if (snap.detail) setGenPhase(`${snap.stage || ''}: ${snap.detail}`);
+              if (typeof snap.percent === 'number') {
+                setGenPct(Math.max(8, Math.min(99, snap.percent)));
+              }
+              if (snap.completed) {
+                if (snap.error) {
+                  // Blocked-vision-model is surfaced as result.blocked_payload
+                  const bp = snap.result?.blocked_payload;
+                  if (bp) {
+                    setModelBlockModal({
+                      candidates: bp.candidates || [],
+                      mime_type: bp.mime_type,
+                      session_id: bp.session_id,
+                    });
+                    return;
+                  }
+                  showError(snap.error || 'خطا در تولید پرامپت');
+                  return;
+                }
+                data = snap.result;
+                break;
+              }
+            }
+          }
+          if (!data) {
+            showError('زمان پردازش بیش از حد طول کشید — لطفاً دوباره تلاش کنید');
+            return;
+          }
+        } else {
+          data = initial;
+        }
+      }
+      if (data) {
         setPreviewPrompt({
           title: data.title,
           prompt: data.prompt,
