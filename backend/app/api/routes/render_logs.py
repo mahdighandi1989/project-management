@@ -8404,14 +8404,64 @@ async def _ai_analyze_repo_only(
 
     # ── 2. خواندن فایل‌های کلیدی ──
     files_content_parts = []
+    # 2a) لیست hardcoded
+    tried_paths: set = set()
     for file_path in _KEY_FILES_TO_READ:
+        tried_paths.add(file_path)
         content = await _read_github_file(owner, repo, file_path, branch, github_token)
         if content:
             truncated = content[:3000] if len(content) > 3000 else content
             files_content_parts.append(f"### 📄 {file_path}\n```\n{truncated}\n```")
 
+    # 2b) 🆕 (creator parity fix) — اگر هیچ key file پیدا نشد ولی tree
+    # شامل فایل‌هایی است، فایل‌های deploy-relevant را پویا پیدا کن.
+    # creator engine گاهی پروژه‌هایی می‌سازد که فقط __init__.py + main.py
+    # دارند بدون requirements.txt یا package.json. در آن حالت AI باید
+    # حداقل از روی ساختار + محتوای main.py تشخیص دهد چه stack ای است.
+    if not files_content_parts and dir_structure:
+        # هر فایل کوچک در root یا تا عمق ۲ که الگوی deploy-relevant دارد
+        _patterns_of_interest = (
+            "main.py", "app.py", "server.py", "index.js", "index.ts",
+            "server.js", "server.ts", "manage.py", "wsgi.py", "asgi.py",
+        )
+        _extensions_root = (".py", ".js", ".ts", ".json", ".toml", ".yaml", ".yml")
+        for path in dir_structure[:200]:
+            if path in tried_paths:
+                continue
+            # فقط فایل (نه دایرکتوری)؛ tree از GitHub فقط paths می‌دهد، ولی
+            # دایرکتوری‌ها هم در آن هستند — heuristic: شامل "." باشد یا
+            # یکی از pattern های شناخته
+            base = path.rsplit("/", 1)[-1].lower()
+            depth = path.count("/")
+            is_root_or_one_level = depth <= 1
+            is_match = (
+                base in _patterns_of_interest
+                or (
+                    is_root_or_one_level
+                    and any(base.endswith(e) for e in _extensions_root)
+                )
+            )
+            if not is_match:
+                continue
+            content = await _read_github_file(owner, repo, path, branch, github_token)
+            if content:
+                truncated = content[:1500] if len(content) > 1500 else content
+                files_content_parts.append(f"### 📄 {path}\n```\n{truncated}\n```")
+                if len(files_content_parts) >= 10:
+                    break  # سقف برای جلوگیری از پرامپت غول‌پیکر
+
+    # 2c) 🆕 (creator parity fix) — حتی اگر هیچ فایل reading نشد، اگر
+    # tree موجود است AI می‌تواند فقط از روی نام‌ پوشه‌ها (backend/,
+    # frontend/, ...) تصمیم بگیرد. در آن حالت یک placeholder بفرست.
     if not files_content_parts:
-        return {"services": [], "analysis": "هیچ فایل قابل شناسایی‌ای پیدا نشد. ریپو خالی است یا دسترسی وجود ندارد."}
+        if dir_structure:
+            files_content_parts.append(
+                "### ℹ️ ساختار repo (فایل‌های محتوای قابل پارس پیدا نشد)\n"
+                "```\n" + "\n".join(dir_structure[:100]) + "\n```\n"
+                "تصمیم سرویس‌ها را فقط بر اساس این ساختار بگیر."
+            )
+        else:
+            return {"services": [], "analysis": "هیچ فایل قابل شناسایی‌ای پیدا نشد. ریپو خالی است یا دسترسی وجود ندارد."}
 
     files_content = "\n\n".join(files_content_parts)
     dir_str = "\n".join(dir_structure[:200]) if dir_structure else "(ساختار دایرکتوری در دسترس نیست)"
