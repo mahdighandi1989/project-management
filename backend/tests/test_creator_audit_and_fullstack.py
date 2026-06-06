@@ -1840,9 +1840,9 @@ def test_audit_aggregated_exposes_regression_signals():
         _BACKEND_ROOT / "app/api/routes/simple_projects.py"
     ).read_text(encoding="utf-8")
     idx = src.find("async def audit_project")
-    # Window covers the whole audit handler — regression block sits
-    # near the end in the aggregation section.
-    body = src[idx:idx + 20000]
+    # Window widened to 24000 after convergence_notice block was added
+    # between regression detection and history persistence.
+    body = src[idx:idx + 24000]
     assert "regression_warning" in body
     assert "score_delta" in body
     assert "previous_score" in body
@@ -1857,7 +1857,8 @@ def test_audit_appends_to_history_and_persists():
     ).read_text(encoding="utf-8")
     idx = src.find("async def audit_project")
     # History append + meta-save live near the end of the function.
-    body = src[idx:idx + 20000]
+    # Widened to 25000 after convergence_notice block was added.
+    body = src[idx:idx + 25000]
     assert "project.audit_history.append" in body
     # 20-entry cap so meta files stay small
     assert "audit_history[-20:]" in body
@@ -1915,3 +1916,60 @@ def test_frontend_project_page_renders_audit_history():
     ).read_text(encoding="utf-8")
     assert "audit_history" in src
     assert "تاریخچه" in src and ("audit" in src or "apply" in src)
+
+
+def test_audit_exposes_convergence_notice():
+    """User reported audit→apply→audit cycle with oscillating scores
+    (58→62→58, modify count growing 15→16→19). When recent 3 audits
+    show scores within ±5 and similar modify counts, backend must emit
+    a convergence_notice so the frontend can show a green 'project is
+    good enough — stop iterating' banner. Without this, the user is
+    stuck in an infinite cycle."""
+    src = (
+        _BACKEND_ROOT / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def audit_project")
+    body = src[idx:idx + 25000]
+    assert "convergence_notice" in body, (
+        "audit must compute convergence_notice and expose it in "
+        "aggregated so frontend can show 'project is done' banner"
+    )
+    assert "oscillation" in body.lower() or "همگرایی" in body, (
+        "the convergence detection must be documented in code so future "
+        "readers know what it solves"
+    )
+
+
+def test_audit_prompt_discourages_subjective_issues():
+    """User explicitly asked: scores oscillate because every audit
+    finds 'new' issues, but they're really just subjective opinions
+    (could be more comprehensive / more idiomatic / nice to have).
+    The prompt must include a 'do NOT flag' negative list to break
+    the cycle."""
+    src = (
+        _BACKEND_ROOT / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def audit_project")
+    body = src[idx:idx + 18000]
+    # Persian negative-list markers — these are the patterns the user
+    # complained about and must be explicitly forbidden in the prompt
+    assert "بهتر باشد" in body or "می‌تواند" in body, (
+        "prompt must list forbidden subjective categories ('could be "
+        "better', 'might be more complete') to break the cycle"
+    )
+    # Must mention iterative loop awareness
+    assert "حلقه" in body, (
+        "prompt must tell the model it's in an iterative loop and that "
+        "over-flagging traps the user"
+    )
+
+
+def test_frontend_renders_convergence_banner():
+    """The green convergence banner is the visual signal the user
+    needs to know 'project is done, push it'."""
+    src = (
+        _FRONTEND_ROOT / "app/project/[id]/page.tsx"
+    ).read_text(encoding="utf-8")
+    assert "convergence_notice" in src
+    # Green styling (not red/amber) so the message reads as "all good"
+    assert "bg-green-500" in src and "convergence_notice" in src
