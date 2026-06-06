@@ -57,6 +57,9 @@ class WatchedUpdate(BaseModel):
     # 🆕 (auto-loop) ping-pong مداوم تا verify=done
     auto_continue_until_done: Optional[bool] = None
     max_auto_loop_rounds: Optional[int] = None
+    # 🆕 (silent-stop fix v2) — حد نصاب درصدی (0..1) برای ارشیو خودکار
+    # بعد از هر verify partial. ≥ این مقدار → archive + remaining به TODO.
+    auto_archive_done_ratio: Optional[float] = None
     # 🆕 (P1) مدل‌های auto-scan — لیست ID مدل‌ها (مثل deepseek-coder)
     selected_models: Optional[List[str]] = None
     # 🆕 (Smart Task Lifecycle)

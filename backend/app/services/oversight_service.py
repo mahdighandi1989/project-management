@@ -252,7 +252,17 @@ class WatchedProject:
     # تا verify=done شود یا max_auto_loop_rounds برسد یا regress رخ دهد
     # فقط وقتی autonomy_level=auto و execution_mode auto_via_* معنی دارد
     auto_continue_until_done: bool = False
-    max_auto_loop_rounds: int = 5
+    # 🆕 (silent-stop fix v2) — default از ۵ → ۶ بنا به درخواست کاربر:
+    # «اگر ۶ بار تلاش کرد و دیگه وریفایر تاییدیه نداد، باقی‌مانده‌ها به
+    # TODO + به زور ارشیو شود». مقادیر ست‌شده توسط کاربر در پنل بدون
+    # تغییر باقی می‌مانند — فقط default برای watchedهای جدید.
+    max_auto_loop_rounds: int = 6
+    # 🆕 (silent-stop fix v2) — حد نصاب درصدی برای ارشیو خودکار پس از هر
+    # verify partial. اگر done_parts / (done_parts + remaining_parts) از این
+    # نسبت بیشتر شد، تسک ارشیو می‌شود و باقی‌مانده‌ها به TODO منتقل می‌شوند
+    # (verifier hard-guard موجود فقط remaining=0 را قبول می‌کند — این لایه
+    # روی آن سوار می‌شود). 0.90 = ۹۰٪.
+    auto_archive_done_ratio: float = 0.90
     # 🆕 (Smart Task Lifecycle) بازتولید خودکار پرامپت‌های ناقص قدیمی
     # وقتی scan خودکار اجرا می‌شود، پس از scan تسک‌هایی که prompt_quality_score آن‌ها
     # کمتر از prompt_quality_threshold باشد بازتولید می‌شوند (با rate-limit 5).
@@ -2241,6 +2251,9 @@ class OversightService:
                         # 🆕 (auto-loop) ping-pong scheduler-driven
                         "auto_continue_until_done",
                         "max_auto_loop_rounds",
+                        # 🆕 (silent-stop fix v2) — حد نصاب درصدی برای
+                        # ارشیو خودکار بعد از هر verify
+                        "auto_archive_done_ratio",
                         # 🆕 (P1) مدل‌های auto-scan
                         "selected_models",
                         # 🆕 (Creator) منبع auto-add
@@ -9396,7 +9409,17 @@ AC = «طراحی شیک‌تر باشد»:
             # هنوز ۶/۶ مرحله باقی بود. حالا cleanup کامل مشابه
             # external_prompts._verify_then_chain (action=max_retries_todo)
             # انجام می‌شود: archive + TODO + Telegram notification.
-            _trigger_max_rounds_cleanup = False
+            # 🐛 (silent-stop fix v2) — cleanup در دو حالت trigger می‌شود:
+            #   ratio_threshold: ≥ ۹۰٪ از done_parts/(done+remaining) تیک
+            #     خورد. این حالت **بعد از هر verify** بررسی می‌شود — حتی
+            #     در دور دوم/سوم. حد نصاب verifier فعلی remaining=۰ است
+            #     (hard-guard)، ولی کاربر می‌خواهد ۹۰٪ کافی باشد و
+            #     باقی‌مانده‌ها به TODO منتقل شوند.
+            #   max_rounds: سقف ۶ تلاش رسید و هنوز < ۹۰٪. force-archive
+            #     مثل دکمهٔ archive روی کارت — کاربر دستی ادامه می‌دهد.
+            _trigger_cleanup = False
+            _cleanup_reason = ""
+            _cleanup_ratio = 0.0
             try:
                 if (
                     watched
@@ -9405,21 +9428,46 @@ AC = «طراحی شیک‌تر باشد»:
                     and not getattr(watched, "verify_only_mode", False)
                     and task.execution_mode in ("auto_via_projects_page", "auto_via_pr")
                 ):
-                    max_rounds = int(getattr(watched, "max_auto_loop_rounds", 5) or 5)
-                    if (task.followup_round or 0) < max_rounds:
+                    max_rounds = int(getattr(watched, "max_auto_loop_rounds", 6) or 6)
+                    ratio_threshold = float(
+                        getattr(watched, "auto_archive_done_ratio", 0.90) or 0.90
+                    )
+                    _done_n = len([
+                        x for x in (getattr(report, "done_parts", []) or [])
+                        if str(x).strip()
+                    ])
+                    _rem_n = len([
+                        x for x in (getattr(report, "remaining_parts", []) or [])
+                        if str(x).strip()
+                    ])
+                    _total = _done_n + _rem_n
+                    _cleanup_ratio = (_done_n / _total) if _total > 0 else 0.0
+
+                    if _total > 0 and _cleanup_ratio >= ratio_threshold:
+                        _trigger_cleanup = True
+                        _cleanup_reason = "ratio_threshold"
+                        logger.info(
+                            f"auto-loop: task {task.id} به حد نصاب "
+                            f"{ratio_threshold:.0%} رسید "
+                            f"(done={_done_n}, remaining={_rem_n}, "
+                            f"ratio={_cleanup_ratio:.2f}) — archive + TODO"
+                        )
+                    elif (task.followup_round or 0) < max_rounds:
                         task.status = "pending"
                         # next_run_at به الان ست می‌شود تا در tick بعدی اجرا شود
                         task.next_run_at = now_iso()
                         logger.info(
                             f"auto-loop: task {task.id} → pending for round "
-                            f"{task.followup_round}/{max_rounds}"
+                            f"{task.followup_round}/{max_rounds} "
+                            f"(ratio={_cleanup_ratio:.2f}<{ratio_threshold:.2f})"
                         )
                     else:
+                        _trigger_cleanup = True
+                        _cleanup_reason = "max_rounds"
                         logger.info(
-                            f"auto-loop: task {task.id} به max_auto_loop_rounds={max_rounds} رسید"
-                            f" — archive + TODO + notification"
+                            f"auto-loop: task {task.id} به سقف ۶ تلاش رسید "
+                            f"(ratio={_cleanup_ratio:.2f}) — force-archive + TODO"
                         )
-                        _trigger_max_rounds_cleanup = True
             except Exception as _e:
                 logger.debug(f"auto-loop check failed: {_e}")
 
@@ -9431,7 +9479,7 @@ AC = «طراحی شیک‌تر باشد»:
         #   2) task را archive کن (mutation داخل lock جدا)
         #   3) verify-lock روی watched را آزاد کن
         #   4) Telegram notification بزن
-        if _trigger_max_rounds_cleanup and watched is not None:
+        if _trigger_cleanup and watched is not None:
             try:
                 _verify_result_for_todo = {
                     "report": {
@@ -9464,17 +9512,25 @@ AC = «طراحی شیک‌تر باشد»:
                     )
                 except Exception as _todo_e:
                     logger.warning(
-                        f"auto-loop max-rounds: _write_todo_for_task failed "
+                        f"auto-loop cleanup: _write_todo_for_task failed "
                         f"for {task_id}: {_todo_e}"
                     )
 
                 _max_rounds_val = int(
-                    getattr(watched, "max_auto_loop_rounds", 5) or 5
+                    getattr(watched, "max_auto_loop_rounds", 6) or 6
+                )
+                # دو reason جدا برای پنل/گزارش‌ها:
+                #   auto_loop_ratio_met → ≥۹۰٪ tick خورد، باقی به TODO
+                #   auto_loop_max_rounds → ۶ تلاش رسید، force-archive
+                _archive_reason = (
+                    "auto_loop_ratio_met"
+                    if _cleanup_reason == "ratio_threshold"
+                    else "auto_loop_max_rounds"
                 )
                 async with self._lock:
                     task.archived = True
                     task.archived_at = now_iso()
-                    task.archived_reason = "auto_loop_max_rounds"
+                    task.archived_reason = _archive_reason
                     task.status = "abandoned"
                     task.external_status = "abandoned"
                     task.external_locked_by = None
@@ -9488,18 +9544,30 @@ AC = «طراحی شیک‌تر باشد»:
                         pass
 
                 try:
+                    if _cleanup_reason == "ratio_threshold":
+                        _extra_msg = (
+                            f"حد نصاب ۹۰٪ checklist محرز شد "
+                            f"(ratio={_cleanup_ratio:.0%}, "
+                            f"round={task.followup_round}/{_max_rounds_val}).\n"
+                            f"تسک ارشیو شد. باقی‌مانده‌ها در "
+                            f"TO-DO/todo-task-{(task.id or '')[:8]}.md ثبت شد.\n"
+                            f"برای ادامهٔ کارهای جزئی: TODO را بخوان."
+                        )
+                    else:
+                        _extra_msg = (
+                            f"auto-loop به سقف ۶ تلاش رسید بدون رسیدن به "
+                            f"حد نصاب (ratio={_cleanup_ratio:.0%}).\n"
+                            f"تسک به‌زور ارشیو شد و باقی‌مانده‌ها در "
+                            f"TO-DO/todo-task-{(task.id or '')[:8]}.md ثبت شد.\n"
+                            f"برای ادامه: TODO را مطالعه، مشکل را رفع، و در "
+                            f"پنل تسک را un-archive کن یا «اجرا با کلاد» را "
+                            f"دستی بزن."
+                        )
                     _ern(
                         event="external_runner_max_retries_or_regressed",
                         task=task,
                         agent_id="claude-runner",
-                        extra=(
-                            f"auto-loop به سقف رسید "
-                            f"(rounds={task.followup_round}/{_max_rounds_val}).\n"
-                            f"تسک با علت `auto_loop_max_rounds` آرشیو شد و "
-                            f"TO-DO/todo-task-{(task.id or '')[:8]}.md ایجاد شد.\n"
-                            f"برای ادامه: TODO را مطالعه، مشکل را رفع، و در پنل "
-                            f"تسک را un-archive کن یا «اجرا با کلاد» را دستی بزن."
-                        ),
+                        extra=_extra_msg,
                     )
                 except Exception as _notify_e:
                     logger.debug(
