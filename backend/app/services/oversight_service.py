@@ -6465,11 +6465,20 @@ class OversightService:
                 # 🆕 (current_project_profile) — شناسنامهٔ پروژهٔ فعلی برای
                 # تطبیق توصیه‌ها با stack/dependency واقعی این پروژه.
                 _cur_profile = self._build_current_project_profile(watched_id)
-                _ref_ctx = await _ref_svc.build_reference_context(
-                    selected_projects=_normalized_refs,
-                    task_summary=idea[:500],
-                    token=get_github_token() or None,
-                    current_project_profile=_cur_profile,
+                # 🚨 (Render edge timeout fix) — کل /tasks/from-idea روی
+                # Render free-tier حداکثر ~100s فرصت دارد. اگر reference scan
+                # کند باشد، باقی pipeline (multi-pass AI) فرصت تمام شدن ندارد
+                # و edge با 403 connection را می‌بندد. timeout سخت 45s روی
+                # reference scan: اگر زمان گذشت، silently صرف نظر می‌کنیم و
+                # پرامپت بدون reference context تولید می‌شود (better-than-fail).
+                _ref_ctx = await asyncio.wait_for(
+                    _ref_svc.build_reference_context(
+                        selected_projects=_normalized_refs,
+                        task_summary=idea[:500],
+                        token=get_github_token() or None,
+                        current_project_profile=_cur_profile,
+                    ),
+                    timeout=45.0,
                 )
                 if _ref_ctx and _ref_ctx.fusion_text:
                     idea = (
@@ -6486,6 +6495,12 @@ class OversightService:
                         f"idea_to_prompt: injected reference context for "
                         f"{len(_normalized_refs)} project(s), {_ref_ctx.total_chars} chars"
                     )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"idea_to_prompt: reference scan exceeded 45s timeout "
+                    f"({len(_normalized_refs)} project(s)) — proceeding without "
+                    f"reference context to stay under Render edge limit"
+                )
             except Exception as _ref_e:
                 logger.warning(f"idea_to_prompt: reference projects scan failed: {_ref_e}")
 
