@@ -840,15 +840,39 @@ async def deploy_project(project_id: str, request: DeployRequest = None):
     deploy_manager = get_deploy_manager()
     deploy_manager.configure_render(render_key)
 
-    # بررسی GitHub repo
+    # 🐛 (deploy-to-render fix) — اولویت‌بندی منبع repo:
+    #   1) override صریح از request (کاربر URL داده)
+    #   2) repo جدای پروژه (از push_to_github، مثلاً Detective-1)
+    #   3) fallback به github_storage داخلی (ai-workspace-data) — آخرین
+    #      راه چاره، چون اگر این مسیر طی شود root_dir باید subpath داشته
+    #      باشد، در حالی که حالت ۲ پروژه در root repo جدا است.
     github_repo_url = None
+    source_kind = "none"  # "request" | "project" | "internal_storage"
+    github_branch = (request.github_branch if request else "main") or "main"
+    # subpath فقط برای fallback به repo داخلی استفاده می‌شود.
+    # برای repo جدا که از push_to_github آمده، پروژه در root است.
+    root_dir = ""
+
     if request and request.github_repo_url:
         github_repo_url = request.github_repo_url
+        source_kind = "request"
+        # برای override کاربر هم پیش‌فرض root خالی (پروژه‌های push شدهٔ کاربر
+        # معمولاً در root repo هستند)
+        root_dir = ""
+    elif project.github_repo_url:
+        # حالت معمول: کاربر قبلاً «GitHub به push» را زده — اطلاعات repo
+        # جدا را روی project داریم.
+        github_repo_url = project.github_repo_url
+        source_kind = "project"
+        github_branch = project.github_default_branch or github_branch
+        root_dir = ""  # پروژه در root repo جدا است (Detective-1 use case)
     else:
-        # سعی کن از GitHub storage اطلاعات رو بگیر
+        # fallback آخر: repo داخلی data — root باید subpath داشته باشد
         github_storage = get_github_storage()
         if github_storage.token and github_storage.owner and github_storage.repo:
             github_repo_url = f"https://github.com/{github_storage.owner}/{github_storage.repo}"
+            source_kind = "internal_storage"
+            root_dir = f"ai-workspace/projects/{project_id}/generated"
 
     if not github_repo_url:
         # اگر GitHub repo نداریم، راهنمای دستی بده
@@ -858,10 +882,9 @@ async def deploy_project(project_id: str, request: DeployRequest = None):
             "message": "برای Deploy خودکار، اول پروژه رو به GitHub push کن.",
             "project_id": project_id,
             "instructions": [
-                "۱. فایل‌های پروژه رو دانلود کن",
-                "۲. یه repo جدید در GitHub بساز",
-                "۳. فایل‌ها رو push کن",
-                "۴. برگرد و دوباره Deploy رو بزن با آدرس repo"
+                "۱. روی دکمهٔ «GitHub به push» همین صفحه کلیک کن",
+                "۲. صبر کن repo ساخته و فایل‌ها push شوند",
+                "۳. سپس «Deploy به Render» را دوباره بزن",
             ]
         }
 
@@ -872,8 +895,8 @@ async def deploy_project(project_id: str, request: DeployRequest = None):
             project_name=project.name,
             project_type=project.project_type,
             github_repo_url=github_repo_url,
-            github_branch=request.github_branch if request else "main",
-            root_dir=f"ai-workspace/projects/{project_id}/generated",
+            github_branch=github_branch,
+            root_dir=root_dir,
             env_vars=request.env_vars if request else {}
         )
 
@@ -2046,6 +2069,20 @@ async def push_to_github(project_id: str, request: Optional[PushToGitHubRequest]
                 })
 
     full_name = f"{owner}/{desired_repo}"
+
+    # 🆕 (deploy-to-render fix) — اطلاعات repo جدا را روی project ذخیره
+    # کن تا دکمهٔ «Deploy به Render» بداند به کدام repo وصل شود (و نه
+    # repo داخلی ai-workspace-data که فقط ذخیرهٔ پرامپت‌هاست).
+    # حتی اگر بعضی فایل‌ها fail شدند، repo ساخته شده و قابل deploy است
+    # — پس اطلاعات را ذخیره می‌کنیم.
+    try:
+        project.github_owner = owner
+        project.github_repo = desired_repo
+        project.github_repo_url = repo_html_url
+        project.github_default_branch = default_branch
+        await creator._save_project_meta(project)
+    except Exception as _meta_e:
+        logger.warning(f"saving github repo info on project failed: {_meta_e}")
 
     # 🆕 (Creator) auto-register به watched + notification
     auto_watched_info: Optional[Dict[str, Any]] = None

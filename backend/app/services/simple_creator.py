@@ -70,6 +70,14 @@ class Project:
     #    models_used, summary, applied_paths?}
     # سقف ۲۰ ورودی نگه می‌داریم تا meta فایل rowdy نشود.
     audit_history: List[Dict[str, Any]] = field(default_factory=list)
+    # 🆕 (deploy-to-render fix) — وقتی پروژه به یک repo جدا روی GitHub
+    # push شد (مثلاً Detective-1)، اطلاعاتش اینجا ذخیره می‌شود تا دکمهٔ
+    # «Deploy به Render» به repo درست وصل شود نه به repo داخلی
+    # ai-workspace-data. اگر None باشد یعنی هنوز push نشده.
+    github_owner: Optional[str] = None
+    github_repo: Optional[str] = None
+    github_repo_url: Optional[str] = None
+    github_default_branch: Optional[str] = None
 
     def to_dict(self):
         return {
@@ -84,6 +92,10 @@ class Project:
             "technologies": self.technologies,
             "selected_projects": self.selected_projects,
             "audit_history": self.audit_history,
+            "github_owner": self.github_owner,
+            "github_repo": self.github_repo,
+            "github_repo_url": self.github_repo_url,
+            "github_default_branch": self.github_default_branch,
         }
 
 
@@ -174,6 +186,13 @@ class SimpleProjectCreator:
                                 # default [] از dataclass استفاده می‌شود.
                                 selected_projects=data.get("selected_projects", []) or [],
                                 audit_history=data.get("audit_history", []) or [],
+                                # 🆕 (deploy-to-render fix) — اطلاعات repo
+                                # جدا که project به آن push شده. اگر کاربر
+                                # هنوز push نکرده، None باقی می‌ماند.
+                                github_owner=data.get("github_owner"),
+                                github_repo=data.get("github_repo"),
+                                github_repo_url=data.get("github_repo_url"),
+                                github_default_branch=data.get("github_default_branch"),
                             )
                             self.projects[project.id] = project
         except Exception as e:
