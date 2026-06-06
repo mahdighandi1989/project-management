@@ -43,14 +43,12 @@ export default function ProjectPage() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
-  // Deploy state
-  const [deploying, setDeploying] = useState(false);
-  const [deployUrl, setDeployUrl] = useState('');
   // 🆕 (parity with inspector) — modal دوگزینه‌ای free vs AI auto.
-  // قبلاً فقط یک دکمه «Deploy» داشتیم که سعی می‌کرد همه‌چیز را خودکار
-  // انجام دهد و برای fullstack ها (frontend+backend) نمی‌کرد. حالا
-  // مثل Inspector، کاربر بین پلن رایگان (ریدایرکت) یا پلن starter
-  // با AI multi-service انتخاب می‌کند.
+  // قبلاً یک دکمه «Deploy» با state های deploying + deployUrl داشت
+  // که سعی می‌کرد همه‌چیز را خودکار انجام دهد و برای fullstack ها
+  // (frontend+backend) نمی‌کرد. حالا مثل Inspector، کاربر بین پلن
+  // رایگان (ریدایرکت) یا پلن starter با AI multi-service انتخاب می‌کند.
+  // state های قدیمی deploying/deployUrl حذف شدند (هیچ‌جا set نمی‌شدند).
   const [deployModalOpen, setDeployModalOpen] = useState(false);
   const [deployAiResult, setDeployAiResult] = useState<any>(null);
   const [deployAiLoading, setDeployAiLoading] = useState(false);
@@ -531,7 +529,7 @@ export default function ProjectPage() {
             </button>
             <button
               onClick={openDeployModal}
-              disabled={deploying || deployAiLoading}
+              disabled={deployAiLoading}
               className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 disabled:opacity-50 font-medium"
             >
               {deployAiLoading ? '... در حال Deploy' : 'Deploy به Render'}
@@ -582,14 +580,8 @@ export default function ProjectPage() {
           </div>
         </div>
 
-        {/* Deploy URL */}
-        {deployUrl && (
-          <div className="mb-6 p-4 bg-green-500/20 border border-green-500/50 rounded-xl">
-            <p className="text-green-400">
-              Deploy موفق! آدرس: <a href={deployUrl} target="_blank" rel="noopener noreferrer" className="underline">{deployUrl}</a>
-            </p>
-          </div>
-        )}
+        {/* Deploy URL — جایگزین شد با modal deploy_ai_result */}
+
 
         {/* پنل تحلیل سلامت در commit 3.3a حذف شد. کاربران باید برای
             تحلیل پروژه به /oversight بروند. */}
