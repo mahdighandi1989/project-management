@@ -156,7 +156,13 @@ class ReferenceProjectService:
     def __init__(
         self,
         *,
-        max_files_per_repo: int = 30,
+        # 🚨 (Render edge timeout fix) — قبلاً 30 فایل per repo بود. هر فایل
+        # یک GitHub fetch می‌خواهد و sequential در batch خوانده می‌شود؛
+        # روی Render free-tier با چند پروژهٔ مرجع همزمان به 20-40s می‌رسید
+        # و کل /tasks/from-idea را به بالای 100s می‌برد → edge timeout
+        # → user 403 می‌گرفت. 12 فایل با اولویت بالا برای الهام کاملاً کافی است
+        # (README + 5 منبع اصلی + 6 ساختاری) و scan را در ~10s نگه می‌دارد.
+        max_files_per_repo: int = 12,
         max_file_chars: int = 8000,
         max_total_chars: int = 80000,
     ):
