@@ -978,6 +978,260 @@ async def deploy_project(project_id: str, request: DeployRequest = None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 🆕 (creator parity with inspector) — AI multi-service deploy
+# ─────────────────────────────────────────────────────────────────────────────
+# Inspector tab has a much better deploy flow: AI reads the repo,
+# decides how many services (fullstack → 2), what type (static_site for
+# Vite SPA, web_service for FastAPI/Express), build/start commands, env
+# vars. Creator only did a single-service docker deploy → fullstack
+# projects like Detective-1 broke.
+#
+# This endpoint reuses the inspector helper `_ai_analyze_repo_only` (the
+# DB-less variant) so Creator gets the same intelligence without touching
+# the Project DB model. Per-service plan (free/starter) is forwarded to
+# the Render API.
+
+
+class DeployRenderAIRequest(BaseModel):
+    """درخواست deploy هوشمند با AI."""
+    plan: str = "starter"  # "free" | "starter" — برای الان فقط در پاسخ نگاه‌داشته
+    env_vars_overrides: dict = {}  # {service_name: {KEY: value}}
+
+
+@router.post("/projects/{project_id}/deploy/render-ai")
+async def deploy_project_render_ai(
+    project_id: str,
+    request: DeployRenderAIRequest = DeployRenderAIRequest(),
+):
+    """Deploy یک پروژه به Render با تحلیل AI — همانند Inspector.
+
+    تفاوت با /projects/{id}/deploy:
+      - برای fullstack ها چند سرویس می‌سازد (frontend + backend جدا)
+      - static_site (Vite SPA) را تشخیص می‌دهد و درست تنظیم می‌کند
+      - build/start/publish path را AI تصمیم می‌گیرد
+      - env vars را از .env/.env.example استخراج می‌کند و خالی‌ها را
+        به کاربر گزارش می‌دهد
+    """
+    from ...services.simple_creator import get_simple_creator
+    from ...services.deploy_service import RenderDeployService
+    import os as _os
+
+    creator = get_simple_creator()
+    project = creator.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    render_key = _os.environ.get("RENDER_API_KEY")
+    if not render_key:
+        raise HTTPException(
+            status_code=400,
+            detail="کلید Render تنظیم نشده. از صفحه تنظیمات کلید رو وارد کن.",
+        )
+
+    # ── ۱) اطلاعات repo — همان منطق deploy_project ──
+    # برای Creator فقط حالت "project field" + "github_lookup" قابل
+    # قبول است. internal_storage در حالت AI معنا ندارد چون AI روی repo
+    # واقعی پروژه (Detective-1) کار می‌کند نه روی repo داخلی data.
+    owner = project.github_owner
+    repo_name = project.github_repo
+    repo_url = project.github_repo_url
+    branch = project.github_default_branch or "main"
+
+    if not (owner and repo_name and repo_url):
+        # smart lookup مشابه deploy_project
+        token = _get_github_token_value()
+        if token:
+            try:
+                import aiohttp
+                guessed = _normalize_repo_name(project.name)
+                async with aiohttp.ClientSession() as _s:
+                    async with _s.get(
+                        "https://api.github.com/user",
+                        headers={
+                            "Authorization": f"Bearer {token}",
+                            "Accept": "application/vnd.github+json",
+                        },
+                    ) as _ur:
+                        if _ur.status == 200:
+                            _u = await _ur.json()
+                            _o = _u.get("login")
+                            if _o:
+                                async with _s.get(
+                                    f"https://api.github.com/repos/{_o}/{guessed}",
+                                    headers={
+                                        "Authorization": f"Bearer {token}",
+                                        "Accept": "application/vnd.github+json",
+                                    },
+                                ) as _rr:
+                                    if _rr.status == 200:
+                                        _ri = await _rr.json()
+                                        owner = _o
+                                        repo_name = guessed
+                                        repo_url = _ri.get("html_url")
+                                        branch = _ri.get("default_branch") or branch
+                                        # backfill برای دفعهٔ بعد
+                                        try:
+                                            project.github_owner = owner
+                                            project.github_repo = repo_name
+                                            project.github_repo_url = repo_url
+                                            project.github_default_branch = branch
+                                            await creator._save_project_meta(project)
+                                        except Exception:
+                                            pass
+            except Exception as _e:
+                logger.warning(f"deploy-render-ai: lookup failed: {_e}")
+
+    if not (owner and repo_name and repo_url):
+        return {
+            "success": False,
+            "error": "no_github_repo",
+            "message": (
+                "این پروژه هنوز روی GitHub push نشده. اول روی دکمهٔ "
+                "«GitHub به push» کلیک کن، صبر کن کامل شود، سپس دوباره Deploy بزن."
+            ),
+        }
+
+    # ── ۲) تحلیل AI ──
+    github_token = _get_github_token_value() or ""
+    try:
+        from .render_logs import _ai_analyze_repo_only
+        ai_result = await _ai_analyze_repo_only(
+            owner=owner, repo=repo_name, branch=branch,
+            github_token=github_token, github_url=repo_url,
+            model_id=None,  # fallback به gemini-2.0-flash
+        )
+    except Exception as e:
+        logger.exception(f"deploy-render-ai: AI analyze failed: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"خطا در تحلیل AI: {str(e)[:200]}",
+        )
+
+    services_plan = ai_result.get("services", [])
+    analysis_text = ai_result.get("analysis", "")
+    model_used = ai_result.get("model_used", "unknown")
+
+    if not services_plan:
+        return {
+            "success": False,
+            "error": "ai_no_services",
+            "analysis": analysis_text,
+            "model_used": model_used,
+            "message": (
+                "AI نتوانست تشخیص دهد کدام سرویس‌ها باید ساخته شوند. "
+                "لاگ‌های backend را برای جزئیات ببین."
+            ),
+        }
+
+    # ── ۳) ساخت هر سرویس روی Render ──
+    deploy_svc = RenderDeployService(render_key)
+    created: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+    try:
+        for svc in services_plan:
+            svc_name = svc.get("name", "app")
+            svc_type = svc.get("service_type", "web_service")
+            # env_vars overrides از request
+            base_envs = dict(svc.get("env_vars", {}) or {})
+            ovr = (request.env_vars_overrides or {}).get(svc_name, {}) or {}
+            base_envs.update(ovr)
+            result = await deploy_svc.create_service(
+                name=svc_name,
+                project_type=svc.get("role", "app"),
+                github_repo_url=repo_url,
+                github_branch=branch,
+                root_dir=svc.get("root_dir", "."),
+                build_command=svc.get("build_command"),
+                start_command=svc.get("start_command"),
+                service_type=svc_type,
+                publish_path=svc.get("publish_path"),
+                env_vars=base_envs if base_envs else None,
+            )
+            if result.get("success"):
+                created.append({
+                    "name": result.get("name"),
+                    "service_id": result.get("service_id"),
+                    "role": svc.get("role", "app"),
+                    "service_type": svc_type,
+                    "dashboard_url": result.get("dashboard_url"),
+                    "url": result.get("url"),
+                    "notes": svc.get("notes", ""),
+                })
+            else:
+                errors.append({
+                    "name": svc_name,
+                    "role": svc.get("role", "app"),
+                    "error": result.get("error", "unknown"),
+                })
+    finally:
+        await deploy_svc.close()
+
+    # env vars خالی که کاربر باید پر کند
+    empty_env_vars: List[str] = []
+    for svc in services_plan:
+        for k, v in (svc.get("env_vars") or {}).items():
+            if v == "" or v is None:
+                empty_env_vars.append(f"{svc.get('name', '?')}: {k}")
+
+    return {
+        "success": len(created) > 0,
+        "created": created,
+        "errors": errors,
+        "analysis": analysis_text,
+        "model_used": model_used,
+        "project_name": project.name,
+        "github_url": repo_url,
+        "branch": branch,
+        "empty_env_vars": empty_env_vars,
+        "plan": request.plan,
+        "message": (
+            f"✅ {len(created)} سرویس ساخته شد"
+            + (f" | ❌ {len(errors)} خطا" if errors else "")
+        ),
+    }
+
+
+@router.get("/projects/{project_id}/deploy/render-prefill")
+async def deploy_project_render_prefill(project_id: str):
+    """🆕 (creator free-plan UX) — اطلاعات لازم برای ریدایرکت به
+    Render dashboard در حالت «پلن رایگان».
+
+    Frontend با گرفتن این پاسخ، کاربر را به
+    `dashboard.render.com/select-repo?type=web&q=<owner>/<repo>`
+    می‌فرستد تا با dropdown سرویس را خودش بسازد.
+    """
+    from ...services.simple_creator import get_simple_creator
+    creator = get_simple_creator()
+    project = creator.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    owner = project.github_owner
+    repo_name = project.github_repo
+    repo_url = project.github_repo_url
+
+    if not (owner and repo_name and repo_url):
+        return {
+            "success": False,
+            "error": "no_github_repo",
+            "message": (
+                "این پروژه هنوز روی GitHub push نشده. اول دکمهٔ «GitHub به push»."
+            ),
+        }
+
+    full = f"{owner}/{repo_name}"
+    return {
+        "success": True,
+        "owner": owner,
+        "repo": repo_name,
+        "full_name": full,
+        "github_url": repo_url,
+        "render_dashboard_url": (
+            f"https://dashboard.render.com/select-repo?type=web&q={full}"
+        ),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 🆕 Pre-push audit — re-check generated files against the original goal
 # ─────────────────────────────────────────────────────────────────────────────
 # User explicitly asked for this: "وقتی پروژه ساخته میشه بتونم توسط مدل های

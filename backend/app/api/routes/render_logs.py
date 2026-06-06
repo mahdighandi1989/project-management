@@ -8364,10 +8364,23 @@ _KEY_FILES_TO_READ = [
 ]
 
 
-async def _ai_analyze_project(owner: str, repo: str, branch: str, github_token: str, github_url: str, project_id: str, db) -> dict:
-    """
-    تحلیل پروژه توسط AI — فایل‌های کلیدی رو از GitHub میخونه و به مدل میده
-    Returns: { services: [...], analysis: "..." }
+async def _ai_analyze_repo_only(
+    owner: str,
+    repo: str,
+    branch: str,
+    github_token: str,
+    github_url: str,
+    *,
+    model_id: Optional[str] = None,
+) -> dict:
+    """🆕 (creator parity) — نسخهٔ DB-less از تحلیل AI.
+
+    این تابع از DB یا project_id استفاده نمی‌کند تا هم Inspector (که از
+    project DB دارد) و هم Creator (که از simple_creator فایل‌سیستم دارد)
+    بتوانند آن را صدا بزنند. logic GitHub Tree API + key files + AI
+    prompt دقیقاً همان است؛ فقط model_id باید از caller داده شود (یا
+    None برای fallback به gemini-2.0-flash).
+    Returns: { services: [...], analysis: "...", model_used: "..." }
     """
     import aiohttp
 
@@ -8416,7 +8429,7 @@ async def _ai_analyze_project(owner: str, repo: str, branch: str, github_token: 
     from ...services.ai_base import Message
 
     ai_manager = get_ai_manager()
-    primary_model = await _smart_select_model(db, project_id)
+    primary_model = model_id or "gemini-2.0-flash"
 
     messages = [
         Message(role="system", content="تو یک DevOps Engineer متخصص Render.com هستی. فقط خروجی JSON بده، بدون توضیح اضافه."),
@@ -8453,6 +8466,21 @@ async def _ai_analyze_project(owner: str, repo: str, branch: str, github_token: 
     except (json.JSONDecodeError, IndexError) as e:
         slog.warning(f"Failed to parse AI JSON: {e}", ai_text=ai_text[:500])
         return {"services": [], "analysis": f"خطا در پارس خروجی AI. خروجی خام:\n{ai_text[:1000]}"}
+
+
+async def _ai_analyze_project(owner: str, repo: str, branch: str, github_token: str, github_url: str, project_id: str, db) -> dict:
+    """Inspector-side wrapper around `_ai_analyze_repo_only`.
+
+    Uses `_smart_select_model` for project-aware model selection, then
+    delegates to the DB-less helper that holds the actual logic. Kept
+    for backward compatibility — all existing callers of this function
+    behave identically to before."""
+    primary_model = await _smart_select_model(db, project_id)
+    return await _ai_analyze_repo_only(
+        owner=owner, repo=repo, branch=branch,
+        github_token=github_token, github_url=github_url,
+        model_id=primary_model,
+    )
 
 
 @router.post("/inspector/create-render-service")
