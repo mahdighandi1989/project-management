@@ -155,7 +155,7 @@ def test_deploy_render_ai_supports_multi_service():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 8000]
+    body = src[idx:idx + 14000]
     assert "for svc in services_plan" in body or "for svc in services" in body, (
         "must iterate over services_plan to create one Render service per "
         "AI-recommended service (otherwise fullstack only gets one service)"
@@ -175,7 +175,7 @@ def test_deploy_render_ai_reports_empty_env_vars():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 8000]
+    body = src[idx:idx + 14000]
     assert "empty_env_vars" in body, (
         "response must include empty_env_vars (mirrors Inspector's UX)"
     )
@@ -191,7 +191,7 @@ def test_deploy_render_ai_uses_project_repo_not_internal_storage():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 8000]
+    body = src[idx:idx + 14000]
     assert "project.github_repo_url" in body
     assert "project.github_owner" in body
     # Must NOT hardcode the internal-storage path in the AI variant
@@ -210,7 +210,7 @@ def test_deploy_render_ai_returns_actionable_no_repo_error():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 8000]
+    body = src[idx:idx + 14000]
     assert '"error": "no_github_repo"' in body, (
         "must return a structured error so the frontend can route the "
         "user to the «GitHub به push» button"
@@ -361,3 +361,99 @@ def test_frontend_no_dead_deploy_url_state():
         "setDeploying is never called after the modal refactor — the "
         "useState hook should be removed too"
     )
+
+
+# ---------------------------------------------------------------------------
+# 🐛 Empty-Dockerfile guard — root-cause fix for Detective-1 deploy failure
+# ---------------------------------------------------------------------------
+
+
+def test_deploy_render_ai_checks_dockerfile_before_create():
+    """User report: AI deployed services with runtime=docker, but Render
+    failed with `error: failed to solve: the Dockerfile cannot be empty`
+    because Creator engine pushes an empty Dockerfile placeholder (~31
+    bytes). The fix: before calling create_service, read the Dockerfile
+    from GitHub for each service's root_dir. If empty/missing, override
+    the runtime to native Python (backend) or Vite static_site (frontend).
+    """
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def deploy_project_render_ai")
+    assert idx != -1
+    body = src[idx:idx + 14000]
+    assert "_read_github_file" in body, (
+        "must read the Dockerfile from GitHub to verify it's not empty — "
+        "AI's recommendation alone is unreliable when Creator emits a "
+        "placeholder Dockerfile"
+    )
+    assert "df_usable" in body, (
+        "must compute a df_usable flag based on size + content"
+    )
+
+
+def test_deploy_render_ai_overrides_backend_to_python_native():
+    """When the backend's Dockerfile is empty, runtime must be overridden
+    to FastAPI/Python native with `pip install -r requirements.txt`."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def deploy_project_render_ai")
+    assert idx != -1
+    body = src[idx:idx + 14000]
+    assert 'svc_role == "backend"' in body
+    assert "pip install -r requirements.txt" in body, (
+        "backend override must use the standard Python build command"
+    )
+    assert "uvicorn main:app" in body, (
+        "backend override must use uvicorn (FastAPI default) as start cmd"
+    )
+
+
+def test_deploy_render_ai_overrides_frontend_to_vite_static_site():
+    """When the frontend's Dockerfile is empty, override to static_site
+    with the standard Vite build (mirrors Inspector's prompt rules)."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def deploy_project_render_ai")
+    assert idx != -1
+    body = src[idx:idx + 14000]
+    assert 'svc_role == "frontend"' in body
+    assert '"static_site"' in body, "frontend override must select static_site"
+    assert "npm run build" in body
+    assert "_redirects" in body, (
+        "must include the SPA rewrite rule so client routing works on "
+        "Render static sites"
+    )
+
+
+def test_deploy_render_ai_reports_override_in_created_service():
+    """The created service entry must carry a flag so the user knows
+    the deploy used overridden settings."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def deploy_project_render_ai")
+    assert idx != -1
+    body = src[idx:idx + 14000]
+    assert "docker_overridden" in body
+    assert "notes_append" in body
+
+
+def test_deploy_render_ai_dockerfile_usability_threshold():
+    """Threshold pinned: > 100 bytes + at least 2 non-comment lines.
+    The real-world symptom was 31 bytes — must be flagged as unusable."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def deploy_project_render_ai")
+    assert idx != -1
+    body = src[idx:idx + 14000]
+    assert "len(df_content) > 100" in body
+    assert "len(stripped_lines) >= 2" in body
