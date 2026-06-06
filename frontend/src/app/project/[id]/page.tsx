@@ -46,6 +46,14 @@ export default function ProjectPage() {
   // Deploy state
   const [deploying, setDeploying] = useState(false);
   const [deployUrl, setDeployUrl] = useState('');
+  // 🆕 (parity with inspector) — modal دوگزینه‌ای free vs AI auto.
+  // قبلاً فقط یک دکمه «Deploy» داشتیم که سعی می‌کرد همه‌چیز را خودکار
+  // انجام دهد و برای fullstack ها (frontend+backend) نمی‌کرد. حالا
+  // مثل Inspector، کاربر بین پلن رایگان (ریدایرکت) یا پلن starter
+  // با AI multi-service انتخاب می‌کند.
+  const [deployModalOpen, setDeployModalOpen] = useState(false);
+  const [deployAiResult, setDeployAiResult] = useState<any>(null);
+  const [deployAiLoading, setDeployAiLoading] = useState(false);
 
   // 🆕 Description modal — long descriptions shouldn't be dumped onto the
   // page; user reported the raw idea text was unreadable. Show a truncated
@@ -318,25 +326,64 @@ export default function ProjectPage() {
     }
   };
 
-  const deployToRender = async () => {
-    setDeploying(true);
-    try {
-      const res = await fetch(`${API_BASE}/api/simple/projects/${projectId}/deploy`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
+  // 🆕 (parity with inspector) — به جای deploy مستقیم، modal باز می‌کنیم
+  // تا کاربر بین «پلن رایگان (ریدایرکت)» و «AI خودکار (multi-service)»
+  // انتخاب کند. منطق قدیمی deploy تنها اگر کاربر AI را انتخاب کند اجرا
+  // می‌شود.
+  const openDeployModal = () => {
+    setDeployAiResult(null);
+    setDeployModalOpen(true);
+  };
 
+  // 🆓 پلن رایگان: کاربر را به Render dashboard می‌فرستیم با repo
+  // pre-fill شده. تنظیمات را خودش با dropdown انتخاب می‌کند.
+  const deployToRenderFreePlan = async () => {
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/simple/projects/${projectId}/deploy/render-prefill`,
+      );
       const data = await res.json();
-      if (data.success) {
-        setDeployUrl(data.deploy_url || '');
-        showSuccess('Deploy شروع شد!');
+      if (data.success && data.render_dashboard_url) {
+        window.open(data.render_dashboard_url, '_blank');
+        setDeployModalOpen(false);
       } else {
-        showError(data.detail || 'خطا در Deploy');
+        showError(data.message || data.error || 'این پروژه هنوز روی GitHub push نشده.');
       }
-    } catch (e) {
-      showError('خطا در ارتباط با سرور');
+    } catch (e: any) {
+      showError(e?.message || 'خطا در ارتباط با سرور');
+    }
+  };
+
+  // 💎 پلن starter با AI: همان منطق Inspector — AI تحلیل می‌کند،
+  // multi-service می‌سازد، env vars خالی را به کاربر گزارش می‌دهد.
+  const deployToRenderAi = async () => {
+    setDeployAiLoading(true);
+    setDeployAiResult(null);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/simple/projects/${projectId}/deploy/render-ai`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ plan: 'starter', env_vars_overrides: {} }),
+        },
+      );
+      const data = await res.json();
+      setDeployAiResult(data);
+      if (data.success) {
+        showSuccess(
+          `${(data.created || []).length} سرویس ساخته شد` +
+            (data.empty_env_vars?.length
+              ? ` (${data.empty_env_vars.length} env var خالی)`
+              : ''),
+        );
+      } else {
+        showError(data.message || data.error || 'خطا در deploy با AI');
+      }
+    } catch (e: any) {
+      showError(e?.message || 'خطا در ارتباط با سرور');
     } finally {
-      setDeploying(false);
+      setDeployAiLoading(false);
     }
   };
 
@@ -483,11 +530,11 @@ export default function ProjectPage() {
               {pushing ? '... در حال push' : '🐙 push به GitHub'}
             </button>
             <button
-              onClick={deployToRender}
-              disabled={deploying}
+              onClick={openDeployModal}
+              disabled={deploying || deployAiLoading}
               className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 disabled:opacity-50 font-medium"
             >
-              {deploying ? '... در حال Deploy' : 'Deploy به Render'}
+              {deployAiLoading ? '... در حال Deploy' : 'Deploy به Render'}
             </button>
             <button
               onClick={deleteProject}
@@ -1304,6 +1351,139 @@ export default function ProjectPage() {
                     </button>
                   </div>
                 </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 🆕 (parity with inspector) — Deploy to Render modal: free vs AI auto */}
+      {deployModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onClick={() => !deployAiLoading && setDeployModalOpen(false)}
+        >
+          <div
+            className="bg-gray-900 border border-white/10 rounded-2xl max-w-lg w-full max-h-[85vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="sticky top-0 flex items-center justify-between p-4 bg-gray-900 border-b border-white/10">
+              <h3 className="font-bold text-lg flex items-center gap-2">
+                <span>🚀</span> Deploy به Render
+              </h3>
+              <button
+                onClick={() => !deployAiLoading && setDeployModalOpen(false)}
+                className="p-1 hover:bg-white/10 rounded text-gray-400"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="p-4 space-y-4">
+              <p className="text-sm text-gray-400">روش deploy را انتخاب کن:</p>
+
+              {/* پلن رایگان */}
+              <button
+                onClick={deployToRenderFreePlan}
+                disabled={deployAiLoading}
+                className="w-full p-4 rounded-xl border-2 border-green-600/40 hover:border-green-500 hover:bg-green-500/10 transition-all text-right disabled:opacity-50"
+              >
+                <div className="flex items-center gap-3">
+                  <span className="text-2xl">🆓</span>
+                  <div className="flex-1">
+                    <div className="font-bold text-green-400">پلن رایگان (Free)</div>
+                    <p className="text-xs text-gray-400 mt-1">
+                      به داشبورد Render منتقل می‌شوی با repo از پیش‌انتخاب‌شده.
+                      تنظیمات سرویس را خودت دستی وارد می‌کنی.
+                    </p>
+                  </div>
+                  <span className="text-gray-500">↗</span>
+                </div>
+              </button>
+
+              {/* پلن starter با AI */}
+              <button
+                onClick={deployToRenderAi}
+                disabled={deployAiLoading}
+                className="w-full p-4 rounded-xl border-2 border-orange-600/40 hover:border-orange-500 hover:bg-orange-500/10 transition-all text-right disabled:opacity-50"
+              >
+                <div className="flex items-center gap-3">
+                  <span className="text-2xl">{deployAiLoading ? '⏳' : '💎'}</span>
+                  <div className="flex-1">
+                    <div className="font-bold text-orange-400">
+                      ایجاد خودکار با AI (Starter)
+                    </div>
+                    <p className="text-xs text-gray-400 mt-1">
+                      {deployAiLoading
+                        ? '🤖 AI در حال تحلیل ساختار پروژه و ساخت سرویس‌ها...'
+                        : 'AI ساختار repo را می‌خواند، fullstack را به دو سرویس جدا می‌کند (frontend + backend)، static_site/web_service را تشخیص می‌دهد، env vars را استخراج می‌کند.'}
+                    </p>
+                  </div>
+                  {!deployAiLoading && <span className="text-gray-500">⚡</span>}
+                </div>
+              </button>
+
+              {/* نتیجهٔ AI deploy */}
+              {deployAiResult && (
+                <div className="mt-4 p-3 rounded-lg bg-black/40 border border-white/10 text-xs">
+                  {deployAiResult.success ? (
+                    <>
+                      <div className="font-bold text-green-400 mb-2">
+                        ✅ {(deployAiResult.created || []).length} سرویس ساخته شد
+                      </div>
+                      {(deployAiResult.created || []).map((svc: any, i: number) => (
+                        <div key={i} className="mb-2 p-2 bg-white/5 rounded">
+                          <div className="font-mono text-blue-300">
+                            {svc.role} — {svc.name} ({svc.service_type})
+                          </div>
+                          {svc.dashboard_url && (
+                            <a
+                              href={svc.dashboard_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-orange-400 hover:underline"
+                            >
+                              ↗ Render dashboard
+                            </a>
+                          )}
+                          {svc.notes && (
+                            <div className="text-gray-400 mt-1">{svc.notes}</div>
+                          )}
+                        </div>
+                      ))}
+                      {(deployAiResult.empty_env_vars || []).length > 0 && (
+                        <div className="mt-2 p-2 bg-yellow-500/10 border border-yellow-500/30 rounded">
+                          <div className="font-bold text-yellow-400 mb-1">
+                            ⚠️ env var های خالی که باید پر کنی:
+                          </div>
+                          <ul className="text-yellow-200">
+                            {deployAiResult.empty_env_vars.map((v: string, i: number) => (
+                              <li key={i}>• {v}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {(deployAiResult.errors || []).length > 0 && (
+                        <div className="mt-2 text-red-400">
+                          ❌ {deployAiResult.errors.length} خطا — جزئیات در لاگ
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="text-red-400">
+                      ❌ {deployAiResult.message || deployAiResult.error}
+                    </div>
+                  )}
+                  {deployAiResult.analysis && (
+                    <details className="mt-2">
+                      <summary className="cursor-pointer text-gray-400">
+                        تحلیل AI
+                      </summary>
+                      <div className="mt-1 text-gray-300 whitespace-pre-wrap">
+                        {deployAiResult.analysis}
+                      </div>
+                    </details>
+                  )}
+                </div>
               )}
             </div>
           </div>
