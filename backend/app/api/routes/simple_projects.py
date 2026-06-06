@@ -1130,7 +1130,84 @@ async def deploy_project_render_ai(
             ),
         }
 
-    # ── ۳) ساخت هر سرویس روی Render ──
+    # ── ۳) 🆕 (empty-dockerfile guard) قبل از create_service، Dockerfile
+    # موثر هر سرویس را روی GitHub چک کن. اگر خالی است (Creator engine
+    # گاهی Dockerfile placeholder تولید می‌کند که فقط چند بایت دارد)،
+    # Render در build fail می‌دهد با
+    # `error: failed to solve: the Dockerfile cannot be empty`.
+    # تشخیص بده و runtime را به native (Python برای backend، Vite
+    # static_site برای frontend) override کن.
+    from .render_logs import _read_github_file
+    docker_overrides: Dict[str, Dict[str, Any]] = {}
+    for svc in services_plan:
+        svc_name = svc.get("name", "app")
+        svc_root = svc.get("root_dir", ".")
+        svc_role = (svc.get("role", "") or "").lower()
+        # Dockerfile path نسبت به root repo
+        dockerfile_path = (
+            "Dockerfile" if svc_root in (".", "", None)
+            else f"{svc_root.rstrip('/')}/Dockerfile"
+        )
+        df_content = await _read_github_file(
+            owner, repo_name, dockerfile_path, branch, github_token,
+        )
+        # Dockerfile موثر بودن: > 100 byte و حداقل یک خط non-comment
+        df_usable = False
+        if df_content:
+            stripped_lines = [
+                ln.strip() for ln in df_content.splitlines()
+                if ln.strip() and not ln.strip().startswith("#")
+            ]
+            df_usable = len(df_content) > 100 and len(stripped_lines) >= 2
+        if df_usable:
+            continue  # Dockerfile خوب است، تغییری نده
+
+        # Dockerfile قابل استفاده نیست → بر اساس role override کن
+        if svc_role == "frontend":
+            # احتمالاً Vite/React SPA → static_site
+            override = {
+                "service_type": "static_site",
+                "build_command": (
+                    "npm install && npm run build && "
+                    "echo '/*    /index.html   200' > dist/_redirects"
+                ),
+                "start_command": None,
+                "publish_path": "dist",
+                "project_type": "vite",
+                "notes_append": (
+                    "⚠️ Dockerfile خالی بود — به static_site (Vite) تبدیل شد. "
+                    "اگر پروژه Next.js است، باید Dockerfile معتبر در repo قرار دهی."
+                ),
+            }
+        elif svc_role == "backend":
+            # احتمالاً FastAPI/Flask/Django → Python native
+            override = {
+                "service_type": "web_service",
+                "build_command": (
+                    "pip install --upgrade pip setuptools && "
+                    "pip install -r requirements.txt"
+                ),
+                "start_command": (
+                    "uvicorn main:app --host 0.0.0.0 --port $PORT"
+                ),
+                "publish_path": None,
+                "project_type": "fastapi",
+                "notes_append": (
+                    "⚠️ Dockerfile خالی بود — به Python native (FastAPI) تبدیل شد. "
+                    "اگر start command درست نیست، در Render dashboard اصلاح کن."
+                ),
+            }
+        else:
+            # نقش نامعلوم → نمی‌توان override کرد، گزارش بده
+            override = {
+                "skip_with_error": (
+                    f"Dockerfile خالی است و role=`{svc_role}` نامعلوم — "
+                    f"override خودکار ممکن نیست."
+                ),
+            }
+        docker_overrides[svc_name] = override
+
+    # ── ۴) ساخت هر سرویس روی Render ──
     deploy_svc = RenderDeployService(render_key)
     created: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
@@ -1142,27 +1219,56 @@ async def deploy_project_render_ai(
             base_envs = dict(svc.get("env_vars", {}) or {})
             ovr = (request.env_vars_overrides or {}).get(svc_name, {}) or {}
             base_envs.update(ovr)
+
+            # 🆕 اعمال docker override اگر Dockerfile خالی بود
+            do = docker_overrides.get(svc_name, {})
+            if do.get("skip_with_error"):
+                errors.append({
+                    "name": svc_name,
+                    "role": svc.get("role", "app"),
+                    "error": do["skip_with_error"],
+                })
+                continue
+            project_type_param = do.get("project_type") or svc.get("role", "app")
+            service_type_param = do.get("service_type") or svc_type
+            build_cmd_param = do.get("build_command") or svc.get("build_command")
+            start_cmd_param = (
+                do.get("start_command")
+                if "start_command" in do else svc.get("start_command")
+            )
+            publish_path_param = (
+                do.get("publish_path")
+                if "publish_path" in do else svc.get("publish_path")
+            )
+
             result = await deploy_svc.create_service(
                 name=svc_name,
-                project_type=svc.get("role", "app"),
+                project_type=project_type_param,
                 github_repo_url=repo_url,
                 github_branch=branch,
                 root_dir=svc.get("root_dir", "."),
-                build_command=svc.get("build_command"),
-                start_command=svc.get("start_command"),
-                service_type=svc_type,
-                publish_path=svc.get("publish_path"),
+                build_command=build_cmd_param,
+                start_command=start_cmd_param,
+                service_type=service_type_param,
+                publish_path=publish_path_param,
                 env_vars=base_envs if base_envs else None,
             )
             if result.get("success"):
+                # notes اصلی + هشدار override (اگر بود)
+                final_notes = svc.get("notes", "") or ""
+                if do.get("notes_append"):
+                    final_notes = (
+                        f"{final_notes}\n{do['notes_append']}".strip()
+                    )
                 created.append({
                     "name": result.get("name"),
                     "service_id": result.get("service_id"),
                     "role": svc.get("role", "app"),
-                    "service_type": svc_type,
+                    "service_type": service_type_param,
                     "dashboard_url": result.get("dashboard_url"),
                     "url": result.get("url"),
-                    "notes": svc.get("notes", ""),
+                    "notes": final_notes,
+                    "docker_overridden": bool(do.get("notes_append")),
                 })
             else:
                 errors.append({
