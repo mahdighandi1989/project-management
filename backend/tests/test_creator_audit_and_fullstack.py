@@ -1973,3 +1973,91 @@ def test_frontend_renders_convergence_banner():
     assert "convergence_notice" in src
     # Green styling (not red/amber) so the message reads as "all good"
     assert "bg-green-500" in src and "convergence_notice" in src
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🐛 Convergence threshold regression — user's actual screen scenario
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_convergence_fires_on_users_real_oscillation_pattern(monkeypatch, tmp_path):
+    """🚨 First convergence implementation required `mod_range <= 5` too.
+    But user's actual screen showed 15→13→16→19 (range 6) — the *textbook*
+    oscillation case — and the notice didn't fire. This test pins the
+    threshold to score-only so future tightening doesn't regress to that
+    "notice never shows up" bug."""
+    from app.api.routes.simple_projects import audit_project, AuditProjectRequest
+    from app.services.simple_creator import get_simple_creator, Project, ProjectFile
+
+    monkeypatch.setattr(get_simple_creator(), "workspace", tmp_path)
+    creator = get_simple_creator()
+
+    # Replay user's actual history
+    proj = Project(
+        id="proj_convergence_user_repro",
+        name="Detective-1",
+        description="OSINT platform with FastAPI + Next.js",
+        project_type="fullstack",
+        status="created",
+        files=[
+            ProjectFile(
+                path="backend/app/main.py",
+                content="from fastapi import FastAPI\napp = FastAPI()",
+                language="python",
+            ),
+        ],
+        structure={"directories": ["backend"]},
+        audit_history=[
+            {"kind": "audit", "run_at": "2026-06-06T10:07:19",
+             "overall_score": 58, "modify_count": 15, "missing_count": 14},
+            {"kind": "apply", "run_at": "2026-06-06T10:20:00",
+             "applied_paths": ["a.py"]},
+            {"kind": "audit", "run_at": "2026-06-06T10:23:13",
+             "overall_score": 62, "modify_count": 13, "missing_count": 0},
+            {"kind": "apply", "run_at": "2026-06-06T10:35:50",
+             "applied_paths": ["b.py"]},
+            {"kind": "audit", "run_at": "2026-06-06T10:38:07",
+             "overall_score": 62, "modify_count": 16, "missing_count": 6},
+            {"kind": "apply", "run_at": "2026-06-06T10:53:45",
+             "applied_paths": ["c.py"]},
+        ],
+    )
+    creator.projects[proj.id] = proj
+
+    # Mock the AI to return a 58-score audit, modify_count won't matter
+    # (no files_to_modify in the response), but score within range
+    async def fake_ai_with_score_58(prompt, model_ids=None, **kwargs):
+        return (
+            '{"overall_score": 58, "ready_to_push": false, '
+            '"missing_critical_files": [], "files_to_modify": [], '
+            '"files_to_delete": [], "structural_issues": [], '
+            '"quality_concerns": [], "matches_goal": true, '
+            '"goal_mismatch_reasons": [], "suggestions_before_push": [], '
+            '"summary": "still oscillating"}'
+        )
+
+    # Make our fake-model pass the "available models" gate by stubbing
+    # the manager. Otherwise the endpoint 400s before reaching the
+    # convergence path we're testing.
+    from types import SimpleNamespace
+    fake_model = SimpleNamespace(id="fake-model")
+    with patch(
+        "app.api.routes.simple_projects.ai_generate", new=fake_ai_with_score_58,
+    ), patch(
+        "app.services.ai_manager.AIManager.get_available_models",
+        return_value=[fake_model],
+    ):
+        result = await audit_project(
+            proj.id, AuditProjectRequest(model_ids=["fake-model"]),
+        )
+
+    agg = result["aggregated"]
+    assert agg["overall_score_avg"] == 58
+    assert agg["convergence_notice"], (
+        "Convergence MUST fire on the user's reported oscillation "
+        "(scores 58→62→62→58, applies between each). If this regresses, "
+        "the user is back in the infinite loop they reported."
+    )
+    # The text must call it out as oscillation, not as a problem
+    assert "همگرایی" in agg["convergence_notice"]
