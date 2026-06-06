@@ -2240,6 +2240,34 @@ export default function OversightPage() {
       // و کار را در background ادامه می‌دهد؛ ما همان progress endpoint را
       // poll می‌کنیم تا completed شود، سپس result را از همان snapshot برمی‌داریم.
       const wantAsync = validSessionIds.length > 0 || refPayload.length > 0;
+      // 🚨 (Render edge body-size workaround) — for any idea text larger
+      // than ~50KB, chunk-upload it via /idea-draft/* first, then send
+      // only the small draft_id in the main POST. Render's edge caps
+      // POST bodies; large prompts hit that cap and get rejected before
+      // FastAPI (browser sees this as a CORS error).
+      let ideaDraftId: string | null = null;
+      if (idea.length > 50_000) {
+        try {
+          setGenPhase('در حال آپلود پرامپت بزرگ...');
+          const startRes = await fetch(`${API_BASE}/api/oversight/idea-draft/start`, { method: 'POST' });
+          if (!startRes.ok) throw new Error(`draft/start HTTP ${startRes.status}`);
+          const { draft_id, chunk_size_max } = await startRes.json();
+          const chunkSize = Math.min(chunk_size_max || 256 * 1024, 200 * 1024); // 200KB safety
+          for (let off = 0; off < idea.length; off += chunkSize) {
+            const chunk = idea.slice(off, off + chunkSize);
+            const r = await fetch(`${API_BASE}/api/oversight/idea-draft/${draft_id}/chunk`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+              body: chunk,
+            });
+            if (!r.ok) throw new Error(`draft/chunk HTTP ${r.status}`);
+          }
+          ideaDraftId = draft_id;
+        } catch (e: any) {
+          showError('آپلود پرامپت بزرگ ناموفق: ' + (e?.message || e));
+          return;
+        }
+      }
       // 🚨 (Render edge workaround) — when async, use the alias endpoint
       // at `/idea-to-prompt-job`. Render's edge was rejecting POSTs to
       // `/tasks/from-idea` with no CORS headers (visible to the browser
@@ -2253,7 +2281,8 @@ export default function OversightPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          idea,
+          idea: ideaDraftId ? '' : idea,
+          idea_draft_id: ideaDraftId || undefined,
           watched_id: firstId,
           type: ideaType,
           priority: ideaPriority,
