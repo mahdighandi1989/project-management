@@ -7,7 +7,7 @@ API routes برای مرکز نظارت و مدیریت پروژه‌های گی
 import asyncio
 import json
 import logging
-from fastapi import APIRouter, HTTPException, Query, Depends, Body
+from fastapi import APIRouter, HTTPException, Query, Depends, Body, Request
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
@@ -93,6 +93,12 @@ class IdeaToPromptRequest(BaseModel):
     # تا completed=true شود و result را از تابع تکمیل بگیرد.
     # default=False برای backward compatibility — کلاینت‌های قدیمی همان sync behavior.
     async_mode: bool = False
+    # 🚨 (Render edge body-size workaround) — اگر idea خیلی طولانی است، فرانت
+    # متن را chunk-chunk به /idea-draft/* upload می‌کند و فقط draft_id کوچک
+    # را اینجا می‌فرستد. backend متن کامل را از store می‌خواند و جای idea
+    # می‌گذارد. این مسیر دور می‌زند Render edge body-size cap را که برای
+    # POST های یک‌جا با idea بزرگ موجب CORS-shaped 403 می‌شد.
+    idea_draft_id: Optional[str] = None
 
 
 class TaskCreate(BaseModel):
@@ -1334,6 +1340,22 @@ async def task_from_idea(payload: IdeaToPromptRequest):
     """
     service = get_oversight_service()
 
+    # 🚨 (Render edge body-size workaround) — اگر فرانت idea را به‌صورت
+    # chunk به /idea-draft/* upload کرده و فقط draft_id را اینجا فرستاده،
+    # متن کامل را از store برمی‌داریم و جایگزین idea می‌کنیم. این مسیر
+    # دور می‌زند cap بدنهٔ POST سمت Render edge.
+    effective_idea = payload.idea
+    if payload.idea_draft_id:
+        stored = _consume_idea_draft(payload.idea_draft_id)
+        if stored is None:
+            raise HTTPException(
+                status_code=404,
+                detail="idea_draft_not_found_or_expired",
+            )
+        # If both inline idea and draft are provided, draft wins
+        # (frontend should only set one).
+        effective_idea = stored
+
     # 🚨 Async mode — dispatch + return track_id فوراً
     if payload.async_mode:
         import uuid as _uuid
@@ -1347,7 +1369,7 @@ async def task_from_idea(payload: IdeaToPromptRequest):
         async def _bg_run() -> None:
             try:
                 result = await service.idea_to_prompt(
-                    idea=payload.idea,
+                    idea=effective_idea,
                     watched_id=payload.watched_id,
                     type_=payload.type,
                     priority=payload.priority,
@@ -1387,7 +1409,7 @@ async def task_from_idea(payload: IdeaToPromptRequest):
     # Sync mode (legacy) — حفظ backward compat
     try:
         return await service.idea_to_prompt(
-            idea=payload.idea,
+            idea=effective_idea,
             watched_id=payload.watched_id,
             type_=payload.type,
             priority=payload.priority,
@@ -1408,6 +1430,90 @@ async def task_from_idea(payload: IdeaToPromptRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# 🚨 (Render edge body-size workaround) — chunked idea-text upload.
+# Render's edge layer caps POST bodies (the exact threshold isn't
+# documented but symptoms appeared around prompts >~50-100KB). Large
+# bodies are rejected before reaching FastAPI; the edge's error
+# response has no CORS headers, so the browser reports it as a CORS
+# failure rather than the actual rejection.
+#
+# Workaround: frontend chunk-uploads the idea text into an in-memory
+# draft, then triggers /idea-to-prompt-job with just `idea_draft_id`
+# (a tiny hex string) instead of the full text. The chunked endpoints
+# accept small bodies (a few KB each), so each POST stays well under
+# the edge cap. The final job-trigger POST is also tiny.
+import time as _time_idea_draft
+import threading as _threading_idea_draft
+
+_idea_drafts: Dict[str, Dict[str, Any]] = {}
+_idea_drafts_lock = _threading_idea_draft.Lock()
+_IDEA_DRAFT_MAX_BYTES = 10 * 1024 * 1024  # 10MB ceiling per draft
+_IDEA_DRAFT_TTL_SECONDS = 3600  # auto-expire after 1 hour
+
+
+def _idea_drafts_gc() -> None:
+    cutoff = _time_idea_draft.time() - _IDEA_DRAFT_TTL_SECONDS
+    with _idea_drafts_lock:
+        stale = [k for k, v in _idea_drafts.items() if v.get("created_at", 0) < cutoff]
+        for k in stale:
+            _idea_drafts.pop(k, None)
+
+
+@router.post("/idea-draft/start")
+async def idea_draft_start():
+    """Returns a draft_id for chunked idea-text upload."""
+    import uuid as _uuid
+    _idea_drafts_gc()
+    draft_id = _uuid.uuid4().hex
+    with _idea_drafts_lock:
+        _idea_drafts[draft_id] = {
+            "text": "",
+            "created_at": _time_idea_draft.time(),
+        }
+    return {"draft_id": draft_id, "chunk_size_max": 256 * 1024}
+
+
+@router.post("/idea-draft/{draft_id}/chunk")
+async def idea_draft_chunk(draft_id: str, request: Request):
+    """Append a UTF-8 text chunk to the draft. Max 256KB per chunk."""
+    body = await request.body()
+    if len(body) > 256 * 1024:
+        raise HTTPException(status_code=413, detail="chunk_too_large")
+    with _idea_drafts_lock:
+        draft = _idea_drafts.get(draft_id)
+        if draft is None:
+            raise HTTPException(status_code=404, detail="draft_not_found")
+        new_text = draft["text"] + body.decode("utf-8", errors="replace")
+        if len(new_text.encode("utf-8")) > _IDEA_DRAFT_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="draft_total_too_large")
+        draft["text"] = new_text
+    return {"bytes_received": len(new_text.encode("utf-8"))}
+
+
+@router.post("/idea-draft/{draft_id}/finalize")
+async def idea_draft_finalize(draft_id: str):
+    """No-op; just confirms the draft exists. Frontend can use this to
+    sanity-check before triggering the job."""
+    with _idea_drafts_lock:
+        draft = _idea_drafts.get(draft_id)
+        if draft is None:
+            raise HTTPException(status_code=404, detail="draft_not_found")
+        return {
+            "draft_id": draft_id,
+            "total_bytes": len(draft["text"].encode("utf-8")),
+            "total_chars": len(draft["text"]),
+        }
+
+
+def _consume_idea_draft(draft_id: Optional[str]) -> Optional[str]:
+    """Pop the draft text out of the store. Returns None if not found."""
+    if not draft_id:
+        return None
+    with _idea_drafts_lock:
+        draft = _idea_drafts.pop(draft_id, None)
+    return draft["text"] if draft else None
 
 
 # 🚨 (Render edge workaround) — alias endpoint with a different path.
