@@ -9443,7 +9443,18 @@ AC = «طراحی شیک‌تر باشد»:
                     _total = _done_n + _rem_n
                     _cleanup_ratio = (_done_n / _total) if _total > 0 else 0.0
 
-                    if _total > 0 and _cleanup_ratio >= ratio_threshold:
+                    # ratio_threshold فقط برای status=partial فعال است.
+                    # regressed یعنی نسبت به دور قبل عقب‌گرد داشتیم — حتی
+                    # اگر ۹۰٪ tick خورده باشد، نباید "خوب پیش رفت" تفسیر
+                    # شود؛ باید کلود فرصت برگرداندن regression را داشته
+                    # باشد. not_done/error هم با ratio=0 طبیعتاً trigger
+                    # نمی‌شوند ولی برای صراحت guard می‌گذاریم.
+                    _report_status = (getattr(report, "status", "") or "").lower()
+                    if (
+                        _report_status == "partial"
+                        and _total > 0
+                        and _cleanup_ratio >= ratio_threshold
+                    ):
                         _trigger_cleanup = True
                         _cleanup_reason = "ratio_threshold"
                         logger.info(

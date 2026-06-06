@@ -547,6 +547,52 @@ async def _verify_then_chain(
             service._save_watched()
         return
 
+    # 🐛 (silent-stop fix v2 interaction) — اگر apply_followup_after_verify
+    # داخل verify_task این تسک را آرشیو کرده (حد نصاب ۹۰٪ محرز شد یا
+    # سقف ۶ تلاش پر شد)، نباید retry_same انجام دهیم چون status را به
+    # "pending" برگرداندن یعنی undo شدن آرشیو و loop دوباره. به جای آن
+    # فقط lock را آزاد + chain_next می‌زنیم تا تسک بعدی pick شود.
+    if getattr(task, "archived", False):
+        logger.info(
+            f"_verify_then_chain: task={task_id} already archived "
+            f"(reason={getattr(task, 'archived_reason', '?')}) — "
+            f"skipping action decision, going straight to chain_next"
+        )
+        async with service._lock:
+            service._release_verify_lock(watched_id)
+            service._save_watched()
+        # force action=chain_next + skip notification (apply_followup_after_verify
+        # خودش نوتیفیکیشن ارسال کرده). فقط workflow بعدی trigger می‌شود.
+        action = "chain_next"
+        target_for_dispatch = None
+        force_dispatch = False
+        try:
+            from ...services.oversight_service import get_github_token
+            from ...services.claude_runner_bootstrap import (
+                pick_model_for_task,
+                trigger_workflow_dispatch,
+            )
+            gh_token = get_github_token()
+            if gh_token:
+                _picked_model = await pick_model_for_task(
+                    task, consumer_key="claude_auto_runner",
+                ) if task else None
+                disp = await trigger_workflow_dispatch(
+                    watched,
+                    gh_token=gh_token,
+                    target_task_id=target_for_dispatch,
+                    force=force_dispatch,
+                    claude_model=_picked_model,
+                )
+                logger.info(
+                    f"_verify_then_chain: post-archive chain_next dispatched → {disp}"
+                )
+        except Exception as _disp_e:
+            logger.warning(
+                f"_verify_then_chain: post-archive dispatch failed: {_disp_e}"
+            )
+        return
+
     vstatus = getattr(task, "verification_status", None)
     # 🚨 (auto-runner loop fix) — raw verdict verifier در این run. اگر
     # status_val=done باشد ولی vstatus به streak guard خورده و "partial"

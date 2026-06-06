@@ -224,7 +224,56 @@ def test_ratio_zero_total_does_not_trigger_archive():
     ratio is undefined. We must NOT trigger ratio_threshold cleanup — fall
     through to max_rounds check or pending."""
     body = _slice_apply_followup_body()
-    assert "_total > 0 and _cleanup_ratio >= ratio_threshold" in body, (
+    assert "_total > 0" in body and "_cleanup_ratio >= ratio_threshold" in body, (
         "must guard ratio check with _total > 0 — otherwise a verify with "
         "no parts at all would archive on ratio=0.0 >= 0 spuriously"
+    )
+
+
+def test_ratio_threshold_only_fires_on_partial_status():
+    """Critical: regressed at 95% must NOT trigger ratio_threshold cleanup.
+    Regressed means progress went BACKWARDS — Claude should get a chance
+    to recover from the regression, not be archived. not_done/error are
+    naturally guarded by ratio=0, but we add an explicit `partial` guard
+    for safety/clarity."""
+    body = _slice_apply_followup_body()
+    assert '_report_status == "partial"' in body, (
+        "ratio_threshold cleanup must guard on report.status == 'partial' — "
+        "otherwise a regressed task at 95% done would be incorrectly "
+        "archived as 'good enough' when it actually went backwards"
+    )
+
+
+def test_verify_then_chain_skips_already_archived_task():
+    """After `apply_followup_after_verify` cleanup archives a task,
+    `_verify_then_chain` (which runs after verify_task returns) re-reads
+    the task and previously would have set status='pending' via the
+    retry_same action — silently undoing the archive and causing the
+    auto-loop to continue forever. The fix: detect `task.archived=True`
+    early and skip to chain_next."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/external_prompts.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def _verify_then_chain")
+    assert idx != -1
+    rest = src[idx + 1:]
+    nxt = rest.find("\nasync def ")
+    body = rest if nxt == -1 else rest[:nxt]
+
+    # Must check archived after re-reading task
+    assert 'getattr(task, "archived", False)' in body, (
+        "_verify_then_chain must check if the task was archived by "
+        "apply_followup_after_verify (the verify_task internal hook) "
+        "before deciding on retry_same — otherwise retry_same would "
+        "overwrite status='abandoned' back to 'pending' and undo the archive"
+    )
+
+    # The archived-check must come BEFORE the action decision block
+    archived_idx = body.find('getattr(task, "archived", False)')
+    retry_decision_idx = body.find('vstatus = getattr(task, "verification_status"')
+    assert archived_idx != -1 and retry_decision_idx != -1
+    assert archived_idx < retry_decision_idx, (
+        "archived check must come BEFORE vstatus/action decision — "
+        "otherwise we'd compute retry_same on an already-archived task"
     )
