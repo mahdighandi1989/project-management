@@ -91,7 +91,10 @@ class ProjectResponse(BaseModel):
 # ================================
 
 async def ai_generate_with_meta(
-    prompt: str, model_ids: Optional[List[str]] = None,
+    prompt: str,
+    model_ids: Optional[List[str]] = None,
+    *,
+    max_tokens: int = 4000,
 ) -> tuple:
     """🆕 (model attribution) — same as ai_generate but returns a
     (content, used_model_id) tuple so callers can record which model
@@ -101,7 +104,14 @@ async def ai_generate_with_meta(
     The simple_creator's _tracked_ai_generate unpacks this tuple to
     populate ProjectFile.generated_by, which the UI then displays per
     file. Without this attribution the user couldn't tell which of
-    their selected models produced which file."""
+    their selected models produced which file.
+
+    🆕 `max_tokens` override — audit needs more headroom (8000) than
+    file-generation (4000) because its JSON output enumerates per-file
+    issues + suggestions. Truncated audit responses (at 4000) come back
+    as malformed JSON → user sees "couldn't parse" with no signal as
+    to why. Callers should bump this for any long-form JSON response.
+    """
     from ...services.ai_manager import get_ai_manager
     from ...services.ai_base import Message
 
@@ -132,7 +142,7 @@ async def ai_generate_with_meta(
             response = await ai_manager.generate(
                 model_id=mid,
                 messages=[Message(role="user", content=prompt)],
-                max_tokens=4000,
+                max_tokens=max_tokens,
                 temperature=0.7,
             )
             content = response.content if hasattr(response, "content") else str(response)
@@ -152,14 +162,21 @@ async def ai_generate_with_meta(
     )
 
 
-async def ai_generate(prompt: str, model_ids: Optional[List[str]] = None) -> str:
+async def ai_generate(
+    prompt: str,
+    model_ids: Optional[List[str]] = None,
+    *,
+    max_tokens: int = 4000,
+) -> str:
     """Back-compat shim — returns just the content string.
 
     Existing callers (audit prompt generation, _detect_project_type,
     idea_to_prompt) don't care which model answered; they only need
     the text. For attribution-aware callers use ai_generate_with_meta.
     """
-    content, _model = await ai_generate_with_meta(prompt, model_ids)
+    content, _model = await ai_generate_with_meta(
+        prompt, model_ids, max_tokens=max_tokens,
+    )
     return content
 
 
@@ -946,12 +963,17 @@ async def audit_project(
     # the prefix of every file, so it would re-flag the same "stub
     # detected" issue even after a regen that fixed it past byte 800.
     # The user reported scores going DOWN after apply-fixes; this was
-    # a major contributor. Raise to 200 files × 4000 chars (~800KB max)
-    # and prefer prioritized files (entry points, configs) when the
-    # cap is hit. Also note which files were truncated so the model
-    # doesn't infer "missing content" from a truncated view.
-    MAX_FILES = 200
-    MAX_CHARS_PER_FILE = 4000
+    # a major contributor.
+    #
+    # 🐛 (streaming-timeout fix) — first attempt bumped to 200×4000
+    # (~800KB) but Claude opus then streamed the response for 60+
+    # seconds on a 70-file project and hit max_tokens before completing
+    # the JSON. User saw "هیچ مدلی نتوانست audit را به JSON قابل تجزیه
+    # برساند" + 65s wait. Settled at 100 files × 2000 chars (~200KB) —
+    # still 2.5× the original visibility but small enough that opus
+    # responds in ~10s and stays within the 8000-token output budget.
+    MAX_FILES = 100
+    MAX_CHARS_PER_FILE = 2000
 
     def _audit_priority(path: str) -> int:
         """Lower = higher priority. Entry points, configs, mains first."""
@@ -1123,7 +1145,16 @@ async def audit_project(
     # model doesn't kill the whole audit.
     async def _audit_one(mid: str) -> Dict[str, Any]:
         try:
-            response_text = await ai_generate(audit_prompt, model_ids=[mid])
+            # 🐛 (streaming-timeout fix) — audit JSON is long-form: one
+            # file_to_modify entry can easily be 200+ tokens, and complex
+            # projects need 10-30 such entries plus missing_files +
+            # structural_issues. 4000-token cap truncated the JSON
+            # mid-object → "couldn't parse" 500 after 60s of streaming.
+            # 8000 leaves headroom for verbose audits without blowing
+            # past the model's context window.
+            response_text = await ai_generate(
+                audit_prompt, model_ids=[mid], max_tokens=8000,
+            )
             return {
                 "model_id": mid,
                 "ok": True,
@@ -1159,10 +1190,30 @@ async def audit_project(
         if r["ok"] and isinstance(r.get("report"), dict) and r["report"]
     ]
     if not successful:
-        raise HTTPException(
-            status_code=500,
-            detail="هیچ مدلی نتوانست audit را به JSON قابل تجزیه برساند.",
+        # 🐛 (visibility fix) — when JSON parse fails, the user previously
+        # saw a blank "couldn't parse" toast with no clue why. Now we
+        # surface each model's raw response excerpt + ok/error flag so
+        # they can see whether the model was truncated, returned prose,
+        # or errored out entirely. Frontend renders these in the modal.
+        excerpts = []
+        for r in results_per_model:
+            if r.get("ok"):
+                excerpt = (r.get("raw_response_excerpt") or "")[:400]
+                excerpts.append(
+                    f"• {r.get('model_id', '?')}: {excerpt or '(empty)'}"
+                )
+            else:
+                excerpts.append(
+                    f"• {r.get('model_id', '?')} ❌ "
+                    f"{str(r.get('error') or 'unknown')[:300]}"
+                )
+        detail_msg = (
+            "هیچ مدلی نتوانست audit را به JSON قابل تجزیه برساند. "
+            "ممکن است پاسخ truncate شده باشد (پرامپت کوتاه‌تر کنید یا "
+            "تعداد فایل کمتر) یا مدل به‌جای JSON متن آزاد برگردانده.\n\n"
+            "پاسخ هر مدل:\n" + "\n".join(excerpts)
         )
+        raise HTTPException(status_code=500, detail=detail_msg)
 
     def _collect(field: str) -> List[str]:
         seen: List[str] = []

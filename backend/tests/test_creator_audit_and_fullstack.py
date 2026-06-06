@@ -322,7 +322,7 @@ async def test_audit_endpoint_handles_well_formed_json_responses(monkeypatch):
 
     proj = _make_fake_project(monkeypatch)
 
-    async def fake_ai_generate(prompt, model_ids=None):
+    async def fake_ai_generate(prompt, model_ids=None, **kwargs):
         return (
             '{"overall_score": 85, "ready_to_push": true, '
             '"matches_goal": true, '
@@ -370,7 +370,7 @@ async def test_audit_endpoint_survives_string_score_and_list_response(monkeypatc
 
     call_count = {"n": 0}
 
-    async def fake_ai_generate(prompt, model_ids=None):
+    async def fake_ai_generate(prompt, model_ids=None, **kwargs):
         call_count["n"] += 1
         # Model 1: score as fraction string + missing some keys
         if call_count["n"] == 1:
@@ -442,7 +442,7 @@ async def test_audit_endpoint_runs_models_in_parallel(monkeypatch, tmp_path):
     creator = get_simple_creator()
     creator.projects[proj.id] = proj
 
-    async def slow_ai_generate(prompt, model_ids=None):
+    async def slow_ai_generate(prompt, model_ids=None, **kwargs):
         await _asyncio.sleep(0.5)  # each call takes 0.5s
         return '{"overall_score": 70, "ready_to_push": true}'
 
@@ -561,10 +561,10 @@ async def test_apply_fixes_endpoint_generates_missing_files(tmp_path):
     )
     creator.projects[proj.id] = proj
 
-    async def fake_ai_generate(prompt, model_ids=None):
+    async def fake_ai_generate(prompt, model_ids=None, **kwargs):
         return f"# generated content for: {prompt[:40]}"
 
-    async def fake_ai_generate_with_meta(prompt, model_ids=None):
+    async def fake_ai_generate_with_meta(prompt, model_ids=None, **kwargs):
         return (await fake_ai_generate(prompt, model_ids), "fake-test-model")
 
     with patch(
@@ -637,10 +637,10 @@ async def test_apply_fixes_can_promote_to_fullstack(tmp_path):
     )
     creator.projects[proj.id] = proj
 
-    async def fake_ai_generate(prompt, model_ids=None):
+    async def fake_ai_generate(prompt, model_ids=None, **kwargs):
         return "// generated\n"
 
-    async def fake_ai_generate_with_meta(prompt, model_ids=None):
+    async def fake_ai_generate_with_meta(prompt, model_ids=None, **kwargs):
         return ("// generated\n", "fake-test-model")
 
     with patch(
@@ -809,11 +809,11 @@ async def test_apply_fixes_regenerates_existing_files_with_audit_context(tmp_pat
 
     captured_prompts: List[str] = []
 
-    async def fake_ai_generate(prompt, model_ids=None):
+    async def fake_ai_generate(prompt, model_ids=None, **kwargs):
         captured_prompts.append(prompt)
         return "from fastapi import FastAPI\napp = FastAPI()\napp.include_router(...)"
 
-    async def fake_ai_generate_with_meta(prompt, model_ids=None):
+    async def fake_ai_generate_with_meta(prompt, model_ids=None, **kwargs):
         content = await fake_ai_generate(prompt, model_ids)
         return (content, "fake-test-model")
 
@@ -972,10 +972,10 @@ async def test_apply_fixes_treats_missing_target_as_add_not_modify(tmp_path):
     creator.projects[proj.id] = proj
     (tmp_path / proj.id).mkdir(parents=True, exist_ok=True)
 
-    async def fake_ai_generate(prompt, model_ids=None):
+    async def fake_ai_generate(prompt, model_ids=None, **kwargs):
         return "new content"
 
-    async def fake_ai_generate_with_meta(prompt, model_ids=None):
+    async def fake_ai_generate_with_meta(prompt, model_ids=None, **kwargs):
         return ("new content", "fake-test-model")
 
     with patch(
@@ -1789,15 +1789,22 @@ def test_audit_prompt_widens_file_and_char_caps():
     """The 80-files × 800-chars cap from the original audit was too
     aggressive: re-audits would see only the prefix of every file, so
     even after regen the same 'stub detected' issue kept firing.
-    Caps must now be at least 200 files × 4000 chars."""
+    Caps walked back from 200×4000 → 100×2000 after the streaming-
+    timeout fix: huge prompts made Claude opus stream a response for
+    60+ seconds that hit the max_tokens cap mid-JSON. Current caps
+    (100×2000 = ~200KB) are still 2.5× the original 80×800 visibility
+    while staying under model output budgets."""
     src = (
         _BACKEND_ROOT / "app/api/routes/simple_projects.py"
     ).read_text(encoding="utf-8")
     idx = src.find("async def audit_project")
     body = src[idx:idx + 14000]
-    assert "MAX_FILES = 200" in body, "audit must scan up to 200 files"
-    assert "MAX_CHARS_PER_FILE = 4000" in body, (
-        "audit must show up to 4000 chars per file"
+    assert "MAX_FILES = 100" in body, (
+        "audit must scan up to 100 files — well above the 80 original"
+    )
+    assert "MAX_CHARS_PER_FILE = 2000" in body, (
+        "audit must show up to 2000 chars per file (2.5× the original "
+        "800, but small enough that opus responds without truncating)"
     )
     assert "TRUNCATED" in body, (
         "truncated files must be marked so the model doesn't infer "
