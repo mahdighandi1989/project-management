@@ -1338,9 +1338,15 @@ async def audit_project(
             ev.get("modify_count") or 0 for ev in recent_audits
         ] + [len(modify_collected)]
         score_range = max(recent_scores) - min(recent_scores)
-        mod_range = max(recent_mod_counts) - min(recent_mod_counts)
-        # All scores within ±5, modify counts within ±5, and at least
-        # one apply happened between them → we're oscillating.
+        # 🐛 (convergence threshold fix) — initial logic also required
+        # modify_count to be within ±5, but user's actual screen showed
+        # 15→13→16→19 (range 6) while score oscillated 58→62→62→58 (range
+        # 4). That's the *textbook* oscillation pattern — score stuck,
+        # AI inventing new "issues" each round — but the mod_range gate
+        # blocked the notice from firing. Drop the mod_range cap; the
+        # score-range gate (≤5 across 3-4 audits) is already a strong
+        # enough signal of "not improving". Bumped score floor to 55
+        # so we don't tell a project with 50 it's "good enough".
         applies_between = sum(
             1 for ev in (project.audit_history or [])
             if ev.get("kind") == "apply"
@@ -1348,20 +1354,20 @@ async def audit_project(
         )
         if (
             score_range <= 5
-            and mod_range <= 5
             and applies_between >= 1
-            and avg_score >= 50
+            and avg_score >= 55
         ):
             convergence_notice = (
-                f"🎯 **پروژه به همگرایی رسیده.** ۳ audit آخر امتیاز "
-                f"{recent_scores[0]}-{recent_scores[-1]} داده و تعداد "
-                f"اصلاحات بین {min(recent_mod_counts)} تا "
-                f"{max(recent_mod_counts)} نوسان دارد. این یعنی AI هر "
-                f"بار چیز جدیدی پیدا می‌کند ولی پروژه واقعاً بهبود ندارد "
-                f"— احتمالاً به کیفیت قابل قبول رسیده و audit بیشتر فقط "
-                f"نظر شخصی مدل را اضافه می‌کند. می‌توانی push کنی، یا "
-                f"چند issue واقعاً مهم را دستی انتخاب کنی و بقیه را "
-                f"نادیده بگیری."
+                f"🎯 **پروژه به همگرایی رسیده.** {len(recent_scores)} "
+                f"audit آخر امتیازی بین {min(recent_scores)} تا "
+                f"{max(recent_scores)} داده و با وجود {applies_between} "
+                f"apply مداخله‌ای، تعداد اصلاحات (در محدودهٔ "
+                f"{min(recent_mod_counts)} تا {max(recent_mod_counts)}) "
+                f"کاهش معناداری ندارد. این یعنی AI هر بار چیز جدیدی "
+                f"پیدا می‌کند ولی پروژه واقعاً بهبود نمی‌کند — احتمالاً "
+                f"به کیفیت قابل قبول رسیده و audit بیشتر فقط نظر شخصی "
+                f"مدل را اضافه می‌کند. می‌توانی push کنی، یا چند issue "
+                f"واقعاً مهم را دستی انتخاب کنی و بقیه را نادیده بگیری."
             )
 
     # Pull a representative summary from the highest-scoring model so the

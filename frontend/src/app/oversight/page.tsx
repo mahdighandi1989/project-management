@@ -2252,15 +2252,33 @@ export default function OversightPage() {
           const startRes = await fetch(`${API_BASE}/api/oversight/idea-draft/start`, { method: 'POST' });
           if (!startRes.ok) throw new Error(`draft/start HTTP ${startRes.status}`);
           const { draft_id, chunk_size_max } = await startRes.json();
-          const chunkSize = Math.min(chunk_size_max || 256 * 1024, 200 * 1024); // 200KB safety
-          for (let off = 0; off < idea.length; off += chunkSize) {
-            const chunk = idea.slice(off, off + chunkSize);
+          // 🐛 (UTF-8 chunk-size bug) — backend's chunk_size_max is in
+          // BYTES, but idea.slice() works in CHARACTERS. Persian text
+          // is ~2 bytes per char in UTF-8, so a "200KB chars" chunk is
+          // really 400KB on the wire and the backend's 256KB cap fired
+          // a 413. Encode each candidate chunk and split it precisely
+          // at the UTF-8 byte boundary instead of guessing.
+          const encoder = new TextEncoder();
+          const byteCap = Math.min(chunk_size_max || 256 * 1024, 200 * 1024);
+          let off = 0;
+          while (off < idea.length) {
+            // Start with a generous char-window, then shrink until the
+            // encoded byte length fits the cap.
+            let end = Math.min(idea.length, off + byteCap);
+            let chunk = idea.slice(off, end);
+            let encoded = encoder.encode(chunk);
+            while (encoded.length > byteCap && end > off + 1) {
+              end = off + Math.floor((end - off) * 0.85);
+              chunk = idea.slice(off, end);
+              encoded = encoder.encode(chunk);
+            }
             const r = await fetch(`${API_BASE}/api/oversight/idea-draft/${draft_id}/chunk`, {
               method: 'POST',
               headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-              body: chunk,
+              body: encoded,
             });
             if (!r.ok) throw new Error(`draft/chunk HTTP ${r.status}`);
+            off = end;
           }
           ideaDraftId = draft_id;
         } catch (e: any) {
