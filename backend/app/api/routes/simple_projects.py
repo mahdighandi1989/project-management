@@ -1207,18 +1207,42 @@ async def deploy_project_render_ai(
             }
         docker_overrides[svc_name] = override
 
-    # ── ۴) ساخت هر سرویس روی Render ──
+    # ── ۴) 🆕 (env auto-fill) — برای هر سرویس، env vars را resolve کن:
+    # API keys از Settings DB، SECRET_KEY ها تولید، cross-service ها
+    # mark می‌شوند. خروجی: env_resolution[svc_name] = {var: {value, source, ...}}
+    env_resolution: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for svc in services_plan:
+        svc_name = svc.get("name", "app")
+        per_var: Dict[str, Dict[str, Any]] = {}
+        # request override به‌عنوان user-supplied value
+        ovr = (request.env_vars_overrides or {}).get(svc_name, {}) or {}
+        for k, v in (svc.get("env_vars") or {}).items():
+            initial = (ovr.get(k) if k in ovr else v) or ""
+            per_var[k] = _resolve_env_var(k, str(initial or ""))
+        env_resolution[svc_name] = per_var
+
+    # ── ۵) ساخت هر سرویس روی Render — ترتیب: backend اول (تا URL آن
+    # برای frontend در دسترس باشد)، static و web_service فرعی بعد.
+    def _service_sort_key(s: dict) -> int:
+        role = (s.get("role") or "").lower()
+        if role == "backend":
+            return 0
+        if role == "frontend":
+            return 2
+        return 1  # سایر نقش‌ها وسط
+
+    ordered_services = sorted(services_plan, key=_service_sort_key)
+    # نقشهٔ backend URL ها برای cross-service ref
+    backend_urls: Dict[str, str] = {}
+
     deploy_svc = RenderDeployService(render_key)
     created: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
     try:
-        for svc in services_plan:
+        for svc in ordered_services:
             svc_name = svc.get("name", "app")
             svc_type = svc.get("service_type", "web_service")
-            # env_vars overrides از request
-            base_envs = dict(svc.get("env_vars", {}) or {})
-            ovr = (request.env_vars_overrides or {}).get(svc_name, {}) or {}
-            base_envs.update(ovr)
+            svc_role = (svc.get("role") or "").lower()
 
             # 🆕 اعمال docker override اگر Dockerfile خالی بود
             do = docker_overrides.get(svc_name, {})
@@ -1241,6 +1265,26 @@ async def deploy_project_render_ai(
                 if "publish_path" in do else svc.get("publish_path")
             )
 
+            # 🆕 جمع‌آوری env vars resolved، شامل cross-service fill برای
+            # frontend (NEXT_PUBLIC_API_URL = backend URL اگر backend
+            # قبلاً deploy شده).
+            resolved = env_resolution.get(svc_name, {})
+            final_envs: Dict[str, str] = {}
+            for var_name, info in resolved.items():
+                if info["resolved"]:
+                    final_envs[var_name] = info["value"]
+                    continue
+                # cross-service: اگر backend موجود است، استفاده کن
+                if info["source"] == "cross_service" and backend_urls:
+                    backend_url = next(iter(backend_urls.values()))
+                    final_envs[var_name] = backend_url
+                    info["value"] = backend_url
+                    info["source"] = "cross_service_resolved"
+                    info["resolved"] = True
+                else:
+                    # هنوز خالی — Render خواهد دید
+                    final_envs[var_name] = info.get("value", "")
+
             result = await deploy_svc.create_service(
                 name=svc_name,
                 project_type=project_type_param,
@@ -1251,24 +1295,28 @@ async def deploy_project_render_ai(
                 start_command=start_cmd_param,
                 service_type=service_type_param,
                 publish_path=publish_path_param,
-                env_vars=base_envs if base_envs else None,
+                env_vars=final_envs if final_envs else None,
             )
             if result.get("success"):
-                # notes اصلی + هشدار override (اگر بود)
                 final_notes = svc.get("notes", "") or ""
                 if do.get("notes_append"):
                     final_notes = (
                         f"{final_notes}\n{do['notes_append']}".strip()
                     )
+                # اگر backend است، URL را برای frontend بعدی نگه دار
+                svc_url = result.get("url") or ""
+                if svc_role == "backend" and svc_url:
+                    backend_urls[svc_name] = svc_url
                 created.append({
                     "name": result.get("name"),
                     "service_id": result.get("service_id"),
                     "role": svc.get("role", "app"),
                     "service_type": service_type_param,
                     "dashboard_url": result.get("dashboard_url"),
-                    "url": result.get("url"),
+                    "url": svc_url,
                     "notes": final_notes,
                     "docker_overridden": bool(do.get("notes_append")),
+                    "env_resolution": resolved,  # برای frontend نمایش
                 })
             else:
                 errors.append({
@@ -1279,12 +1327,27 @@ async def deploy_project_render_ai(
     finally:
         await deploy_svc.close()
 
-    # env vars خالی که کاربر باید پر کند
-    empty_env_vars: List[str] = []
-    for svc in services_plan:
-        for k, v in (svc.get("env_vars") or {}).items():
-            if v == "" or v is None:
-                empty_env_vars.append(f"{svc.get('name', '?')}: {k}")
+    # 🆕 (env auto-fill) — خلاصهٔ resolve:
+    #   auto_resolved: لیست env های که خودکار پر شدند (source != external/unknown)
+    #   still_manual:  لیست env های که هنوز نیاز به اقدام کاربر دارند، با hint
+    auto_resolved: List[Dict[str, str]] = []
+    still_manual: List[Dict[str, str]] = []
+    for svc_name, per_var in env_resolution.items():
+        for k, info in per_var.items():
+            if info["resolved"]:
+                auto_resolved.append({
+                    "service": svc_name,
+                    "var": k,
+                    "source": info["source"],
+                    # مقدار را نمایش نمی‌دهیم (sensitivity) — فقط منبع
+                })
+            else:
+                still_manual.append({
+                    "service": svc_name,
+                    "var": k,
+                    "source": info["source"],
+                    "hint": info.get("hint", ""),
+                })
 
     return {
         "success": len(created) > 0,
@@ -1295,10 +1358,17 @@ async def deploy_project_render_ai(
         "project_name": project.name,
         "github_url": repo_url,
         "branch": branch,
-        "empty_env_vars": empty_env_vars,
+        "auto_resolved": auto_resolved,
+        "still_manual": still_manual,
+        # backward compat — frontend قدیم empty_env_vars را می‌خواند
+        "empty_env_vars": [
+            f"{x['service']}: {x['var']}" for x in still_manual
+        ],
         "plan": request.plan,
         "message": (
             f"✅ {len(created)} سرویس ساخته شد"
+            + (f" | 🔐 {len(auto_resolved)} env خودکار" if auto_resolved else "")
+            + (f" | ⚠️ {len(still_manual)} env دستی" if still_manual else "")
             + (f" | ❌ {len(errors)} خطا" if errors else "")
         ),
     }
@@ -2302,6 +2372,135 @@ def _get_github_token_value() -> str:
     except Exception:
         pass
     return ""
+
+
+# 🆕 (env auto-fill) — patterns برای resolve خودکار env vars.
+# هدف: کاربر نیاز به وارد کردن دستی کلیدهایی که سیستم در Settings دارد،
+# نباشد. سه لایه:
+#   1) Settings DB lookup — برای کلیدهای API شناخته‌شده
+#   2) Auto-generate — برای SECRET_KEY / JWT_SECRET / تصادفی
+#   3) Cross-service reference — برای NEXT_PUBLIC_API_URL (backend → frontend)
+# هر چیز دیگر (DATABASE_URL, NEO4J_*, REDIS_URL) به‌عنوان "external"
+# علامت زده می‌شود تا کاربر در پنل Render خودش دست بگیرد.
+
+# Map: env var name pattern → Settings DB key
+_ENV_VAR_DB_LOOKUPS = {
+    "OPENAI_API_KEY": "api_key_openai",
+    "OPENAI_KEY": "api_key_openai",
+    "OPEN_AI_KEY": "api_key_openai",
+    "ANTHROPIC_API_KEY": "api_key_claude",
+    "CLAUDE_API_KEY": "api_key_claude",
+    "GOOGLE_API_KEY": "api_key_gemini",
+    "GEMINI_API_KEY": "api_key_gemini",
+    "GOOGLE_GENAI_API_KEY": "api_key_gemini",
+    "DEEPSEEK_API_KEY": "api_key_deepseek",
+    "PERPLEXITY_API_KEY": "api_key_perplexity",
+    "GITHUB_TOKEN": "api_key_github",
+    "GH_TOKEN": "api_key_github",
+    "RENDER_API_KEY": "api_key_render",
+}
+
+# Pattern های auto-generate شدنی: نام شامل این کلمات باشد → token_urlsafe
+_ENV_VAR_AUTOGEN_PATTERNS = (
+    "SECRET_KEY", "JWT_SECRET", "SESSION_SECRET", "APP_SECRET",
+    "ENCRYPTION_KEY", "SIGNING_KEY", "CSRF_SECRET",
+)
+
+# Pattern های مرتبط با cross-service backend URL
+_ENV_VAR_BACKEND_URL_PATTERNS = (
+    "NEXT_PUBLIC_API_URL", "VITE_API_URL", "REACT_APP_API_URL",
+    "API_BASE_URL", "BACKEND_URL", "API_URL",
+)
+
+# Pattern های external که نمی‌توان خودکار resolve کرد (نیاز به سرویس
+# مدیریت‌شده). در پاسخ با hint مناسب به کاربر گزارش می‌شوند.
+_ENV_VAR_EXTERNAL_HINTS = {
+    "DATABASE_URL": "یک PostgreSQL در Render dashboard بساز (New + Postgres) و connection string را کپی کن",
+    "DB_URL": "یک PostgreSQL در Render dashboard بساز و connection string را کپی کن",
+    "POSTGRES_URL": "یک PostgreSQL در Render dashboard بساز",
+    "REDIS_URL": "یک Key Value (Redis) در Render dashboard بساز",
+    "CELERY_BROKER_URL": "همان REDIS_URL است (یا یک Redis جدا برای broker)",
+    "CELERY_RESULT_BACKEND": "همان REDIS_URL است (یا یک Redis جدا برای backend)",
+    "NEO4J_URI": "یک حساب Neo4j Aura رایگان بساز (neo4j.com/cloud/aura) و bolt URL را وارد کن",
+    "NEO4J_USERNAME": "Neo4j Aura (پیش‌فرض: neo4j)",
+    "NEO4J_PASSWORD": "Neo4j Aura — رمز موقع ساخت instance نمایش داده می‌شود",
+    "MONGODB_URI": "یک MongoDB Atlas رایگان بساز",
+    "MONGO_URL": "یک MongoDB Atlas رایگان بساز",
+}
+
+
+def _resolve_env_var(name: str, current_value: str = "") -> Dict[str, Any]:
+    """تلاش برای resolve خودکار یک env var.
+
+    Returns:
+      {
+        "value": str,        # مقدار resolved (یا current_value اگر نشد)
+        "source": str,       # "user" | "db_lookup" | "autogen" | "external" | "cross_service"
+        "hint": str,         # برای source="external"، راهنمای کاربر
+        "resolved": bool,    # آیا automatic resolved شد
+      }
+    """
+    # اگر کاربر مقدار داده، احترام بگذار
+    if current_value and current_value.strip():
+        return {
+            "value": current_value, "source": "user",
+            "hint": "", "resolved": True,
+        }
+
+    name_upper = (name or "").upper().strip()
+
+    # Layer 1: Settings DB lookup
+    db_key = _ENV_VAR_DB_LOOKUPS.get(name_upper)
+    if db_key:
+        try:
+            from ...models.setting import Setting
+            from ...core.database import SessionLocal
+            db = SessionLocal()
+            try:
+                v = Setting.get_value(db, db_key)
+                if v:
+                    return {
+                        "value": str(v), "source": "db_lookup",
+                        "hint": "", "resolved": True,
+                    }
+            finally:
+                db.close()
+        except Exception:
+            pass
+
+    # Layer 2: Auto-generate برای SECRET_KEY و معادل‌ها
+    for pat in _ENV_VAR_AUTOGEN_PATTERNS:
+        if pat in name_upper:
+            import secrets
+            return {
+                "value": secrets.token_urlsafe(48), "source": "autogen",
+                "hint": "", "resolved": True,
+            }
+
+    # Layer 3: Cross-service marker (در زمان resolve فعلی هنوز نداریم،
+    # caller backend URL را در پاس دوم پر می‌کند).
+    for pat in _ENV_VAR_BACKEND_URL_PATTERNS:
+        if pat in name_upper:
+            return {
+                "value": "", "source": "cross_service",
+                "hint": "بعد از deploy backend خودکار set می‌شود",
+                "resolved": False,
+            }
+
+    # Layer 4: External hint
+    if name_upper in _ENV_VAR_EXTERNAL_HINTS:
+        return {
+            "value": "", "source": "external",
+            "hint": _ENV_VAR_EXTERNAL_HINTS[name_upper],
+            "resolved": False,
+        }
+
+    # Unknown — pass through empty
+    return {
+        "value": "", "source": "unknown",
+        "hint": "این env var را در Render dashboard دستی وارد کن",
+        "resolved": False,
+    }
 
 
 def _get_render_api_key_value() -> str:

@@ -1442,7 +1442,55 @@ export default function ProjectPage() {
                           )}
                         </div>
                       ))}
-                      {(deployAiResult.empty_env_vars || []).length > 0 && (
+                      {/* 🆕 (env auto-fill) — auto_resolved + still_manual */}
+                      {(deployAiResult.auto_resolved || []).length > 0 && (
+                        <div className="mt-2 p-2 bg-green-500/10 border border-green-500/30 rounded">
+                          <div className="font-bold text-green-400 mb-1">
+                            🔐 env var هایی که خودکار پر شدند:
+                          </div>
+                          <ul className="text-green-200 text-[11px]">
+                            {deployAiResult.auto_resolved.map((v: any, i: number) => (
+                              <li key={i}>
+                                • <span className="font-mono">{v.service}</span>:{' '}
+                                <span className="font-mono">{v.var}</span>{' '}
+                                <span className="opacity-60">
+                                  ({
+                                    v.source === 'db_lookup' ? 'از پنل تنظیمات'
+                                    : v.source === 'autogen' ? 'تصادفی تولید شد'
+                                    : v.source === 'cross_service_resolved' ? 'از URL backend'
+                                    : v.source === 'user' ? 'توسط کاربر'
+                                    : v.source
+                                  })
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {(deployAiResult.still_manual || []).length > 0 && (
+                        <div className="mt-2 p-2 bg-yellow-500/10 border border-yellow-500/30 rounded">
+                          <div className="font-bold text-yellow-400 mb-1">
+                            ⚠️ env var هایی که نیاز به اقدام دستی دارند:
+                          </div>
+                          <ul className="text-yellow-200 text-[11px] space-y-1">
+                            {deployAiResult.still_manual.map((v: any, i: number) => (
+                              <li key={i}>
+                                <div>
+                                  • <span className="font-mono">{v.service}</span>:{' '}
+                                  <span className="font-mono">{v.var}</span>
+                                </div>
+                                {v.hint && (
+                                  <div className="ml-3 text-yellow-300/70 text-[10px]">
+                                    ↳ {v.hint}
+                                  </div>
+                                )}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {/* fallback برای backend قدیم که فقط empty_env_vars داشت */}
+                      {!deployAiResult.still_manual && (deployAiResult.empty_env_vars || []).length > 0 && (
                         <div className="mt-2 p-2 bg-yellow-500/10 border border-yellow-500/30 rounded">
                           <div className="font-bold text-yellow-400 mb-1">
                             ⚠️ env var های خالی که باید پر کنی:

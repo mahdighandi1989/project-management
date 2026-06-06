@@ -155,7 +155,7 @@ def test_deploy_render_ai_supports_multi_service():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 14000]
+    body = src[idx:idx + 20000]
     assert "for svc in services_plan" in body or "for svc in services" in body, (
         "must iterate over services_plan to create one Render service per "
         "AI-recommended service (otherwise fullstack only gets one service)"
@@ -175,7 +175,7 @@ def test_deploy_render_ai_reports_empty_env_vars():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 14000]
+    body = src[idx:idx + 20000]
     assert "empty_env_vars" in body, (
         "response must include empty_env_vars (mirrors Inspector's UX)"
     )
@@ -191,7 +191,7 @@ def test_deploy_render_ai_uses_project_repo_not_internal_storage():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 14000]
+    body = src[idx:idx + 20000]
     assert "project.github_repo_url" in body
     assert "project.github_owner" in body
     # Must NOT hardcode the internal-storage path in the AI variant
@@ -210,7 +210,7 @@ def test_deploy_render_ai_returns_actionable_no_repo_error():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 14000]
+    body = src[idx:idx + 20000]
     assert '"error": "no_github_repo"' in body, (
         "must return a structured error so the frontend can route the "
         "user to the «GitHub به push» button"
@@ -382,7 +382,7 @@ def test_deploy_render_ai_checks_dockerfile_before_create():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 14000]
+    body = src[idx:idx + 20000]
     assert "_read_github_file" in body, (
         "must read the Dockerfile from GitHub to verify it's not empty — "
         "AI's recommendation alone is unreliable when Creator emits a "
@@ -402,7 +402,7 @@ def test_deploy_render_ai_overrides_backend_to_python_native():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 14000]
+    body = src[idx:idx + 20000]
     assert 'svc_role == "backend"' in body
     assert "pip install -r requirements.txt" in body, (
         "backend override must use the standard Python build command"
@@ -421,7 +421,7 @@ def test_deploy_render_ai_overrides_frontend_to_vite_static_site():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 14000]
+    body = src[idx:idx + 20000]
     assert 'svc_role == "frontend"' in body
     assert '"static_site"' in body, "frontend override must select static_site"
     assert "npm run build" in body
@@ -440,7 +440,7 @@ def test_deploy_render_ai_reports_override_in_created_service():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 14000]
+    body = src[idx:idx + 20000]
     assert "docker_overridden" in body
     assert "notes_append" in body
 
@@ -454,6 +454,159 @@ def test_deploy_render_ai_dockerfile_usability_threshold():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 14000]
+    body = src[idx:idx + 20000]
     assert "len(df_content) > 100" in body
     assert "len(stripped_lines) >= 2" in body
+
+
+# ---------------------------------------------------------------------------
+# 🆕 ENV var auto-fill — user requested no-manual-work workflow
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_env_var_helper_exists():
+    """Source-level pin: the `_resolve_env_var` helper must exist and
+    handle the four sources (db_lookup, autogen, cross_service, external)."""
+    from app.api.routes.simple_projects import _resolve_env_var
+
+    # OPENAI_API_KEY → DB lookup tag (value depends on actual DB; just
+    # check the source classification path is reachable)
+    r = _resolve_env_var("OPENAI_API_KEY", "")
+    assert r["source"] in ("db_lookup", "unknown"), (
+        f"OPENAI_API_KEY must be classified as db_lookup (or unknown if "
+        f"DB is empty in test env); got {r['source']}"
+    )
+
+    # SECRET_KEY → autogen, always resolves
+    r = _resolve_env_var("SECRET_KEY", "")
+    assert r["source"] == "autogen"
+    assert r["resolved"] is True
+    assert len(r["value"]) >= 32, "autogen secret must be sufficiently long"
+
+    # JWT_SECRET pattern match
+    r = _resolve_env_var("JWT_SECRET", "")
+    assert r["source"] == "autogen"
+    assert r["resolved"] is True
+
+    # NEXT_PUBLIC_API_URL → cross_service (not resolved at this stage)
+    r = _resolve_env_var("NEXT_PUBLIC_API_URL", "")
+    assert r["source"] == "cross_service"
+    assert r["resolved"] is False
+    assert "backend" in r["hint"].lower() or "بعد" in r["hint"]
+
+    # DATABASE_URL → external with hint
+    r = _resolve_env_var("DATABASE_URL", "")
+    assert r["source"] == "external"
+    assert r["resolved"] is False
+    assert "Postgres" in r["hint"] or "postgres" in r["hint"].lower()
+
+    # NEO4J_URI → external
+    r = _resolve_env_var("NEO4J_URI", "")
+    assert r["source"] == "external"
+    assert "neo4j" in r["hint"].lower() or "Aura" in r["hint"]
+
+
+def test_resolve_env_var_respects_user_supplied_value():
+    """If the user already supplied a value (current_value non-empty),
+    we must not overwrite it — return source='user'."""
+    from app.api.routes.simple_projects import _resolve_env_var
+
+    r = _resolve_env_var("OPENAI_API_KEY", "sk-user-provided-key")
+    assert r["source"] == "user"
+    assert r["value"] == "sk-user-provided-key"
+    assert r["resolved"] is True
+
+
+def test_resolve_env_var_unknown_name_returns_unresolved():
+    """Unknown env var names get a generic 'manual' hint without
+    pretending to know the answer."""
+    from app.api.routes.simple_projects import _resolve_env_var
+
+    r = _resolve_env_var("SOME_UNIQUE_CUSTOM_VAR_XYZ", "")
+    assert r["resolved"] is False
+    assert r["source"] == "unknown"
+
+
+def test_deploy_endpoint_orders_backend_before_frontend():
+    """Critical for cross-service ref: backend must be created first so
+    its URL is available when the frontend service is created."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def deploy_project_render_ai")
+    assert idx != -1
+    body = src[idx:idx + 20000]
+    assert "_service_sort_key" in body, (
+        "must sort services so backend is created before frontend "
+        "(otherwise cross-service env ref fails)"
+    )
+    assert "backend_urls" in body, (
+        "must capture backend URLs into a dict for later cross-service use"
+    )
+
+
+def test_deploy_endpoint_response_separates_auto_and_manual():
+    """User's request: 'خودش باید ENV ها رو پر کنه نباید کاری دستی انجام
+    بشه'. Response must surface what was auto-filled vs what still needs
+    user action — and the manual ones must come with actionable hints."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def deploy_project_render_ai")
+    assert idx != -1
+    body = src[idx:idx + 20000]
+    assert '"auto_resolved"' in body
+    assert '"still_manual"' in body
+    # Hints must be carried through
+    assert "hint" in body
+
+
+def test_db_lookup_table_covers_common_api_keys():
+    """Pin the lookup table so a refactor doesn't accidentally drop a
+    common provider (e.g., OpenAI / Google)."""
+    from app.api.routes.simple_projects import _ENV_VAR_DB_LOOKUPS
+
+    for required in (
+        "OPENAI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY",
+        "ANTHROPIC_API_KEY", "CLAUDE_API_KEY", "DEEPSEEK_API_KEY",
+        "GITHUB_TOKEN",
+    ):
+        assert required in _ENV_VAR_DB_LOOKUPS, (
+            f"{required} must be in the auto-fill DB lookup table"
+        )
+
+
+def test_external_hints_cover_common_databases():
+    """Common database env vars must have actionable hints (not just
+    'manual' with no guidance)."""
+    from app.api.routes.simple_projects import _ENV_VAR_EXTERNAL_HINTS
+
+    for required in (
+        "DATABASE_URL", "REDIS_URL", "NEO4J_URI",
+        "CELERY_BROKER_URL", "CELERY_RESULT_BACKEND",
+    ):
+        assert required in _ENV_VAR_EXTERNAL_HINTS, (
+            f"{required} must have an external-service hint so the user "
+            f"knows where to provision it"
+        )
+        assert len(_ENV_VAR_EXTERNAL_HINTS[required]) > 20, (
+            f"hint for {required} must be actionable (long enough)"
+        )
+
+
+def test_frontend_modal_shows_auto_resolved_and_still_manual():
+    """The deploy modal must surface both lists from the response."""
+    src = (
+        Path(__file__).resolve().parents[2]
+        / "frontend/src/app/project/[id]/page.tsx"
+    ).read_text(encoding="utf-8")
+    assert "auto_resolved" in src, (
+        "frontend must render the auto_resolved list"
+    )
+    assert "still_manual" in src, (
+        "frontend must render the still_manual list with hints"
+    )
+    # Source-tag rendering
+    assert "db_lookup" in src or "از پنل تنظیمات" in src
