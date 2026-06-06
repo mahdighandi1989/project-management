@@ -9017,7 +9017,15 @@ AC = «طراحی شیک‌تر باشد»:
         done_parts = report.done_parts or []
         remaining = report.remaining_parts or []
         next_actions = report.next_actions or []
-        verifier_summary = (report.summary or "").strip()
+        # 🐛 (AttributeError fix) — OversightReport summary فیلد ندارد.
+        # قبلاً به‌خاطر این هر بار generate_followup_prompt fail می‌شد و
+        # auto-runner دور بعد را trigger نمی‌کرد. از raw_response یا
+        # done_parts/remaining_parts به‌عنوان خلاصه استفاده کن.
+        verifier_summary = (
+            getattr(report, "summary", None)
+            or (report.raw_response or "")[:500]
+            or ""
+        ).strip()
 
         # 🆕 (Multi-pass Checklist) — اگر task_steps دارد، مراحل ناقص/انجام‌نشده
         # را به‌عنوان منبع اصلی remaining/AC استفاده کن. این focused تر است
