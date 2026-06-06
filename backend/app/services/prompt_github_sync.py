@@ -509,6 +509,15 @@ async def rebuild_project_index(
                     f"workflow_dispatch trigger failed for {watched.repo_full_name}: "
                     f"{disp.get('error')}"
                 )
+            elif disp.get("skipped"):
+                # 🐛 (log clarity fix) — قبلاً وقتی dispatch به دلیل lock یا
+                # runner_not_enabled skip می‌شد، چون success=True همراهش بود
+                # لاگ "✓ triggered" زده می‌شد و کاربر فکر می‌کرد runner trigger
+                # شده. حالا skip را به‌صراحت با reason اعلام می‌کنیم.
+                logger.info(
+                    f"workflow_dispatch skipped for {watched.repo_full_name} "
+                    f"— reason: {disp.get('reason', 'unknown')}"
+                )
             elif disp.get("success"):
                 logger.info(
                     f"workflow_dispatch ✓ triggered Claude Auto-Runner for "

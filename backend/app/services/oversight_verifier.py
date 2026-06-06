@@ -2831,7 +2831,13 @@ async def verify_task(
                     # اصلاً اجرا نشود چون feature روی UI نیست و vision قطعاً
                     # «feature missing» خواهد گفت. در عوض همان step را برای
                     # backend_log_probe می‌فرستیم.
-                    def _classify_step_for_probe(step: Dict[str, Any]) -> str:
+                    # 🐛 (UnboundLocalError fix) — قبلاً اسم این local function
+                    # دقیقاً با module-level `_classify_step_for_probe` یکی بود.
+                    # Python در سراسر `verify_task` آن را local در نظر می‌گرفت،
+                    # پس استفاده در خط 3650 (مسیر verify_v6) — که قبل از این
+                    # شاخه اجرا می‌شود — با UnboundLocalError fail می‌کرد و
+                    # ورژن v5 fallback اجبار می‌شد. حالا local rename شد.
+                    def _classify_step_for_probe_local(step: Dict[str, Any]) -> str:
                         """Returns: 'ui_eligible' | 'backend_only'"""
                         _scope_low = str(step.get("scope") or "").lower()
                         _title_low = str(step.get("title") or "").lower()
@@ -2864,7 +2870,7 @@ async def verify_task(
                             _stitle = str(_step.get("title") or "")[:80]
                             _sscope = str(_step.get("scope") or "")[:200]
                             # 🆕 (bug 33) — backend-only step → skip UI probe
-                            _step_class = _classify_step_for_probe(_step)
+                            _step_class = _classify_step_for_probe_local(_step)
                             if _step_class == "backend_only":
                                 if auto_verify_session_id:
                                     try:
