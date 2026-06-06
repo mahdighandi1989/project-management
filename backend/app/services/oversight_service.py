@@ -9387,6 +9387,16 @@ AC = «طراحی شیک‌تر باشد»:
             # اگر watched.auto_continue_until_done فعال است + autonomy=auto +
             # هنوز به max_auto_loop_rounds نرسیدیم → status را به pending
             # برگردان تا scheduler tick بعدی این تسک را دوباره اجرا کند.
+            #
+            # 🐛 (silent-stop fix) — قبلاً وقتی max_auto_loop_rounds می‌رسید،
+            # else فقط لاگ می‌کرد و تسک در همان status قبلی (مثلاً
+            # awaiting_review یا applied_externally_pending_verify) رها
+            # می‌شد بدون archive، بدون TODO، بدون نوتیفیکیشن. کاربر گزارش
+            # داد که تسک ۹ دور اجرا شد و بعد بی‌صدا متوقف شد در حالی که
+            # هنوز ۶/۶ مرحله باقی بود. حالا cleanup کامل مشابه
+            # external_prompts._verify_then_chain (action=max_retries_todo)
+            # انجام می‌شود: archive + TODO + Telegram notification.
+            _trigger_max_rounds_cleanup = False
             try:
                 if (
                     watched
@@ -9407,12 +9417,104 @@ AC = «طراحی شیک‌تر باشد»:
                     else:
                         logger.info(
                             f"auto-loop: task {task.id} به max_auto_loop_rounds={max_rounds} رسید"
-                            f" — متوقف شد (نیاز به مداخلهٔ کاربر)"
+                            f" — archive + TODO + notification"
                         )
+                        _trigger_max_rounds_cleanup = True
             except Exception as _e:
                 logger.debug(f"auto-loop check failed: {_e}")
 
             self._save_tasks()
+
+        # 🐛 (silent-stop fix) — خارج از lock چون _write_todo_for_task
+        # GitHub API call می‌زند که می‌تواند ۳-۱۰ ثانیه طول بکشد. ترتیب:
+        #   1) TODO file روی repo بنویس (با snapshot فعلی verify report)
+        #   2) task را archive کن (mutation داخل lock جدا)
+        #   3) verify-lock روی watched را آزاد کن
+        #   4) Telegram notification بزن
+        if _trigger_max_rounds_cleanup and watched is not None:
+            try:
+                _verify_result_for_todo = {
+                    "report": {
+                        "id": getattr(report, "id", None),
+                        "done_parts": list(getattr(report, "done_parts", []) or []),
+                        "remaining_parts": list(
+                            getattr(report, "remaining_parts", []) or []
+                        ),
+                        "next_actions": list(
+                            getattr(report, "next_actions", []) or []
+                        ),
+                        "confidence_score": float(
+                            getattr(report, "confidence_score", 0.0) or 0.0
+                        ),
+                        "evidence": dict(getattr(report, "evidence", {}) or {}),
+                        "raw_response": getattr(report, "raw_response", "") or "",
+                        "model_id": getattr(report, "model_id", "") or "",
+                    },
+                    "status_val": getattr(report, "status", "") or "",
+                }
+                from ..api.routes.external_prompts import (
+                    _write_todo_for_task as _wtt,
+                    _emit_runner_notification as _ern,
+                )
+                try:
+                    await _wtt(
+                        task=task,
+                        watched=watched,
+                        verify_result=_verify_result_for_todo,
+                    )
+                except Exception as _todo_e:
+                    logger.warning(
+                        f"auto-loop max-rounds: _write_todo_for_task failed "
+                        f"for {task_id}: {_todo_e}"
+                    )
+
+                _max_rounds_val = int(
+                    getattr(watched, "max_auto_loop_rounds", 5) or 5
+                )
+                async with self._lock:
+                    task.archived = True
+                    task.archived_at = now_iso()
+                    task.archived_reason = "auto_loop_max_rounds"
+                    task.status = "abandoned"
+                    task.external_status = "abandoned"
+                    task.external_locked_by = None
+                    task.external_lease_until = None
+                    task.updated_at = now_iso()
+                    self._save_tasks()
+                    try:
+                        self._release_verify_lock(watched.id)
+                        self._save_watched()
+                    except Exception:
+                        pass
+
+                try:
+                    _ern(
+                        event="external_runner_max_retries_or_regressed",
+                        task=task,
+                        agent_id="claude-runner",
+                        extra=(
+                            f"auto-loop به سقف رسید "
+                            f"(rounds={task.followup_round}/{_max_rounds_val}).\n"
+                            f"تسک با علت `auto_loop_max_rounds` آرشیو شد و "
+                            f"TO-DO/todo-task-{(task.id or '')[:8]}.md ایجاد شد.\n"
+                            f"برای ادامه: TODO را مطالعه، مشکل را رفع، و در پنل "
+                            f"تسک را un-archive کن یا «اجرا با کلاد» را دستی بزن."
+                        ),
+                    )
+                except Exception as _notify_e:
+                    logger.debug(
+                        f"auto-loop max-rounds notification skipped: {_notify_e}"
+                    )
+
+                # Cleanup کامل شد — followup chain بعدی نباید روی این
+                # تسک archived/abandoned اجرا شود.
+                return
+            except Exception as _cleanup_e:
+                logger.error(
+                    f"auto-loop max-rounds cleanup failed for {task_id}: "
+                    f"{_cleanup_e}",
+                    exc_info=True,
+                )
 
         # 🆕 (Phase 2) — پس از اعمال followup روی task.followup_prompt،
         # به‌صورت خودکار آن را به‌عنوان prompt جدید روی task ست می‌کنیم،
