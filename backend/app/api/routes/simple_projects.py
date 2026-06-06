@@ -941,15 +941,93 @@ async def audit_project(
         )
 
     # Build the audit prompt — original goal + generated structure.
-    # Cap each file body to keep prompt size sane (the audit doesn't need
-    # to re-read every line — just structure + key signals).
+    # 🐛 (audit quality fix) — previous caps were 80 files × 800 chars
+    # each (~64KB max). For multi-file projects, audit was seeing only
+    # the prefix of every file, so it would re-flag the same "stub
+    # detected" issue even after a regen that fixed it past byte 800.
+    # The user reported scores going DOWN after apply-fixes; this was
+    # a major contributor. Raise to 200 files × 4000 chars (~800KB max)
+    # and prefer prioritized files (entry points, configs) when the
+    # cap is hit. Also note which files were truncated so the model
+    # doesn't infer "missing content" from a truncated view.
+    MAX_FILES = 200
+    MAX_CHARS_PER_FILE = 4000
+
+    def _audit_priority(path: str) -> int:
+        """Lower = higher priority. Entry points, configs, mains first."""
+        p = (path or "").lower()
+        if any(p.endswith(x) for x in (
+            "/main.py", "/app.py", "/index.ts", "/index.js",
+            "/index.tsx", "/main.ts", "/page.tsx",
+        )):
+            return 0
+        if any(x in p for x in (
+            "config", "settings", "requirements.txt", "package.json",
+            "dockerfile", "docker-compose", "pyproject.toml", "tsconfig",
+        )):
+            return 1
+        if any(x in p for x in ("router", "route", "api/", "schema", "model")):
+            return 2
+        return 3
+
+    sorted_files = sorted(project.files, key=lambda f: _audit_priority(f.path))
     file_summaries: List[str] = []
-    for f in project.files[:80]:  # ceiling so 200-file projects don't blow up
-        body = (f.content or "")[:800]
+    truncated_files: List[str] = []
+    for f in sorted_files[:MAX_FILES]:
+        content = f.content or ""
+        was_truncated = len(content) > MAX_CHARS_PER_FILE
+        body = content[:MAX_CHARS_PER_FILE]
+        if was_truncated:
+            truncated_files.append(f.path)
+            body += f"\n... [TRUNCATED — original file is {len(content)} chars]"
         file_summaries.append(
             f"### `{f.path}` ({f.language or '?'})\n```\n{body}\n```"
         )
     file_text = "\n\n".join(file_summaries)
+    files_overflow = max(0, len(project.files) - MAX_FILES)
+    overflow_note = (
+        f"\n\n_توجه: {files_overflow} فایل به‌خاطر cap نمایش داده نشد._"
+        if files_overflow else ""
+    )
+
+    # 🆕 (audit quality fix) — include previous audit context so the
+    # model can verify what was supposed to be fixed and detect actual
+    # regression vs hallucinated new issues. Without this, every audit
+    # is independent and the model often re-flags fixed issues with
+    # slightly different wording, or sees the same issue differently
+    # and the verdict oscillates.
+    previous_context = ""
+    if project.audit_history:
+        recent = project.audit_history[-3:]  # last 3 events
+        lines = ["", "# 📜 تاریخچهٔ audit/apply قبلی (مهم)", ""]
+        for ev in recent:
+            kind = ev.get("kind", "audit")
+            when = ev.get("run_at", "?")
+            score = ev.get("overall_score")
+            mc = ev.get("missing_count", 0)
+            mod = ev.get("modify_count", 0)
+            summary = (ev.get("summary") or "").strip()[:300]
+            if kind == "audit":
+                lines.append(
+                    f"- 🔎 audit در {when}: score={score}, "
+                    f"missing={mc}, modify={mod}. خلاصه: «{summary}»"
+                )
+            else:
+                applied = ev.get("applied_paths") or []
+                lines.append(
+                    f"- 🔧 apply در {when}: {len(applied)} فایل اصلاح شد. "
+                    f"مسیرها: {', '.join(applied[:10])}"
+                    + ("..." if len(applied) > 10 else "")
+                )
+        lines.append("")
+        lines.append(
+            "👉 **مهم:** اگر apply اجرا شد، باید بررسی کنی که آیا issue های "
+            "قبلی واقعاً برطرف شده‌اند. اگر همان issue را دوباره flag می‌کنی، "
+            "حتماً در `summary` صریحاً بگو که این **regression** است (نه issue "
+            "جدید). اگر برطرف شده، نباید دوباره در `files_to_modify` بیاد."
+        )
+        lines.append("")
+        previous_context = "\n".join(lines)
 
     audit_prompt = f"""تو یک معمار نرم‌افزاری ارشد هستی. این پروژه به‌تازگی توسط AI ساخته شده. وظیفهٔ تو یک **audit مستقل** قبل از push به GitHub است.
 
@@ -965,8 +1043,9 @@ async def audit_project(
 دایرکتوری‌ها: {', '.join(project.structure.get('directories', []) or [])}
 نقطهٔ ورود: {project.structure.get('entry_point', '—')}
 دستور اجرا: {project.structure.get('run_command', '—')}
+{previous_context}
 
-# فایل‌های تولیدشده ({len(project.files)} فایل)
+# فایل‌های تولیدشده ({len(project.files)} فایل){overflow_note}
 {file_text}
 
 # وظیفهٔ تو
@@ -977,6 +1056,12 @@ async def audit_project(
 5. مشکلات **ساختاری** را پیدا کن (مثلاً Dockerfile entry-point اشتباه، dependency گم‌شده)
 6. کیفیت کد را ارزیابی کن (production-ready vs scaffolding)
 7. اگر همه چیز خوب است صریحاً بگو
+
+⚠️ **نکات مهم برای دقت بیشتر:**
+- اگر یک فایل با `[TRUNCATED]` نشان داده شد، نتیجه‌گیری «محتوا کم است» **ممنوع** است — فقط بر اساس بخش نمایش‌داده‌شده قضاوت کن، یا اگر نمی‌توانی، در `files_to_modify` نیار.
+- قبل از flag کردن یک فایل به‌عنوان "stub" یا "ناقص"، حتماً مطمئن شو که محتوای واقعی را دیده‌ای، نه فقط prefix.
+- اگر تاریخچه نشان می‌دهد فایلی قبلاً apply شده، دوباره مرور کن که آیا واقعاً مشکل برطرف شده. اگر هنوز مشکل دارد، **regression** بنویس نه issue جدید.
+- `overall_score` باید نسبت به audit قبلی منطقی باشد. اگر apply اجرا شد و چیزی بهبود یافت ولی تو امتیاز کمتر می‌دهی، در `summary` دلیل دقیق بنویس.
 
 📌 برای هر فایلی که محتوایش نیاز به اصلاح دارد، در `files_to_modify` با path دقیق + توضیح *آنچه که اشتباه است* + پیشنهاد *چه باید بشود* مشخص کن. کاربر می‌تواند per-file انتخاب کند کدام را regenerate کنیم.
 
@@ -1137,6 +1222,38 @@ async def audit_project(
         1 for r in successful if bool(r["report"].get("matches_goal"))
     )
 
+    missing_collected = _collect("missing_critical_files")
+    modify_collected = _collect_objects("files_to_modify")
+    delete_collected = _collect_objects("files_to_delete")
+
+    # 🆕 (regression detection) — compare with the most recent audit in
+    # history. If score went DOWN materially or new issues appeared on
+    # files that were just applied, flag prominently in the UI.
+    previous_audit = None
+    for ev in reversed(project.audit_history or []):
+        if ev.get("kind") == "audit":
+            previous_audit = ev
+            break
+    regression_warning = None
+    if previous_audit:
+        prev_score = previous_audit.get("overall_score") or 0
+        delta = avg_score - prev_score
+        if delta <= -5:
+            regression_warning = (
+                f"⚠️ امتیاز نسبت به audit قبلی {abs(delta)} امتیاز پایین آمد "
+                f"({prev_score} → {avg_score}). یا apply اشتباه عمل کرده، یا "
+                f"مدل audit دارد دچار اختلاف رأی می‌شود. خلاصهٔ مدل‌ها را "
+                f"بخوان و در صورت تردید با مدل‌های متفاوت دوباره audit کن."
+            )
+
+    # Pull a representative summary from the highest-scoring model so the
+    # history entry stays informative without storing per-model raw text.
+    rep = max(
+        successful,
+        key=lambda r: _coerce_score(r["report"].get("overall_score")),
+    )
+    rep_summary = str(rep["report"].get("summary") or "").strip()[:600]
+
     aggregated = {
         "models_consulted": len(audit_ids),
         # 🆕 expose the actual model IDs so frontend can show
@@ -1148,20 +1265,49 @@ async def audit_project(
         "ready_to_push_majority": ready_votes > len(successful) / 2,
         "ready_to_push_votes": f"{ready_votes}/{len(successful)}",
         "matches_goal_majority": goal_match_votes > len(successful) / 2,
-        "missing_critical_files": _collect("missing_critical_files"),
-        "files_to_modify": _collect_objects("files_to_modify"),
-        "files_to_delete": _collect_objects("files_to_delete"),
+        "missing_critical_files": missing_collected,
+        "files_to_modify": modify_collected,
+        "files_to_delete": delete_collected,
         "structural_issues": _collect("structural_issues"),
         "quality_concerns": _collect("quality_concerns"),
         "goal_mismatch_reasons": _collect("goal_mismatch_reasons"),
         "suggestions_before_push": _collect("suggestions_before_push"),
+        # 🆕 regression context for the UI
+        "previous_score": previous_audit.get("overall_score") if previous_audit else None,
+        "score_delta": (
+            avg_score - (previous_audit.get("overall_score") or 0)
+            if previous_audit else None
+        ),
+        "regression_warning": regression_warning,
+        "summary": rep_summary,
     }
+
+    # 🆕 (audit history) — persist a compact event so the next audit
+    # can compare. Cap at 20 entries to keep meta file small.
+    from datetime import datetime as _dt_audit
+    project.audit_history.append({
+        "run_at": _dt_audit.now().isoformat(timespec="seconds"),
+        "kind": "audit",
+        "overall_score": avg_score,
+        "missing_count": len(missing_collected),
+        "modify_count": len(modify_collected),
+        "delete_count": len(delete_collected),
+        "models_used": list(audit_ids),
+        "summary": rep_summary,
+    })
+    project.audit_history = project.audit_history[-20:]
+    try:
+        await creator._save_project_meta(project)
+    except Exception:
+        # Don't fail the audit just because we couldn't persist history.
+        pass
 
     return {
         "success": True,
         "project_id": project_id,
         "aggregated": aggregated,
         "per_model": results_per_model,
+        "audit_history": project.audit_history,
     }
 
 
@@ -1482,6 +1628,26 @@ async def apply_audit_fixes(
         except Exception as e:
             files_skipped.append({"path": path, "reason": str(e)[:300]})
 
+    # 🆕 (audit history) — record the apply event so the next audit can
+    # verify what was supposed to be fixed and detect false regression.
+    from datetime import datetime as _dt_apply
+    applied_paths = (
+        [f["path"] for f in files_added]
+        + [f["path"] for f in files_modified]
+        + [f["path"] if isinstance(f, dict) else f for f in files_deleted]
+    )
+    project.audit_history.append({
+        "run_at": _dt_apply.now().isoformat(timespec="seconds"),
+        "kind": "apply",
+        "applied_paths": applied_paths,
+        "added_count": len(files_added),
+        "modified_count": len(files_modified),
+        "deleted_count": len(files_deleted),
+        "skipped_count": len(files_skipped),
+        "models_used": list(req.model_ids or []),
+    })
+    project.audit_history = project.audit_history[-20:]
+
     # 4) Persist the updated project meta
     try:
         await creator._save_project_meta(project)
@@ -1499,6 +1665,7 @@ async def apply_audit_fixes(
         "new_project_type": project.project_type,
         "total_files_now": len(project.files),
         "audit_summary": audit_summary,
+        "audit_history": project.audit_history,
     }
 
 

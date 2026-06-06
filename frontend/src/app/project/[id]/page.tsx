@@ -72,6 +72,48 @@ export default function ProjectPage() {
   const [fixing, setFixing] = useState(false);
   const [fixResult, setFixResult] = useState<any>(null);
 
+  // 🆕 (per-page model picker) — user complained: "وقتی روی یه پروژه
+  // ساخته شده کلیک میکنم، وقتی میخوام بررسی دوباره بزنم، جایی نیست که
+  // بتونم انتخاب کنم کدوم مدل کار انجام بده". Now we render a chip-toggle
+  // picker right above the audit button. Defaults to whatever the
+  // creator page last saved in localStorage (same key) so the cross-page
+  // workflow stays consistent; user can override per-project.
+  const [availableModels, setAvailableModels] = useState<Array<{id: string; name: string}>>([]);
+  const [auditModelIds, setAuditModelIds] = useState<string[]>([]);
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/simple/status`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const models = (data.models || data.available_models || []) as Array<{id: string; name: string}>;
+        setAvailableModels(models);
+        // Initialize selection from localStorage (creator page key)
+        try {
+          const saved = localStorage.getItem('creator_selected_models');
+          const parsed = saved ? JSON.parse(saved) : [];
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setAuditModelIds(parsed.filter((x) => typeof x === 'string'));
+          } else if (models.length > 0) {
+            // No previous selection → default to first available
+            setAuditModelIds([models[0].id]);
+          }
+        } catch {
+          if (models.length > 0) setAuditModelIds([models[0].id]);
+        }
+      } catch {}
+    })();
+  }, []);
+  const toggleAuditModel = (id: string) => {
+    setAuditModelIds((prev) => {
+      const next = prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id];
+      try {
+        localStorage.setItem('creator_selected_models', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  };
+
   useEffect(() => {
     if (projectId) {
       loadProject();
@@ -132,22 +174,12 @@ export default function ProjectPage() {
     }
   };
 
-  // 🆕 (model attribution) — honor the user's model selection from
-  // /creator. Without this, audit/apply-fixes used all active models,
-  // which the user (rightly) complained about: "آیا وقتی روی دکمه
-  // بررسی می‌زنم همون مدلی که انتخاب شده در صفحه اصلی موتور خالق کار
-  // انجام می‌ده؟". Read the same localStorage key the creator page
-  // writes so the choice carries over.
-  const getSelectedModelIds = (): string[] => {
-    try {
-      const saved = localStorage.getItem('creator_selected_models');
-      if (!saved) return [];
-      const parsed = JSON.parse(saved);
-      return Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string') : [];
-    } catch {
-      return [];
-    }
-  };
+  // 🆕 (model attribution) — read the live in-page picker. Used to be
+  // a localStorage-only read from /creator; that was confusing because
+  // the user couldn't see/change the choice on this page. Now we use
+  // the per-page picker state (which is itself initialized from the
+  // same localStorage key, so the cross-page default still works).
+  const getSelectedModelIds = (): string[] => auditModelIds;
 
   const runAudit = async () => {
     setAuditing(true);
@@ -515,6 +547,47 @@ export default function ProjectPage() {
         {/* پنل تحلیل سلامت در commit 3.3a حذف شد. کاربران باید برای
             تحلیل پروژه به /oversight بروند. */}
 
+        {/* 🆕 (model picker for audit) — کاربر دقیقاً اینجا می‌تواند
+            انتخاب کند کدام مدل‌ها audit/apply-fixes را انجام بدهند.
+            انتخاب در همان localStorage که /creator می‌نویسد ذخیره می‌شود
+            تا cross-page consistent بماند. */}
+        {availableModels.length > 0 && (
+          <div className="mb-6 p-4 bg-white/5 backdrop-blur rounded-xl border border-white/10">
+            <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+              <h3 className="font-bold text-sm flex items-center gap-2">
+                🤖 مدل‌های audit / اصلاح
+              </h3>
+              <p className="text-xs text-gray-400">
+                {auditModelIds.length} مدل انتخاب شده — انتخاب چند مدل = اجماع (consensus)
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {availableModels.map((m) => {
+                const selected = auditModelIds.includes(m.id);
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => toggleAuditModel(m.id)}
+                    className={`px-3 py-1.5 rounded-lg text-sm border transition ${
+                      selected
+                        ? 'bg-blue-500 text-white border-blue-500'
+                        : 'bg-white/5 text-gray-200 border-white/10 hover:bg-white/10'
+                    }`}
+                  >
+                    {selected ? '✓ ' : ''}{m.name || m.id}
+                  </button>
+                );
+              })}
+            </div>
+            {auditModelIds.length === 0 && (
+              <p className="text-xs text-amber-400 mt-2">
+                ⚠️ هیچ مدلی انتخاب نشده — audit از همهٔ مدل‌های فعال استفاده می‌کند.
+              </p>
+            )}
+          </div>
+        )}
+
         <div className="grid lg:grid-cols-4 gap-6">
           {/* لیست فایل‌ها */}
           <div className="lg:col-span-1">
@@ -758,9 +831,69 @@ export default function ProjectPage() {
                         </span>
                       ))}
                       <span className="text-gray-500">
-                        (انتخاب شما از صفحهٔ موتور خالق)
+                        (انتخاب شما)
                       </span>
                     </div>
+                  )}
+
+                  {/* 🆕 (regression detection) — کاربر گزارش داد بعد از
+                      apply گاهی امتیاز پایین‌تر می‌رود. حالا backend دلتا را
+                      محاسبه می‌کند و اگر منفی مهم بود warning می‌فرستد. */}
+                  {auditResult.aggregated.regression_warning && (
+                    <div className="bg-amber-500/15 border border-amber-500/40 rounded-lg p-4">
+                      <h4 className="font-bold text-amber-300 mb-1 flex items-center gap-2">
+                        ⚠️ هشدار regression
+                      </h4>
+                      <p className="text-sm text-amber-100 leading-relaxed">
+                        {auditResult.aggregated.regression_warning}
+                      </p>
+                    </div>
+                  )}
+
+                  {/* 🆕 (audit history) — نشان دادن چند audit/apply اخیر
+                      تا کاربر روند را ببیند (افزایش/کاهش امتیاز در طول
+                      چند iteration) و metric های مهم را tracking کند. */}
+                  {auditResult.audit_history && auditResult.audit_history.length > 1 && (
+                    <details className="bg-white/5 border border-white/10 rounded-lg p-3" open>
+                      <summary className="cursor-pointer text-sm font-bold text-gray-200">
+                        📜 تاریخچهٔ audit / apply ({auditResult.audit_history.length})
+                      </summary>
+                      <div className="mt-3 space-y-2">
+                        {auditResult.audit_history.slice().reverse().map((ev: any, i: number) => (
+                          <div key={i} className="flex items-start gap-2 text-xs border-r-2 border-gray-600 pr-3">
+                            <span className="shrink-0">{ev.kind === 'audit' ? '🔎' : '🔧'}</span>
+                            <div className="flex-1">
+                              <div className="flex items-center gap-2 flex-wrap text-gray-300">
+                                <span className="font-mono text-gray-500">{ev.run_at}</span>
+                                {ev.kind === 'audit' && (
+                                  <>
+                                    <span className="px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-200">
+                                      امتیاز: {ev.overall_score}
+                                    </span>
+                                    {ev.missing_count > 0 && (
+                                      <span className="text-red-300">🚫 {ev.missing_count} مفقود</span>
+                                    )}
+                                    {ev.modify_count > 0 && (
+                                      <span className="text-amber-300">✏️ {ev.modify_count} اصلاح</span>
+                                    )}
+                                  </>
+                                )}
+                                {ev.kind === 'apply' && (
+                                  <>
+                                    <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-200">
+                                      ✅ {ev.added_count || 0}+ {ev.modified_count || 0}~ {ev.deleted_count || 0}-
+                                    </span>
+                                  </>
+                                )}
+                              </div>
+                              {ev.summary && (
+                                <p className="text-gray-400 mt-1 leading-relaxed line-clamp-2">{ev.summary}</p>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </details>
                   )}
 
                   {auditResult.aggregated.missing_critical_files?.length > 0 && (
