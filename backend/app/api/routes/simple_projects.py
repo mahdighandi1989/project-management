@@ -867,12 +867,66 @@ async def deploy_project(project_id: str, request: DeployRequest = None):
         github_branch = project.github_default_branch or github_branch
         root_dir = ""  # پروژه در root repo جدا است (Detective-1 use case)
     else:
+        # 🆕 (deploy-to-render fix v2) — Smart fallback قبل از internal
+        # storage: اگر کاربر قبلاً push کرده ولی پیش از این فیکس
+        # (project.json قدیمی فاقد github_*)، یا «push» را با کد قدیم زده،
+        # نام estimated repo را با GitHub API چک کن. اگر repo با نام پروژه
+        # وجود داشت، از همان استفاده کن — تا کاربر مجبور به re-push نشود.
+        try:
+            token = _get_github_token_value()
+            if token:
+                import aiohttp
+                guessed_name = _normalize_repo_name(project.name)
+                async with aiohttp.ClientSession() as _s:
+                    async with _s.get(
+                        "https://api.github.com/user",
+                        headers={
+                            "Authorization": f"Bearer {token}",
+                            "Accept": "application/vnd.github+json",
+                        },
+                    ) as _ur:
+                        if _ur.status == 200:
+                            _u = await _ur.json()
+                            _owner = _u.get("login")
+                            if _owner:
+                                async with _s.get(
+                                    f"https://api.github.com/repos/{_owner}/{guessed_name}",
+                                    headers={
+                                        "Authorization": f"Bearer {token}",
+                                        "Accept": "application/vnd.github+json",
+                                    },
+                                ) as _rr:
+                                    if _rr.status == 200:
+                                        _ri = await _rr.json()
+                                        github_repo_url = _ri.get("html_url")
+                                        github_branch = (
+                                            _ri.get("default_branch") or github_branch
+                                        )
+                                        source_kind = "github_lookup"
+                                        root_dir = ""
+                                        # یک بار روی project ذخیره کن تا
+                                        # دفعهٔ بعد به این مسیر کند نیاز نباشد.
+                                        try:
+                                            project.github_owner = _owner
+                                            project.github_repo = guessed_name
+                                            project.github_repo_url = github_repo_url
+                                            project.github_default_branch = github_branch
+                                            await creator._save_project_meta(project)
+                                        except Exception as _save_e:
+                                            logger.warning(
+                                                f"deploy: backfill github_* "
+                                                f"on project failed: {_save_e}"
+                                            )
+        except Exception as _lookup_e:
+            logger.warning(f"deploy: GitHub repo lookup failed: {_lookup_e}")
+
         # fallback آخر: repo داخلی data — root باید subpath داشته باشد
-        github_storage = get_github_storage()
-        if github_storage.token and github_storage.owner and github_storage.repo:
-            github_repo_url = f"https://github.com/{github_storage.owner}/{github_storage.repo}"
-            source_kind = "internal_storage"
-            root_dir = f"ai-workspace/projects/{project_id}/generated"
+        if not github_repo_url:
+            github_storage = get_github_storage()
+            if github_storage.token and github_storage.owner and github_storage.repo:
+                github_repo_url = f"https://github.com/{github_storage.owner}/{github_storage.repo}"
+                source_kind = "internal_storage"
+                root_dir = f"ai-workspace/projects/{project_id}/generated"
 
     if not github_repo_url:
         # اگر GitHub repo نداریم، راهنمای دستی بده
