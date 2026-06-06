@@ -4,6 +4,7 @@ Oversight API
 API routes برای مرکز نظارت و مدیریت پروژه‌های گیت‌هاب.
 """
 
+import asyncio
 import json
 import logging
 from fastapi import APIRouter, HTTPException, Query, Depends, Body
@@ -87,6 +88,11 @@ class IdeaToPromptRequest(BaseModel):
     progress_track_id: Optional[str] = None
     # 🆕 (Reference Projects) — پروژه‌های انتخاب‌شده به‌عنوان منبع الهام برای تولید پرامپت.
     selected_projects: Optional[List[Dict[str, Any]]] = None
+    # 🚨 (Render edge timeout fix) — اگر True، endpoint بلافاصله track_id برمی‌گرداند
+    # و کار را در background ادامه می‌دهد. فرانت با /progress/{track_id} poll می‌کند
+    # تا completed=true شود و result را از تابع تکمیل بگیرد.
+    # default=False برای backward compatibility — کلاینت‌های قدیمی همان sync behavior.
+    async_mode: bool = False
 
 
 class TaskCreate(BaseModel):
@@ -1318,8 +1324,67 @@ async def task_from_idea(payload: IdeaToPromptRequest):
 
     🆕 (Stage 7) — اگر `upload_session_ids` داده شده، فایل‌های پیوست
     قبل از تولید پرامپت استخراج می‌شوند و متن کامل به idea append می‌شود.
+
+    🚨 (async_mode) — اگر `async_mode=True`، تابع بلافاصله `{track_id, async: True}`
+    برمی‌گرداند و کار را در background ادامه می‌دهد. لازم است `progress_track_id`
+    ست شده باشد. فرانت با GET /api/oversight/progress/{track_id} هر چند ثانیه
+    poll می‌کند تا `completed=True` شود؛ نتیجهٔ نهایی در `result` همان snapshot
+    قرار دارد. این مسیر برای reference projects / multi-pass استفاده می‌شود
+    تا Render edge بعد از 100s connection را نبندد.
     """
     service = get_oversight_service()
+
+    # 🚨 Async mode — dispatch + return track_id فوراً
+    if payload.async_mode:
+        import uuid as _uuid
+        from ...services.oversight_progress import get_progress_tracker
+        track_id = payload.progress_track_id or _uuid.uuid4().hex
+        tracker = get_progress_tracker()
+        await tracker.start(
+            track_id, stage="queued", detail="در صف اجرا قرار گرفت",
+        )
+
+        async def _bg_run() -> None:
+            try:
+                result = await service.idea_to_prompt(
+                    idea=payload.idea,
+                    watched_id=payload.watched_id,
+                    type_=payload.type,
+                    priority=payload.priority,
+                    model_id=payload.model_id,
+                    model_ids=payload.model_ids,
+                    multi_pass_mode=payload.multi_pass_mode,
+                    upload_session_ids=payload.upload_session_ids,
+                    progress_track_id=track_id,
+                    selected_projects=payload.selected_projects,
+                )
+                await tracker.complete(
+                    track_id, stage="done",
+                    detail="پرامپت آماده شد",
+                    result=result,
+                )
+            except ValueError as e:
+                blocked = getattr(e, "blocked_payload", None)
+                if blocked:
+                    await tracker.complete(
+                        track_id, stage="error",
+                        error="blocked_no_vision_model",
+                        result={"blocked_payload": blocked},
+                    )
+                else:
+                    await tracker.complete(
+                        track_id, stage="error", error=str(e)[:500],
+                    )
+            except Exception as e:
+                logger.exception("task_from_idea async run failed")
+                await tracker.complete(
+                    track_id, stage="error", error=str(e)[:500],
+                )
+
+        asyncio.create_task(_bg_run())
+        return {"async": True, "track_id": track_id}
+
+    # Sync mode (legacy) — حفظ backward compat
     try:
         return await service.idea_to_prompt(
             idea=payload.idea,
