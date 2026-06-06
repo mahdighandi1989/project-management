@@ -61,6 +61,15 @@ class Project:
     # 🆕 (Reference Projects) — پروژه‌هایی که هنگام ساخت به‌عنوان منبع
     # الهام استفاده شدند. هر آیتم: {project_id, project_path, is_selected}
     selected_projects: List[Dict[str, Any]] = field(default_factory=list)
+    # 🆕 (audit history) — هر بار audit/apply-fixes اجرا می‌شود، یک ورودی
+    # خلاصه اینجا append می‌شود. هدف: detect regression (اگر امتیاز پایین‌تر
+    # رفت یا تعداد issue ها بیشتر شد) + context برای audit بعدی (مدل می‌داند
+    # قبلاً چه چیزی flag شده بوده). هر ورودی:
+    #   {run_at, kind: "audit"|"apply",
+    #    overall_score, missing_count, modify_count, delete_count,
+    #    models_used, summary, applied_paths?}
+    # سقف ۲۰ ورودی نگه می‌داریم تا meta فایل rowdy نشود.
+    audit_history: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self):
         return {
@@ -74,6 +83,7 @@ class Project:
             "structure": self.structure,
             "technologies": self.technologies,
             "selected_projects": self.selected_projects,
+            "audit_history": self.audit_history,
         }
 
 
@@ -163,6 +173,7 @@ class SimpleProjectCreator:
                                 # 🆕 (Reference Projects) — اگر در meta نبود،
                                 # default [] از dataclass استفاده می‌شود.
                                 selected_projects=data.get("selected_projects", []) or [],
+                                audit_history=data.get("audit_history", []) or [],
                             )
                             self.projects[project.id] = project
         except Exception as e:

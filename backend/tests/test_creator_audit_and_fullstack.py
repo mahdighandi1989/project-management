@@ -270,9 +270,20 @@ def test_valid_types_includes_fullstack():
 
 
 def _make_fake_project(monkeypatch):
-    """Stash a fake project in the singleton creator's in-memory dict."""
+    """Stash a fake project in the singleton creator's in-memory dict.
+
+    Also redirect the creator's workspace to a temp dir for the duration
+    of the test — otherwise audit/apply will persist project.json into
+    the real backend/storage/projects/ tree and pollute the repo. We
+    create the temp dir, point the singleton at it, and rely on pytest's
+    monkeypatch undo to restore the original workspace after the test.
+    """
+    import tempfile
+    from pathlib import Path as _PathTest
     from app.services.simple_creator import get_simple_creator, Project, ProjectFile
     creator = get_simple_creator()
+    tmpdir = _PathTest(tempfile.mkdtemp(prefix="creator_audit_test_"))
+    monkeypatch.setattr(creator, "workspace", tmpdir)
     proj = Project(
         id="proj_audit_test_123",
         name="TestApp",
@@ -408,7 +419,7 @@ async def test_audit_endpoint_survives_string_score_and_list_response(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_audit_endpoint_runs_models_in_parallel():
+async def test_audit_endpoint_runs_models_in_parallel(monkeypatch, tmp_path):
     """🚨 Sequential audit would take >100s for 5 models which exceeds
     Render's gateway timeout. The endpoint must use asyncio.gather so
     all model calls happen concurrently."""
@@ -416,6 +427,10 @@ async def test_audit_endpoint_runs_models_in_parallel():
     import time
     from app.api.routes.simple_projects import audit_project, AuditProjectRequest
     from app.services.simple_creator import get_simple_creator, Project, ProjectFile
+
+    # Redirect workspace so audit's history-persistence side effect
+    # doesn't pollute the real backend/storage/projects/ tree.
+    monkeypatch.setattr(get_simple_creator(), "workspace", tmp_path)
 
     proj = Project(
         id="proj_parallel_test_999",
@@ -714,7 +729,12 @@ def test_audit_prompt_requests_modify_and_delete_lists():
         _BACKEND_ROOT / "app/api/routes/simple_projects.py"
     ).read_text(encoding="utf-8")
     idx = src.find("async def audit_project")
-    body = src[idx:idx + 8000]
+    # Window widened from 8000 → 14000 chars because the audit prompt
+    # now embeds previous-audit context + per-file priority sort + a
+    # truncation note before the JSON schema example. The "issue" /
+    # "suggestion" / "reason" markers live in the JSON example near
+    # the end.
+    body = src[idx:idx + 14000]
     assert "files_to_modify" in body, (
         "audit prompt must request files_to_modify so the AI flags existing "
         "files with wrong content (not just missing ones)"
@@ -1746,3 +1766,145 @@ def test_structure_prompt_demands_both_halves_for_fullstack():
         "the fullstack guidance must mention both backend/ and frontend/ "
         "directories so the AI knows the structure is mandatory bilateral"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🆕 Audit history + regression detection + larger file/char caps
+# (User reported: scores going DOWN after apply, no model picker on this page)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_project_dataclass_has_audit_history_field():
+    """Project must persist audit_history so the next audit can detect
+    regression and the UI can show trend."""
+    from app.services.simple_creator import Project
+    p = Project(id="x", name="x", description="x", project_type="api")
+    assert hasattr(p, "audit_history")
+    assert p.audit_history == []
+    d = p.to_dict()
+    assert "audit_history" in d
+
+
+def test_audit_prompt_widens_file_and_char_caps():
+    """The 80-files × 800-chars cap from the original audit was too
+    aggressive: re-audits would see only the prefix of every file, so
+    even after regen the same 'stub detected' issue kept firing.
+    Caps must now be at least 200 files × 4000 chars."""
+    src = (
+        _BACKEND_ROOT / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def audit_project")
+    body = src[idx:idx + 14000]
+    assert "MAX_FILES = 200" in body, "audit must scan up to 200 files"
+    assert "MAX_CHARS_PER_FILE = 4000" in body, (
+        "audit must show up to 4000 chars per file"
+    )
+    assert "TRUNCATED" in body, (
+        "truncated files must be marked so the model doesn't infer "
+        "'missing content' from a prefix-only view"
+    )
+
+
+def test_audit_prompt_includes_previous_audit_context():
+    """When project.audit_history has prior events, the prompt must
+    include them so the model can verify what was supposed to be fixed
+    and avoid hallucinating regression. Without this, every audit is
+    independent and scores oscillate as different models disagree."""
+    src = (
+        _BACKEND_ROOT / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def audit_project")
+    body = src[idx:idx + 14000]
+    assert "previous_context" in body, (
+        "audit must build a previous-audit context block"
+    )
+    assert "تاریخچهٔ audit" in body, (
+        "the prompt must include the audit-history section in Persian"
+    )
+    assert "regression" in body, (
+        "the prompt must instruct the model to flag regression explicitly"
+    )
+
+
+def test_audit_aggregated_exposes_regression_signals():
+    """Frontend needs previous_score / score_delta / regression_warning
+    so it can render the amber banner the user asked for."""
+    src = (
+        _BACKEND_ROOT / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def audit_project")
+    # Window covers the whole audit handler — regression block sits
+    # near the end in the aggregation section.
+    body = src[idx:idx + 20000]
+    assert "regression_warning" in body
+    assert "score_delta" in body
+    assert "previous_score" in body
+
+
+def test_audit_appends_to_history_and_persists():
+    """After an audit run, the project's audit_history must gain a new
+    'audit' event and the meta file must be saved. Without this, the
+    history grows forgotten."""
+    src = (
+        _BACKEND_ROOT / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def audit_project")
+    # History append + meta-save live near the end of the function.
+    body = src[idx:idx + 20000]
+    assert "project.audit_history.append" in body
+    # 20-entry cap so meta files stay small
+    assert "audit_history[-20:]" in body
+    # save_project_meta hook
+    assert "_save_project_meta(project)" in body
+
+
+def test_apply_fixes_appends_to_history():
+    """apply-fixes must record an 'apply' event including the paths
+    touched, so the next audit knows which files just changed."""
+    src = (
+        _BACKEND_ROOT / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def apply_audit_fixes")
+    # The history append is well past the function entry; search the
+    # remainder.
+    body = src[idx:idx + 20000]
+    assert "project.audit_history.append" in body
+    assert '"kind": "apply"' in body
+    assert '"applied_paths"' in body
+
+
+def test_frontend_project_page_has_model_picker():
+    """User explicitly asked for this:
+    «وقتی روی یه پروژه ساخته شده کلیک میکنم، وقتی میخوام بررسی دوباره
+     بزنم، جایی نیست که بتونم انتخاب کنم کدوم مدل کار انجام بده»
+    The picker must (a) fetch from /api/simple/status, (b) render
+    toggle chips, (c) write to localStorage 'creator_selected_models'
+    so cross-page selection stays consistent."""
+    src = (
+        _FRONTEND_ROOT / "app/project/[id]/page.tsx"
+    ).read_text(encoding="utf-8")
+    assert "availableModels" in src and "auditModelIds" in src
+    assert "/api/simple/status" in src
+    assert "creator_selected_models" in src
+    assert "toggleAuditModel" in src
+    # Picker label in Persian so the user can find it
+    assert "مدل‌های audit" in src or "مدل‌های audit / اصلاح" in src
+
+
+def test_frontend_project_page_renders_regression_banner():
+    """The amber regression banner is the visible signal the user
+    asked for. Must read from aggregated.regression_warning."""
+    src = (
+        _FRONTEND_ROOT / "app/project/[id]/page.tsx"
+    ).read_text(encoding="utf-8")
+    assert "regression_warning" in src
+    assert "هشدار regression" in src or "regression" in src
+
+
+def test_frontend_project_page_renders_audit_history():
+    """User should see the trend of past audit/apply events."""
+    src = (
+        _FRONTEND_ROOT / "app/project/[id]/page.tsx"
+    ).read_text(encoding="utf-8")
+    assert "audit_history" in src
+    assert "تاریخچه" in src and ("audit" in src or "apply" in src)
