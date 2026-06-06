@@ -1410,6 +1410,24 @@ async def task_from_idea(payload: IdeaToPromptRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# 🚨 (Render edge workaround) — alias endpoint with a different path.
+# Symptom: console showed CORS error + 403 with no Access-Control-Allow-Origin
+# header. Backend logs showed OPTIONS /tasks/from-idea 200 but NO POST ever
+# reaching FastAPI. That means Render's edge layer was rejecting the POST
+# before it reached the app — likely because of accumulated cached state
+# from earlier 87s+ long-running requests that timed out on the edge.
+# The edge's error response doesn't include CORS headers, so the browser
+# reports it as a CORS failure rather than the actual rejection.
+#
+# This alias gives the frontend a brand-new path that Render's edge has
+# no history for, bypassing any path-keyed state. Same handler, same
+# payload, same behavior — just a different URL.
+@router.post("/idea-to-prompt-job")
+async def idea_to_prompt_job(payload: IdeaToPromptRequest):
+    """Alias of POST /tasks/from-idea — see that handler for full docs."""
+    return await task_from_idea(payload)
+
+
 @router.patch("/tasks/{task_id}")
 async def update_task(task_id: str, payload: TaskUpdate):
     service = get_oversight_service()

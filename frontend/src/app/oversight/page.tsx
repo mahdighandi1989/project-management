@@ -2240,7 +2240,16 @@ export default function OversightPage() {
       // و کار را در background ادامه می‌دهد؛ ما همان progress endpoint را
       // poll می‌کنیم تا completed شود، سپس result را از همان snapshot برمی‌داریم.
       const wantAsync = validSessionIds.length > 0 || refPayload.length > 0;
-      const res = await fetch(`${API_BASE}/api/oversight/tasks/from-idea`, {
+      // 🚨 (Render edge workaround) — when async, use the alias endpoint
+      // at `/idea-to-prompt-job`. Render's edge was rejecting POSTs to
+      // `/tasks/from-idea` with no CORS headers (visible to the browser
+      // as a CORS error + ERR_FAILED), likely because of cached state
+      // from earlier long-running requests that timed out at the edge.
+      // The alias path has no such history → preflight + POST both pass.
+      const endpoint = wantAsync
+        ? `${API_BASE}/api/oversight/idea-to-prompt-job`
+        : `${API_BASE}/api/oversight/tasks/from-idea`;
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
