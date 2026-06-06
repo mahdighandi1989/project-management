@@ -1,27 +1,34 @@
-"""🐛 Auto-runner silent-stop fix — apply_followup_after_verify max-rounds.
+"""🐛 Auto-runner silent-stop fix v2 — threshold + max-rounds cleanup.
 
-User report (verbatim, Persian):
-  > یه تسک ایجاد کردم، و از اونجایی که قبلا دکمه اجرای خودکار روشن بود،
-  > بعد از دقایقی شروع کرد به کار شدن روش از طریق توکن کلاد از اکشن
-  > متوجه شدم چند دور روش کار شد ولی بعدش تا الایگه کاری روش انجام نشده
-  > یعنی چند ساعته که گویا پرونده ش رو بسته دون اینکه کارش تموم شده باشه
-  > یا ارشیو شده باشه یا تو فولدر تودو بخواد اپدیت کنه ...
+User reports (in chronological order):
 
-Translation: a task ran ~9 auto-rounds via Claude Code action, then stopped
-silently for hours — no archive, no TODO file, no Telegram notification —
-even though the checklist showed 0/6 done and lots of work left.
+  v1 report (silent stop): task ran ~9 auto-rounds via Claude Code action,
+    then stopped silently for hours — no archive, no TODO file, no Telegram
+    notification — even though the checklist showed 0/6 done.
 
-Root cause — `apply_followup_after_verify` else-branch when
-`max_auto_loop_rounds` is reached only did `logger.info(...)`. No mutation,
-no cleanup. Task stayed in whatever status it was (commonly
-`applied_externally_pending_verify` or `awaiting_review`), held the verify
-lock, and the user had no signal anything was wrong.
+  v2 refinement: "archiving should NOT happen just because we hit max_rounds
+    with an incomplete checklist. First check after every verify if the
+    checklist crossed a threshold (e.g., 90%) — if yes, archive + write
+    remaining items to TODO. ONLY if 6 attempts pass without crossing the
+    threshold, force-archive (same as clicking the archive button on the
+    card) and write remaining to TODO."
 
-Reference for the correct cleanup is `external_prompts._verify_then_chain`
-action=`max_retries_todo` (lines ~674-708): write TODO + archive task +
-release lock + emit notification.
+Two trigger conditions for cleanup:
 
-The fix mirrors that cleanup inside `apply_followup_after_verify`.
+  1. ratio_threshold — `done_parts / (done_parts + remaining_parts) >= 0.90`
+     fires on ANY verify (even round 2). Verifier hard-guard only archives
+     when remaining=0 (100%). This layer sits above it and accepts 90% as
+     "good enough", routing the remaining 10% to the TO-DO/ folder.
+
+  2. max_rounds — `followup_round >= max_auto_loop_rounds (6)`. Force-archive
+     mirroring the archive button on the card. Distinct archived_reason so
+     the panel can distinguish the two failure modes.
+
+In BOTH cases:
+  - TODO file written to repo (`TO-DO/todo-task-<id>.md`)
+  - Task archived with `archived_reason` tagging the cause
+  - Verify-lock released on the watched project
+  - Telegram notification with reason-specific message
 """
 
 from __future__ import annotations
@@ -33,13 +40,6 @@ import pytest
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-
-# ---------------------------------------------------------------------------
-# Source-level pins — the fix is a code-shape change inside a single block.
-# Behavioral tests would require mocking GitHub API + notification service;
-# source pins are cheaper and catch regressions just as well.
-# ---------------------------------------------------------------------------
 
 
 def _slice_apply_followup_body() -> str:
@@ -54,146 +54,177 @@ def _slice_apply_followup_body() -> str:
     return rest if nxt == -1 else rest[:nxt]
 
 
-def test_max_rounds_branch_no_longer_only_logs():
-    """The else-branch when `max_auto_loop_rounds` is reached must NOT be a
-    silent log-and-continue. It must trigger cleanup (archive + TODO +
-    notification). We pin the presence of the cleanup trigger flag."""
+def test_cleanup_flag_present():
+    """The function must set a generic cleanup flag (no longer only
+    triggered by max-rounds)."""
     body = _slice_apply_followup_body()
-
-    assert "_trigger_max_rounds_cleanup" in body, (
-        "apply_followup_after_verify must set a max-rounds cleanup flag "
-        "so the post-lock block can archive + write TODO + notify. "
-        "Without this flag the function silently stops the task in limbo "
-        "(reported by user: 9 rounds ran, then no archive / no TODO / "
-        "no Telegram for hours)."
+    assert "_trigger_cleanup" in body, (
+        "apply_followup_after_verify must set _trigger_cleanup flag "
+        "for the post-lock block to archive + write TODO + notify"
     )
 
-    # The flag must be set in the max-rounds branch
-    assert "_trigger_max_rounds_cleanup = True" in body
 
-
-def test_max_rounds_cleanup_archives_with_correct_reason():
-    """When max-rounds cleanup fires, the task must be archived with reason
-    `auto_loop_max_rounds` (distinct from `max_retries` used by the other
-    cleanup path in external_prompts) so the panel/reports can distinguish
-    the two failure modes."""
+def test_two_distinct_cleanup_reasons():
+    """Cleanup must distinguish ratio_threshold vs max_rounds so panel/
+    reports can show why the task was abandoned."""
     body = _slice_apply_followup_body()
-
-    assert 'task.archived_reason = "auto_loop_max_rounds"' in body, (
-        "max-rounds cleanup must archive with reason `auto_loop_max_rounds` "
-        "so it's distinct from `max_retries` and `regressed`"
+    assert 'ratio_threshold' in body, (
+        "cleanup must support a ratio_threshold reason (≥90% done → archive)"
     )
-    assert 'task.archived = True' in body
+    assert '"max_rounds"' in body or "'max_rounds'" in body, (
+        "cleanup must support a max_rounds reason (6 attempts → force-archive)"
+    )
+    assert '"auto_loop_ratio_met"' in body, (
+        "archived_reason `auto_loop_ratio_met` must be used for threshold case"
+    )
+    assert '"auto_loop_max_rounds"' in body, (
+        "archived_reason `auto_loop_max_rounds` must be used for force case"
+    )
+
+
+def test_ratio_uses_done_over_total():
+    """The threshold must be computed as done / (done + remaining) so it
+    reflects actual progress, not absolute counts."""
+    body = _slice_apply_followup_body()
+    assert "_done_n" in body and "_rem_n" in body
+    assert "_total = _done_n + _rem_n" in body
+    assert "_done_n / _total" in body
+
+
+def test_ratio_threshold_default_is_90_percent():
+    """User specified 90%. Pin both the Watched field default and the local
+    fallback in apply_followup_after_verify."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/services/oversight_service.py"
+    ).read_text(encoding="utf-8")
+    assert "auto_archive_done_ratio: float = 0.90" in src, (
+        "Watched.auto_archive_done_ratio must default to 0.90 (90%)"
+    )
+    body = _slice_apply_followup_body()
+    assert "0.90" in body, "fallback threshold must be 0.90"
+
+
+def test_max_rounds_default_is_six():
+    """User specified 6. Pin both Watched field and local fallback."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/services/oversight_service.py"
+    ).read_text(encoding="utf-8")
+    assert "max_auto_loop_rounds: int = 6" in src, (
+        "Watched.max_auto_loop_rounds default must be 6 (user requested)"
+    )
+    body = _slice_apply_followup_body()
+    assert 'getattr(watched, "max_auto_loop_rounds", 5)' not in body, (
+        "stale fallback to 5 must be updated to 6"
+    )
+
+
+def test_ratio_check_runs_before_max_rounds_check():
+    """Critical ordering: ratio_threshold must be checked FIRST so that a
+    task hitting 90% in round 3 is archived cleanly via ratio_threshold,
+    not silently kept running until round 6 and then force-archived."""
+    body = _slice_apply_followup_body()
+    ratio_idx = body.find('_cleanup_reason = "ratio_threshold"')
+    rounds_idx = body.find('_cleanup_reason = "max_rounds"')
+    assert ratio_idx != -1 and rounds_idx != -1
+    assert ratio_idx < rounds_idx, (
+        "ratio_threshold must be checked BEFORE max_rounds — otherwise a "
+        "task at 95% done in round 3 keeps running until round 6"
+    )
+
+
+def test_pending_branch_still_works_when_below_threshold_and_under_limit():
+    """The middle case (ratio < 90% AND round < 6) must still send the task
+    back to pending so the next auto-runner tick picks it up."""
+    body = _slice_apply_followup_body()
+    assert 'task.status = "pending"' in body
+    assert "task.next_run_at = now_iso()" in body
+    assert "elif (task.followup_round or 0) < max_rounds" in body
+
+
+def test_cleanup_calls_write_todo():
+    """User explicitly demanded remaining items → TO-DO/ folder."""
+    body = _slice_apply_followup_body()
+    assert "_write_todo_for_task" in body
+    assert "remaining_parts" in body and "done_parts" in body
+    assert "next_actions" in body
+
+
+def test_cleanup_archives_and_abandons_task():
+    """User said force-archive mirrors the card archive button."""
+    body = _slice_apply_followup_body()
+    assert "task.archived = True" in body
     assert 'task.status = "abandoned"' in body
     assert 'task.external_status = "abandoned"' in body
 
 
-def test_max_rounds_cleanup_writes_todo_file():
-    """User specifically called out the TODO folder not being updated. The
-    cleanup must invoke `_write_todo_for_task` with the verify report so
-    the user has a self-contained handoff document."""
+def test_cleanup_releases_verify_lock():
     body = _slice_apply_followup_body()
-
-    assert "_write_todo_for_task" in body, (
-        "max-rounds cleanup must call _write_todo_for_task so the repo's "
-        "TO-DO/ folder gets the partial-progress record"
-    )
-    # The verify_result shape passed in must include report fields the
-    # TODO writer needs (done_parts, remaining_parts, next_actions,
-    # confidence_score, evidence) — pin a couple to lock the shape.
-    assert "remaining_parts" in body
-    assert "done_parts" in body
-    assert "next_actions" in body
-
-
-def test_max_rounds_cleanup_releases_verify_lock():
-    """Without releasing the verify-lock, subsequent auto-runner dispatches
-    on the same watched project are blocked by `verify_in_progress`."""
-    body = _slice_apply_followup_body()
-
     assert "_release_verify_lock" in body, (
-        "max-rounds cleanup must release the watched verify-lock — "
-        "otherwise the project is permanently stuck in 'verify in progress'"
+        "must release verify-lock so other dispatches aren't blocked"
     )
 
 
-def test_max_rounds_cleanup_emits_notification():
-    """User must be told via Telegram that the auto-loop hit its cap and
-    that manual intervention is required. Use the same notification helper
-    as external_prompts._verify_then_chain for consistent UX."""
+def test_cleanup_emits_notification_with_reason_specific_message():
     body = _slice_apply_followup_body()
-
-    assert "_emit_runner_notification" in body, (
-        "max-rounds cleanup must emit a runner notification so the user "
-        "knows the auto-loop stopped (user explicitly reported no "
-        "Telegram message arrived for hours after silent stop)"
-    )
-    # The notification event must match the one used for max-retries in
-    # external_prompts — the notification_service treats them the same.
+    assert "_emit_runner_notification" in body
     assert "external_runner_max_retries_or_regressed" in body
+    assert "حد نصاب ۹۰٪" in body, (
+        "Telegram message for ratio_threshold path must mention threshold"
+    )
+    assert "سقف ۶ تلاش" in body, (
+        "Telegram message for max_rounds path must mention attempts cap"
+    )
 
 
-def test_max_rounds_cleanup_runs_outside_main_lock():
-    """`_write_todo_for_task` calls the GitHub API (3-10s). Holding the
-    service lock during a long network call would block every other
-    operation (UI list, status, other verifies). The cleanup must run
-    AFTER the main `self._save_tasks()` and release the outer lock first."""
+def test_cleanup_runs_outside_main_lock():
+    """`_write_todo_for_task` is a 3-10s GitHub API call. Holding the
+    service lock during that serializes the whole oversight service."""
     body = _slice_apply_followup_body()
-
-    # The cleanup block must be after the outer `self._save_tasks()` and at
-    # function-body indentation (8 spaces — outside the `async with`).
-    cleanup_marker = "if _trigger_max_rounds_cleanup"
+    cleanup_marker = "if _trigger_cleanup and watched is not None:"
     assert cleanup_marker in body
     line = next(
         ln for ln in body.splitlines()
-        if cleanup_marker in ln and "=" not in ln.split(cleanup_marker)[0]
+        if cleanup_marker in ln
     )
-    # Leading whitespace count
     indent = len(line) - len(line.lstrip())
     assert indent == 8, (
-        f"max-rounds cleanup must be at method-body indent (8 spaces) "
-        f"so it runs outside the outer `async with self._lock:` block. "
-        f"Got indent={indent}. Holding the lock during the GitHub API "
-        f"call would serialize the whole service."
+        f"cleanup must be at method-body indent (8 spaces), got {indent}. "
+        f"Holding self._lock during GitHub API call serializes the service."
     )
 
 
-def test_max_rounds_cleanup_returns_to_skip_followup_apply():
-    """After cleanup, the function should return — calling
-    apply_followup_as_new_prompt on an abandoned/archived task would
-    overwrite task.prompt with a followup that the user will never run.
-    """
+def test_cleanup_returns_to_skip_followup_apply():
+    """After cleanup, function must return — calling
+    apply_followup_as_new_prompt on an abandoned task overwrites task.prompt
+    with a followup the user will never run."""
     body = _slice_apply_followup_body()
-
-    # Find the cleanup block and check there's a `return` inside it before
-    # the apply_followup_as_new_prompt call at the bottom.
-    cleanup_idx = body.find("if _trigger_max_rounds_cleanup")
+    cleanup_idx = body.find("if _trigger_cleanup")
     apply_idx = body.find("apply_followup_as_new_prompt", cleanup_idx)
     assert cleanup_idx != -1 and apply_idx != -1
     between = body[cleanup_idx:apply_idx]
     assert "return" in between, (
-        "max-rounds cleanup block must `return` so the function does NOT "
-        "fall through to apply_followup_as_new_prompt — that would "
-        "overwrite task.prompt with a stale followup for an already-"
-        "abandoned task"
+        "cleanup block must return — otherwise the function falls through "
+        "to apply_followup_as_new_prompt on an already-abandoned task"
     )
 
 
-def test_initial_flag_value_is_false():
-    """`_trigger_max_rounds_cleanup` must be initialized to False BEFORE
-    the try-block so that if the try raises before assignment, the
-    post-lock `if` doesn't blow up with NameError."""
+def test_cleanup_flags_initialized_before_try():
+    """Flags must be pre-initialized so an exception inside the try-block
+    doesn't leave them unbound."""
     body = _slice_apply_followup_body()
-    assert "_trigger_max_rounds_cleanup = False" in body, (
-        "flag must be pre-initialized to False so an exception inside "
-        "the auto-loop try-block doesn't leave it unbound"
+    assert "_trigger_cleanup = False" in body
+    assert '_cleanup_reason = ""' in body
+    assert "_cleanup_ratio = 0.0" in body
+
+
+def test_ratio_zero_total_does_not_trigger_archive():
+    """If total = 0 (verifier returned empty done AND empty remaining), the
+    ratio is undefined. We must NOT trigger ratio_threshold cleanup — fall
+    through to max_rounds check or pending."""
+    body = _slice_apply_followup_body()
+    assert "_total > 0 and _cleanup_ratio >= ratio_threshold" in body, (
+        "must guard ratio check with _total > 0 — otherwise a verify with "
+        "no parts at all would archive on ratio=0.0 >= 0 spuriously"
     )
-
-
-def test_pending_branch_still_works():
-    """Regression guard: the existing happy path (round < max_rounds →
-    status=pending → next_run_at=now) must still be intact."""
-    body = _slice_apply_followup_body()
-    assert 'task.status = "pending"' in body
-    assert "task.next_run_at = now_iso()" in body
-    assert "max_rounds = int(getattr(watched" in body
