@@ -302,3 +302,83 @@ def test_push_to_github_persists_before_auto_register_block():
         "github_* fields must be saved unconditionally on repo creation, "
         "not only on full success — even partial pushes leave a valid repo"
     )
+
+
+# ---------------------------------------------------------------------------
+# Smart fallback — GitHub repo lookup before falling to internal storage
+# ---------------------------------------------------------------------------
+
+
+def test_deploy_project_attempts_github_lookup_before_internal_storage():
+    """🐛 (v2) User pushed BEFORE the v1 fix went live → their project.json
+    has no github_* fields. After the v1 fix went live, clicking Deploy
+    still fell through to internal_storage → wrong repo.
+
+    The v2 fix: when project.github_repo_url is empty, derive the
+    expected repo name (`_normalize_repo_name(project.name)`) and query
+    GitHub for `<user>/<that-name>`. If it exists, use it AND backfill
+    the project fields so the slow lookup doesn't repeat.
+
+    Order must be: project field → GitHub lookup → internal_storage.
+    Lookup BEFORE internal_storage is the whole point — otherwise the
+    fallback to internal_storage steals control and the lookup is dead
+    code."""
+    body = _slice_deploy_project_body()
+
+    # The lookup branch must be present
+    assert "github_lookup" in body, (
+        "deploy_project must have a github_lookup source_kind for the "
+        "smart fallback when project.github_repo_url is empty"
+    )
+    assert "_normalize_repo_name(project.name)" in body, (
+        "lookup must derive the expected repo name from project.name "
+        "(same as push_to_github uses)"
+    )
+
+    # Lookup must come BEFORE the internal_storage fallback
+    lookup_idx = body.find('source_kind = "github_lookup"')
+    storage_idx = body.find('source_kind = "internal_storage"')
+    assert lookup_idx != -1 and storage_idx != -1
+    assert lookup_idx < storage_idx, (
+        "github_lookup MUST be tried before internal_storage — otherwise "
+        "the fallback wins and the lookup never runs (the original bug)"
+    )
+
+
+def test_deploy_project_backfills_project_after_successful_lookup():
+    """When the lookup finds the repo, backfill the project's github_*
+    fields + save metadata so the next deploy click is fast (and survives
+    a backend restart)."""
+    body = _slice_deploy_project_body()
+    # Inside the lookup branch, find the backfill block
+    lookup_idx = body.find('source_kind = "github_lookup"')
+    storage_idx = body.find('source_kind = "internal_storage"')
+    assert lookup_idx != -1 and storage_idx != -1
+    between = body[lookup_idx:storage_idx]
+    assert "project.github_owner = _owner" in between, (
+        "must backfill project.github_owner after a successful lookup"
+    )
+    assert "project.github_repo_url = github_repo_url" in between, (
+        "must backfill project.github_repo_url after a successful lookup"
+    )
+    assert "creator._save_project_meta(project)" in between, (
+        "must persist the backfill so subsequent deploys skip the lookup"
+    )
+
+
+def test_deploy_project_lookup_failure_falls_through_to_internal_storage():
+    """If the GitHub lookup raises (network, 404, rate limit), we must
+    still fall through to the internal_storage fallback — not crash the
+    endpoint."""
+    body = _slice_deploy_project_body()
+    # Look for the try/except around the lookup
+    assert "except Exception as _lookup_e" in body, (
+        "lookup must be wrapped in try/except so transient GitHub errors "
+        "don't crash the deploy endpoint"
+    )
+    # And the internal_storage block must be guarded by `if not github_repo_url`
+    # so a successful lookup short-circuits it.
+    assert "if not github_repo_url:" in body, (
+        "internal_storage fallback must be guarded — only fires when the "
+        "lookup found nothing (otherwise we'd overwrite a good lookup result)"
+    )
