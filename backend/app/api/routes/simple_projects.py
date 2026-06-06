@@ -832,9 +832,10 @@ async def deploy_project(project_id: str, request: DeployRequest = None):
     if not project:
         raise HTTPException(status_code=404, detail="پروژه پیدا نشد")
 
-    render_key = os.environ.get("RENDER_API_KEY")
+    # 🐛 (audit fix) — Render key از env یا Settings DB
+    render_key = _get_render_api_key_value()
     if not render_key:
-        raise HTTPException(status_code=400, detail="کلید Render تنظیم نشده. از صفحه تنظیمات کلید رو وارد کن.")
+        raise HTTPException(status_code=400, detail="کلید Render تنظیم نشده. به /settings برو و کلید رو وارد کن.")
 
     # دریافت deploy manager
     deploy_manager = get_deploy_manager()
@@ -1014,18 +1015,25 @@ async def deploy_project_render_ai(
     """
     from ...services.simple_creator import get_simple_creator
     from ...services.deploy_service import RenderDeployService
-    import os as _os
 
     creator = get_simple_creator()
     project = creator.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="پروژه یافت نشد")
 
-    render_key = _os.environ.get("RENDER_API_KEY")
+    # 🐛 (audit fix) — Render API key باید از Settings DB هم خوانده شود،
+    # نه فقط env var. Inspector این کار را می‌کرد (api_key_render در
+    # Settings table). کاربر معمولاً از پنل /settings کلید را وارد می‌کند
+    # که در DB ذخیره می‌شود — اگر فقط env را چک کنیم، 400 می‌دهیم در
+    # حالی که کلید واقعاً موجود است.
+    render_key = _get_render_api_key_value()
     if not render_key:
         raise HTTPException(
             status_code=400,
-            detail="کلید Render تنظیم نشده. از صفحه تنظیمات کلید رو وارد کن.",
+            detail=(
+                "کلید Render تنظیم نشده. به /settings برو و کلید رو "
+                "وارد کن، یا RENDER_API_KEY را در environment ست کن."
+            ),
         )
 
     # ── ۱) اطلاعات repo — همان منطق deploy_project ──
@@ -2182,6 +2190,35 @@ def _get_github_token_value() -> str:
                 v = Setting.get_value(db, k)
                 if v:
                     os.environ["GITHUB_TOKEN"] = v
+                    return v
+        finally:
+            db.close()
+    except Exception:
+        pass
+    return ""
+
+
+def _get_render_api_key_value() -> str:
+    """🆕 (audit fix) — دریافت Render API key از env یا Settings DB.
+
+    کاربر معمولاً از پنل /settings کلید را وارد می‌کند که در Settings
+    table با key=`api_key_render` ذخیره می‌شود. تابع قدیمی `deploy_project`
+    و `deploy_project_render_ai` فقط env را چک می‌کردند → 400 می‌دادند
+    حتی وقتی کلید واقعاً در DB موجود بود. Inspector این مشکل را نداشت
+    چون مستقیماً از DB می‌خواند.
+    """
+    key = os.environ.get("RENDER_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        from ...models.setting import Setting
+        from ...core.database import SessionLocal
+        db = SessionLocal()
+        try:
+            for k in ("api_key_render", "render_api_key", "RENDER_API_KEY"):
+                v = Setting.get_value(db, k)
+                if v:
+                    os.environ["RENDER_API_KEY"] = v
                     return v
         finally:
             db.close()

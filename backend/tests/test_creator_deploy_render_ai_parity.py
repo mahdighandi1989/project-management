@@ -271,3 +271,93 @@ def test_frontend_modal_displays_empty_env_var_warnings():
         / "frontend/src/app/project/[id]/page.tsx"
     ).read_text(encoding="utf-8")
     assert "empty_env_vars" in src
+
+
+# ---------------------------------------------------------------------------
+# 🐛 Audit fixes — Render API key sourcing, no dead state, etc.
+# ---------------------------------------------------------------------------
+
+
+def test_render_api_key_helper_reads_from_env_and_settings_db():
+    """🐛 (audit) Inspector reads Render key from Settings DB
+    (`api_key_render`) — the user enters it in the /settings panel and
+    it lands there. The original Creator deploy endpoints only checked
+    `os.environ` → returned 400 even when the key WAS configured in
+    DB. The new helper must check both."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("def _get_render_api_key_value")
+    assert idx != -1, "missing _get_render_api_key_value helper"
+    body = src[idx:idx + 1500]
+    # env first
+    assert 'os.environ.get("RENDER_API_KEY"' in body, (
+        "must check env var first for fast-path"
+    )
+    # then Settings DB
+    assert "from ...models.setting import Setting" in body
+    assert '"api_key_render"' in body, (
+        "must check the `api_key_render` Settings DB key (same name "
+        "Inspector uses)"
+    )
+
+
+def test_both_deploy_endpoints_use_render_api_key_helper():
+    """Both the legacy /deploy and the new /deploy/render-ai endpoints
+    must call the helper, NOT call `os.environ.get('RENDER_API_KEY')`
+    directly — otherwise the DB-sourced key never gets picked up."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+
+    # Both endpoints must call the helper
+    for fn_name in ("async def deploy_project(", "async def deploy_project_render_ai("):
+        idx = src.find(fn_name)
+        assert idx != -1, f"missing {fn_name}"
+        # Slice through ~3000 chars or to next @router
+        end = src.find("\n@router.", idx + 50)
+        body = src[idx:end if end != -1 else idx + 3000]
+        assert "_get_render_api_key_value()" in body, (
+            f"{fn_name} must call _get_render_api_key_value() so DB-sourced "
+            f"keys are picked up — direct os.environ checks miss the panel UX"
+        )
+
+
+def test_render_ai_endpoint_does_not_import_os_locally():
+    """Audit cleanup: redundant `import os as _os` was removed — the
+    module-level `import os` covers it. Verify the alias is gone so a
+    future reader doesn't get confused."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def deploy_project_render_ai")
+    assert idx != -1
+    body = src[idx:idx + 2000]
+    assert "import os as _os" not in body, (
+        "redundant local `import os as _os` must be removed — `os` is "
+        "already imported at module top"
+    )
+
+
+def test_frontend_no_dead_deploy_url_state():
+    """Audit cleanup: the old `deployUrl` / `setDeployUrl` and
+    `deploying` / `setDeploying` state were never set after the modal
+    refactor (the old `deployToRender` function was replaced). They
+    must be removed."""
+    src = (
+        Path(__file__).resolve().parents[2]
+        / "frontend/src/app/project/[id]/page.tsx"
+    ).read_text(encoding="utf-8")
+    # No setDeployUrl call anywhere — declaration without setter usage
+    # means dead state. setDeployUrl appears nowhere now.
+    assert "setDeployUrl(" not in src, (
+        "setDeployUrl is never called after the modal refactor — the "
+        "useState hook should be removed too"
+    )
+    assert "setDeploying(" not in src, (
+        "setDeploying is never called after the modal refactor — the "
+        "useState hook should be removed too"
+    )
