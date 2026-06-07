@@ -43,6 +43,13 @@ SUPPORTED_TOOLS_PHASE_3 = {
     "render_get_env_vars",
     "render_set_env_var",
     "render_trigger_deploy",
+    # 🆕 (create-service) — کاربر گزارش داد که Cloud Code می‌گوید «ابزار
+    # ساخت سرویس را ندارم». این allowlist را filter می‌کرد. این سه ابزار
+    # حالا exposed می‌شوند تا agent بتواند web_service / background_worker
+    # / static_site / Postgres / Redis مستقیم بسازد.
+    "render_create_service",
+    "render_create_redis",
+    "render_create_postgres",
     "submit_action_plan",
     "preflight_check",
 }
@@ -243,6 +250,108 @@ def build_inspector_executor(
                     return _err(f"Render خطا: {res.get('error')}")
                 return _ok(f"🚀 deploy روی سرویس `{sid}` شروع شد"
                            + (" (با clear cache)" if clear_cache else "") + ".")
+
+            # 🆕 (create-service) — ساخت سرویس جدید Render
+            if name == "render_create_service":
+                guard = _need_render()
+                if guard:
+                    return guard
+                svc_type = (args.get("type") or "").strip().lower()
+                if svc_type not in (
+                    "web_service", "background_worker",
+                    "static_site", "private_service",
+                ):
+                    return _err(
+                        "type باید یکی از web_service / background_worker / "
+                        "static_site / private_service باشد."
+                    )
+                if not args.get("name"):
+                    return _err("name لازم است.")
+                if not args.get("repo"):
+                    return _err("repo (URL گیت‌هاب) لازم است.")
+                res = await render_service.create_service(
+                    name=args.get("name"),
+                    type=svc_type,
+                    repo=args.get("repo"),
+                    branch=(args.get("branch") or "main"),
+                    owner_id=(args.get("owner_id") or "").strip() or None,
+                    region=(args.get("region") or "oregon"),
+                    plan=(args.get("plan") or "starter"),
+                    root_dir=args.get("root_dir"),
+                    build_command=args.get("build_command"),
+                    start_command=args.get("start_command"),
+                    runtime=args.get("runtime"),
+                    env_vars=args.get("env_vars") or {},
+                    auto_deploy=bool(args.get("auto_deploy", True)),
+                    dockerfile_path=args.get("dockerfile_path"),
+                    publish_path=args.get("publish_path"),
+                )
+                if not res.get("success"):
+                    return _err(f"خطا در ساخت سرویس: {res.get('error')}")
+                return _ok(
+                    f"✅ سرویس ساخته شد:\n"
+                    f"- service_id: {res.get('service_id')}\n"
+                    f"- name: {res.get('name')}\n"
+                    f"- type: {res.get('type')}\n"
+                    f"- dashboard: {res.get('dashboard_url')}\n\n"
+                    f"📌 اگر env vars اضافی لازم است، با "
+                    f"`render_set_env_var(service_id='{res.get('service_id')}', ...)` set کن."
+                )
+
+            if name == "render_create_redis":
+                guard = _need_render()
+                if guard:
+                    return guard
+                if not args.get("name"):
+                    return _err("name لازم است.")
+                res = await render_service.create_redis(
+                    name=args.get("name"),
+                    owner_id=(args.get("owner_id") or "").strip() or None,
+                    region=(args.get("region") or "oregon"),
+                    plan=(args.get("plan") or "free"),
+                )
+                if not res.get("success"):
+                    return _err(f"خطا در ساخت Redis: {res.get('error')}")
+                return _ok(
+                    f"✅ Redis ساخته شد:\n"
+                    f"- redis_id: {res.get('redis_id')}\n"
+                    f"- name: {res.get('name')}\n\n"
+                    f"📌 provisioning ~۱-۳ دقیقه. وقتی available شد، "
+                    f"connection string را از dashboard کپی و در سرویس‌های "
+                    f"نیازمند set کن."
+                )
+
+            if name == "render_create_postgres":
+                guard = _need_render()
+                if guard:
+                    return guard
+                if not args.get("name"):
+                    return _err("name لازم است.")
+                owner_id = (args.get("owner_id") or "").strip() or None
+                if not owner_id:
+                    owner_id = await render_service.get_owner_id_from_services()
+                    if not owner_id:
+                        return _err(
+                            "owner_id پیدا نشد — لطفاً دستی owner_id را پاس بده."
+                        )
+                res = await render_service.create_postgres(
+                    name=args.get("name"),
+                    owner_id=owner_id,
+                    plan=(args.get("plan") or "free"),
+                    region=(args.get("region") or "oregon"),
+                    version=str(args.get("version") or "16"),
+                    database_name=args.get("database_name"),
+                    database_user=args.get("database_user"),
+                )
+                if not res.get("success"):
+                    return _err(f"خطا در ساخت Postgres: {res.get('error')}")
+                return _ok(
+                    f"✅ Postgres ساخته شد:\n"
+                    f"- postgres_id: {res.get('postgres_id')}\n"
+                    f"- name: {res.get('name')}\n"
+                    f"- status: {res.get('status')}\n\n"
+                    f"📌 {res.get('note', 'صبر کن provisioning تمام شود.')}"
+                )
 
             # ---------- Action plan ----------
             if name == "submit_action_plan":

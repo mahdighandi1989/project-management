@@ -254,9 +254,33 @@ async def test_unsupported_tool_returns_friendly_decline():
         owner="o", repo="r", branch="main", github_token=None,
         file_list=[],
     )
-    res = await execute("render_create_postgres", {"name": "db"})
+    # render_create_postgres is now wired (see SUPPORTED_TOOLS_PHASE_3).
+    # Use a tool name that genuinely doesn't have a handler.
+    res = await execute("totally_unknown_tool_xyz", {})
     assert res["is_error"] is True
     assert "Local AI" in res["content"]
+
+
+def test_create_service_tools_are_in_supported_phase_3_allowlist():
+    """🐛 (user-reported) Inspector chat said it had only 10 tools and
+    couldn't create services. Root cause: the SUPPORTED_TOOLS_PHASE_3
+    allowlist filtered out render_create_service / render_create_redis /
+    render_create_postgres even though _build_tools() declared them.
+
+    Pin all three in the allowlist so a future refactor can't silently
+    drop them again."""
+    from app.services.cloud_code_executor import SUPPORTED_TOOLS_PHASE_3
+
+    for tool_name in (
+        "render_create_service",
+        "render_create_redis",
+        "render_create_postgres",
+    ):
+        assert tool_name in SUPPORTED_TOOLS_PHASE_3, (
+            f"{tool_name} must be in SUPPORTED_TOOLS_PHASE_3 — without it "
+            f"the Cloud Code agent reports «I can only manage existing "
+            f"services» and the user has to click in the dashboard"
+        )
 
 
 @pytest.mark.asyncio
