@@ -682,10 +682,15 @@ def test_provision_postgres_calls_render_v1_endpoint():
     ).read_text(encoding="utf-8")
     idx = src.find("async def provision_postgres")
     assert idx != -1
-    body = src[idx:idx + 4000]
+    body = src[idx:idx + 6000]
     assert "/postgres" in body
     assert "_wait_for_postgres_ready" in body, (
         "must poll for status=available before returning the connection string"
+    )
+    # 🐛 (version-required fix) — Render API requires the `version` field
+    assert '"version"' in body, (
+        "Postgres payload must include a `version` field (Render API "
+        "rejects requests without it: 400 'version is required')"
     )
 
 
@@ -1026,8 +1031,11 @@ def test_worker_role_gets_celery_start_command():
         "the worker role override branch must accept the common role "
         "spellings AI emits (worker / celery-worker / celery_worker)"
     )
-    assert "celery -A main worker" in body, (
-        "worker services must launch with `celery -A main worker`, not uvicorn"
+    # 🆕 (smart-start) — celery module path is now discovered from tree.
+    # Accept either `celery -A main worker` (default fallback) or the
+    # discovery-driven form `celery -A {_celery_module} worker`.
+    assert "celery -A " in body and "worker --loglevel=info" in body, (
+        "worker services must launch with `celery -A <module> worker`, not uvicorn"
     )
 
 
