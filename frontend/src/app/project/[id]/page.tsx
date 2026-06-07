@@ -1442,6 +1442,26 @@ export default function ProjectPage() {
                           )}
                         </div>
                       ))}
+                      {/* 🆕 (auto-provision) — Postgres/Redis ای که Render API
+                          خودکار ساخت */}
+                      {deployAiResult.provisioned && Object.keys(deployAiResult.provisioned).length > 0 && (
+                        <div className="mt-2 p-2 bg-blue-500/10 border border-blue-500/30 rounded">
+                          <div className="font-bold text-blue-400 mb-1">
+                            🗄 سرویس‌های مدیریت‌شده‌ای که خودکار ساخته شدند:
+                          </div>
+                          <ul className="text-blue-200 text-[11px]">
+                            {Object.entries(deployAiResult.provisioned).map(([kind, info]: [string, any]) => (
+                              <li key={kind}>
+                                • <span className="font-mono">{kind}</span>:{' '}
+                                <span className="font-mono">{info.name}</span>{' '}
+                                <span className="opacity-60">
+                                  (connection string خودکار در همهٔ سرویس‌ها set شد)
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
                       {/* 🆕 (env auto-fill) — auto_resolved + still_manual */}
                       {(deployAiResult.auto_resolved || []).length > 0 && (
                         <div className="mt-2 p-2 bg-green-500/10 border border-green-500/30 rounded">
@@ -1458,6 +1478,7 @@ export default function ProjectPage() {
                                     v.source === 'db_lookup' ? 'از پنل تنظیمات'
                                     : v.source === 'autogen' ? 'تصادفی تولید شد'
                                     : v.source === 'cross_service_resolved' ? 'از URL backend'
+                                    : v.source === 'render_provisioned' ? 'از Render auto-provision'
                                     : v.source === 'user' ? 'توسط کاربر'
                                     : v.source
                                   })

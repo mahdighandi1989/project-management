@@ -1221,6 +1221,87 @@ async def deploy_project_render_ai(
             per_var[k] = _resolve_env_var(k, str(initial or ""))
         env_resolution[svc_name] = per_var
 
+    # ── 🆕 ۴.۵) Auto-provision Postgres + Redis اگر هر سرویس به آن‌ها نیاز
+    # دارد. این بخش زمان‌بر است (۱-۳ دقیقه polling تا available) ولی
+    # خواستهٔ کاربر این است: «نباید کاری دستی انجام شود». Render API
+    # رایگان Postgres و Key Value (Redis) را پشتیبانی می‌کند.
+    # تشخیص: اگر بین env vars (کل سرویس‌ها) `DATABASE_URL` یا
+    # `POSTGRES_*` یا `REDIS_URL` یا `CELERY_*_URL` وجود دارد و source
+    # آن `external` است (نشانهٔ خالی-بودن)، یک instance بساز و
+    # connectionString را در همهٔ سرویس‌های نیازمند پر کن.
+    provisioned: Dict[str, Dict[str, Any]] = {}
+    _need_postgres = False
+    _need_redis = False
+    _PG_VAR_KEYWORDS = ("DATABASE_URL", "POSTGRES_URL", "DB_URL")
+    _REDIS_VAR_KEYWORDS = (
+        "REDIS_URL", "CELERY_BROKER_URL", "CELERY_RESULT_BACKEND",
+        "CELERY_BACKEND_URL",
+    )
+    for _svc_name, per_var in env_resolution.items():
+        for _k, _info in per_var.items():
+            _ku = _k.upper()
+            if any(p in _ku for p in _PG_VAR_KEYWORDS):
+                if _info.get("source") in ("external", "unknown") and not _info.get("resolved"):
+                    _need_postgres = True
+            if any(p in _ku for p in _REDIS_VAR_KEYWORDS):
+                if _info.get("source") in ("external", "unknown") and not _info.get("resolved"):
+                    _need_redis = True
+
+    if _need_postgres or _need_redis:
+        # یک نام پایه از project برای resource ها
+        _base_name = (
+            project.github_repo
+            or _normalize_repo_name(project.name)
+            or project_id
+        ).lower().replace("_", "-")[:40]
+        _provision_svc = RenderDeployService(render_key)
+        try:
+            if _need_postgres:
+                pg_result = await _provision_svc.provision_postgres(
+                    name=f"{_base_name}-db",
+                )
+                if pg_result.get("success") and pg_result.get("connectionString"):
+                    provisioned["postgres"] = {
+                        "id": pg_result["id"],
+                        "name": pg_result["name"],
+                        "connection_string": pg_result["connectionString"],
+                    }
+                    # توزیع روی env_resolution
+                    for _svc_name, per_var in env_resolution.items():
+                        for _k, _info in per_var.items():
+                            if any(p in _k.upper() for p in _PG_VAR_KEYWORDS):
+                                if not _info.get("resolved"):
+                                    _info["value"] = pg_result["connectionString"]
+                                    _info["source"] = "render_provisioned"
+                                    _info["resolved"] = True
+                else:
+                    logger.warning(
+                        f"provision_postgres failed: {pg_result.get('error')}"
+                    )
+            if _need_redis:
+                rd_result = await _provision_svc.provision_redis(
+                    name=f"{_base_name}-redis",
+                )
+                if rd_result.get("success") and rd_result.get("connectionString"):
+                    provisioned["redis"] = {
+                        "id": rd_result["id"],
+                        "name": rd_result["name"],
+                        "connection_string": rd_result["connectionString"],
+                    }
+                    for _svc_name, per_var in env_resolution.items():
+                        for _k, _info in per_var.items():
+                            if any(p in _k.upper() for p in _REDIS_VAR_KEYWORDS):
+                                if not _info.get("resolved"):
+                                    _info["value"] = rd_result["connectionString"]
+                                    _info["source"] = "render_provisioned"
+                                    _info["resolved"] = True
+                else:
+                    logger.warning(
+                        f"provision_redis failed: {rd_result.get('error')}"
+                    )
+        finally:
+            await _provision_svc.close()
+
     # ── ۵) ساخت هر سرویس روی Render — ترتیب: backend اول (تا URL آن
     # برای frontend در دسترس باشد)، static و web_service فرعی بعد.
     def _service_sort_key(s: dict) -> int:
@@ -1360,6 +1441,8 @@ async def deploy_project_render_ai(
         "branch": branch,
         "auto_resolved": auto_resolved,
         "still_manual": still_manual,
+        # 🆕 (auto-provision) — Postgres/Redis ای که خودکار ساخته شدند
+        "provisioned": provisioned,
         # backward compat — frontend قدیم empty_env_vars را می‌خواند
         "empty_env_vars": [
             f"{x['service']}: {x['var']}" for x in still_manual
@@ -1367,6 +1450,7 @@ async def deploy_project_render_ai(
         "plan": request.plan,
         "message": (
             f"✅ {len(created)} سرویس ساخته شد"
+            + (f" | 🗄 {len(provisioned)} resource ساخته شد" if provisioned else "")
             + (f" | 🔐 {len(auto_resolved)} env خودکار" if auto_resolved else "")
             + (f" | ⚠️ {len(still_manual)} env دستی" if still_manual else "")
             + (f" | ❌ {len(errors)} خطا" if errors else "")

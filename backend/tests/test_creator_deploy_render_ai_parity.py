@@ -643,6 +643,119 @@ def test_push_to_github_reads_content_from_disk_when_missing():
     )
 
 
+def test_render_deploy_service_has_provision_postgres():
+    """🆕 (auto-provision) RenderDeployService must expose a method that
+    creates a managed Postgres on Render and returns the connection
+    string. User's explicit requirement: «نباید کاری دستی انجام بشه»."""
+    from app.services.deploy_service import RenderDeployService
+    import inspect
+
+    svc = RenderDeployService(api_key="dummy")
+    assert hasattr(svc, "provision_postgres")
+    sig = inspect.signature(svc.provision_postgres)
+    assert "name" in sig.parameters
+    assert "plan" in sig.parameters
+    assert "region" in sig.parameters
+    assert sig.parameters["plan"].default == "free"
+
+
+def test_render_deploy_service_has_provision_redis():
+    """🆕 Same for Redis (Key Value). Render's newer API uses /keyvalue;
+    the method must accept that fact and also try /redis as a fallback."""
+    from app.services.deploy_service import RenderDeployService
+    import inspect
+
+    svc = RenderDeployService(api_key="dummy")
+    assert hasattr(svc, "provision_redis")
+    sig = inspect.signature(svc.provision_redis)
+    assert "name" in sig.parameters
+    assert "plan" in sig.parameters
+    assert sig.parameters["plan"].default == "free"
+
+
+def test_provision_postgres_calls_render_v1_endpoint():
+    """Source pin: must POST to /postgres on the Render API."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/services/deploy_service.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def provision_postgres")
+    assert idx != -1
+    body = src[idx:idx + 4000]
+    assert "/postgres" in body
+    assert "_wait_for_postgres_ready" in body, (
+        "must poll for status=available before returning the connection string"
+    )
+
+
+def test_provision_redis_tries_both_keyvalue_and_redis_endpoints():
+    """Render renamed /redis to /keyvalue. Try the new name first, fall
+    back to the old name for backwards compatibility."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/services/deploy_service.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def provision_redis")
+    assert idx != -1
+    body = src[idx:idx + 4000]
+    assert "/keyvalue" in body
+    assert "/redis" in body
+
+
+def test_deploy_endpoint_auto_provisions_postgres_when_needed():
+    """When any service has an empty DATABASE_URL (source=external),
+    deploy_project_render_ai must auto-create a Postgres and fill the
+    connection string into ALL services that need it."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def deploy_project_render_ai")
+    assert idx != -1
+    body = src[idx:idx + 20000]
+    assert "_need_postgres" in body
+    assert "provision_postgres(" in body
+    assert "render_provisioned" in body
+
+
+def test_deploy_endpoint_auto_provisions_redis_when_needed():
+    """Same for Redis (REDIS_URL, CELERY_BROKER_URL, etc)."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def deploy_project_render_ai")
+    assert idx != -1
+    body = src[idx:idx + 20000]
+    assert "_need_redis" in body
+    assert "provision_redis(" in body
+    assert "CELERY_BROKER_URL" in body
+
+
+def test_deploy_endpoint_response_includes_provisioned():
+    """Response must surface what was provisioned so the frontend can
+    show the user e.g., «🗄 Postgres + Redis ساخته شد»."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def deploy_project_render_ai")
+    assert idx != -1
+    body = src[idx:idx + 20000]
+    assert '"provisioned": provisioned' in body
+
+
+def test_frontend_modal_renders_provisioned_panel():
+    """Frontend must show the Postgres/Redis panel when the response
+    includes a non-empty `provisioned`."""
+    src = (
+        Path(__file__).resolve().parents[2]
+        / "frontend/src/app/project/[id]/page.tsx"
+    ).read_text(encoding="utf-8")
+    assert "deployAiResult.provisioned" in src
+    assert "render_provisioned" in src
+
+
 def test_get_project_files_does_not_return_content():
     """Tripwire: if a future change makes get_project_files include
     `content` in its dicts, this test alerts so we can simplify the
