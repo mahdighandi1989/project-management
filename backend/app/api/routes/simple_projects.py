@@ -2690,7 +2690,22 @@ async def push_to_github(project_id: str, request: Optional[PushToGitHubRequest]
             file_path = f.get("path") or ""
             if not file_path:
                 continue
-            content = f.get("content", "")
+            # 🐛 (push-empty-files fix) — `get_project_files` فقط
+            # path/size/language می‌داد. اگر content از آن می‌خواندیم،
+            # همیشه خالی بود → repo با Dockerfile/package.json/
+            # requirements.txt خالی push می‌شد → deploy fail. علت
+            # واقعی failed deploy Detective-1.
+            # حالا content را explicit از disk می‌خوانیم.
+            content = f.get("content") or ""
+            if not content:
+                try:
+                    disk_content = await creator.get_file_content(
+                        project_id, file_path,
+                    )
+                    if disk_content is not None:
+                        content = disk_content
+                except Exception:
+                    pass
             if not isinstance(content, str):
                 content = str(content)
 

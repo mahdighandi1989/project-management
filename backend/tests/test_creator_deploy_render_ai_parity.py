@@ -610,3 +610,56 @@ def test_frontend_modal_shows_auto_resolved_and_still_manual():
     )
     # Source-tag rendering
     assert "db_lookup" in src or "از پنل تنظیمات" in src
+
+
+# ---------------------------------------------------------------------------
+# 🐛 Root cause #2: push_to_github was uploading EMPTY content for every file
+# ---------------------------------------------------------------------------
+
+
+def test_push_to_github_reads_content_from_disk_when_missing():
+    """Detective-1 deploy kept failing not just because of Dockerfile but
+    because EVERY file was empty in the repo. Root cause: the push loop
+    did `f.get("content", "")` but `get_project_files` returns only
+    path/size/language — it never includes content. So every file was
+    pushed as a 0-byte blob.
+
+    Fix: when content is missing, fall back to
+    `creator.get_file_content(project_id, file_path)` which reads from
+    disk."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def push_to_github")
+    assert idx != -1
+    body = src[idx:idx + 10000]
+    # Must call get_file_content as fallback in the upload loop
+    upload_block = body[body.find("for f in files"):body.find("for f in files") + 2500]
+    assert "creator.get_file_content(" in upload_block, (
+        "push_to_github upload loop must call creator.get_file_content "
+        "to read file content from disk — otherwise every file goes up "
+        "empty (the actual root cause of Detective-1 deploy failures)"
+    )
+
+
+def test_get_project_files_does_not_return_content():
+    """Tripwire: if a future change makes get_project_files include
+    `content` in its dicts, this test alerts so we can simplify the
+    push_to_github fallback (which is currently necessary)."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/services/simple_creator.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def get_project_files")
+    assert idx != -1
+    # Slice through the function body (next async def or class boundary)
+    rest = src[idx:]
+    end_async = rest.find("\n    async def ", 10)
+    end_sync = rest.find("\n    def ", 10)
+    end = min(x for x in (end_async, end_sync) if x != -1) if (end_async != -1 or end_sync != -1) else 1500
+    body = rest[:end]
+    assert '"content"' not in body, (
+        "tripwire: get_project_files now appears to include `content` — "
+        "verify the push_to_github fallback is still needed (or simplify it)"
+    )
