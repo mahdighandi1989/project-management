@@ -10,7 +10,7 @@ verification_status: pending
 watched_id: 3f34a2b1-2a8d-4ad2-904a-9835a8a5b7c9
 project: mahdighandi1989/project-management
 created_at: '2026-06-07T09:30:21.710497+00:00'
-updated_at: '2026-06-07T09:30:21.710500+00:00'
+updated_at: '2026-06-07T09:35:12.689024+00:00'
 target_files:
 - backend/app/api/routes/simple_projects.py
 ---
@@ -477,6 +477,6 @@ _(مستقل)_
 
 ## Acceptance Criteria
 
-1. The AI model fallback mechanism prioritizes models based on suitability (e.g., capabilities, performance scores). _(verify: static)_
-2. Users receive higher quality or more relevant AI responses even if their primary model choices fail. _(verify: static)_
-3. The system provides clear error messages if no suitable model can be found after all fallback attempts. _(verify: static)_
+1. The AI model fallback mechanism prioritizes models based on suitability (e.g., capabilities, performance scores). _(verify: backend_test)_
+2. Users receive higher quality or more relevant AI responses even if their primary model choices fail. _(verify: manual_only)_
+3. The system provides clear error messages if no suitable model can be found after all fallback attempts. _(verify: api_response)_
