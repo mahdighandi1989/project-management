@@ -1256,6 +1256,7 @@ async def deploy_project_render_ai(
     # آن `external` است (نشانهٔ خالی-بودن)، یک instance بساز و
     # connectionString را در همهٔ سرویس‌های نیازمند پر کن.
     provisioned: Dict[str, Dict[str, Any]] = {}
+    provision_errors: Dict[str, str] = {}
     _need_postgres = False
     _need_redis = False
     # 🐛 (force-provision fix) — keywords را گسترش دادیم تا تمام
@@ -1401,9 +1402,9 @@ async def deploy_project_render_ai(
                                 _info["source"] = "render_provisioned"
                                 _info["resolved"] = True
                 else:
-                    logger.warning(
-                        f"provision_postgres failed: {pg_result.get('error')}"
-                    )
+                    _err_msg = pg_result.get("error", "unknown")
+                    provision_errors["postgres"] = _err_msg
+                    logger.warning(f"provision_postgres failed: {_err_msg}")
             if _need_redis:
                 rd_result = await _provision_svc.provision_redis(
                     name=f"{_base_name}-redis",
@@ -1448,9 +1449,9 @@ async def deploy_project_render_ai(
                                 _info["source"] = "render_provisioned"
                                 _info["resolved"] = True
                 else:
-                    logger.warning(
-                        f"provision_redis failed: {rd_result.get('error')}"
-                    )
+                    _err_msg = rd_result.get("error", "unknown")
+                    provision_errors["redis"] = _err_msg
+                    logger.warning(f"provision_redis failed: {_err_msg}")
         finally:
             await _provision_svc.close()
 
@@ -1595,6 +1596,10 @@ async def deploy_project_render_ai(
         "still_manual": still_manual,
         # 🆕 (auto-provision) — Postgres/Redis ای که خودکار ساخته شدند
         "provisioned": provisioned,
+        # 🆕 (provision-error transparency) — اگر provision_postgres یا
+        # provision_redis fail شدند، خطای واقعی Render API را به کاربر
+        # نشان بده تا بداند چرا DB ساخته نشد (مثلاً plan deprecated).
+        "provision_errors": provision_errors,
         # 🆕 (infra-filter) — سرویس‌های infra که از plan AI حذف شدند
         # (به‌جای ساخت اشتباه به‌عنوان web_service). فقط برای اطلاع
         # کاربر؛ postgres/redis از طریق provisioned ساخته می‌شوند،

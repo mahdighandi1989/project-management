@@ -126,10 +126,14 @@ class RenderDeployService:
         *,
         name: str,
         region: str = "oregon",
-        plan: str = "free",
+        plan: str = "basic_256mb",
         wait_timeout_s: int = 180,
     ) -> Dict:
         """ساخت یک Postgres مدیریت‌شده در Render و بازگرداندن connection string.
+
+        🐛 (plan fix) — Render پلن "free" را برای Postgres دیگر پشتیبانی
+        نمی‌کند (deprecated). default را به "basic_256mb" تغییر دادیم
+        (~$6/ماه). اگر این هم fail شد، تلاش fallback به پلن‌های دیگر.
 
         فرایند:
           1. POST /postgres → ایجاد instance
@@ -148,7 +152,14 @@ class RenderDeployService:
             return {"success": False, "error": "owner_id_not_found"}
 
         session = await self._get_session()
-        safe_name = name.lower().replace("_", "-").replace(" ", "-")[:60]
+        # 🆕 (uniqueness fix) — نام unique با timestamp تا 409 conflict
+        # روی retry نگیریم (در صورت provisioning قبلی fail شده).
+        import time as _t_uniq
+        _suffix = f"-{int(_t_uniq.time()) % 10000}"
+        safe_name = (
+            name.lower().replace("_", "-").replace(" ", "-")[:55]
+            + _suffix
+        )
         # databaseName/databaseUser باید alphanumeric باشد (Render قانون)
         db_basename = "".join(c for c in safe_name if c.isalnum())[:40] or "appdb"
 
@@ -161,25 +172,52 @@ class RenderDeployService:
             "databaseUser": db_basename,
         }
 
-        try:
-            async with session.post(
-                f"{self.API_BASE}/postgres", json=payload,
-            ) as r:
-                txt = await r.text()
-                if r.status not in (200, 201):
-                    return {
-                        "success": False,
-                        "error": f"create_postgres_failed: {r.status} {txt[:300]}",
-                    }
-                created = await r.json() if r.content_type == "application/json" else {}
-                # شکل پاسخ: ممکن است wrapper یا direct باشد
-                pg = created.get("postgres") or created
-                pg_id = pg.get("id") or created.get("id")
-        except Exception as e:
-            return {"success": False, "error": f"create_postgres_exception: {e}"}
+        # 🐛 (plan-fallback fix) — Render plan names تغییر کرده. تلاش با
+        # plan فعلی، سپس fallback به نام‌های مختلف.
+        _plan_candidates = [plan]
+        for _fb in ("basic_256mb", "basic_1gb", "starter", "free"):
+            if _fb not in _plan_candidates:
+                _plan_candidates.append(_fb)
+
+        pg_id: Optional[str] = None
+        last_err = ""
+        for _try_plan in _plan_candidates:
+            payload["plan"] = _try_plan
+            try:
+                async with session.post(
+                    f"{self.API_BASE}/postgres", json=payload,
+                ) as r:
+                    txt = await r.text()
+                    if r.status in (200, 201):
+                        created = (
+                            await r.json()
+                            if r.content_type == "application/json"
+                            else {}
+                        )
+                        pg = created.get("postgres") or created
+                        pg_id = pg.get("id") or created.get("id")
+                        if pg_id:
+                            logger.info(
+                                f"provision_postgres: created with plan={_try_plan}"
+                            )
+                            break
+                    else:
+                        last_err = f"plan={_try_plan}: {r.status} {txt[:200]}"
+                        # خطای plan-related → ادامه با fallback. سایر خطاها
+                        # (auth, conflict) → بزن بیرون.
+                        if r.status not in (400, 422):
+                            return {
+                                "success": False,
+                                "error": f"create_postgres_failed: {last_err}",
+                            }
+            except Exception as e:
+                last_err = f"plan={_try_plan}: exception {e}"
 
         if not pg_id:
-            return {"success": False, "error": "no_postgres_id_returned"}
+            return {
+                "success": False,
+                "error": f"create_postgres_all_plans_failed: {last_err}",
+            }
 
         # polling — Render معمولاً ۱-۳ دقیقه طول می‌کشد
         conn_str = await self._wait_for_postgres_ready(pg_id, wait_timeout_s)

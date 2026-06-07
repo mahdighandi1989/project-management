@@ -656,7 +656,8 @@ def test_render_deploy_service_has_provision_postgres():
     assert "name" in sig.parameters
     assert "plan" in sig.parameters
     assert "region" in sig.parameters
-    assert sig.parameters["plan"].default == "free"
+    # 🐛 (plan fix) — Render free Postgres deprecated. default basic_256mb.
+    assert sig.parameters["plan"].default == "basic_256mb"
 
 
 def test_render_deploy_service_has_provision_redis():
