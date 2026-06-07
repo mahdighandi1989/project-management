@@ -1114,9 +1114,35 @@ async def deploy_project_render_ai(
             status_code=500, detail=f"خطا در تحلیل AI: {str(e)[:200]}",
         )
 
-    services_plan = ai_result.get("services", [])
+    services_plan_raw = ai_result.get("services", [])
     analysis_text = ai_result.get("analysis", "")
     model_used = ai_result.get("model_used", "unknown")
+
+    # 🐛 (infra-filter fix) — AI گاهی postgres/redis/neo4j/minio/qdrant
+    # را به‌عنوان web_service Docker در plan می‌گذارد (چون در
+    # docker-compose پروژه هستند). Render این‌ها را به‌عنوان web_service
+    # نمی‌سازد → ۵ خطا در ساخت. درست: postgres/redis توسط
+    # provision_postgres / provision_redis (Render managed) ساخته شوند،
+    # neo4j/minio/qdrant external هستند (Render پشتیبانی ندارد).
+    # این filter سرویس‌های infra را از services_plan حذف می‌کند.
+    _INFRA_KEYWORDS = (
+        "postgres", "postgresql", "pgvector",
+        "redis", "keyvalue",
+        "neo4j", "minio", "qdrant", "mongo", "mongodb",
+        "rabbitmq", "kafka", "elasticsearch", "elastic",
+        "mysql", "mariadb",
+    )
+
+    def _is_infra_service(svc: dict) -> bool:
+        name = (svc.get("name") or "").lower()
+        role = (svc.get("role") or "").lower()
+        for kw in _INFRA_KEYWORDS:
+            if kw in name or kw in role:
+                return True
+        return False
+
+    services_plan = [s for s in services_plan_raw if not _is_infra_service(s)]
+    infra_skipped = [s for s in services_plan_raw if _is_infra_service(s)]
 
     if not services_plan:
         return {
@@ -1443,6 +1469,14 @@ async def deploy_project_render_ai(
         "still_manual": still_manual,
         # 🆕 (auto-provision) — Postgres/Redis ای که خودکار ساخته شدند
         "provisioned": provisioned,
+        # 🆕 (infra-filter) — سرویس‌های infra که از plan AI حذف شدند
+        # (به‌جای ساخت اشتباه به‌عنوان web_service). فقط برای اطلاع
+        # کاربر؛ postgres/redis از طریق provisioned ساخته می‌شوند،
+        # neo4j/minio/qdrant external می‌مانند.
+        "infra_skipped": [
+            {"name": s.get("name", "?"), "role": s.get("role", "?")}
+            for s in infra_skipped
+        ],
         # backward compat — frontend قدیم empty_env_vars را می‌خواند
         "empty_env_vars": [
             f"{x['service']}: {x['var']}" for x in still_manual
@@ -2513,6 +2547,35 @@ _ENV_VAR_EXTERNAL_HINTS = {
 }
 
 
+def _is_placeholder_value(value: str) -> bool:
+    """🐛 (placeholder fix) — AI گاهی values مثل `{{GENERATED_SECRET_KEY}}`
+    یا `<your-key>` یا `change-me` در env_vars می‌گذارد. این‌ها non-empty
+    هستند ولی نباید به‌عنوان user-supplied تفسیر شوند. ست user-supplied
+    تفسیر شدن یعنی app هنگام run با literal `{{POSTGRES_PASSWORD}}`
+    crash می‌کند. این تابع آن‌ها را شناسایی می‌کند تا resolve منطقی
+    خودکار جای آن‌ها اجرا شود."""
+    import re as _re_ph
+    v = (value or "").strip()
+    if not v:
+        return True
+    # patterns رایج placeholder
+    if v.startswith("{{") and v.endswith("}}"):
+        return True
+    if v.startswith("<") and v.endswith(">"):
+        return True
+    if _re_ph.match(r"^your[-_]", v, _re_ph.IGNORECASE):
+        return True
+    if _re_ph.match(r"^change[-_]?me$", v, _re_ph.IGNORECASE):
+        return True
+    if _re_ph.match(r"^placeholder$", v, _re_ph.IGNORECASE):
+        return True
+    if _re_ph.match(r"^xxx+$", v, _re_ph.IGNORECASE):
+        return True
+    if v.upper() in ("TODO", "FIXME", "TBD", "REPLACE_ME", "FILL_ME"):
+        return True
+    return False
+
+
 def _resolve_env_var(name: str, current_value: str = "") -> Dict[str, Any]:
     """تلاش برای resolve خودکار یک env var.
 
@@ -2524,8 +2587,9 @@ def _resolve_env_var(name: str, current_value: str = "") -> Dict[str, Any]:
         "resolved": bool,    # آیا automatic resolved شد
       }
     """
-    # اگر کاربر مقدار داده، احترام بگذار
-    if current_value and current_value.strip():
+    # 🐛 اگر کاربر مقدار «واقعی» داده، احترام بگذار. ولی placeholder های
+    # AI (مثل {{GENERATED_SECRET_KEY}}) را به‌عنوان user-supplied نگیر.
+    if current_value and current_value.strip() and not _is_placeholder_value(current_value):
         return {
             "value": current_value, "source": "user",
             "hint": "", "resolved": True,

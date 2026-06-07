@@ -155,7 +155,7 @@ def test_deploy_render_ai_supports_multi_service():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 20000]
+    body = src[idx:idx + 25000]
     assert "for svc in services_plan" in body or "for svc in services" in body, (
         "must iterate over services_plan to create one Render service per "
         "AI-recommended service (otherwise fullstack only gets one service)"
@@ -175,7 +175,7 @@ def test_deploy_render_ai_reports_empty_env_vars():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 20000]
+    body = src[idx:idx + 25000]
     assert "empty_env_vars" in body, (
         "response must include empty_env_vars (mirrors Inspector's UX)"
     )
@@ -191,7 +191,7 @@ def test_deploy_render_ai_uses_project_repo_not_internal_storage():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 20000]
+    body = src[idx:idx + 25000]
     assert "project.github_repo_url" in body
     assert "project.github_owner" in body
     # Must NOT hardcode the internal-storage path in the AI variant
@@ -210,7 +210,7 @@ def test_deploy_render_ai_returns_actionable_no_repo_error():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 20000]
+    body = src[idx:idx + 25000]
     assert '"error": "no_github_repo"' in body, (
         "must return a structured error so the frontend can route the "
         "user to the «GitHub به push» button"
@@ -382,7 +382,7 @@ def test_deploy_render_ai_checks_dockerfile_before_create():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 20000]
+    body = src[idx:idx + 25000]
     assert "_read_github_file" in body, (
         "must read the Dockerfile from GitHub to verify it's not empty — "
         "AI's recommendation alone is unreliable when Creator emits a "
@@ -402,7 +402,7 @@ def test_deploy_render_ai_overrides_backend_to_python_native():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 20000]
+    body = src[idx:idx + 25000]
     assert 'svc_role == "backend"' in body
     assert "pip install -r requirements.txt" in body, (
         "backend override must use the standard Python build command"
@@ -421,7 +421,7 @@ def test_deploy_render_ai_overrides_frontend_to_vite_static_site():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 20000]
+    body = src[idx:idx + 25000]
     assert 'svc_role == "frontend"' in body
     assert '"static_site"' in body, "frontend override must select static_site"
     assert "npm run build" in body
@@ -440,7 +440,7 @@ def test_deploy_render_ai_reports_override_in_created_service():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 20000]
+    body = src[idx:idx + 25000]
     assert "docker_overridden" in body
     assert "notes_append" in body
 
@@ -454,7 +454,7 @@ def test_deploy_render_ai_dockerfile_usability_threshold():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 20000]
+    body = src[idx:idx + 25000]
     assert "len(df_content) > 100" in body
     assert "len(stripped_lines) >= 2" in body
 
@@ -536,7 +536,7 @@ def test_deploy_endpoint_orders_backend_before_frontend():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 20000]
+    body = src[idx:idx + 25000]
     assert "_service_sort_key" in body, (
         "must sort services so backend is created before frontend "
         "(otherwise cross-service env ref fails)"
@@ -556,7 +556,7 @@ def test_deploy_endpoint_response_separates_auto_and_manual():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 20000]
+    body = src[idx:idx + 25000]
     assert '"auto_resolved"' in body
     assert '"still_manual"' in body
     # Hints must be carried through
@@ -712,7 +712,7 @@ def test_deploy_endpoint_auto_provisions_postgres_when_needed():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 20000]
+    body = src[idx:idx + 25000]
     assert "_need_postgres" in body
     assert "provision_postgres(" in body
     assert "render_provisioned" in body
@@ -726,7 +726,7 @@ def test_deploy_endpoint_auto_provisions_redis_when_needed():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 20000]
+    body = src[idx:idx + 25000]
     assert "_need_redis" in body
     assert "provision_redis(" in body
     assert "CELERY_BROKER_URL" in body
@@ -741,7 +741,7 @@ def test_deploy_endpoint_response_includes_provisioned():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 20000]
+    body = src[idx:idx + 25000]
     assert '"provisioned": provisioned' in body
 
 
@@ -754,6 +754,123 @@ def test_frontend_modal_renders_provisioned_panel():
     ).read_text(encoding="utf-8")
     assert "deployAiResult.provisioned" in src
     assert "render_provisioned" in src
+
+
+# ---------------------------------------------------------------------------
+# 🐛 Placeholder-detection + Infra-filter fixes (Detective-1 attempt 3)
+# ---------------------------------------------------------------------------
+
+
+def test_is_placeholder_value_detects_common_patterns():
+    """🐛 AI returns env_var values like `{{GENERATED_SECRET_KEY}}` or
+    `<your-key>` instead of empty strings. _resolve_env_var was treating
+    those as user-supplied (because they're non-empty) and propagating
+    the literal text to the deployed service, causing runtime crashes.
+    The new _is_placeholder_value helper must detect these."""
+    from app.api.routes.simple_projects import _is_placeholder_value
+
+    # Real placeholders
+    assert _is_placeholder_value("{{GENERATED_SECRET_KEY}}") is True
+    assert _is_placeholder_value("{{POSTGRES_PASSWORD}}") is True
+    assert _is_placeholder_value("<your-key>") is True
+    assert _is_placeholder_value("<openai-api-key>") is True
+    assert _is_placeholder_value("your-secret") is True
+    assert _is_placeholder_value("your_password") is True
+    assert _is_placeholder_value("change-me") is True
+    assert _is_placeholder_value("changeme") is True
+    assert _is_placeholder_value("CHANGE_ME") is True
+    assert _is_placeholder_value("placeholder") is True
+    assert _is_placeholder_value("xxxxx") is True
+    assert _is_placeholder_value("TODO") is True
+    assert _is_placeholder_value("FIXME") is True
+    assert _is_placeholder_value("") is True
+    assert _is_placeholder_value("   ") is True
+
+    # Real values
+    assert _is_placeholder_value("sk-abc123") is False
+    assert _is_placeholder_value("postgresql://user:pass@host:5432/db") is False
+    assert _is_placeholder_value("true") is False
+    assert _is_placeholder_value("3.11") is False
+    assert _is_placeholder_value("8000") is False
+
+
+def test_resolve_env_var_treats_placeholders_as_empty():
+    """When AI gives `{{GENERATED_SECRET_KEY}}` for SECRET_KEY, the
+    resolver must IGNORE the placeholder and autogen a real secret —
+    not propagate `{{GENERATED_SECRET_KEY}}` as user-supplied."""
+    from app.api.routes.simple_projects import _resolve_env_var
+
+    # SECRET_KEY with placeholder → autogen wins
+    r = _resolve_env_var("SECRET_KEY", "{{GENERATED_SECRET_KEY}}")
+    assert r["source"] == "autogen", (
+        f"placeholder must NOT be treated as user-supplied; got source={r['source']}"
+    )
+    assert r["value"] != "{{GENERATED_SECRET_KEY}}"
+    assert len(r["value"]) >= 32
+
+    # DATABASE_URL with placeholder → external (will be provisioned)
+    r = _resolve_env_var("DATABASE_URL", "{{POSTGRES_DSN}}")
+    assert r["source"] == "external"
+    assert r["resolved"] is False
+
+    # Real value still respected
+    r = _resolve_env_var("SECRET_KEY", "actually-real-key-value-here-xyz")
+    assert r["source"] == "user"
+    assert r["value"] == "actually-real-key-value-here-xyz"
+
+
+def test_deploy_endpoint_filters_out_infra_services():
+    """AI sometimes plans `detective-1-postgres`, `detective-1-redis`,
+    `detective-1-neo4j`, `detective-1-minio`, `detective-1-qdrant` as
+    web_service Docker entries (because they're in docker-compose).
+    Render rejects these as web services → 5 errors. Filter them out
+    BEFORE iterating services_plan."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def deploy_project_render_ai")
+    assert idx != -1
+    body = src[idx:idx + 25000]
+    assert "_INFRA_KEYWORDS" in body, (
+        "infra filter keyword list must exist"
+    )
+    assert "_is_infra_service" in body, (
+        "infra filter function must be applied to services_plan"
+    )
+    # Critical keywords must be in the list
+    for kw in ("postgres", "redis", "neo4j", "minio", "qdrant"):
+        assert f'"{kw}"' in body, (
+            f"infra keyword '{kw}' must be in the filter list"
+        )
+
+
+def test_deploy_response_includes_infra_skipped():
+    """User must see which services were filtered out so they understand
+    why their docker-compose has more services than Render shows."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def deploy_project_render_ai")
+    assert idx != -1
+    body = src[idx:idx + 25000]
+    assert '"infra_skipped"' in body, (
+        "response must include the infra_skipped list"
+    )
+
+
+def test_frontend_renders_infra_skipped_panel():
+    """Frontend modal must show the purple panel listing infra services
+    that were filtered out (so user knows postgres/redis are handled
+    differently and neo4j/minio/qdrant need external accounts)."""
+    src = (
+        Path(__file__).resolve().parents[2]
+        / "frontend/src/app/project/[id]/page.tsx"
+    ).read_text(encoding="utf-8")
+    assert "infra_skipped" in src, (
+        "frontend must render the infra_skipped list"
+    )
 
 
 def test_get_project_files_does_not_return_content():
