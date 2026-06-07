@@ -1,0 +1,567 @@
+---
+task_id: 80a7b8d6-f6ec-4ccb-ad9e-85c56ca7c34d
+title: پیاده‌سازی احراز هویت در سطح پروژه برای دسترسی به داده‌ها
+type: security
+priority: critical
+execution_priority: 1000
+status: suggested
+external_status: pending
+verification_status: pending
+watched_id: 3f34a2b1-2a8d-4ad2-904a-9835a8a5b7c9
+project: mahdighandi1989/project-management
+created_at: '2026-06-07T09:27:58.814224+00:00'
+updated_at: '2026-06-07T09:27:58.814229+00:00'
+target_files:
+- backend/app/api/routes/analysis.py
+- backend/app/api/routes/project_memory.py
+- backend/app/api/routes/security_analysis.py
+- backend/app/api/routes/unified_api.py
+---
+
+# پیاده‌سازی احراز هویت در سطح پروژه برای دسترسی به داده‌ها
+
+## Raw Idea
+
+بسیاری از مسیرهای API در بک‌اند که با `project_id` کار می‌کنند (مانند تحلیل پروژه، مدیریت حافظه، ژورنال و تحلیل امنیتی) فاقد بررسی‌های صریح احراز هویت هستند. این امر به هر کاربر احراز هویت شده اجازه می‌دهد تا با حدس زدن یا شمارش `project_id`ها، به داده‌های پروژه‌های دیگر دسترسی پیدا کند، آن‌ها را تغییر دهد یا حذف کند. این یک نقص حیاتی در کنترل دسترسی است.
+
+## Prompt
+
+## ⚠️ یادداشت مهم برای مدل اجراکننده — قبل از شروع بخوان
+
+این پرامپت بر اساس یک **بررسی اولیهٔ خودکار** از repo ساخته شده — ممکن است
+حاوی اشتباه، تشخیص نادرست، یا حذف موارد مهم باشد. به‌عنوان منبع نهایی به
+آن استناد نکن.
+
+📖 **خواندن کامل + اجرای مو-به-مو (بسیار مهم):**
+
+این پرامپت — از این یادداشت تا انتها — یک سند واحد است که هر بخشش
+حاوی الزام یا context منحصربه‌فرد است. خواندن سطحی یا skim کردن **ممنوع**
+است.
+
+- پرامپت را **سطر به سطر** بخوان، نه head/tail/فقط-بخش-اصلی.
+- اگر بخشی به‌نظر طولانی یا تکراری آمد، **حتماً** بخوان — تفاوت‌های
+  ریز ممکن است در آن جا اساسی باشند.
+- هر جمله، URL، نام فایل، نام تابع، یا مقدار عددی که در پرامپت آمده،
+  دقیقاً همان است که کاربر می‌خواهد — تغییرش نده، رندش نکن، خلاصه‌اش
+  نکن.
+- اگر پرامپت چندین درخواست/مرحله/زیرتسک دارد، **همه** را پیاده کن. حتی
+  یکی را نه به‌عنوان "خارج از scope" حذف کن.
+
+❌ ممنوعات صریح:
+- خلاصه‌سازی متن کاربر در commit message یا response
+- "این بخش اصلی نیست، رد می‌کنم"
+- "کاربر احتمالاً منظورش این بود..." — منظورش همان است که نوشته
+- "این URL/نام به نظر قدیمی است، آپدیتش کردم" — تغییر بدون درخواست ممنوع
+- پیاده‌سازی فقط بخشی از پرامپت و تظاهر به کامل بودن
+- "همه آیتم‌های لیست A را بررسی کردم، B و C مشابه بودند" — نه؛
+  هرکدام را جداگانه
+
+♻️ **احتمال پیاده‌سازی قبلی (مهم):**
+- ممکن است **بخشی یا تمامِ** این درخواست قبلاً (به صورت کامل یا ناقص) در
+  repo پیاده‌سازی شده باشد. پیش از شروع، با grep/search و خواندن فایل‌های
+  مرتبط بررسی کن که چه چیزی **از قبل وجود دارد**.
+- اگر یک قابلیت/فایل/تابع از قبل موجود است: آن را **دوباره نساز**؛ فقط
+  موارد ناقص یا اشتباه را اصلاح/تکمیل کن.
+- اگر همه چیز از قبل به‌درستی انجام شده: یک کامیت توضیحی (no-op) ثبت کن که
+  چرا تغییری لازم نبود و دقیقاً کدام فایل‌ها این درخواست را پوشش می‌دهند.
+
+🔍 **مسئولیت تو (مدل اجراکننده):**
+- پیش از هر تغییر، خودت ساختار repo، فایل‌های ذکرشده، و وابستگی‌های آن‌ها را
+  مستقل بررسی کن.
+- اگر تشخیص دادی موقعیت ذکرشده در پرامپت اشتباه است یا فایل دیگری مناسب‌تر
+  است، بر اساس قضاوت خودت عمل کن — این پرامپت نمی‌تواند بهانهٔ کار اشتباه
+  باشد ("خودت گفتی" قابل قبول نیست).
+- اگر معیارهای پذیرش (AC) مبهم/ناقص بودند، بهترین تفسیر را انتخاب کن و در
+  commit message توضیح بده.
+
+🔗 **وابستگی‌ها و همگام‌سازی (بسیار حیاتی — هرگز skip نکن):**
+
+این بخش از همهٔ بخش‌های دیگرِ این یادداشت **مهم‌تر** است. اگر نقض شود،
+نتیجهٔ کار ممکن است مشروع به‌نظر برسد ولی در عمل بخش‌های دیگر سیستم را عقب
+بیندازد، broken reference تولید کند، یا منجر به data corruption شود.
+
+پیش از و حین تغییر، تمام وابستگی‌ها را در **چهار جهت** به‌طور **کامل و
+بدون هیچ خلاصه‌سازی** شناسایی و همگام کن:
+
+**۱. وابستگی‌های upstream (این تسک به چه چیزهایی متکی است):**
+- چه فایل‌ها، توابع، کلاس‌ها، API endpoint ها، schema های دیتابیس،
+  env vars، یا config هایی که این تسک نیاز دارد؟
+- آیا قرار است چیزی را ویرایش/حذف کنی که جای دیگر (signature، رفتار،
+  return type، side effect) از آن انتظار خاصی می‌رود؟
+- اگر dependency جدیدی اضافه می‌کنی، آیا با dependencyهای موجود تداخل
+  دارد (نسخه، compat، lock file)؟
+
+**۲. وابستگی‌های downstream (چه چیزهایی به این تسک متکی‌اند):**
+- چه فایل‌ها، توابع، تست‌ها، migrations، docs، یا UI component هایی از
+  کدی که داری ویرایش/اضافه/حذف می‌کنی **استفاده می‌کنند**؟
+- با grep و reference search **همه‌ی** call sites، importها، subclassها،
+  reference های مستقیم و غیرمستقیم را پیدا کن — نه فقط چند مورد اصلی.
+- خصوصاً برای حذف یا rename: هیچ broken reference نباید باقی بماند.
+
+**۳. وابستگی‌های cross-tier (بسیار مهم — هرگز فقط یک لایه را نبین):**
+
+تسک شما ممکن است از backend، frontend، database، worker، یا هر tier
+دیگری شروع شده باشد. ولی تغییرات تقریباً همیشه روی tier های دیگر هم
+اثر می‌گذارند. **مستقل از اینکه تسک از کدام tier است**، این چک‌های دو
+طرفه را همیشه انجام بده:
+
+🔁 **اگر backend را تغییر دادی** (API، service، model، route):
+  → frontend: کدام component/page/hook این endpoint یا data shape را
+    مصرف می‌کند؟ type definition، state shape، error handling، loading
+    state، form validation، URL routing همگی باید همگام شوند.
+  → mobile/SDK/client library (اگر پروژه دارد): همان داستان frontend.
+  → database: آیا migration لازم است؟ آیا rollback امن است؟
+  → background workers: آیا event producer/consumer ها تحت تأثیرند؟
+  → rate limit، auth، CORS، CSP: آیا رفتار جدید پشتیبانی می‌شود؟
+
+🔁 **اگر frontend را تغییر دادی** (component، form، state، route):
+  → backend: آیا endpoint جدید/تغییریافته لازم است؟ آیا data shape ای
+    که ارسال می‌شود با schema سرور سازگار است؟
+  → backend validation: آیا برای ورودی‌های جدید UI کافی است؟
+  → permissions/RBAC: آیا feature جدید نیاز به role check جدید دارد؟
+  → analytics/tracking: آیا event های جدید باید در backend log شوند؟
+  → SEO/SSR: آیا تغییر route نیاز به sitemap/meta tags جدید دارد؟
+
+🔁 **اگر database/migration را تغییر دادی**:
+  → backend models (ORM، Pydantic، dataclasses) همگی به‌روزند؟
+  → query های raw SQL یا ORM queries با schema جدید سازگارند؟
+  → seed data، fixtures، factory functions تست‌ها به‌روزند؟
+  → frontend: آیا data shape جدید در UI به‌درستی render می‌شود؟
+  → rollback migration نوشته شده و امن است؟
+
+🔁 **اگر API contract یا event schema را تغییر دادی** (REST، GraphQL،
+   WebSocket، gRPC، Kafka، …):
+  → OpenAPI/GraphQL schema/proto file آپدیت شد؟
+  → همه‌ی consumer ها (client، subscriber، webhook، external API
+    user) با version جدید سازگارند؟
+  → backward compatibility حفظ شده یا migration path روشن است؟
+  → versioning header/path اگر breaking change است؟
+
+🔁 **اگر infrastructure یا config را تغییر دادی** (Dockerfile، CI، Render
+   config، env، secrets):
+  → README setup/installation section به‌روزه؟
+  → `.env.example` با env vars جدید آپدیت شد؟
+  → deploy script یا CI workflow هم تغییر کرد؟
+  → docs/architecture یا diagram های infrastructure به‌روزند؟
+
+⚠️ **هرگز فقط یک tier را تغییر نده و فرض کنی بقیه خودکار همگام می‌شوند.**
+   حتی برای تغییرات به‌ظاهر «کوچک»، چک کن.
+
+**۴. وابستگی‌های جانبی (artifacts که همیشه چک شوند):**
+
+تغییرات کد همیشه روی این artifact ها اثر دارند. **همه را** بررسی و
+به‌روز کن — مستندات اولویت **بالا** دارد چون فراموش‌شدنی‌ترین است.
+
+  📝 **مستندات** (همیشه چک کن — حتی برای تغییر کوچک کد):
+    - README.md (شرح، setup، نمونه‌های استفاده، badge ها)
+    - CHANGELOG.md / RELEASE_NOTES.md
+    - docs/ folder (architecture، API reference، user guides، runbooks)
+    - inline docstrings/کامنت‌های توابع و کلاس‌های تغییریافته
+    - OpenAPI/Swagger annotations، JSDoc/TSDoc
+    - architecture diagrams (اگر component اضافه/حذف شد)
+    - migration guides (اگر breaking change است)
+
+  🌍 **مستندات کاربر**:
+    - i18n files و translation keys
+    - UI labels، tooltip ها، help text، error messages
+    - in-app onboarding (اگر flow جدید است)
+
+  🧪 **تست‌ها**:
+    - unit tests (همه‌ی فایل‌های مرتبط — حتی اگر «بی‌ربط» به‌نظر می‌رسد)
+    - integration tests
+    - e2e tests (Playwright/Cypress/Selenium)
+    - snapshot tests (اگر UI تغییر کرد)
+    - contract tests (Pact یا مشابه)
+    - performance benchmarks (اگر behavior performance-sensitive تغییر کرد)
+
+  🧬 **type definitions و contracts**:
+    - .d.ts files
+    - Pydantic models، dataclasses
+    - Protobuf/Avro/Thrift schemas
+    - GraphQL schema definitions
+    - JSON Schemas
+
+  🏗 **infrastructure و config**:
+    - Dockerfile، docker-compose.yml
+    - Kubernetes manifests
+    - Render/Vercel/Netlify config
+    - GitHub Actions / GitLab CI workflows
+    - environment templates (.env.example، .env.sample)
+    - feature flags (LaunchDarkly، GrowthBook، config)
+
+  📊 **monitoring و observability**:
+    - logging keys (اگر اضافه/حذف شد، log parser ها هم به‌روز شوند)
+    - metric names (Prometheus، Datadog)
+    - tracing spans
+    - alert rules و dashboards
+    - error tracking (Sentry rules، groupings)
+
+  🔐 **security**:
+    - auth rules (rate limit، CORS، CSP، HSTS)
+    - permissions/RBAC config
+    - secrets rotation policies
+    - audit log events (اگر action جدید اضافه شد)
+
+  💾 **caches و serialization**:
+    - cache keys و TTL (اگر data shape یا lifecycle تغییر کرد)
+    - serializer formats (Redis، session storage)
+    - browser storage (localStorage، IndexedDB schemas)
+
+**قانون مطلق همگام‌سازی:**
+- هر چیزی که در (۱)، (۲)، (۳)، یا (۴) شناسایی شد، در **همان workflow
+  این تسک** همگام و به‌روز شود. هرگز برای بعد رها نکن.
+- اگر یک فایل/تست/docs نسبت به تغییر شما عقب بماند، در بهترین حالت bug،
+  در بدترین حالت مشکل امنیتی یا data corruption تولید می‌کند.
+- تغییرات همگام‌سازی می‌توانند در commit جداگانه باشند (در همان task)،
+  ولی نباید skip شوند یا به «refactor آینده» سپرده شوند.
+
+**هرگز این جمله‌ها قابل قبول نیست:**
+- ❌ «بعداً پیداش می‌کنم»
+- ❌ «احتمالاً جای دیگه‌ای استفاده نمی‌شه»
+- ❌ «این یه refactor جداگانه‌ست — out of scope»
+- ❌ «فقط فایل‌های اصلی رو بررسی کردم»
+- ❌ «حدس می‌زنم چیزی بهش وابسته نیست»
+- ❌ «دامنه‌ی وابستگی‌ها رو خلاصه کردم» — هرگز خلاصه نکن
+- ❌ «این task فقط backend است؛ frontend مشکل خودش» — هرگز
+- ❌ «این task فقط frontend است؛ backend از قبل کار می‌کند» — هرگز ثابت نکرده
+- ❌ «مستندات بعداً به‌روز می‌شن» — همیشه same-task همگام شوند
+- ❌ «testها رو نگاه نکردم چون فقط یه تغییر کوچیک بود»
+
+**در commit message یا PR description**، دامنهٔ وابستگی‌های شناسایی‌شده و
+همگام‌شده را به‌طور explicit و **per-tier** بنویس. مثال:
+```
+Dependencies synced:
+- upstream: User model schema, auth middleware
+- downstream: 3 API endpoints, 5 frontend components, 12 tests
+- cross-tier (backend → frontend): UserProfile.tsx, useUser.ts hook,
+  api-types.ts (TS definitions)
+- cross-tier (backend → infra): .env.example added NEW_AUTH_SCOPES
+- side artifacts: OpenAPI spec, README API section, i18n keys for
+  new errors, Sentry alert rule for new error code
+```
+اگر هیچ وابستگی پیدا نکردی در هر کدام از چهار جهت، صریحاً بنویس:
+«بررسی شد — هیچ وابستگی upstream / downstream / cross-tier (backend↔
+frontend↔db↔infra) / side شناسایی نشد» تا مشخص باشد بررسی **انجام شده**
+نه اینکه فراموش شده.
+
+📋 **مدیریت TO-DO برای اقدامات دستی کاربر (همیشه چک کن):**
+
+⚠️ **هشدار بحرانی — قاعدهٔ ضد-فرار:** TO-DO فقط برای کارهایی است که
+**واقعاً غیرممکن** برای agent است (نیاز به انسان مطلق)، نه برای کارهایی
+که «بزرگ‌اند»، «وقت می‌برند»، یا «نیازمند fixture/setup» هستند. اگر یک
+agent در یک سشن بیش از **۲۰٪ از تسک‌ها** را با TO-DO ببندد، یعنی از کار
+فرار می‌کند — این الگو در سشن‌های قبلی **مشاهده** شده و الان ممنوع است.
+
+✅ **فقط برای این موارد TO-DO بساز** (لیست بسته — هرچه خارج این لیست
+ممنوع است):
+
+  ۱. **Credential/secret که فقط کاربر دارد**:
+     - تنظیم API key واقعی در پنل ادمین خارجی (Render، AWS، Stripe، …)
+     - تأیید OAuth client روی console آن سرویس
+     - paste کردن webhook secret که فقط بعد از ساخت در dashboard ظاهر می‌شود
+
+  ۲. **Account/billing روی سرویس خارجی که کاربر باید عضو شود**:
+     - ساخت account جدید روی Stripe/SendGrid/Twilio/Google Cloud
+     - تأیید verification شماره یا ID
+     - فعال‌سازی subscription پولی
+
+  ۳. **داده/asset خصوصی که فقط کاربر دارد**:
+     - آپلود لوگو/تصویر/فونت برند
+     - paste کردن داده‌ای که در محل کار کاربر است
+     - import داده‌ای که فقط روی device کاربر است
+
+  ۴. **تصمیم سلیقه‌ای/حقوقی/کسب‌وکار**:
+     - انتخاب رنگ‌بندی نهایی یا تم
+     - متن دقیق Terms of Service / Privacy Policy
+     - تعرفهٔ قیمت‌گذاری
+     - نام نهایی برند یا دامنه
+
+⛔ **هرگز TO-DO نکن برای** (لیست سیاه — هر چیزی که در این لیست است
+**قابل اجرا** توسط agent است، حتی اگر بزرگ یا چندبخشی باشد):
+
+  ❌ UI component / page / dashboard (هر فریم‌ورک: React, Vue, Angular,
+     Svelte، حتی اگر معماری بزرگ دارد) — می‌توانی stub اولیه + state
+     management + layout + استایل بسازی
+  ❌ "نیازمند Google Drive / Stripe / Twilio API" — می‌توانی **client
+     stub** با abstraction layer بسازی که با env var واقعی plug-in شود؛
+     کد integration یعنی پیاده‌سازی، نه TO-DO
+  ❌ "feature بزرگ، چند روز کار می‌برد" — اندازه دلیل defer نیست؛ کوچک
+     شروع کن، iterate کن، در همین سشن کامل کن
+  ❌ Celery / background worker / scheduler — یک task ساده + register
+     می‌توانی بسازی
+  ❌ Migration / model / schema — حتی اگر فیلد جدید نیاز دارد، اضافه کن
+  ❌ REST endpoint / GraphQL resolver / WebSocket route — هرگز TO-DO
+  ❌ test (unit/integration/e2e) — همیشه قابل نوشتن
+  ❌ Documentation / README / API docs — همیشه قابل نوشتن
+  ❌ Config file / .env.example / Dockerfile / CI workflow — همیشه قابل
+     نوشتن
+  ❌ "می‌توانستی .tsx ولی repo .jsx است" — از .jsx استفاده کن، TO-DO نکن
+  ❌ "نیازمند فیلد X در مدل دیگر" — اضافه کن فیلد را، TO-DO نکن
+  ❌ "تصمیم admin-vs-user-scoped" — پرامپت اولیه scope را معلوم کرده،
+     یا با محتاطانه‌ترین تفسیر پیش برو
+  ❌ "credential در production هنوز ست نیست" — این TO-DO ساده برای
+     تنظیم env var است (مورد ۱ بالا)، نه دلیل برای defer کردن کد
+  ❌ "نیازمند verification از کاربر" — اگر اقدام واقعی غیرممکن نیست،
+     پیش برو
+  ❌ هر چیزی که در یک کامنت `# TODO` معمولی نوشته می‌شد — این فایل
+     TO-DO نیست، کامنت inline است
+
+🔬 **قاعدهٔ «حداقل تلاش» قبل از TO-DO**: قبل از TO-DO کردن یک AC، **اثبات
+کن** که قابل انجام نیست:
+
+  ۱. آیا می‌توانم یک stub/placeholder بسازم که با env واقعی plug-in شود؟
+     → اگر بله، بساز و TO-DO نکن
+  ۲. آیا می‌توانم برای این بخش یک test (حتی mock-based) بنویسم؟
+     → اگر بله، بنویس و TO-DO نکن
+  ۳. آیا می‌توانم abstraction/interface را تعریف کنم، حتی اگر backend
+     واقعی نیست؟ → اگر بله، تعریف کن و TO-DO نکن
+  ۴. آیا فقط یک حالت سلیقه‌ای/decision کاربر در میان است؟
+     → فقط آن یک decision را TO-DO کن، نه کل feature را
+
+اگر یکی از این چهار راه‌حل ممکن بود ولی به TO-DO رفتی، **اعتبار شما از
+بین می‌رود**.
+
+📊 **آستانهٔ TO-DO per session**: در یک حلقهٔ اجرای N تسک، اگر بیشتر از
+**۲۰٪** تسک‌ها فایل TO-DO ساختی، خودت در گزارش پایانی صریحاً اعلام کن:
+
+  "⚠️ نسبت TO-DO من {K}/{N} = {%} است که از آستانهٔ ۲۰٪ بالاتر است.
+   احتمالاً برخی از این TO-DO ها قابل اجرا بودند ولی من فرار کردم.
+   لیست TO-DO ها را کاربر باید بازبینی کند که آیا واقعاً Manual-required
+   بودند یا agent ضعیف کار کرده."
+
+**یادآوری همیشگی:** اگر در آینده قابلیت‌های شما گسترش پیدا کرد و توانستید
+یکی از موارد لیست سفید را خودکار انجام دهید (مثلاً managed credential
+injection، یا integration پولی automate شود)، انجام دهید و TO-DO نسازید.
+لیست سفید بسته است ولی **بسته از پایین** (می‌تواند کوچک‌تر شود اگر
+قابلیت‌ها رشد کنند، ولی هرگز بزرگ‌تر نشود برای فرار).
+
+**اگر هیچ بخش Manual-required نبود (تمام تسک Auto-capable است)**:
+  → فایل TO-DO **نساز**. فولدر TO-DO/ باید پاک و معنادار بماند.
+  → اگر برای این task از قبل `TO-DO/todo-task-{task_id_first_8}.md` بود
+     (یعنی در run قبلی نیاز به دخالت کاربر بود ولی الان نه): فایل قدیمی
+     را پاک کن و entry را از `TO-DO/_index.json` حذف کن.
+
+**اگر بخش Manual-required دارد** (همه‌جانبه یا hybrid):
+  1. فولدر TO-DO/ را در ریشه ریپو ایجاد کن اگر نیست
+  2. فایل `TO-DO/todo-task-{task_id_first_8}.md` بساز با front-matter
+     شامل: task_id, task_title, execution_priority, created_at,
+     updated_at, status: "pending"
+     و در بدنه: «چرا این فایل ساخته شد»، «وضعیت بخش‌های خودکار»
+     (commit ها reference)، «کارهایی که باید انجام دهی» با اولویت
+     بالا/متوسط/پایین به ترتیب، «وقتی این کارها را تمام کردی»
+  3. `TO-DO/_index.json` را با **merge** آپدیت کن (نه overwrite):
+     - فایل موجود را بخوان
+     - entry های orphan (فایلشان پاک شده) را حذف کن
+     - entry این task را اضافه/replace کن
+     - بر اساس execution_priority صعودی مرتب کن
+     - ساختار: `{"version":1, "generated_at": ISO, "total": N, "items": [...]}`
+  4. این تغییرات TO-DO را در **همان commit کد** شامل کن (نه commit جداگانه)
+
+⛔ **ممنوعات مطلق TO-DO**:
+  ❌ ساختن TO-DO برای کاری که می‌توانستی خودت انجام دهی (شلوغی فولدر)
+  ❌ overwrite کردن `TO-DO/_index.json` بدون merge (data loss)
+  ❌ نگه‌داشتن entry هایی که فایل‌شان پاک شده (broken reference)
+  ❌ فراموش کردن نوشتن «خروجی مورد انتظار» در هر آیتم TO-DO
+
+این بخش الزامی است. حتی اگر فکر می‌کنی "این تسک کاملاً auto است و نیازی
+به TO-DO نیست"، صریحاً در commit message یا report بنویس:
+"بررسی شد — این تسک هیچ بخش Manual-required ندارد، TO-DO ساخته نشد."
+
+📦 **اگر کار طولانی است:**
+- **خلاصه‌اش نکن.** همه را به‌طور کامل انجام بده.
+- اگر یک کامیت گنجایش ندارد، در **چندین کامیت متوالی** انجام بده — ولی
+  هیچ بخشی را skip نکن.
+- ترتیب کامیت‌ها را منطقی نگه‌دار (foundation → core → integration → tests).
+- در آخر یک checklist از همه‌ی کامیت‌ها در PR description بنویس.
+
+🔁 **Commit + Push فوری per-task (بسیار مهم برای جریان کار صحیح):**
+
+پس از اتمام پیاده‌سازی این تسک، **بلافاصله** commit کن و **همان موقع**
+به default branch (main/master) push کن. سپس به تسک بعدی برو.
+
+✓ چرا این قانون حیاتی است:
+  - تسک‌های بعدی ممکن است به فایل‌ها/تغییراتی که این تسک ایجاد کرده
+    نیاز داشته باشند. اگر push نکنی، `git pull` بعدی آن‌ها را نمی‌بیند.
+  - جمع‌کردن تغییرات چند تسک منجر به conflict های بزرگ می‌شود.
+  - اگر در میانه fail کنی، task های push شده ضایع نمی‌شوند.
+
+⛔ ممنوع: "همه task ها را تمام می‌کنم بعد یک‌جا push می‌زنم"
+⛔ ممنوع: branch جدا برای task — مستقیم به default branch
+⛔ ممنوع: task بعدی بدون push کامل task قبلی
+
+---
+
+
+## 🎯 هدف (خلاصه ساختاریافته)
+پیاده‌سازی احراز هویت در سطح پروژه برای دسترسی به داده‌ها
+
+## 📍 موقعیت دقیق در پروژه
+_(file:line — symbol — snippet)_
+
+- `backend/app/api/routes/analysis.py:272-325` — مسیرهای دریافت/حذف گزارش تحلیل پروژه فاقد بررسی دسترسی به project_id هستند.
+  ```python
+  @router.get("/reports", response_model=List[AnalysisReportSchema])
+  async def get_analysis_reports(
+      project_id: Optional[str] = None,
+      limit: int = 20
+  ):
+  ```
+- `backend/app/api/routes/project_memory.py:403-446` — مسیرهای افزودن/به‌روزرسانی/حذف فیلدهای پویا فاقد بررسی دسترسی به project_id هستند.
+  ```python
+  @router.post("/{project_id}/fields")
+  async def add_dynamic_field(
+      project_id: str,
+      request: DynamicFieldRequest,
+      background_tasks: BackgroundTasks,
+      db: Session = Depends(get_db)
+  ):
+  ```
+- `backend/app/api/routes/security_analysis.py:40-104` — مسیرهای تحلیل امنیتی فاقد بررسی دسترسی به project_id هستند.
+  ```python
+  @router.post("/scan-secrets")
+  async def scan_for_secrets(
+      project_id: str,
+      include_low_confidence: bool = Query(False, description="شامل موارد با اطمینان کم"),
+      db: Session = Depends(get_db)
+  ) -> Dict[str, Any]:
+  ```
+- `backend/app/api/routes/unified_api.py:101-135` — مسیرهای Unified API برای دسترسی به پروژه فاقد بررسی دسترسی به project_id هستند.
+  ```python
+  @router.get("/projects/{project_id}")
+  async def get_project(project_id: str):
+      """دریافت اطلاعات پروژه"""
+      storage = get_unified_storage()
+      config = await storage.get_project_config(project_id)
+  
+      if not config:
+          raise HTTPException(status_code=404, detail="Project not found")
+  ```
+
+## 🧭 هدف اصلی پروژه (از یادداشت کاربر)
+(کاربر یادداشتی ثبت نکرده است)
+
+## 🧱 پشتهٔ فناوری و معماری
+FastAPI, SQLAlchemy, Pydantic
+
+## 🔗 فایل‌های مرتبط (Cross-references)
+_(فایل‌هایی که با موقعیت‌های هدف در ارتباط هستند — import، caller، shared state)_
+
+- `backend/app/models/project.py` — مدل پروژه برای بررسی مالکیت/دسترسی استفاده می‌شود.
+- `backend/app/core/database.py` — مدیریت Session دیتابیس برای کوئری‌های احراز هویت.
+- `backend/app/core/roles.py` — می‌تواند برای تعریف نقش‌ها و سطوح دسترسی استفاده شود.
+- `backend/app/services/project_analyzer.py` — `analysis.py` این فایل را import می‌کند
+- `backend/app/services/model_profiler.py` — `analysis.py` این فایل را import می‌کند
+- `backend/app/models/analysis_report.py` — `analysis.py` این فایل را import می‌کند
+- `backend/app/models/ai_profile.py` — `analysis.py` این فایل را import می‌کند
+- `backend/app/main.py` — این فایل `analysis.py` را import می‌کند (caller)
+
+## 🌐 نقشهٔ وابستگی‌ها
+این یک تغییر معماری امنیتی اساسی است که بر تمام تعاملات API مرتبط با پروژه تأثیر می‌گذارد. نیاز به تعریف واضح روابط کاربر-پروژه و اعمال Dependency در تمام مسیرهای مربوطه دارد.
+
+## 🔍 Context و وضعیت فعلی
+بسیاری از مسیرهای API در بک‌اند که با `project_id` کار می‌کنند (مانند تحلیل پروژه، مدیریت حافظه، ژورنال و تحلیل امنیتی) فاقد بررسی‌های صریح احراز هویت هستند. این امر به هر کاربر احراز هویت شده اجازه می‌دهد تا با حدس زدن یا شمارش `project_id`ها، به داده‌های پروژه‌های دیگر دسترسی پیدا کند، آن‌ها را تغییر دهد یا حذف کند. این یک نقص حیاتی در کنترل دسترسی است.
+
+## ✅ معیار پذیرش (Acceptance Criteria) — رفتار-محور
+**مهم:** هر AC رفتار قابل مشاهده را تعریف می‌کند، نه نام فایل/کلاس.
+verify می‌تواند پیاده‌سازی متفاوت ولی هم‌ارز را قبول کند.
+
+- [ ] تمام مسیرهای API که `project_id` را می‌پذیرند، Dependency احراز هویت را اعمال می‌کنند.
+- [ ] کاربران فقط می‌توانند به پروژه‌هایی که به آن‌ها دسترسی دارند، دسترسی پیدا کنند.
+- [ ] تلاش برای دسترسی غیرمجاز به `project_id` منجر به خطای 403 Forbidden می‌شود.
+- [ ] تست‌های واحد جدید برای تأیید احراز هویت پروژه اضافه می‌شوند.
+- [ ] هیچ تستی fail نمی‌شود (`npm run test` / `pytest`)
+- [ ] linter بدون warning عبور می‌کند
+- [ ] type-check موفق است (`tsc --noEmit` / `mypy`)
+
+## 🪜 مراحل اجرایی پیشنهادی
+1. یک `FastAPI Dependency` جدید ایجاد کنید که `project_id` را از مسیر یا کوئری پارامتر استخراج کرده و سپس با استفاده از `user_id` کاربر فعلی (که باید از یک سیستم احراز هویت دیگر به دست آید)، بررسی کند که آیا کاربر به پروژه مورد نظر دسترسی دارد یا خیر. این Dependency باید به تمام مسیرهای API مرتبط با پروژه اعمال شود.
+
+## 💡 نمونه‌های قبل/بعد
+**قبل از احراز هویت**
+
+_قبل:_
+```
+async def get_analysis_report(report_id: str):
+```
+
+_بعد:_
+```
+from ...dependencies import get_current_user, verify_project_access
+
+async def get_analysis_report(
+    report_id: str,
+    current_user: Any = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    # ... logic to get report ...
+    await verify_project_access(current_user.id, report.project_id, db, "read")
+```
+
+## 📤 خروجی مورد انتظار
+تغییر کد در فایل‌های مرتبط، commit یا PR جدید با پیام واضح، و عبور تمام معیارهای پذیرش.
+
+## 🧪 دستورات اعتبارسنجی
+- `pytest backend/tests/security/test_project_auth.py`
+- `curl -X GET http://localhost:8000/api/analysis/reports/{other_project_id} -H 'Authorization: Bearer {user_token}' # باید 403 برگرداند`
+
+## ⚠️ ریسک‌ها و موارد احتیاط
+پیچیدگی در پیاده‌سازی صحیح منطق دسترسی می‌تواند منجر به باگ‌های جدید یا مسدود شدن دسترسی‌های قانونی شود. نیاز به بازبینی گسترده کد.
+
+## 🔗 وابستگی‌های تسکی
+_(مستقل)_
+
+## 🏷 دسته‌بندی
+- نوع: security
+- اولویت: critical
+- تخمین زمان: large
+
+## Acceptance Criteria
+
+1. تمام مسیرهای API که `project_id` را می‌پذیرند، Dependency احراز هویت را اعمال می‌کنند.
+2. کاربران فقط می‌توانند به پروژه‌هایی که به آن‌ها دسترسی دارند، دسترسی پیدا کنند.
+3. تلاش برای دسترسی غیرمجاز به `project_id` منجر به خطای 403 Forbidden می‌شود.
+4. تست‌های واحد جدید برای تأیید احراز هویت پروژه اضافه می‌شوند.
+
+## Task Steps
+
+### Step 1: طراحی و پیاده‌سازی مکانیزم احراز هویت سطح پروژه برای project_id
+**Status:** `pending` (0%)
+**Scope:** این مرحله شامل طراحی و پیاده‌سازی یک مکانیزم بک‌اند قابل استفاده مجدد است که بتواند تأیید کند آیا یک کاربر احراز هویت شده، دسترسی صریح به داده‌های مرتبط با یک `project_id` مشخص را دارد یا خیر. این مکانیزم باید به اندازه کافی عمومی باشد تا بتوان آن را در مسیرهای مختلف API اعمال کرد. این شامل تعریف نحوه بررسی مالکیت یا حقوق دسترسی کاربر به پروژه است. این مرحله هنوز شامل اعمال این مکانیزم به مسیرهای API خاص نیست.
+**Excerpt:**
+```
+بسیاری از مسیرهای API در بک‌اند که با `project_id` کار می‌کنند (مانند تحلیل پروژه، مدیریت حافظه، ژورنال و تحلیل امنیتی) فاقد بررسی‌های صریح احراز هویت هستند. این امر به هر کاربر احراز هویت شده اجازه می‌دهد تا با حدس زدن یا شمارش `project_id`ها، به داده‌های پروژه‌های دیگر دسترسی پیدا کند، آن‌ها را تغییر دهد یا حذف کند. این یک نقص حیاتی در کنترل دسترسی است.
+```
+
+### Step 2: اعمال احراز هویت پروژه به مسیرهای API تحلیل پروژه
+**Status:** `pending` (0%)
+**Scope:** این مرحله بر ادغام مکانیزم احراز هویت سطح پروژه که اخیراً ایجاد شده، در تمام مسیرهای API بک‌اند که به طور خاص با «تحلیل پروژه» سروکار دارند و از `project_id` استفاده می‌کنند، تمرکز دارد. هدف این است که اطمینان حاصل شود فقط کاربرانی که برای یک `project_id` خاص مجاز هستند، می‌توانند به داده‌های تحلیل آن دسترسی داشته باشند یا آن‌ها را دستکاری کنند. این شامل شناسایی این مسیرها و افزودن بررسی‌های احراز هویت لازم است.
+— [merged] این مرحله بر ادغام مکانیزم احراز هویت سطح پروژه در تمام مسیرهای API بک‌اند مرتبط با «ژورنال» است که از `project_id` استفاده می‌کنند. هدف این است که تضمین شود فقط کاربرانی که برای یک `project_id` خاص مجاز هستند، می‌توانند به ورودی‌های ژورنال آن دسترسی داشته باشند یا آن‌ها را تغییر دهند. این شامل شناسایی مسیرهای مربوطه و پیاده‌سازی بررسی‌های احراز هویت لازم است.
+— [merged] این مرحله شامل ادغام مکانیزم احراز هویت سطح پروژه در تمام مسیرهای API بک‌اند مرتبط با «تحلیل امنیتی» است که از `project_id` استفاده می‌کنند. هدف این است که اطمینان حاصل شود فقط کاربرانی که مجوز صریح برای یک `project_id` خاص را دارند، می‌توانند به ویژگی‌ها و داده‌های تحلیل امنیتی آن دسترسی داشته باشند یا آن‌ها را مدیریت کنند. این امر مستلزم شناسایی این مسیرها و افزودن بررسی‌های احراز هویت مناسب است.
+**Excerpt:**
+```
+بسیاری از مسیرهای API در بک‌اند که با `project_id` کار می‌کنند (مانند تحلیل پروژه...) فاقد بررسی‌های صریح احراز هویت هستند.
+```
+
+### Step 3: اعمال احراز هویت پروژه به مسیرهای API مدیریت حافظه
+**Status:** `pending` (0%)
+**Scope:** این مرحله شامل ادغام مکانیزم احراز هویت سطح پروژه در تمام مسیرهای API بک‌اند مرتبط با «مدیریت حافظه» است که از `project_id` استفاده می‌کنند. هدف این است که اطمینان حاصل شود فقط کاربرانی که مجوز مناسب برای یک `project_id` خاص را دارند، می‌توانند با قابلیت‌های مدیریت حافظه آن تعامل داشته باشند. این امر مستلزم شناسایی مسیرهای مربوطه و افزودن بررسی‌های احراز هویت است.
+**Excerpt:**
+```
+بسیاری از مسیرهای API در بک‌اند که با `project_id` کار می‌کنند (...مدیریت حافظه...) فاقد بررسی‌های صریح احراز هویت هستند.
+```
+
+### Step 4: پیاده‌سازی تست‌های واحد و یکپارچه‌سازی برای احراز هویت پروژه
+**Status:** `pending` (0%)
+**Scope:** این مرحله شامل نوشتن تست‌های واحد و یکپارچه‌سازی جامع برای اعتبارسنجی صحت و استحکام مکانیزم احراز هویت سطح پروژه که اخیراً پیاده‌سازی شده و اعمال آن در مسیرهای API تحت تأثیر است. تست‌ها باید سناریوهای دسترسی مجاز، دسترسی غیرمجاز (مانند حدس زدن `project_id`ها)، موارد خاص و مدیریت صحیح خطا را پوشش دهند. این امر تضمین می‌کند که رفع مشکل به طور مؤثر از نقص امنیتی توصیف شده جلوگیری می‌کند.
+**Excerpt:**
+```
+بسیاری از مسیرهای API در بک‌اند که با `project_id` کار می‌کنند... فاقد بررسی‌های صریح احراز هویت هستند. این امر به هر کاربر احراز هویت شده اجازه می‌دهد تا با حدس زدن یا شمارش `project_id`ها، به داده‌های پروژه‌های دیگر دسترسی پیدا کند، آن‌ها را تغییر دهد یا حذف کند. این یک نقص حیاتی در کنترل دسترسی است.
+```
+
+### Step 5: انجام ممیزی امنیتی برای دسترسی project_id
+**Status:** `pending` (0%)
+**Scope:** این مرحله نهایی شامل یک ممیزی امنیتی دستی یا خودکار برای تأیید کامل اینکه آسیب‌پذیری کنترل دسترسی `project_id` در تمام مسیرهای API بک‌اند مربوطه به طور کامل کاهش یافته است. این شامل بازبینی تغییرات کد، تلاش برای بهره‌برداری از آسیب‌پذیری اصلی (به عنوان مثال، با شمارش `project_id`ها با یک کاربر احراز هویت شده اما غیرمجاز)، و تأیید اینکه تمام تلاش‌های دسترسی به داده‌های پروژه‌های دیگر به درستی رد می‌شوند.
+**Excerpt:**
+```
+بسیاری از مسیرهای API در بک‌اند که با `project_id` کار می‌کنند... فاقد بررسی‌های صریح احراز هویت هستند. این امر به هر کاربر احراز هوتی شده اجازه می‌دهد تا با حدس زدن یا شمارش `project_id`ها، به داده‌های پروژه‌های دیگر دسترسی پیدا کند، آن‌ها را تغییر دهد یا حذف کند. این یک نقص حیاتی در کنترل دسترسی است.
+```
