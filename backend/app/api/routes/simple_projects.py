@@ -1473,12 +1473,13 @@ async def deploy_project_render_ai(
                     for _svc_name, per_var in env_resolution.items():
                         for _k, _info in per_var.items():
                             _ku = _k.upper()
-                            _val = (_info.get("value") or "")
-                            _is_override_target = (
-                                not _info.get("resolved")
-                                or not _val.strip()
-                                or _value_is_compose_specific(_val)
-                            )
+                            # 🐛 (final-patch) — Postgres/Redis env vars
+                            # همیشه از connection string Render override
+                            # شوند. هر مقدار AI داده نادیده می‌گیریم چون
+                            # connection string Render قطعی است. این
+                            # چرخهٔ "AI trick → patch → AI trick" را
+                            # تمام می‌کند.
+                            _is_override_target = True
                             if not _is_override_target:
                                 continue
                             new_val: Optional[str] = None
@@ -1525,12 +1526,13 @@ async def deploy_project_render_ai(
                     for _svc_name, per_var in env_resolution.items():
                         for _k, _info in per_var.items():
                             _ku = _k.upper()
-                            _val = (_info.get("value") or "")
-                            _is_override_target = (
-                                not _info.get("resolved")
-                                or not _val.strip()
-                                or _value_is_compose_specific(_val)
-                            )
+                            # 🐛 (final-patch) — Postgres/Redis env vars
+                            # همیشه از connection string Render override
+                            # شوند. هر مقدار AI داده نادیده می‌گیریم چون
+                            # connection string Render قطعی است. این
+                            # چرخهٔ "AI trick → patch → AI trick" را
+                            # تمام می‌کند.
+                            _is_override_target = True
                             if not _is_override_target:
                                 continue
                             new_val: Optional[str] = None
