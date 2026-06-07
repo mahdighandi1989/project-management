@@ -1442,6 +1442,27 @@ export default function ProjectPage() {
                           )}
                         </div>
                       ))}
+                      {/* 🆕 (provision errors) — اگر Postgres/Redis ساخته نشدند، چرا */}
+                      {deployAiResult.provision_errors && Object.keys(deployAiResult.provision_errors).length > 0 && (
+                        <div className="mt-2 p-2 bg-red-500/10 border border-red-500/30 rounded">
+                          <div className="font-bold text-red-400 mb-1">
+                            ❌ خطا در auto-provision Render resources:
+                          </div>
+                          <ul className="text-red-200 text-[11px]">
+                            {Object.entries(deployAiResult.provision_errors).map(([kind, err]: [string, any]) => (
+                              <li key={kind}>
+                                • <span className="font-mono">{kind}</span>:{' '}
+                                <span className="opacity-70">{String(err)}</span>
+                              </li>
+                            ))}
+                          </ul>
+                          <div className="text-red-300/70 text-[10px] mt-1">
+                            احتمالاً پلن رایگان Render برای این resource دیگر در دسترس نیست
+                            یا حساب شما به upgrade نیاز دارد. در Render dashboard
+                            دستی resource را بساز.
+                          </div>
+                        </div>
+                      )}
                       {/* 🆕 (auto-provision) — Postgres/Redis ای که Render API
                           خودکار ساخت */}
                       {deployAiResult.provisioned && Object.keys(deployAiResult.provisioned).length > 0 && (
