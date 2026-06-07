@@ -970,6 +970,67 @@ def test_redis_url_parsing_distributes_to_split_fields():
     assert "REDIS_PORT" in body and 'rd_parts.get("port"' in body
 
 
+# ---------------------------------------------------------------------------
+# 🐛 prefer_native: skip Docker runtime even when Dockerfile is "valid"
+# ---------------------------------------------------------------------------
+
+
+def test_deploy_request_has_prefer_native_default_true():
+    """Creator-generated Dockerfiles regularly fail Render builds (COPY
+    paths relative to root vs root_dir, missing multi-stage targets,
+    requirements.txt resolution). To unblock the user without asking
+    them to fix the Dockerfile, default `prefer_native=True` so backend
+    always becomes Python native and frontend always becomes Vite
+    static_site — regardless of whether a Dockerfile exists in the
+    repo."""
+    from app.api.routes.simple_projects import DeployRenderAIRequest
+
+    req = DeployRenderAIRequest()
+    assert req.prefer_native is True, (
+        "prefer_native must default to True so Detective-1-style projects "
+        "with broken Creator-generated Dockerfiles can still deploy"
+    )
+
+
+def test_prefer_native_skips_dockerfile_usability_check():
+    """When prefer_native=True, the deploy endpoint must NOT keep using
+    the Dockerfile even if it looks usable. The 'continue' guard inside
+    the Dockerfile override loop must be gated on prefer_native=False."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def deploy_project_render_ai")
+    assert idx != -1
+    body = src[idx:idx + 35000]
+    # Must reference the request flag when deciding to skip override
+    assert "df_usable and not request.prefer_native" in body, (
+        "the 'Dockerfile is usable → continue' branch must require "
+        "prefer_native=False; otherwise it shadows the native-runtime fix"
+    )
+
+
+def test_worker_role_gets_celery_start_command():
+    """When AI emits a service with role=worker or celery-worker, the
+    native override must use a celery worker start command, NOT
+    uvicorn (which would never serve traffic and Render would mark
+    deploy as failed)."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def deploy_project_render_ai")
+    assert idx != -1
+    body = src[idx:idx + 35000]
+    assert '"worker"' in body and '"celery-worker"' in body, (
+        "the worker role override branch must accept the common role "
+        "spellings AI emits (worker / celery-worker / celery_worker)"
+    )
+    assert "celery -A main worker" in body, (
+        "worker services must launch with `celery -A main worker`, not uvicorn"
+    )
+
+
 def test_get_project_files_does_not_return_content():
     """Tripwire: if a future change makes get_project_files include
     `content` in its dicts, this test alerts so we can simplify the
