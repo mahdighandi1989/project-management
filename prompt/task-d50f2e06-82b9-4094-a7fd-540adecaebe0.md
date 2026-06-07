@@ -10,7 +10,7 @@ verification_status: pending
 watched_id: 3f34a2b1-2a8d-4ad2-904a-9835a8a5b7c9
 project: mahdighandi1989/project-management
 created_at: '2026-05-24T09:11:17.541995+00:00'
-updated_at: '2026-06-03T18:25:35.745217+00:00'
+updated_at: '2026-06-07T09:30:53.896809+00:00'
 target_files:
 - backend/app/api/routes/oversight.py
 ---
@@ -27,6 +27,15 @@ caption فاقد title و context و action link است. فقط subject='Backfil
 Missing title, context, action link, and attachments. Only subject and priority are set.
 
 🛠 پیشنهاد: notify_event('backfill_ac_completed', 'Backfill AC completed for project {project_name}', subject='Backfill AC completed', priority=_priority, context='Backfill process finished successfully', action
+---
+[scan #3 at 2026-06-07T09:30:53.896797+00:00]
+## 📋 شرح
+در `backend/app/api/routes/oversight.py` یک `notify_event` call پیدا شد که اولین پارامتر (event_type) رشته‌ای ساده/مبهم است یا خالی.
+
+## 🤔 چرا مهم است
+event_type کلید routing و filter در سیستم notification است. بدون آن، نمی‌توان آن event را به‌صورت per-event mute/customize کرد.
+
+## 🔍 جزئیات
 
 ## Prompt
 
