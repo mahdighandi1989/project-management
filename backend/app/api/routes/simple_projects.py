@@ -1258,23 +1258,92 @@ async def deploy_project_render_ai(
     provisioned: Dict[str, Dict[str, Any]] = {}
     _need_postgres = False
     _need_redis = False
-    _PG_VAR_KEYWORDS = ("DATABASE_URL", "POSTGRES_URL", "DB_URL")
-    _REDIS_VAR_KEYWORDS = (
-        "REDIS_URL", "CELERY_BROKER_URL", "CELERY_RESULT_BACKEND",
-        "CELERY_BACKEND_URL",
+    # 🐛 (force-provision fix) — keywords را گسترش دادیم تا تمام
+    # variants Postgres/Redis را پوشش دهد. AI گاهی به‌جای DATABASE_URL،
+    # POSTGRES_HOST/USER/PASSWORD/DB جدا می‌دهد با مقادیر compose-
+    # specific (مثل `detective1-postgres`) که روی Render معتبر نیستند.
+    _PG_VAR_KEYWORDS = (
+        "DATABASE_URL", "DATABASE_URL_SYNC", "POSTGRES_URL", "DB_URL",
+        "POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_USER",
+        "POSTGRES_PASSWORD", "POSTGRES_DB", "POSTGRES_DATABASE",
+        "PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE",
     )
+    _REDIS_VAR_KEYWORDS = (
+        "REDIS_URL", "REDIS_HOST", "REDIS_PORT", "REDIS_DB",
+        "REDIS_PASSWORD", "CELERY_BROKER_URL", "CELERY_RESULT_BACKEND",
+        "CELERY_BACKEND_URL", "BROKER_URL", "BACKEND_URL_CELERY",
+    )
+
+    def _value_is_compose_specific(v: str) -> bool:
+        """تشخیص مقادیری که AI از docker-compose خوانده — host name های
+        داخلی compose روی Render کار نمی‌کنند."""
+        if not v:
+            return True
+        vl = v.lower().strip()
+        # host placeholders/compose names
+        compose_indicators = (
+            "localhost", "127.0.0.1", "host.docker.internal",
+            "postgres:", "@postgres", "@db:", "redis:", "@redis",
+            "neo4j:", "@neo4j", "minio:", "qdrant:",
+        )
+        if any(ind in vl for ind in compose_indicators):
+            return True
+        # AI گاهی نام پروژه را در URL می‌گذارد
+        if "@" + (project.name or "").lower().replace("_", "-") in vl:
+            return True
+        return False
+
+    # 🐛 (force-provision fix) — auto-provision را همیشه trigger کن اگر
+    # service ای از این patterns استفاده می‌کند. حتی اگر AI value داده،
+    # تا زمانی که compose-specific است یا placeholder، override می‌کنیم.
     for _svc_name, per_var in env_resolution.items():
         for _k, _info in per_var.items():
             _ku = _k.upper()
-            if any(p in _ku for p in _PG_VAR_KEYWORDS):
-                if _info.get("source") in ("external", "unknown") and not _info.get("resolved"):
+            _val = (_info.get("value") or "")
+            # condition برای auto-provision:
+            #   1) source در external/unknown است (resolved=False)
+            #   2) value خالی است
+            #   3) value compose-specific است (نه placeholder، نه real)
+            _needs_override = (
+                not _info.get("resolved")
+                or not _val.strip()
+                or _value_is_compose_specific(_val)
+            )
+            if _needs_override:
+                if any(p in _ku for p in _PG_VAR_KEYWORDS):
                     _need_postgres = True
-            if any(p in _ku for p in _REDIS_VAR_KEYWORDS):
-                if _info.get("source") in ("external", "unknown") and not _info.get("resolved"):
+                if any(p in _ku for p in _REDIS_VAR_KEYWORDS):
                     _need_redis = True
 
+    def _parse_postgres_url(url: str) -> Dict[str, str]:
+        """Extract host/port/user/password/db از connection string."""
+        try:
+            from urllib.parse import urlparse
+            p = urlparse(url)
+            return {
+                "host": p.hostname or "",
+                "port": str(p.port or 5432),
+                "user": p.username or "",
+                "password": p.password or "",
+                "db": (p.path or "").lstrip("/") or "",
+            }
+        except Exception:
+            return {}
+
+    def _parse_redis_url(url: str) -> Dict[str, str]:
+        try:
+            from urllib.parse import urlparse
+            p = urlparse(url)
+            return {
+                "host": p.hostname or "",
+                "port": str(p.port or 6379),
+                "password": p.password or "",
+                "db": (p.path or "").lstrip("/") or "0",
+            }
+        except Exception:
+            return {}
+
     if _need_postgres or _need_redis:
-        # یک نام پایه از project برای resource ها
         _base_name = (
             project.github_repo
             or _normalize_repo_name(project.name)
@@ -1287,19 +1356,50 @@ async def deploy_project_render_ai(
                     name=f"{_base_name}-db",
                 )
                 if pg_result.get("success") and pg_result.get("connectionString"):
+                    pg_url = pg_result["connectionString"]
+                    pg_parts = _parse_postgres_url(pg_url)
                     provisioned["postgres"] = {
                         "id": pg_result["id"],
                         "name": pg_result["name"],
-                        "connection_string": pg_result["connectionString"],
+                        "connection_string": pg_url,
                     }
-                    # توزیع روی env_resolution
+                    # توزیع: URL کامل برای *_URL، و parts برای فیلدهای جدا
                     for _svc_name, per_var in env_resolution.items():
                         for _k, _info in per_var.items():
-                            if any(p in _k.upper() for p in _PG_VAR_KEYWORDS):
-                                if not _info.get("resolved"):
-                                    _info["value"] = pg_result["connectionString"]
-                                    _info["source"] = "render_provisioned"
-                                    _info["resolved"] = True
+                            _ku = _k.upper()
+                            _val = (_info.get("value") or "")
+                            _is_override_target = (
+                                not _info.get("resolved")
+                                or not _val.strip()
+                                or _value_is_compose_specific(_val)
+                            )
+                            if not _is_override_target:
+                                continue
+                            new_val: Optional[str] = None
+                            # URL کامل
+                            if any(p in _ku for p in ("DATABASE_URL", "POSTGRES_URL", "DB_URL")):
+                                new_val = pg_url
+                            elif "DATABASE_URL_SYNC" in _ku:
+                                # نسخهٔ sync (psycopg) از URL کامل
+                                new_val = pg_url.replace(
+                                    "postgresql+asyncpg://", "postgresql://",
+                                ).replace(
+                                    "postgres+asyncpg://", "postgresql://",
+                                )
+                            elif "POSTGRES_HOST" in _ku or "PGHOST" in _ku:
+                                new_val = pg_parts.get("host", "")
+                            elif "POSTGRES_PORT" in _ku or "PGPORT" in _ku:
+                                new_val = pg_parts.get("port", "")
+                            elif "POSTGRES_USER" in _ku or "PGUSER" in _ku:
+                                new_val = pg_parts.get("user", "")
+                            elif "POSTGRES_PASSWORD" in _ku or "PGPASSWORD" in _ku:
+                                new_val = pg_parts.get("password", "")
+                            elif "POSTGRES_DB" in _ku or "POSTGRES_DATABASE" in _ku or "PGDATABASE" in _ku:
+                                new_val = pg_parts.get("db", "")
+                            if new_val is not None:
+                                _info["value"] = new_val
+                                _info["source"] = "render_provisioned"
+                                _info["resolved"] = True
                 else:
                     logger.warning(
                         f"provision_postgres failed: {pg_result.get('error')}"
@@ -1309,18 +1409,44 @@ async def deploy_project_render_ai(
                     name=f"{_base_name}-redis",
                 )
                 if rd_result.get("success") and rd_result.get("connectionString"):
+                    rd_url = rd_result["connectionString"]
+                    rd_parts = _parse_redis_url(rd_url)
                     provisioned["redis"] = {
                         "id": rd_result["id"],
                         "name": rd_result["name"],
-                        "connection_string": rd_result["connectionString"],
+                        "connection_string": rd_url,
                     }
                     for _svc_name, per_var in env_resolution.items():
                         for _k, _info in per_var.items():
-                            if any(p in _k.upper() for p in _REDIS_VAR_KEYWORDS):
-                                if not _info.get("resolved"):
-                                    _info["value"] = rd_result["connectionString"]
-                                    _info["source"] = "render_provisioned"
-                                    _info["resolved"] = True
+                            _ku = _k.upper()
+                            _val = (_info.get("value") or "")
+                            _is_override_target = (
+                                not _info.get("resolved")
+                                or not _val.strip()
+                                or _value_is_compose_specific(_val)
+                            )
+                            if not _is_override_target:
+                                continue
+                            new_val: Optional[str] = None
+                            # URL کامل برای *_URL ها
+                            if any(p in _ku for p in (
+                                "REDIS_URL", "CELERY_BROKER_URL",
+                                "CELERY_RESULT_BACKEND", "CELERY_BACKEND_URL",
+                                "BROKER_URL", "BACKEND_URL_CELERY",
+                            )):
+                                new_val = rd_url
+                            elif "REDIS_HOST" in _ku:
+                                new_val = rd_parts.get("host", "")
+                            elif "REDIS_PORT" in _ku:
+                                new_val = rd_parts.get("port", "")
+                            elif "REDIS_PASSWORD" in _ku:
+                                new_val = rd_parts.get("password", "")
+                            elif "REDIS_DB" in _ku:
+                                new_val = rd_parts.get("db", "0")
+                            if new_val is not None:
+                                _info["value"] = new_val
+                                _info["source"] = "render_provisioned"
+                                _info["resolved"] = True
                 else:
                     logger.warning(
                         f"provision_redis failed: {rd_result.get('error')}"

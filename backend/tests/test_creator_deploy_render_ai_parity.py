@@ -155,7 +155,7 @@ def test_deploy_render_ai_supports_multi_service():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 25000]
+    body = src[idx:idx + 35000]
     assert "for svc in services_plan" in body or "for svc in services" in body, (
         "must iterate over services_plan to create one Render service per "
         "AI-recommended service (otherwise fullstack only gets one service)"
@@ -175,7 +175,7 @@ def test_deploy_render_ai_reports_empty_env_vars():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 25000]
+    body = src[idx:idx + 35000]
     assert "empty_env_vars" in body, (
         "response must include empty_env_vars (mirrors Inspector's UX)"
     )
@@ -191,7 +191,7 @@ def test_deploy_render_ai_uses_project_repo_not_internal_storage():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 25000]
+    body = src[idx:idx + 35000]
     assert "project.github_repo_url" in body
     assert "project.github_owner" in body
     # Must NOT hardcode the internal-storage path in the AI variant
@@ -210,7 +210,7 @@ def test_deploy_render_ai_returns_actionable_no_repo_error():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 25000]
+    body = src[idx:idx + 35000]
     assert '"error": "no_github_repo"' in body, (
         "must return a structured error so the frontend can route the "
         "user to the «GitHub به push» button"
@@ -382,7 +382,7 @@ def test_deploy_render_ai_checks_dockerfile_before_create():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 25000]
+    body = src[idx:idx + 35000]
     assert "_read_github_file" in body, (
         "must read the Dockerfile from GitHub to verify it's not empty — "
         "AI's recommendation alone is unreliable when Creator emits a "
@@ -402,7 +402,7 @@ def test_deploy_render_ai_overrides_backend_to_python_native():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 25000]
+    body = src[idx:idx + 35000]
     assert 'svc_role == "backend"' in body
     assert "pip install -r requirements.txt" in body, (
         "backend override must use the standard Python build command"
@@ -421,7 +421,7 @@ def test_deploy_render_ai_overrides_frontend_to_vite_static_site():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 25000]
+    body = src[idx:idx + 35000]
     assert 'svc_role == "frontend"' in body
     assert '"static_site"' in body, "frontend override must select static_site"
     assert "npm run build" in body
@@ -440,7 +440,7 @@ def test_deploy_render_ai_reports_override_in_created_service():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 25000]
+    body = src[idx:idx + 35000]
     assert "docker_overridden" in body
     assert "notes_append" in body
 
@@ -454,7 +454,7 @@ def test_deploy_render_ai_dockerfile_usability_threshold():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 25000]
+    body = src[idx:idx + 35000]
     assert "len(df_content) > 100" in body
     assert "len(stripped_lines) >= 2" in body
 
@@ -536,7 +536,7 @@ def test_deploy_endpoint_orders_backend_before_frontend():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 25000]
+    body = src[idx:idx + 35000]
     assert "_service_sort_key" in body, (
         "must sort services so backend is created before frontend "
         "(otherwise cross-service env ref fails)"
@@ -556,7 +556,7 @@ def test_deploy_endpoint_response_separates_auto_and_manual():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 25000]
+    body = src[idx:idx + 35000]
     assert '"auto_resolved"' in body
     assert '"still_manual"' in body
     # Hints must be carried through
@@ -712,7 +712,7 @@ def test_deploy_endpoint_auto_provisions_postgres_when_needed():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 25000]
+    body = src[idx:idx + 35000]
     assert "_need_postgres" in body
     assert "provision_postgres(" in body
     assert "render_provisioned" in body
@@ -726,7 +726,7 @@ def test_deploy_endpoint_auto_provisions_redis_when_needed():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 25000]
+    body = src[idx:idx + 35000]
     assert "_need_redis" in body
     assert "provision_redis(" in body
     assert "CELERY_BROKER_URL" in body
@@ -741,7 +741,7 @@ def test_deploy_endpoint_response_includes_provisioned():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 25000]
+    body = src[idx:idx + 35000]
     assert '"provisioned": provisioned' in body
 
 
@@ -831,7 +831,7 @@ def test_deploy_endpoint_filters_out_infra_services():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 25000]
+    body = src[idx:idx + 35000]
     assert "_INFRA_KEYWORDS" in body, (
         "infra filter keyword list must exist"
     )
@@ -854,7 +854,7 @@ def test_deploy_response_includes_infra_skipped():
     ).read_text(encoding="utf-8")
     idx = src.find("async def deploy_project_render_ai")
     assert idx != -1
-    body = src[idx:idx + 25000]
+    body = src[idx:idx + 35000]
     assert '"infra_skipped"' in body, (
         "response must include the infra_skipped list"
     )
@@ -871,6 +871,102 @@ def test_frontend_renders_infra_skipped_panel():
     assert "infra_skipped" in src, (
         "frontend must render the infra_skipped list"
     )
+
+
+# ---------------------------------------------------------------------------
+# 🐛 Force auto-provision + URL parsing (Detective-1 attempt 4)
+# ---------------------------------------------------------------------------
+
+
+def test_postgres_var_keywords_cover_split_fields():
+    """User screenshot: AI emits POSTGRES_HOST / POSTGRES_PORT /
+    POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB as SEPARATE env vars
+    (not just DATABASE_URL). Auto-provision must detect all of them so
+    the user doesn't have to set individual fields manually."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def deploy_project_render_ai")
+    assert idx != -1
+    body = src[idx:idx + 35000]
+    for kw in (
+        "POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_USER",
+        "POSTGRES_PASSWORD", "POSTGRES_DB",
+        "DATABASE_URL_SYNC", "PGHOST", "PGPORT",
+    ):
+        assert f'"{kw}"' in body, (
+            f"_PG_VAR_KEYWORDS must include {kw} so split-field "
+            f"Postgres configs trigger auto-provision"
+        )
+
+
+def test_redis_var_keywords_cover_split_fields():
+    """Same for Redis: REDIS_HOST / REDIS_PORT / REDIS_PASSWORD / REDIS_DB."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def deploy_project_render_ai")
+    assert idx != -1
+    body = src[idx:idx + 35000]
+    for kw in (
+        "REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD", "REDIS_DB",
+    ):
+        assert f'"{kw}"' in body
+
+
+def test_compose_specific_values_trigger_override():
+    """User reported: AI gave POSTGRES_HOST='detective1-postgres' (the
+    Compose-internal hostname). That's non-empty and not a placeholder
+    — but it doesn't work on Render either. Detection helper must flag
+    these compose-specific values so auto-provision runs."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def deploy_project_render_ai")
+    assert idx != -1
+    body = src[idx:idx + 35000]
+    assert "_value_is_compose_specific" in body
+    # Must check for the compose-internal indicators
+    for indicator in (
+        "localhost", "127.0.0.1", "host.docker.internal",
+    ):
+        assert f'"{indicator}"' in body
+
+
+def test_postgres_url_parsing_distributes_to_split_fields():
+    """When auto-provision succeeds, the connection string is parsed
+    into host/port/user/password/db and EACH split field is filled."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def deploy_project_render_ai")
+    assert idx != -1
+    body = src[idx:idx + 35000]
+    assert "_parse_postgres_url" in body, (
+        "must have a helper to parse the Postgres connection string"
+    )
+    # Distribution must set both the URL forms AND the split fields
+    assert "POSTGRES_HOST" in body and 'pg_parts.get("host"' in body
+    assert "POSTGRES_PORT" in body and 'pg_parts.get("port"' in body
+    assert "POSTGRES_USER" in body and 'pg_parts.get("user"' in body
+    assert "POSTGRES_PASSWORD" in body and 'pg_parts.get("password"' in body
+
+
+def test_redis_url_parsing_distributes_to_split_fields():
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "app/api/routes/simple_projects.py"
+    ).read_text(encoding="utf-8")
+    idx = src.find("async def deploy_project_render_ai")
+    assert idx != -1
+    body = src[idx:idx + 35000]
+    assert "_parse_redis_url" in body
+    assert "REDIS_HOST" in body and 'rd_parts.get("host"' in body
+    assert "REDIS_PORT" in body and 'rd_parts.get("port"' in body
 
 
 def test_get_project_files_does_not_return_content():
