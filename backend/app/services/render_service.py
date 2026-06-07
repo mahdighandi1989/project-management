@@ -903,6 +903,189 @@ class RenderAPIService:
             slog.error("Exception creating postgres", exception=e)
             return {"success": False, "error": str(e)}
 
+    async def create_service(
+        self,
+        *,
+        name: str,
+        type: str,
+        repo: str,
+        branch: str = "main",
+        owner_id: Optional[str] = None,
+        region: str = "oregon",
+        plan: str = "starter",
+        root_dir: Optional[str] = None,
+        build_command: Optional[str] = None,
+        start_command: Optional[str] = None,
+        runtime: Optional[str] = None,
+        env_vars: Optional[Dict[str, str]] = None,
+        auto_deploy: bool = True,
+        dockerfile_path: Optional[str] = None,
+        publish_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """ایجاد یک سرویس جدید روی Render.
+
+        type یکی از این‌ها: 'web_service', 'background_worker', 'static_site',
+        'private_service'.
+
+        runtime برای web_service/private_service: 'python', 'node', 'docker',
+        'ruby', 'go', 'rust', 'elixir', 'static'. اگر nudge ندادی، بر
+        اساس runtime معقول guess می‌شود (python برای web پیش‌فرض).
+
+        برای static_site فقط build_command + publish_path لازم است.
+        """
+        if not self._load_api_key():
+            return {"success": False, "error": "کلید API رندر یافت نشد"}
+
+        if not owner_id:
+            owner_id = await self.get_owner_id_from_services()
+            if not owner_id:
+                return {"success": False, "error": "owner_id_not_found"}
+
+        slog.start("Creating service", name=name, type=type, region=region)
+        try:
+            session = await self._get_session()
+            url = f"{self.BASE_URL}/services"
+
+            safe_name = name.lower().replace("_", "-").replace(" ", "-")[:60]
+            payload: Dict[str, Any] = {
+                "type": type,
+                "name": safe_name,
+                "ownerId": owner_id,
+                "repo": repo,
+                "branch": branch,
+                "autoDeploy": "yes" if auto_deploy else "no",
+            }
+            if root_dir and root_dir != ".":
+                payload["rootDir"] = root_dir
+
+            details: Dict[str, Any] = {}
+            if type == "static_site":
+                details["buildCommand"] = build_command or ""
+                details["publishPath"] = publish_path or "dist"
+            else:
+                env = runtime or "python"
+                if dockerfile_path:
+                    env = "docker"
+                details["env"] = env
+                if env == "docker":
+                    if dockerfile_path:
+                        details["dockerfilePath"] = dockerfile_path
+                else:
+                    if build_command or start_command:
+                        details["envSpecificDetails"] = {
+                            "buildCommand": build_command or "",
+                            "startCommand": start_command or "",
+                        }
+                if plan:
+                    details["plan"] = plan
+                if region:
+                    details["region"] = region
+
+            if details:
+                payload["serviceDetails"] = details
+
+            if env_vars:
+                payload["envVars"] = [
+                    {"key": k, "value": str(v)} for k, v in env_vars.items()
+                ]
+
+            async with session.post(url, json=payload) as response:
+                body_text = await response.text()
+                if response.status in (200, 201, 202):
+                    try:
+                        data = json.loads(body_text) if body_text else {}
+                    except Exception:
+                        data = {}
+                    service = data.get("service") if isinstance(data, dict) else None
+                    service = service or data
+                    svc_id = service.get("id") if isinstance(service, dict) else None
+                    slog.success("Service created", id=svc_id, name=safe_name, type=type)
+                    return {
+                        "success": True,
+                        "service_id": svc_id,
+                        "name": safe_name,
+                        "type": type,
+                        "dashboard_url": (
+                            f"https://dashboard.render.com/web/{svc_id}"
+                            if svc_id else None
+                        ),
+                        "error": None,
+                    }
+                slog.error(
+                    "Failed to create service",
+                    status=response.status, body=body_text[:300],
+                )
+                return {
+                    "success": False,
+                    "error": f"HTTP {response.status}: {body_text[:300]}",
+                }
+        except Exception as e:
+            slog.error("Exception creating service", exception=e)
+            return {"success": False, "error": str(e)}
+
+    async def create_redis(
+        self,
+        *,
+        name: str,
+        owner_id: Optional[str] = None,
+        region: str = "oregon",
+        plan: str = "free",
+        maxmemory_policy: str = "allkeys-lru",
+    ) -> Dict[str, Any]:
+        """ایجاد یک Redis (Key Value) جدید روی Render.
+
+        Render endpoint جدید `/keyvalue` است (قبلاً `/redis`).
+        """
+        if not self._load_api_key():
+            return {"success": False, "error": "کلید API رندر یافت نشد"}
+
+        if not owner_id:
+            owner_id = await self.get_owner_id_from_services()
+            if not owner_id:
+                return {"success": False, "error": "owner_id_not_found"}
+
+        slog.start("Creating Redis", name=name, plan=plan, region=region)
+        safe_name = name.lower().replace("_", "-").replace(" ", "-")[:60]
+        payload = {
+            "name": safe_name,
+            "ownerId": owner_id,
+            "plan": plan,
+            "region": region,
+            "maxmemoryPolicy": maxmemory_policy,
+        }
+
+        # Render endpoint نام را تغییر داده — هر دو را امتحان کن
+        last_err = ""
+        try:
+            session = await self._get_session()
+            for endpoint in ("/keyvalue", "/redis"):
+                url = f"{self.BASE_URL}{endpoint}"
+                try:
+                    async with session.post(url, json=payload) as response:
+                        body_text = await response.text()
+                        if response.status in (200, 201, 202):
+                            try:
+                                data = json.loads(body_text) if body_text else {}
+                            except Exception:
+                                data = {}
+                            kv = data.get("keyvalue") or data.get("redis") or data
+                            kv_id = kv.get("id") if isinstance(kv, dict) else None
+                            slog.success("Redis created", id=kv_id, name=safe_name)
+                            return {
+                                "success": True,
+                                "redis_id": kv_id,
+                                "name": safe_name,
+                                "endpoint": endpoint,
+                                "error": None,
+                            }
+                        last_err = f"{endpoint}: HTTP {response.status} {body_text[:200]}"
+                except Exception as e:
+                    last_err = f"{endpoint}: exception {e}"
+            return {"success": False, "error": f"create_redis_failed: {last_err}"}
+        except Exception as e:
+            slog.error("Exception creating redis", exception=e)
+            return {"success": False, "error": str(e)}
+
     async def get_owner_id_from_services(self) -> Optional[str]:
         """ownerId رو از اولین سرویس استخراج می‌کنه (برای create_postgres)."""
         res = await self.get_services()
