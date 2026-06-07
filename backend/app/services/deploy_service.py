@@ -103,6 +103,249 @@ class RenderDeployService:
         """آیا API key تنظیم شده؟"""
         return bool(self.api_key)
 
+    # ─────────────────────────────────────────────────────────────────────
+    # 🆕 Managed databases — Postgres + Key Value (Redis)
+    # ─────────────────────────────────────────────────────────────────────
+
+    async def _get_owner_id(self) -> Optional[str]:
+        """دریافت ownerId از /owners (cache نمی‌شود — call ارزان است)."""
+        session = await self._get_session()
+        try:
+            async with session.get(f"{self.API_BASE}/owners") as r:
+                if r.status == 200:
+                    owners = await r.json()
+                    if owners and len(owners) > 0:
+                        first = owners[0]
+                        return first.get("owner", {}).get("id") or first.get("id")
+        except Exception as e:
+            logger.warning(f"_get_owner_id failed: {e}")
+        return None
+
+    async def provision_postgres(
+        self,
+        *,
+        name: str,
+        region: str = "oregon",
+        plan: str = "free",
+        wait_timeout_s: int = 180,
+    ) -> Dict:
+        """ساخت یک Postgres مدیریت‌شده در Render و بازگرداندن connection string.
+
+        فرایند:
+          1. POST /postgres → ایجاد instance
+          2. polling /postgres/{id} تا status='available'
+          3. GET /postgres/{id}/connection-info → internalConnectionString
+
+        Returns:
+          {"success": bool, "id": str, "name": str,
+           "connectionString": str, "error"?: str}
+        """
+        if not self.is_configured():
+            return {"success": False, "error": "Render API key not configured"}
+
+        owner_id = await self._get_owner_id()
+        if not owner_id:
+            return {"success": False, "error": "owner_id_not_found"}
+
+        session = await self._get_session()
+        safe_name = name.lower().replace("_", "-").replace(" ", "-")[:60]
+        # databaseName/databaseUser باید alphanumeric باشد (Render قانون)
+        db_basename = "".join(c for c in safe_name if c.isalnum())[:40] or "appdb"
+
+        payload = {
+            "name": safe_name,
+            "ownerId": owner_id,
+            "plan": plan,
+            "region": region,
+            "databaseName": db_basename,
+            "databaseUser": db_basename,
+        }
+
+        try:
+            async with session.post(
+                f"{self.API_BASE}/postgres", json=payload,
+            ) as r:
+                txt = await r.text()
+                if r.status not in (200, 201):
+                    return {
+                        "success": False,
+                        "error": f"create_postgres_failed: {r.status} {txt[:300]}",
+                    }
+                created = await r.json() if r.content_type == "application/json" else {}
+                # شکل پاسخ: ممکن است wrapper یا direct باشد
+                pg = created.get("postgres") or created
+                pg_id = pg.get("id") or created.get("id")
+        except Exception as e:
+            return {"success": False, "error": f"create_postgres_exception: {e}"}
+
+        if not pg_id:
+            return {"success": False, "error": "no_postgres_id_returned"}
+
+        # polling — Render معمولاً ۱-۳ دقیقه طول می‌کشد
+        conn_str = await self._wait_for_postgres_ready(pg_id, wait_timeout_s)
+        return {
+            "success": bool(conn_str),
+            "id": pg_id,
+            "name": safe_name,
+            "connectionString": conn_str or "",
+            "error": "" if conn_str else "timeout_waiting_for_available",
+        }
+
+    async def _wait_for_postgres_ready(
+        self, pg_id: str, timeout_s: int,
+    ) -> Optional[str]:
+        """polling status تا available سپس fetch internalConnectionString."""
+        import asyncio as _asyncio
+        session = await self._get_session()
+        start = _asyncio.get_event_loop().time()
+        delay = 5.0
+        while (_asyncio.get_event_loop().time() - start) < timeout_s:
+            try:
+                async with session.get(
+                    f"{self.API_BASE}/postgres/{pg_id}",
+                ) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        status = (
+                            data.get("status")
+                            or (data.get("postgres") or {}).get("status")
+                            or ""
+                        ).lower()
+                        if status in ("available", "running", "ready"):
+                            # try fetch connection info
+                            async with session.get(
+                                f"{self.API_BASE}/postgres/{pg_id}/connection-info",
+                            ) as r2:
+                                if r2.status == 200:
+                                    info = await r2.json()
+                                    return (
+                                        info.get("internalConnectionString")
+                                        or info.get("externalConnectionString")
+                                        or ""
+                                    )
+                        if status in ("failed", "suspended"):
+                            return None
+            except Exception:
+                pass
+            await _asyncio.sleep(delay)
+            delay = min(delay + 2.0, 15.0)  # backoff تا 15s
+        return None
+
+    async def provision_redis(
+        self,
+        *,
+        name: str,
+        region: str = "oregon",
+        plan: str = "free",
+        wait_timeout_s: int = 180,
+        maxmemory_policy: str = "allkeys-lru",
+    ) -> Dict:
+        """ساخت یک Key Value (Redis-compatible) در Render.
+
+        Render endpoint جدید `/keyvalue` است (قبلاً `/redis`).
+        """
+        if not self.is_configured():
+            return {"success": False, "error": "Render API key not configured"}
+
+        owner_id = await self._get_owner_id()
+        if not owner_id:
+            return {"success": False, "error": "owner_id_not_found"}
+
+        session = await self._get_session()
+        safe_name = name.lower().replace("_", "-").replace(" ", "-")[:60]
+        payload = {
+            "name": safe_name,
+            "ownerId": owner_id,
+            "plan": plan,
+            "region": region,
+            "maxmemoryPolicy": maxmemory_policy,
+        }
+
+        # Render API نسخه جدید endpoint را تغییر داده؛ هر دو را امتحان کن
+        last_err = ""
+        kv_id: Optional[str] = None
+        for endpoint in ("/keyvalue", "/redis"):
+            try:
+                async with session.post(
+                    f"{self.API_BASE}{endpoint}", json=payload,
+                ) as r:
+                    txt = await r.text()
+                    if r.status in (200, 201):
+                        created = (
+                            await r.json()
+                            if r.content_type == "application/json"
+                            else {}
+                        )
+                        kv = (
+                            created.get("keyvalue")
+                            or created.get("redis")
+                            or created
+                        )
+                        kv_id = kv.get("id") or created.get("id")
+                        if kv_id:
+                            kv_endpoint = endpoint  # برای polling بعدی
+                            break
+                    else:
+                        last_err = f"{endpoint}: {r.status} {txt[:200]}"
+            except Exception as e:
+                last_err = f"{endpoint}: exception {e}"
+
+        if not kv_id:
+            return {
+                "success": False,
+                "error": f"create_redis_failed: {last_err}",
+            }
+
+        conn_str = await self._wait_for_redis_ready(
+            kv_id, kv_endpoint, wait_timeout_s,
+        )
+        return {
+            "success": bool(conn_str),
+            "id": kv_id,
+            "name": safe_name,
+            "connectionString": conn_str or "",
+            "error": "" if conn_str else "timeout_waiting_for_available",
+        }
+
+    async def _wait_for_redis_ready(
+        self, kv_id: str, endpoint: str, timeout_s: int,
+    ) -> Optional[str]:
+        import asyncio as _asyncio
+        session = await self._get_session()
+        start = _asyncio.get_event_loop().time()
+        delay = 5.0
+        while (_asyncio.get_event_loop().time() - start) < timeout_s:
+            try:
+                async with session.get(
+                    f"{self.API_BASE}{endpoint}/{kv_id}",
+                ) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        kv = (
+                            data.get("keyvalue")
+                            or data.get("redis")
+                            or data
+                        )
+                        status = (kv.get("status") or "").lower()
+                        if status in ("available", "running", "ready"):
+                            async with session.get(
+                                f"{self.API_BASE}{endpoint}/{kv_id}/connection-info",
+                            ) as r2:
+                                if r2.status == 200:
+                                    info = await r2.json()
+                                    return (
+                                        info.get("internalConnectionString")
+                                        or info.get("externalConnectionString")
+                                        or ""
+                                    )
+                        if status in ("failed", "suspended"):
+                            return None
+            except Exception:
+                pass
+            await _asyncio.sleep(delay)
+            delay = min(delay + 2.0, 15.0)
+        return None
+
     async def list_services(self) -> List[Dict]:
         """لیست سرویس‌های موجود در Render (روی خطا [] برمی‌گردد، با لاگ واضح)."""
         if not self.is_configured():
