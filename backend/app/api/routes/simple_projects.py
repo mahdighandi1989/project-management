@@ -997,6 +997,13 @@ class DeployRenderAIRequest(BaseModel):
     """درخواست deploy هوشمند با AI."""
     plan: str = "starter"  # "free" | "starter" — برای الان فقط در پاسخ نگاه‌داشته
     env_vars_overrides: dict = {}  # {service_name: {KEY: value}}
+    # 🆕 (force-native fix) — Creator-generated Dockerfile ها معمولاً
+    # production-ready نیستند (COPY paths نسبت به root که با root_dir
+    # Render همخوانی ندارند، یا multi-stage build incomplete). default
+    # True یعنی همیشه backend → Python native، frontend → Vite static
+    # حتی اگر Dockerfile وجود دارد. کاربر می‌تواند False بفرستد اگر
+    # Dockerfile کامل دارد.
+    prefer_native: bool = True
 
 
 @router.post("/projects/{project_id}/deploy/render-ai")
@@ -1185,10 +1192,20 @@ async def deploy_project_render_ai(
                 if ln.strip() and not ln.strip().startswith("#")
             ]
             df_usable = len(df_content) > 100 and len(stripped_lines) >= 2
-        if df_usable:
-            continue  # Dockerfile خوب است، تغییری نده
+        # 🆕 (force-native fix) — اگر prefer_native=True، هیچ‌وقت Docker
+        # استفاده نکن حتی اگر Dockerfile کامل باشد. Creator-generated
+        # Dockerfile ها معمولاً COPY paths صحیح برای Render ندارند
+        # (مثلاً `COPY . .` در `backend/` فقط backend را copy می‌کند
+        # بدون root files مثل requirements.txt که در root است).
+        # روش امن‌تر: همیشه از native runtime استفاده کن.
+        if df_usable and not request.prefer_native:
+            continue  # Dockerfile خوب است + کاربر خواست — تغییری نده
 
-        # Dockerfile قابل استفاده نیست → بر اساس role override کن
+        # Dockerfile قابل استفاده نیست (یا prefer_native=True) → native
+        _why_override = (
+            "Dockerfile خالی بود" if not df_usable
+            else "prefer_native=True (Dockerfile های Creator-generated معمولاً production-ready نیستند)"
+        )
         if svc_role == "frontend":
             # احتمالاً Vite/React SPA → static_site
             override = {
@@ -1201,26 +1218,34 @@ async def deploy_project_render_ai(
                 "publish_path": "dist",
                 "project_type": "vite",
                 "notes_append": (
-                    "⚠️ Dockerfile خالی بود — به static_site (Vite) تبدیل شد. "
-                    "اگر پروژه Next.js است، باید Dockerfile معتبر در repo قرار دهی."
+                    f"⚠️ {_why_override} — به static_site (Vite) تبدیل شد. "
+                    f"اگر پروژه Next.js است، در Render dashboard build "
+                    f"command را به `npm install && npm run build` و "
+                    f"publish path را به `.next/static` تغییر دهید."
                 ),
             }
-        elif svc_role == "backend":
-            # احتمالاً FastAPI/Flask/Django → Python native
+        elif svc_role == "backend" or svc_role in (
+            "worker", "celery-worker", "celery_worker",
+        ):
+            # FastAPI/Flask/Django → Python native
+            _start = (
+                "uvicorn main:app --host 0.0.0.0 --port $PORT"
+                if svc_role == "backend"
+                else "celery -A main worker --loglevel=info"
+            )
             override = {
-                "service_type": "web_service",
+                "service_type": "web_service" if svc_role == "backend" else "worker",
                 "build_command": (
                     "pip install --upgrade pip setuptools && "
                     "pip install -r requirements.txt"
                 ),
-                "start_command": (
-                    "uvicorn main:app --host 0.0.0.0 --port $PORT"
-                ),
+                "start_command": _start,
                 "publish_path": None,
-                "project_type": "fastapi",
+                "project_type": "fastapi" if svc_role == "backend" else "python",
                 "notes_append": (
-                    "⚠️ Dockerfile خالی بود — به Python native (FastAPI) تبدیل شد. "
-                    "اگر start command درست نیست، در Render dashboard اصلاح کن."
+                    f"⚠️ {_why_override} — به Python native تبدیل شد. "
+                    f"اگر start command یا requirements.txt path درست نیست، "
+                    f"در Render dashboard اصلاح کن."
                 ),
             }
         else:
