@@ -10,7 +10,7 @@ verification_status: pending
 watched_id: 3f34a2b1-2a8d-4ad2-904a-9835a8a5b7c9
 project: mahdighandi1989/project-management
 created_at: '2026-06-07T09:30:52.973039+00:00'
-updated_at: '2026-06-07T09:30:53.604401+00:00'
+updated_at: '2026-06-07T09:35:38.071273+00:00'
 target_files:
 - backend/app/api/routes/external_prompts.py
 ---
@@ -480,5 +480,5 @@ _(مستقل)_
 ## Acceptance Criteria
 
 1. این notification call `silent=` صریح دارد _(verify: static)_
-2. تصمیم با ماهیت event سازگار است (critical=False, routine=True) _(verify: static)_
+2. تصمیم با ماهیت event سازگار است (critical=False, routine=True) _(verify: manual_only)_
 3. کامنت rationale اضافه شد _(verify: static)_
