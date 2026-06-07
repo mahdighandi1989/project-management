@@ -1343,21 +1343,60 @@ async def deploy_project_render_ai(
 
     def _value_is_compose_specific(v: str) -> bool:
         """تشخیص مقادیری که AI از docker-compose خوانده — host name های
-        داخلی compose روی Render کار نمی‌کنند."""
+        داخلی compose روی Render کار نمی‌کنند.
+
+        🐛 (compose-hostname fix) — AI گاهی فقط hostname خام می‌دهد
+        مثل `detective-1-postgres` (نه URL کامل). این روی Render
+        resolve نمی‌شود. تشخیص با چندین heuristic:
+          - host های شناخته شده (localhost, 127.0.0.1, ...)
+          - URL با @host شناخته شده (@postgres, @redis, @db ...)
+          - hostname خام که شامل suffix های infra است
+            (-postgres, -redis, -neo4j, -minio, -qdrant, -db)
+          - hostname خام که با نام پروژه شروع می‌شود + suffix infra
+        """
         if not v:
             return True
         vl = v.lower().strip()
-        # host placeholders/compose names
-        compose_indicators = (
+        # ۱) host placeholders/compose names در URL
+        url_indicators = (
             "localhost", "127.0.0.1", "host.docker.internal",
-            "postgres:", "@postgres", "@db:", "redis:", "@redis",
-            "neo4j:", "@neo4j", "minio:", "qdrant:",
+            "@postgres", "@db:", "@redis", "@neo4j", "@minio", "@qdrant",
+            "@mongo", "@cache",
         )
-        if any(ind in vl for ind in compose_indicators):
+        if any(ind in vl for ind in url_indicators):
             return True
-        # AI گاهی نام پروژه را در URL می‌گذارد
-        if "@" + (project.name or "").lower().replace("_", "-") in vl:
+        # ۲) URL پروژه-اسمی
+        _proj_slug = (project.name or "").lower().replace("_", "-")
+        if _proj_slug and "@" + _proj_slug in vl:
             return True
+        # ۳) hostname خام (نه URL) که compose-style infra است
+        _is_url = (
+            "://" in vl or "/" in vl or vl.startswith("redis:")
+            or vl.startswith("postgres:")
+        )
+        if not _is_url:
+            # raw hostname — بررسی suffix
+            infra_suffixes = (
+                "-postgres", "-redis", "-neo4j", "-minio", "-qdrant",
+                "-pg", "-cache", "-db", "-mongo", "-rabbitmq",
+            )
+            if any(vl.endswith(sfx) or vl == sfx.lstrip("-")
+                   for sfx in infra_suffixes):
+                return True
+            # یا exact match: "postgres", "redis", "neo4j", etc.
+            if vl in (
+                "postgres", "postgresql", "redis", "neo4j", "minio",
+                "qdrant", "mongo", "mongodb", "db", "cache",
+            ):
+                return True
+            # یا با نام پروژه شروع می‌شود + infra suffix
+            if _proj_slug and vl.startswith(_proj_slug + "-"):
+                _rest = vl[len(_proj_slug) + 1:]
+                if _rest in (
+                    "postgres", "postgresql", "redis", "neo4j", "minio",
+                    "qdrant", "mongo", "db", "cache", "pg",
+                ):
+                    return True
         return False
 
     # 🐛 (force-provision fix) — auto-provision را همیشه trigger کن اگر

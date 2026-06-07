@@ -940,6 +940,15 @@ def test_compose_specific_values_trigger_override():
         "localhost", "127.0.0.1", "host.docker.internal",
     ):
         assert f'"{indicator}"' in body
+    # 🆕 (compose-hostname fix) — Raw hostnames like `detective-1-postgres`
+    # were slipping through. The fix detects the infra-suffix pattern
+    # (-postgres, -redis, -neo4j, etc.) on raw (non-URL) values.
+    for sfx in ("-postgres", "-redis", "-neo4j", "-minio", "-qdrant"):
+        assert f'"{sfx}"' in body, (
+            f"compose-hostname detection must include suffix `{sfx}` so "
+            f"AI's raw hostname values like `<project>{sfx}` get flagged "
+            f"and the auto-provisioned connection details override them"
+        )
 
 
 def test_postgres_url_parsing_distributes_to_split_fields():
