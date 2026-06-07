@@ -350,6 +350,72 @@ def _build_tools() -> List[Dict[str, Any]]:
             },
         },
         {
+            "name": "render_create_service",
+            "description": (
+                "ایجاد یک سرویس جدید روی Render (Web Service / Background "
+                "Worker / Static Site / Private Service).\n\n"
+                "**استفاده** وقتی کاربر می‌خواهد سرویس جدید بسازی — به "
+                "جای فرستادن کاربر به داشبورد، مستقیم اینجا بساز.\n\n"
+                "**parameter ها**:\n"
+                "  - `type`: 'web_service' | 'background_worker' | "
+                "'static_site' | 'private_service'\n"
+                "  - `runtime`: 'python' | 'node' | 'docker' (برای static_site لازم نیست)\n"
+                "  - `repo`: 'https://github.com/owner/repo'\n"
+                "  - `branch`: معمولاً 'main'\n"
+                "  - `root_dir`: اگر pyproject یا package.json در subfolder است (مثل 'backend')\n"
+                "  - `build_command`, `start_command`: native runtime ها\n"
+                "  - `dockerfile_path`: اگر docker runtime داری (مثل './Dockerfile' نسبی به root_dir)\n"
+                "  - `publish_path`: برای static_site (مثل 'dist' یا '.next/static')\n"
+                "  - `env_vars`: dict از K/V — مثل {'SECRET_KEY': '...', 'DATABASE_URL': '...'}\n\n"
+                "بعد از create، service_id برمی‌گرداند. می‌توانی بلافاصله "
+                "`render_set_env_var(service_id, ...)` یا "
+                "`render_trigger_deploy(service_id)` صدا بزنی.\n\n"
+                "owner_id اختیاری — اگر ندادی، خودش از اولین سرویس استخراج می‌کنه."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "نام سرویس، مثل 'detective-1-celery-worker'"},
+                    "type": {"type": "string", "enum": ["web_service", "background_worker", "static_site", "private_service"]},
+                    "repo": {"type": "string", "description": "URL کامل repo GitHub"},
+                    "branch": {"type": "string", "default": "main"},
+                    "runtime": {"type": "string", "description": "'python' | 'node' | 'docker' (اختیاری برای static_site)"},
+                    "region": {"type": "string", "default": "oregon"},
+                    "plan": {"type": "string", "default": "starter"},
+                    "root_dir": {"type": "string", "description": "subfolder (مثل 'backend')"},
+                    "build_command": {"type": "string"},
+                    "start_command": {"type": "string"},
+                    "dockerfile_path": {"type": "string", "description": "برای docker runtime، مثل './Dockerfile'"},
+                    "publish_path": {"type": "string", "description": "برای static_site، مثل 'dist'"},
+                    "env_vars": {"type": "object", "description": "dict از K/V"},
+                    "owner_id": {"type": "string", "description": "اختیاری"},
+                    "auto_deploy": {"type": "boolean", "default": True},
+                },
+                "required": ["name", "type", "repo"],
+            },
+        },
+        {
+            "name": "render_create_redis",
+            "description": (
+                "ایجاد یک Redis (Key Value) جدید روی Render. مشابه "
+                "render_create_postgres ولی برای Redis. plan='free' "
+                "هنوز برای Redis قابل قبول است.\n\n"
+                "بعد از create، redis_id برمی‌گرداند — می‌توانی با "
+                "endpoint مناسب /keyvalue/{id}/connection-info "
+                "connection string را بگیری."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "plan": {"type": "string", "enum": ["free", "starter", "standard", "pro"], "default": "free"},
+                    "region": {"type": "string", "default": "oregon"},
+                    "owner_id": {"type": "string"},
+                },
+                "required": ["name"],
+            },
+        },
+        {
             "name": "render_create_postgres",
             "description": (
                 "ایجاد یک PostgreSQL database جدید در Render. وقتی کاربر "
@@ -943,6 +1009,104 @@ async def run_inspector_agent(
                     f"- delete: {sum(1 for f in _to_revert if f.get('operation') == 'delete')}\n"
                     f"action_plan ثبت شد و این مرحله تمام است."
                 ))
+
+            # 🆕 (create-service) — generic service + redis creation
+            elif name in ("render_create_service", "render_create_redis"):
+                try:
+                    from .render_service import get_render_service as _grs
+                    _rs = _grs()
+                    if name == "render_create_service":
+                        svc_type = (args.get("type") or "").strip().lower()
+                        if svc_type not in (
+                            "web_service", "background_worker",
+                            "static_site", "private_service",
+                        ):
+                            tool_results.append(_tr(
+                                "type باید یکی از web_service / "
+                                "background_worker / static_site / "
+                                "private_service باشد",
+                                is_error=True,
+                            ))
+                            continue
+                        repo = (args.get("repo") or "").strip()
+                        if not repo:
+                            tool_results.append(_tr("repo لازم است", is_error=True))
+                            continue
+                        yield ("progress", {
+                            "step": "agent_create_service",
+                            "message": (
+                                f"🛠️ {_tag} ایجاد سرویس "
+                                f"{svc_type} '{args.get('name')}'..."
+                            ),
+                        })
+                        res = await _rs.create_service(
+                            name=args.get("name") or "",
+                            type=svc_type,
+                            repo=repo,
+                            branch=(args.get("branch") or "main").strip(),
+                            owner_id=(args.get("owner_id") or "").strip() or None,
+                            region=(args.get("region") or "oregon").strip(),
+                            plan=(args.get("plan") or "starter").strip(),
+                            root_dir=args.get("root_dir"),
+                            build_command=args.get("build_command"),
+                            start_command=args.get("start_command"),
+                            runtime=args.get("runtime"),
+                            env_vars=args.get("env_vars") or {},
+                            auto_deploy=bool(args.get("auto_deploy", True)),
+                            dockerfile_path=args.get("dockerfile_path"),
+                            publish_path=args.get("publish_path"),
+                        )
+                        if not res.get("success"):
+                            tool_results.append(_tr(
+                                f"خطا در ساخت سرویس: {res.get('error')}",
+                                is_error=True,
+                            ))
+                        else:
+                            tool_results.append(_tr(
+                                f"✅ سرویس ساخته شد:\n"
+                                f"- service_id: {res.get('service_id')}\n"
+                                f"- name: {res.get('name')}\n"
+                                f"- type: {res.get('type')}\n"
+                                f"- dashboard: {res.get('dashboard_url')}\n\n"
+                                f"📌 مرحله بعد: env vars اضافی را با "
+                                f"`render_set_env_var(service_id='{res.get('service_id')}', ...)` "
+                                f"اضافه کن، یا اگر همه env داده شدند، صبر کن build کامل شود."
+                            ))
+                    elif name == "render_create_redis":
+                        rd_name = (args.get("name") or "").strip()
+                        if not rd_name:
+                            tool_results.append(_tr("name لازم است", is_error=True))
+                            continue
+                        yield ("progress", {
+                            "step": "agent_create_redis",
+                            "message": f"🔴 {_tag} ایجاد Redis '{rd_name}'...",
+                        })
+                        res = await _rs.create_redis(
+                            name=rd_name,
+                            owner_id=(args.get("owner_id") or "").strip() or None,
+                            region=(args.get("region") or "oregon").strip(),
+                            plan=(args.get("plan") or "free").strip(),
+                        )
+                        if not res.get("success"):
+                            tool_results.append(_tr(
+                                f"خطا در ساخت Redis: {res.get('error')}",
+                                is_error=True,
+                            ))
+                        else:
+                            tool_results.append(_tr(
+                                f"✅ Redis ساخته شد:\n"
+                                f"- redis_id: {res.get('redis_id')}\n"
+                                f"- name: {res.get('name')}\n\n"
+                                f"📌 provisioning ~۱-۳ دقیقه. وقتی available شد، "
+                                f"connection string را می‌توانی از Render dashboard "
+                                f"بخوانی و در سرویس‌های نیازمند set کنی."
+                            ))
+                except Exception as _cs_e:
+                    tool_results.append(_tr(
+                        f"خطای create tool: {str(_cs_e)[:200]}",
+                        is_error=True,
+                    ))
+                continue
 
             # 🆕 (postgres-ops) — Render PostgreSQL handlers
             elif name in ("render_list_postgres", "render_get_postgres",
