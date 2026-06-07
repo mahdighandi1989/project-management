@@ -10,7 +10,7 @@ verification_status: pending
 watched_id: 3f34a2b1-2a8d-4ad2-904a-9835a8a5b7c9
 project: mahdighandi1989/project-management
 created_at: '2026-06-07T09:27:58.814224+00:00'
-updated_at: '2026-06-07T09:27:58.814229+00:00'
+updated_at: '2026-06-07T09:31:33.846435+00:00'
 target_files:
 - backend/app/api/routes/analysis.py
 - backend/app/api/routes/project_memory.py
@@ -517,10 +517,10 @@ _(مستقل)_
 
 ## Acceptance Criteria
 
-1. تمام مسیرهای API که `project_id` را می‌پذیرند، Dependency احراز هویت را اعمال می‌کنند.
-2. کاربران فقط می‌توانند به پروژه‌هایی که به آن‌ها دسترسی دارند، دسترسی پیدا کنند.
-3. تلاش برای دسترسی غیرمجاز به `project_id` منجر به خطای 403 Forbidden می‌شود.
-4. تست‌های واحد جدید برای تأیید احراز هویت پروژه اضافه می‌شوند.
+1. تمام مسیرهای API که `project_id` را می‌پذیرند، Dependency احراز هویت را اعمال می‌کنند. _(verify: static)_
+2. کاربران فقط می‌توانند به پروژه‌هایی که به آن‌ها دسترسی دارند، دسترسی پیدا کنند. _(verify: api_response)_
+3. تلاش برای دسترسی غیرمجاز به `project_id` منجر به خطای 403 Forbidden می‌شود. _(verify: api_response)_
+4. تست‌های واحد جدید برای تأیید احراز هویت پروژه اضافه می‌شوند. _(verify: static)_
 
 ## Task Steps
 
