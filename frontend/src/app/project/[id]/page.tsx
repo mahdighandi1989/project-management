@@ -1462,6 +1462,28 @@ export default function ProjectPage() {
                           </ul>
                         </div>
                       )}
+                      {/* 🆕 (infra-filter) — سرویس‌های infra که از plan حذف شدند */}
+                      {(deployAiResult.infra_skipped || []).length > 0 && (
+                        <div className="mt-2 p-2 bg-purple-500/10 border border-purple-500/30 rounded">
+                          <div className="font-bold text-purple-400 mb-1">
+                            ℹ️ سرویس‌های infra که از plan حذف شدند:
+                          </div>
+                          <ul className="text-purple-200 text-[11px]">
+                            {deployAiResult.infra_skipped.map((s: any, i: number) => (
+                              <li key={i}>
+                                • <span className="font-mono">{s.name}</span>{' '}
+                                <span className="opacity-60">
+                                  ({s.role})
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                          <div className="text-purple-300/70 text-[10px] mt-1">
+                            postgres/redis توسط Render API خودکار ساخته می‌شوند.
+                            neo4j/minio/qdrant را در external service (مثل Neo4j Aura) راه‌اندازی کن.
+                          </div>
+                        </div>
+                      )}
                       {/* 🆕 (env auto-fill) — auto_resolved + still_manual */}
                       {(deployAiResult.auto_resolved || []).length > 0 && (
                         <div className="mt-2 p-2 bg-green-500/10 border border-green-500/30 rounded">
