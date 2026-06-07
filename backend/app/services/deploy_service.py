@@ -170,6 +170,11 @@ class RenderDeployService:
             "region": region,
             "databaseName": db_basename,
             "databaseUser": db_basename,
+            # 🐛 (version-required fix) — Render API الان نیاز به version
+            # دارد. screenshot کاربر:
+            # {"message":"version is required"}
+            # Postgres 16 default (latest LTS با pgvector پشتیبانی).
+            "version": "16",
         }
 
         # 🐛 (plan-fallback fix) — Render plan names تغییر کرده. تلاش با
@@ -178,40 +183,53 @@ class RenderDeployService:
         for _fb in ("basic_256mb", "basic_1gb", "starter", "free"):
             if _fb not in _plan_candidates:
                 _plan_candidates.append(_fb)
+        # 🐛 (version-fallback fix) — Render `version is required` خطا
+        # نشان می‌داد. ولی version های پشتیبانی‌شده هم زمان تغییر می‌کند.
+        # try 16 → 15 → 14 برای جامعیت.
+        _version_candidates = ("16", "15", "14")
 
         pg_id: Optional[str] = None
         last_err = ""
-        for _try_plan in _plan_candidates:
-            payload["plan"] = _try_plan
-            try:
-                async with session.post(
-                    f"{self.API_BASE}/postgres", json=payload,
-                ) as r:
-                    txt = await r.text()
-                    if r.status in (200, 201):
-                        created = (
-                            await r.json()
-                            if r.content_type == "application/json"
-                            else {}
-                        )
-                        pg = created.get("postgres") or created
-                        pg_id = pg.get("id") or created.get("id")
-                        if pg_id:
-                            logger.info(
-                                f"provision_postgres: created with plan={_try_plan}"
+        # حلقه‌های nested: ابتدا با version="16" روی plan ها امتحان،
+        # اگر همه plan ها 400 "version" دادند، version بعدی.
+        _success = False
+        for _try_version in _version_candidates:
+            if _success:
+                break
+            payload["version"] = _try_version
+            for _try_plan in _plan_candidates:
+                payload["plan"] = _try_plan
+                try:
+                    async with session.post(
+                        f"{self.API_BASE}/postgres", json=payload,
+                    ) as r:
+                        txt = await r.text()
+                        if r.status in (200, 201):
+                            created = (
+                                await r.json()
+                                if r.content_type == "application/json"
+                                else {}
                             )
-                            break
-                    else:
-                        last_err = f"plan={_try_plan}: {r.status} {txt[:200]}"
-                        # خطای plan-related → ادامه با fallback. سایر خطاها
-                        # (auth, conflict) → بزن بیرون.
-                        if r.status not in (400, 422):
-                            return {
-                                "success": False,
-                                "error": f"create_postgres_failed: {last_err}",
-                            }
-            except Exception as e:
-                last_err = f"plan={_try_plan}: exception {e}"
+                            pg = created.get("postgres") or created
+                            pg_id = pg.get("id") or created.get("id")
+                            if pg_id:
+                                logger.info(
+                                    f"provision_postgres: created with "
+                                    f"plan={_try_plan}, version={_try_version}"
+                                )
+                                _success = True
+                                break
+                        else:
+                            last_err = f"plan={_try_plan} version={_try_version}: {r.status} {txt[:200]}"
+                            # خطای plan-related → ادامه با fallback. سایر خطاها
+                            # (auth, conflict) → بزن بیرون.
+                            if r.status not in (400, 422):
+                                return {
+                                    "success": False,
+                                    "error": f"create_postgres_failed: {last_err}",
+                                }
+                except Exception as e:
+                    last_err = f"plan={_try_plan} version={_try_version}: exception {e}"
 
         if not pg_id:
             return {

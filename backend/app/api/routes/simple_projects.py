@@ -1227,11 +1227,52 @@ async def deploy_project_render_ai(
         elif svc_role == "backend" or svc_role in (
             "worker", "celery-worker", "celery_worker",
         ):
-            # FastAPI/Flask/Django → Python native
+            # 🆕 (smart-start-command) — کشف ساختار module واقعی پروژه از
+            # tree GitHub. Detective-1 ساختار `backend/app/main.py` دارد،
+            # نه `backend/main.py`. start_command پویا بر اساس آنچه واقعاً
+            # موجود است:
+            #   - backend/app/main.py → uvicorn app.main:app
+            #   - backend/main.py     → uvicorn main:app
+            #   - backend/src/main.py → uvicorn src.main:app
+            #   - backend/app/__init__.py + backend/app/main.py → app.main:app
+            # برای celery: همان pattern + کلمه `celery_app` یا `celery` چک
+            # تا اولویت با module جداگانه باشد.
+            _module_path = "main"  # default
+            _celery_module = "main"
+            try:
+                # سعی کن tree را sample کن
+                from .render_logs import _read_github_file as _rgf
+                # ابتدا app/main.py
+                _candidates = [
+                    (f"{svc_root.rstrip('/')}/app/main.py", "app.main"),
+                    (f"{svc_root.rstrip('/')}/src/main.py", "src.main"),
+                    (f"{svc_root.rstrip('/')}/main.py", "main"),
+                    (f"{svc_root.rstrip('/')}/app.py", "app"),
+                ]
+                for _p, _mod in _candidates:
+                    _c = await _rgf(owner, repo_name, _p, branch, github_token)
+                    if _c and len(_c.strip()) > 50:
+                        _module_path = _mod
+                        break
+                # celery: ترجیح با celery_app.py یا celery.py جدا
+                _celery_candidates = [
+                    (f"{svc_root.rstrip('/')}/app/celery_app.py", "app.celery_app"),
+                    (f"{svc_root.rstrip('/')}/celery_app.py", "celery_app"),
+                    (f"{svc_root.rstrip('/')}/app/celery.py", "app.celery"),
+                ]
+                _celery_module = _module_path
+                for _p, _mod in _celery_candidates:
+                    _c = await _rgf(owner, repo_name, _p, branch, github_token)
+                    if _c and len(_c.strip()) > 50:
+                        _celery_module = _mod
+                        break
+            except Exception as _disc_e:
+                logger.warning(f"module path discovery failed: {_disc_e}")
+
             _start = (
-                "uvicorn main:app --host 0.0.0.0 --port $PORT"
+                f"uvicorn {_module_path}:app --host 0.0.0.0 --port $PORT"
                 if svc_role == "backend"
-                else "celery -A main worker --loglevel=info"
+                else f"celery -A {_celery_module} worker --loglevel=info"
             )
             override = {
                 "service_type": "web_service" if svc_role == "backend" else "worker",
@@ -1244,8 +1285,8 @@ async def deploy_project_render_ai(
                 "project_type": "fastapi" if svc_role == "backend" else "python",
                 "notes_append": (
                     f"⚠️ {_why_override} — به Python native تبدیل شد. "
-                    f"اگر start command یا requirements.txt path درست نیست، "
-                    f"در Render dashboard اصلاح کن."
+                    f"start_command پویا تشخیص داده شد: `{_start}`. "
+                    f"اگر هنوز start fail می‌کند، در Render dashboard اصلاح کن."
                 ),
             }
         else:
