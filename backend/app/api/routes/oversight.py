@@ -1522,14 +1522,21 @@ async def idea_draft_start():
             "text": "",
             "created_at": _time_idea_draft.time(),
         }
-    return {"draft_id": draft_id, "chunk_size_max": 256 * 1024}
+    return {"draft_id": draft_id, "chunk_size_max": 32 * 1024}
 
 
 @router.post("/idea-draft/{draft_id}/chunk")
 async def idea_draft_chunk(draft_id: str, request: Request):
-    """Append a UTF-8 text chunk to the draft. Max 256KB per chunk."""
+    """Append a UTF-8 text chunk to the draft.
+
+    🐛 (chunk-size lowered) — کاربر روی save تسک با chunk اول 200KB
+    موفق ولی chunk دوم 403 می‌گرفت (Render edge هر chunk بزرگ‌تر از
+    حدود ~150KB را silently reject می‌کند). 32KB قطعاً از edge عبور
+    می‌کند؛ هزینه‌اش chunkهای بیشتر است (یک payload 200KB حالا 7 chunk
+    می‌شود به‌جای 1) ولی همه موفق.
+    """
     body = await request.body()
-    if len(body) > 256 * 1024:
+    if len(body) > 64 * 1024:
         raise HTTPException(status_code=413, detail="chunk_too_large")
     with _idea_drafts_lock:
         draft = _idea_drafts.get(draft_id)
