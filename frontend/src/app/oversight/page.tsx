@@ -2274,7 +2274,7 @@ export default function OversightPage() {
           // a 413. Encode each candidate chunk and split it precisely
           // at the UTF-8 byte boundary instead of guessing.
           const encoder = new TextEncoder();
-          const byteCap = Math.min(chunk_size_max || 256 * 1024, 200 * 1024);
+          const byteCap = Math.min(chunk_size_max || 32 * 1024, 32 * 1024);
           let off = 0;
           while (off < idea.length) {
             // Start with a generous char-window, then shrink until the
@@ -2610,7 +2610,12 @@ export default function OversightPage() {
             throw new Error(`draft start failed: ${startRes.status}`);
           }
           const { draft_id, chunk_size_max } = await startRes.json();
-          const byteCap = Math.min(chunk_size_max || 256 * 1024, 200 * 1024);
+          // 🐛 (chunk-size cap lowered) — کاربر در DevTools دید که
+          // chunk اول 200KB موفق (200) ولی chunk دوم 403 از Render edge
+          // می‌گرفت (0B response، 41ms). یعنی edge حتی chunkهای ~200KB
+          // را reject می‌کند. 32KB قطعاً عبور می‌کند؛ chunkهای بیشتر
+          // ولی همه موفق. backend هم cap خودش را به 32KB پایین آورده.
+          const byteCap = Math.min(chunk_size_max || 32 * 1024, 32 * 1024);
           const encoder = new TextEncoder();
           let off = 0;
           while (off < payloadJson.length) {
