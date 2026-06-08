@@ -2342,30 +2342,42 @@ export default function OversightPage() {
               return null;
             }
           };
-          // 🛡 (multi-image timeout fix) — With many attached images and
-          // multi-pass mode, backend Anthropic calls can take 5-15s each;
-          // 13 images × 3-4 passes = several minutes of wall-clock. Scale
-          // the cap by attachment count: base 5 min + 1 min per
-          // attachment, capped at 15 min so an honest network failure
-          // still surfaces eventually.
+          // 🛡 (progress-based polling) — User reported: 15-min hard
+          // cap killed a deploy that was still legitimately progressing
+          // (multi-pass with 13 images, percent kept climbing every
+          // ~10s but cap fired at 15 min). Replaced with two open-ended
+          // guards:
+          //   1. ABSOLUTE_MAX_SEC (60 min) — last-resort cap so a true
+          //      runaway process eventually surfaces.
+          //   2. STUCK_THRESHOLD_SEC (4 min) — abort ONLY if no movement
+          //      in stage/percent for 4 minutes. As long as backend is
+          //      reporting forward progress, keep polling.
+          // Backend Anthropic calls ~10-15s each; 4 min of total
+          // silence is a real stall, not normal latency.
           const attachmentCount = validSessionIds.length;
-          const baseSec = 300; // 5 min base
-          const perAttachmentSec = 60; // +1 min per attached file
-          const maxSec = Math.min(
-            15 * 60,
-            baseSec + attachmentCount * perAttachmentSec,
-          );
-          const maxAttempts = Math.ceil(maxSec / 2);
-          // 🛡 (no-progress guard) — also bail if NO poll-progress
-          // movement (snap.found stays false) for 90s straight; that
-          // means the backend track never showed up at all (likely
-          // crashed before logging anything).
+          const ABSOLUTE_MAX_SEC = 60 * 60; // 60 min hard cap
+          const STUCK_THRESHOLD_SEC = 4 * 60; // 4 min no-progress = stuck
+          const TRACK_REGISTER_THRESHOLD_SEC = 90; // 90s for `found:true`
+          const startedAt = Date.now();
           let lastFoundAt = Date.now();
-          for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          let lastProgressKey = ''; // stage + percent + detail signature
+          let lastProgressAt = Date.now();
+          const sawTrack = { v: false };
+          // No fixed maxAttempts — loop until done, stuck, or absolute cap
+          let attempt = 0;
+          while (true) {
+            attempt++;
             await new Promise((r) => setTimeout(r, 2000));
             const snap = await pollOnce();
+            const elapsedSec = Math.floor((Date.now() - startedAt) / 1000);
             if (snap?.found) {
+              sawTrack.v = true;
               lastFoundAt = Date.now();
+              const progressKey = `${snap.stage || ''}::${snap.percent ?? ''}::${snap.detail || ''}`;
+              if (progressKey !== lastProgressKey) {
+                lastProgressKey = progressKey;
+                lastProgressAt = Date.now();
+              }
               if (snap.detail) setGenPhase(`${snap.stage || ''}: ${snap.detail}`);
               if (typeof snap.percent === 'number') {
                 setGenPct(Math.max(8, Math.min(99, snap.percent)));
@@ -2389,24 +2401,29 @@ export default function OversightPage() {
                 break;
               }
             }
-            // 🛡 (no-progress guard) — if 90s pass with the track never
-            // appearing or no `completed` ever, give up early so the
-            // user sees a usable error instead of staring at 5+ min.
-            if (Date.now() - lastFoundAt > 90 * 1000) {
+            // Guard 1: track never registered → backend never started
+            if (!sawTrack.v && (Date.now() - lastFoundAt) > TRACK_REGISTER_THRESHOLD_SEC * 1000) {
               showError(
-                'هیچ پیشرفتی از سرور دریافت نشد — لطفاً دوباره تلاش کنید.',
+                `هیچ پیشرفتی از سرور دریافت نشد (${TRACK_REGISTER_THRESHOLD_SEC} ثانیه) — لطفاً دوباره تلاش کنید.`,
               );
               return;
             }
-          }
-          if (!data) {
-            // include attachment count + elapsed minutes so the user
-            // can decide whether to retry or split the request
-            const minutes = Math.round(maxSec / 60);
-            showError(
-              `زمان پردازش بیش از حد طول کشید (بیش از ${minutes} دقیقه با ${attachmentCount} پیوست) — لطفاً دوباره تلاش کنید یا تعداد پیوست‌ها را کاهش دهید.`,
-            );
-            return;
+            // Guard 2: progress stuck → backend hung mid-processing
+            if (sawTrack.v && (Date.now() - lastProgressAt) > STUCK_THRESHOLD_SEC * 1000) {
+              const stuckMin = Math.round(STUCK_THRESHOLD_SEC / 60);
+              showError(
+                `پردازش بیش از ${stuckMin} دقیقه بدون تغییر مانده — احتمالاً سرور stuck شده. لطفاً دوباره تلاش کنید.`,
+              );
+              return;
+            }
+            // Guard 3: absolute cap → genuine runaway, not just slow
+            if (elapsedSec > ABSOLUTE_MAX_SEC) {
+              const minutes = Math.round(elapsedSec / 60);
+              showError(
+                `زمان پردازش بیش از حد طول کشید (${minutes} دقیقه با ${attachmentCount} پیوست) — لطفاً دوباره تلاش کنید یا تعداد پیوست‌ها را کاهش دهید.`,
+              );
+              return;
+            }
           }
         } else {
           data = initial;

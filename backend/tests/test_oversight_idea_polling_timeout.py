@@ -47,48 +47,69 @@ def test_pollonce_swallows_transient_errors():
     assert "poll-resilience" in src
 
 
-def test_timeout_scales_with_attachment_count():
-    """A bare idea-to-prompt call finishes in seconds; one with 13
-    images + multi-pass takes minutes. The cap must scale per attachment
-    so users with many images don't see a spurious timeout."""
+def test_polling_loop_uses_progress_based_guards_not_fixed_cap():
+    """🛡 v2 — User reported the 15-min hard cap killed a perfectly-
+    healthy multi-image run at 15:00 while backend was still climbing.
+    Replaced by progress-based guards: as long as the snapshot's stage
+    or percent is changing, keep polling. Only abort if (a) NO progress
+    for 4 minutes, (b) track never registered for 90s, or (c) absolute
+    60-min runaway cap is hit."""
     src = _read_oversight_page()
-    # base 5 min, +1 min per attachment, capped at 15 min
-    assert "baseSec = 300" in src, "5-minute base must be preserved"
-    assert "perAttachmentSec = 60" in src, (
-        "must add 60s per attachment so multi-image processing fits"
+    # Stuck threshold (4 min of no progress)
+    assert "STUCK_THRESHOLD_SEC = 4 * 60" in src, (
+        "must define a stuck-progress threshold so legitimately slow "
+        "but advancing processes aren't killed"
     )
-    assert "15 * 60" in src, (
-        "must cap at 15 min so a true backend hang still surfaces"
+    # Absolute runaway cap, much higher than the previous 15-min limit
+    assert "ABSOLUTE_MAX_SEC = 60 * 60" in src, (
+        "absolute cap must be 60 min so big batches finish naturally"
     )
-    # And the loop count derives from the dynamic cap, not the old 150
-    assert "const maxAttempts = Math.ceil(maxSec / 2)" in src, (
-        "maxAttempts must derive from the dynamic cap, not be hardcoded"
+    # Track-register guard (replaces the 90s no-found guard)
+    assert "TRACK_REGISTER_THRESHOLD_SEC = 90" in src
+    # Progress signature compares stage + percent + detail so we detect
+    # genuine forward movement, not just any non-empty snapshot
+    assert "progressKey" in src and "lastProgressAt" in src, (
+        "must compute a progress signature so we know whether the "
+        "snapshot is actually advancing or just being re-emitted"
+    )
+    # No fixed maxAttempts loop — while(true) with the three guards
+    assert "while (true)" in src, (
+        "polling loop must run open-ended; guards decide when to break"
     )
 
 
-def test_no_progress_guard_bails_after_90s_without_track():
+def test_no_progress_guard_bails_when_track_never_registers():
     """If the backend never registers the track (e.g., crashed before
-    logging anything), polling for 5+ min on `found: false` is useless.
-    Bail after 90s of no-progress so the user can retry promptly."""
+    logging anything), polling for many minutes on `found: false` is
+    useless. Bail after 90s so the user can retry promptly."""
     src = _read_oversight_page()
-    assert "no-progress guard" in src
-    assert "lastFoundAt" in src, (
-        "must track the last time poll saw found:true to detect "
-        "complete silence from the backend"
-    )
-    assert "Date.now() - lastFoundAt > 90 * 1000" in src, (
-        "90s no-progress threshold must be enforced inside the polling loop"
+    assert "TRACK_REGISTER_THRESHOLD_SEC" in src
+    assert "sawTrack" in src, (
+        "must track whether poll EVER saw found:true to distinguish "
+        "'track never registered' from 'track active but slow'"
     )
     assert "هیچ پیشرفتی از سرور دریافت نشد" in src
 
 
-def test_timeout_message_mentions_attachment_count():
-    """The final timeout error must tell the user WHY (number of
-    attachments, elapsed minutes) so they can decide whether to retry
-    or split the request — instead of a generic 'try again' that just
-    repeats the same failure."""
+def test_stuck_progress_guard_fires_only_after_4min_silence():
+    """If the backend's progress signature hasn't changed in 4 minutes,
+    something is genuinely stuck. Bail with a clear error so the user
+    can retry instead of waiting on a hung process."""
     src = _read_oversight_page()
-    # The message includes both ${minutes} and ${attachmentCount}
-    assert "${minutes} دقیقه" in src or "${minutes} دقیقه" in src
+    assert "lastProgressAt" in src
+    assert "STUCK_THRESHOLD_SEC * 1000" in src
+    assert "پردازش بیش از" in src and "بدون تغییر مانده" in src, (
+        "stuck-progress error message must clearly distinguish 'stuck' "
+        "from 'long but advancing' so the user knows to retry"
+    )
+
+
+def test_absolute_cap_error_mentions_attachment_count():
+    """If the absolute 60-min cap is hit (genuine runaway), the message
+    must tell the user how many attachments + minutes so they can
+    decide whether to split the request."""
+    src = _read_oversight_page()
+    # The runaway message includes both ${minutes} and ${attachmentCount}
+    assert "${minutes} دقیقه" in src
     assert "${attachmentCount} پیوست" in src
     assert "تعداد پیوست‌ها را کاهش دهید" in src
