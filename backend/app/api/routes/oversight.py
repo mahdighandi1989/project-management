@@ -1327,6 +1327,53 @@ async def create_task(payload: TaskCreate):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+# 🚨 (Render edge body-cap workaround) — `POST /tasks` با payload بزرگ
+# (prompt چند صد KB + task_steps JSON پیچیده) از Render edge cap عبور
+# نمی‌کند و قبل از رسیدن به FastAPI با ERR_FAILED rejected می‌شود
+# (preflight OPTIONS موفق ولی POST خاموش). کاربر علامت کلاسیک:
+#   - console: net::ERR_FAILED روی /api/oversight/tasks
+#   - backend logs: هیچ POST log برای /tasks (فقط OPTIONS)
+#
+# راه حل: همان pattern موجود idea-draft را reuse کنیم — frontend
+# اگر payload بزرگ بود، JSON کامل را chunked به idea-draft آپلود می‌کند،
+# سپس `/tasks/from-draft` را با payload_draft_id کوچک صدا می‌زند.
+@router.post("/tasks/from-draft")
+async def create_task_from_draft(payload_draft_id: str):
+    """ساخت تسک با JSON payload خوانده شده از یک chunked draft.
+
+    Frontend چنک‌های JSON serialize شدهٔ TaskCreate را به
+    `/idea-draft/*` آپلود می‌کند و سپس این endpoint را با draft_id
+    صدا می‌زند. این endpoint draft را consume می‌کند، JSON پارس می‌کند،
+    و همان TaskCreate flow عادی را اجرا می‌کند.
+    """
+    import json as _json_td
+    raw = _consume_idea_draft(payload_draft_id)
+    if raw is None:
+        raise HTTPException(
+            status_code=404,
+            detail="task_payload_draft_not_found_or_expired",
+        )
+    try:
+        data = _json_td.loads(raw)
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"draft_json_parse_error: {str(e)[:200]}",
+        )
+    try:
+        task_payload = TaskCreate(**data)
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"draft_payload_validation_failed: {str(e)[:300]}",
+        )
+    service = get_oversight_service()
+    try:
+        return await service.create_task(task_payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.post("/tasks/from-idea")
 async def task_from_idea(payload: IdeaToPromptRequest):
     """تبدیل ایدهٔ خام به پرامپت قدرتمند (پیش‌نمایش، ذخیره نمی‌شود).

@@ -2471,49 +2471,101 @@ export default function OversightPage() {
       idx++;
       const w = watched.find((x) => x.id === wid);
       try {
-        const res = await fetch(`${API_BASE}/api/oversight/tasks`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            watched_id: wid || null,
-            project_full_name: w?.repo_full_name || '',
-            title: previewPrompt.title,
-            prompt: previewPrompt.prompt,
-            raw_idea: previewPrompt.raw_idea || idea,
-            type: ideaType,
-            priority: ideaPriority,
-            status: 'pending',
-            deadline: ideaDeadline || null,
-            force_create: forceCreate,
-            task_steps: previewPrompt.task_steps || [],
-            overall_completion_pct: previewPrompt.overall_completion_pct ?? null,
-            upload_session_ids: uploadedSessions
-              .filter((s) => ['completed', 'extracting', 'extracted'].includes(s.status))
-              .sort((a, b) => a.file_order - b.file_order)
-              .map((s) => s.session_id),
-            // 🔔 Reminder feature — فقط وقتی type=reminder
-            reminder_at: ideaType === 'reminder' && reminderAt
-              ? new Date(reminderAt).toISOString()
-              : null,
-            reminder_repeat_rule: ideaType === 'reminder' && reminderRepeat
-              ? reminderRepeat
-              : null,
-            // 🆕 (Reference Projects) — هر پروژه‌ای که به‌عنوان مرجع انتخاب
-            // شده، در task entity هم ذخیره می‌شود (نمایش در UI + reuse در
-            // regenerate). خود همین watched حذف می‌شود تا self-reference نباشد.
-            selected_projects: referenceProjectIds
-              .filter((id) => id !== (wid || ''))
-              .map((id) => {
-                const rw = watched.find((x) => x.id === id);
-                return {
-                  project_id: id,
-                  project_path: rw?.repo_full_name || '',
-                  is_selected: true,
-                  focus_notes: (referenceFocusNotes[id] || '').trim(),
-                };
-              }),
-          }),
-        });
+        // 🚨 (Render edge body-cap fix) — payload کامل شامل prompt و
+        // task_steps ممکن است > 500KB شود → Render edge با ERR_FAILED
+        // قبل از رسیدن به backend reject می‌کند. اگر بزرگ بود، اول کل
+        // JSON را chunked به idea-draft آپلود کن سپس /tasks/from-draft
+        // را با draft_id صدا بزن (body تقریباً خالی).
+        const payloadObj = {
+          watched_id: wid || null,
+          project_full_name: w?.repo_full_name || '',
+          title: previewPrompt.title,
+          prompt: previewPrompt.prompt,
+          raw_idea: previewPrompt.raw_idea || idea,
+          type: ideaType,
+          priority: ideaPriority,
+          status: 'pending',
+          deadline: ideaDeadline || null,
+          force_create: forceCreate,
+          task_steps: previewPrompt.task_steps || [],
+          overall_completion_pct: previewPrompt.overall_completion_pct ?? null,
+          upload_session_ids: uploadedSessions
+            .filter((s) => ['completed', 'extracting', 'extracted'].includes(s.status))
+            .sort((a, b) => a.file_order - b.file_order)
+            .map((s) => s.session_id),
+          reminder_at: ideaType === 'reminder' && reminderAt
+            ? new Date(reminderAt).toISOString()
+            : null,
+          reminder_repeat_rule: ideaType === 'reminder' && reminderRepeat
+            ? reminderRepeat
+            : null,
+          selected_projects: referenceProjectIds
+            .filter((id) => id !== (wid || ''))
+            .map((id) => {
+              const rw = watched.find((x) => x.id === id);
+              return {
+                project_id: id,
+                project_path: rw?.repo_full_name || '',
+                is_selected: true,
+                focus_notes: (referenceFocusNotes[id] || '').trim(),
+              };
+            }),
+        };
+        const payloadJson = JSON.stringify(payloadObj);
+        const payloadBytes = new TextEncoder().encode(payloadJson).length;
+
+        // 500KB threshold — comfortable margin under Render's ~1MB cap
+        const LARGE_THRESHOLD = 500 * 1024;
+        let res: Response;
+
+        if (payloadBytes > LARGE_THRESHOLD) {
+          // chunked upload: start → chunks → from-draft
+          const startRes = await fetch(
+            `${API_BASE}/api/oversight/idea-draft/start`,
+            { method: 'POST' },
+          );
+          if (!startRes.ok) {
+            throw new Error(`draft start failed: ${startRes.status}`);
+          }
+          const { draft_id, chunk_size_max } = await startRes.json();
+          const byteCap = Math.min(chunk_size_max || 256 * 1024, 200 * 1024);
+          const encoder = new TextEncoder();
+          let off = 0;
+          while (off < payloadJson.length) {
+            let end = Math.min(payloadJson.length, off + byteCap);
+            let chunk = payloadJson.slice(off, end);
+            let encoded = encoder.encode(chunk);
+            // UTF-8 byte cap (Persian text is ~2 bytes/char)
+            while (encoded.length > byteCap && end > off + 1) {
+              end = off + Math.floor((end - off) * 0.85);
+              chunk = payloadJson.slice(off, end);
+              encoded = encoder.encode(chunk);
+            }
+            const chunkRes = await fetch(
+              `${API_BASE}/api/oversight/idea-draft/${encodeURIComponent(draft_id)}/chunk`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+                body: encoded,
+              },
+            );
+            if (!chunkRes.ok) {
+              throw new Error(`chunk upload failed: ${chunkRes.status}`);
+            }
+            off = end;
+          }
+          // trigger the actual task creation with the tiny draft_id
+          res = await fetch(
+            `${API_BASE}/api/oversight/tasks/from-draft?payload_draft_id=${encodeURIComponent(draft_id)}`,
+            { method: 'POST' },
+          );
+        } else {
+          res = await fetch(`${API_BASE}/api/oversight/tasks`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: payloadJson,
+          });
+        }
         if (res.ok) {
           const result = await res.json();
           if (result.status === 'duplicate_detected' && !forceCreate) {
