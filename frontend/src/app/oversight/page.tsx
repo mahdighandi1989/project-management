@@ -1574,6 +1574,21 @@ export default function OversightPage() {
   const [generating, setGenerating] = useState(false);
   const [genPhase, setGenPhase] = useState('');
   const [genPct, setGenPct] = useState(0);
+  // 🛡 (no-fixed-timeout v3) — کاربر گزارش داد که timeout های زمانی
+  // (15 min, 60 min stuck, 90s no-progress) همگی در سناریوی واقعی
+  // غلط فعال می‌شدند. در multi-image multi-pass، آخرین مرحله (merge
+  // final) چند دقیقه روی یک Anthropic call طول می‌کشد بدون اینکه
+  // percent جدید بفرستد → frontend اشتباه stuck تشخیص می‌دهد.
+  // راه‌حل: حذف کامل timeout های زمانی. تنها راه‌های قطع polling:
+  //   1) backend completed/error می‌دهد
+  //   2) کاربر دکمهٔ لغو می‌زند (cancelGen = true)
+  //   3) چند poll پشت سر هم network-fail می‌شود (track wipe)
+  // مدت زمان سپری شده در UI نشان داده می‌شود تا کاربر خودش تصمیم بگیرد.
+  const [cancelGen, setCancelGen] = useState(false);
+  const [genElapsedSec, setGenElapsedSec] = useState(0);
+  // ref for synchronous access inside the polling closure (state would
+  // capture the initial value)
+  const cancelGenRef = useRef(false);
   const [previewPrompt, setPreviewPrompt] = useState<{
     title: string;
     prompt: string;
@@ -2323,107 +2338,104 @@ export default function OversightPage() {
         if (initial?.async && initial?.track_id) {
           // Poll progress endpoint until completed=true
           setGenPhase('در حال پردازش (در پس‌زمینه)...');
-          const pollOnce = async (): Promise<any> => {
+          // 🛡 (no-fixed-timeout v3) — کاربر ۱ ساعت صبر کرد روی ۱۳
+          // تصویر، آخرین مرحلهٔ merge نهایی روی Anthropic call طول
+          // می‌کشید (هیچ percent جدید نمی‌فرستاد) و من اشتباه stuck
+          // تشخیص دادم. درس: هر threshold زمانی خودسرانه در یک
+          // سناریوی واقعی غلط فعال می‌شود. الان فقط ۳ راه قطع polling:
+          //   1) backend می‌گوید completed=true
+          //   2) backend می‌گوید error
+          //   3) کاربر دکمهٔ لغو می‌زند (cancelGenRef.current=true)
+          //   4) چندین poll پشت سر هم 404 → track wipe
+          // مدت زمان سپری شده + دکمهٔ لغو در UI ست می‌شود.
+          const pollOnce = async (): Promise<{
+            data: any;
+            transient: boolean;
+            gone?: boolean;
+          }> => {
             try {
               const pr = await fetch(
                 `${API_BASE}/api/oversight/progress/${initial.track_id}`,
               );
-              if (!pr.ok) {
-                // 🛡 (poll-resilience) — Render edge sometimes returns
-                // 502/503 briefly while backend is mid-Anthropic call.
-                // Don't throw → would abort the polling and surface a
-                // misleading "timeout" error. Just skip this poll and try
-                // again next tick.
-                return null;
+              if (pr.status === 404) {
+                return { data: null, transient: false, gone: true };
               }
-              return await pr.json();
+              if (!pr.ok) {
+                return { data: null, transient: true };
+              }
+              return { data: await pr.json(), transient: false };
             } catch {
-              // network blip → swallow, try again
-              return null;
+              return { data: null, transient: true };
             }
           };
-          // 🛡 (progress-based polling) — User reported: 15-min hard
-          // cap killed a deploy that was still legitimately progressing
-          // (multi-pass with 13 images, percent kept climbing every
-          // ~10s but cap fired at 15 min). Replaced with two open-ended
-          // guards:
-          //   1. ABSOLUTE_MAX_SEC (60 min) — last-resort cap so a true
-          //      runaway process eventually surfaces.
-          //   2. STUCK_THRESHOLD_SEC (4 min) — abort ONLY if no movement
-          //      in stage/percent for 4 minutes. As long as backend is
-          //      reporting forward progress, keep polling.
-          // Backend Anthropic calls ~10-15s each; 4 min of total
-          // silence is a real stall, not normal latency.
-          const attachmentCount = validSessionIds.length;
-          const ABSOLUTE_MAX_SEC = 60 * 60; // 60 min hard cap
-          const STUCK_THRESHOLD_SEC = 4 * 60; // 4 min no-progress = stuck
-          const TRACK_REGISTER_THRESHOLD_SEC = 90; // 90s for `found:true`
+          cancelGenRef.current = false;
+          setCancelGen(false);
+          setGenElapsedSec(0);
           const startedAt = Date.now();
-          let lastFoundAt = Date.now();
-          let lastProgressKey = ''; // stage + percent + detail signature
-          let lastProgressAt = Date.now();
-          const sawTrack = { v: false };
-          // No fixed maxAttempts — loop until done, stuck, or absolute cap
-          let attempt = 0;
-          while (true) {
-            attempt++;
-            await new Promise((r) => setTimeout(r, 2000));
-            const snap = await pollOnce();
-            const elapsedSec = Math.floor((Date.now() - startedAt) / 1000);
-            if (snap?.found) {
-              sawTrack.v = true;
-              lastFoundAt = Date.now();
-              const progressKey = `${snap.stage || ''}::${snap.percent ?? ''}::${snap.detail || ''}`;
-              if (progressKey !== lastProgressKey) {
-                lastProgressKey = progressKey;
-                lastProgressAt = Date.now();
-              }
-              if (snap.detail) setGenPhase(`${snap.stage || ''}: ${snap.detail}`);
-              if (typeof snap.percent === 'number') {
-                setGenPct(Math.max(8, Math.min(99, snap.percent)));
-              }
-              if (snap.completed) {
-                if (snap.error) {
-                  // Blocked-vision-model is surfaced as result.blocked_payload
-                  const bp = snap.result?.blocked_payload;
-                  if (bp) {
-                    setModelBlockModal({
-                      candidates: bp.candidates || [],
-                      mime_type: bp.mime_type,
-                      session_id: bp.session_id,
-                    });
-                    return;
-                  }
-                  showError(snap.error || 'خطا در تولید پرامپت');
-                  return;
-                }
-                data = snap.result;
+          const elapsedTimer = setInterval(() => {
+            setGenElapsedSec(Math.floor((Date.now() - startedAt) / 1000));
+          }, 1000);
+          let consecutiveGone = 0;
+          let userCancelled = false;
+          try {
+            while (true) {
+              if (cancelGenRef.current) {
+                userCancelled = true;
                 break;
               }
+              await new Promise((r) => setTimeout(r, 2000));
+              if (cancelGenRef.current) {
+                userCancelled = true;
+                break;
+              }
+              const pollResult = await pollOnce();
+              if (pollResult.gone) {
+                consecutiveGone++;
+                if (consecutiveGone >= 5) {
+                  // 5 × 2s = 10s of consistent 404 → backend wiped track
+                  showError(
+                    'session را backend پیدا نکرد (track حذف شده) — احتمالاً سرور restart شد. لطفاً دوباره تلاش کنید.',
+                  );
+                  return;
+                }
+                continue;
+              }
+              consecutiveGone = 0;
+              const snap = pollResult.data;
+              if (snap?.found) {
+                if (snap.detail) setGenPhase(`${snap.stage || ''}: ${snap.detail}`);
+                if (typeof snap.percent === 'number') {
+                  setGenPct(Math.max(8, Math.min(99, snap.percent)));
+                }
+                if (snap.completed) {
+                  if (snap.error) {
+                    // Blocked-vision-model is surfaced as result.blocked_payload
+                    const bp = snap.result?.blocked_payload;
+                    if (bp) {
+                      setModelBlockModal({
+                        candidates: bp.candidates || [],
+                        mime_type: bp.mime_type,
+                        session_id: bp.session_id,
+                      });
+                      return;
+                    }
+                    showError(snap.error || 'خطا در تولید پرامپت');
+                    return;
+                  }
+                  data = snap.result;
+                  break;
+                }
+              }
             }
-            // Guard 1: track never registered → backend never started
-            if (!sawTrack.v && (Date.now() - lastFoundAt) > TRACK_REGISTER_THRESHOLD_SEC * 1000) {
-              showError(
-                `هیچ پیشرفتی از سرور دریافت نشد (${TRACK_REGISTER_THRESHOLD_SEC} ثانیه) — لطفاً دوباره تلاش کنید.`,
-              );
-              return;
-            }
-            // Guard 2: progress stuck → backend hung mid-processing
-            if (sawTrack.v && (Date.now() - lastProgressAt) > STUCK_THRESHOLD_SEC * 1000) {
-              const stuckMin = Math.round(STUCK_THRESHOLD_SEC / 60);
-              showError(
-                `پردازش بیش از ${stuckMin} دقیقه بدون تغییر مانده — احتمالاً سرور stuck شده. لطفاً دوباره تلاش کنید.`,
-              );
-              return;
-            }
-            // Guard 3: absolute cap → genuine runaway, not just slow
-            if (elapsedSec > ABSOLUTE_MAX_SEC) {
-              const minutes = Math.round(elapsedSec / 60);
-              showError(
-                `زمان پردازش بیش از حد طول کشید (${minutes} دقیقه با ${attachmentCount} پیوست) — لطفاً دوباره تلاش کنید یا تعداد پیوست‌ها را کاهش دهید.`,
-              );
-              return;
-            }
+          } finally {
+            clearInterval(elapsedTimer);
+          }
+          if (userCancelled) {
+            const elapsedMin = Math.round((Date.now() - startedAt) / 60000);
+            showError(
+              `پردازش توسط کاربر لغو شد (پس از ${elapsedMin} دقیقه).`,
+            );
+            return;
           }
         } else {
           data = initial;
@@ -4270,6 +4282,26 @@ export default function OversightPage() {
                     style={{ width: `${genPct}%` }}
                   />
                 </div>
+                {/* 🛡 (no-fixed-timeout v3) — مدت زمان سپری شده + دکمهٔ لغو
+                    تا کاربر خودش تصمیم بگیرد چقدر صبر کند بدون اینکه
+                    سیستم خودسرانه قطع کند. */}
+                {genElapsedSec > 0 && (
+                  <div className="flex items-center justify-between mt-2 text-[11px]">
+                    <span className="text-purple-600/70 dark:text-purple-400/70">
+                      ⏱ سپری شده: {Math.floor(genElapsedSec / 60)} دقیقه {genElapsedSec % 60} ثانیه
+                    </span>
+                    <button
+                      onClick={() => {
+                        cancelGenRef.current = true;
+                        setCancelGen(true);
+                      }}
+                      disabled={cancelGen}
+                      className="px-2 py-1 rounded bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300 hover:bg-red-200 dark:hover:bg-red-900/50 disabled:opacity-50 text-[11px]"
+                    >
+                      {cancelGen ? '⏳ در حال لغو...' : '✕ لغو پردازش'}
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 
