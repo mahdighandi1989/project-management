@@ -2324,16 +2324,48 @@ export default function OversightPage() {
           // Poll progress endpoint until completed=true
           setGenPhase('در حال پردازش (در پس‌زمینه)...');
           const pollOnce = async (): Promise<any> => {
-            const pr = await fetch(`${API_BASE}/api/oversight/progress/${initial.track_id}`);
-            if (!pr.ok) throw new Error(`HTTP ${pr.status}`);
-            return pr.json();
+            try {
+              const pr = await fetch(
+                `${API_BASE}/api/oversight/progress/${initial.track_id}`,
+              );
+              if (!pr.ok) {
+                // 🛡 (poll-resilience) — Render edge sometimes returns
+                // 502/503 briefly while backend is mid-Anthropic call.
+                // Don't throw → would abort the polling and surface a
+                // misleading "timeout" error. Just skip this poll and try
+                // again next tick.
+                return null;
+              }
+              return await pr.json();
+            } catch {
+              // network blip → swallow, try again
+              return null;
+            }
           };
-          // up to 5 minutes
-          const maxAttempts = 150;
+          // 🛡 (multi-image timeout fix) — With many attached images and
+          // multi-pass mode, backend Anthropic calls can take 5-15s each;
+          // 13 images × 3-4 passes = several minutes of wall-clock. Scale
+          // the cap by attachment count: base 5 min + 1 min per
+          // attachment, capped at 15 min so an honest network failure
+          // still surfaces eventually.
+          const attachmentCount = validSessionIds.length;
+          const baseSec = 300; // 5 min base
+          const perAttachmentSec = 60; // +1 min per attached file
+          const maxSec = Math.min(
+            15 * 60,
+            baseSec + attachmentCount * perAttachmentSec,
+          );
+          const maxAttempts = Math.ceil(maxSec / 2);
+          // 🛡 (no-progress guard) — also bail if NO poll-progress
+          // movement (snap.found stays false) for 90s straight; that
+          // means the backend track never showed up at all (likely
+          // crashed before logging anything).
+          let lastFoundAt = Date.now();
           for (let attempt = 0; attempt < maxAttempts; attempt++) {
             await new Promise((r) => setTimeout(r, 2000));
             const snap = await pollOnce();
             if (snap?.found) {
+              lastFoundAt = Date.now();
               if (snap.detail) setGenPhase(`${snap.stage || ''}: ${snap.detail}`);
               if (typeof snap.percent === 'number') {
                 setGenPct(Math.max(8, Math.min(99, snap.percent)));
@@ -2357,9 +2389,23 @@ export default function OversightPage() {
                 break;
               }
             }
+            // 🛡 (no-progress guard) — if 90s pass with the track never
+            // appearing or no `completed` ever, give up early so the
+            // user sees a usable error instead of staring at 5+ min.
+            if (Date.now() - lastFoundAt > 90 * 1000) {
+              showError(
+                'هیچ پیشرفتی از سرور دریافت نشد — لطفاً دوباره تلاش کنید.',
+              );
+              return;
+            }
           }
           if (!data) {
-            showError('زمان پردازش بیش از حد طول کشید — لطفاً دوباره تلاش کنید');
+            // include attachment count + elapsed minutes so the user
+            // can decide whether to retry or split the request
+            const minutes = Math.round(maxSec / 60);
+            showError(
+              `زمان پردازش بیش از حد طول کشید (بیش از ${minutes} دقیقه با ${attachmentCount} پیوست) — لطفاً دوباره تلاش کنید یا تعداد پیوست‌ها را کاهش دهید.`,
+            );
             return;
           }
         } else {
