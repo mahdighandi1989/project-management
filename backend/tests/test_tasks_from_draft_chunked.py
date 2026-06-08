@@ -69,7 +69,15 @@ def test_tasks_from_draft_returns_404_when_draft_missing():
 def test_frontend_uses_chunked_upload_above_threshold():
     """Source pin: oversight/page.tsx savePromptAsTask must check the
     JSON byte size and switch to the chunked /idea-draft + from-draft
-    path when above the 500KB threshold."""
+    path when above the LARGE_THRESHOLD.
+
+    🐛 (regression guard) — Threshold must stay at 50KB (= 50 * 1024).
+    کاربر روی Lifemanager با 500KB ای که قبلاً ست شده بود همچنان «network
+    — Failed to fetch» می‌دید چون payload ~100-200KB بود ولی Render edge
+    قبل از 500KB body را reject می‌کرد. مرز ایمن همان 50KB است که
+    /idea-draft هم استفاده می‌کند. اگر کسی این عدد را بالا برد، bug
+    دوباره برمی‌گردد.
+    """
     src = (
         Path(__file__).resolve().parents[2]
         / "frontend/src/app/oversight/page.tsx"
@@ -77,6 +85,10 @@ def test_frontend_uses_chunked_upload_above_threshold():
     # Threshold + size measurement
     assert "LARGE_THRESHOLD" in src, (
         "must define a threshold for switching to chunked upload"
+    )
+    assert "LARGE_THRESHOLD = 50 * 1024" in src, (
+        "threshold must stay at 50KB — higher values let payloads through "
+        "that Render edge silently rejects (Failed to fetch with no logs)"
     )
     assert "new TextEncoder().encode(payloadJson)" in src, (
         "must measure UTF-8 byte size of the JSON payload (not just .length "

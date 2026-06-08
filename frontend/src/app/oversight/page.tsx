@@ -2589,8 +2589,15 @@ export default function OversightPage() {
         const payloadJson = JSON.stringify(payloadObj);
         const payloadBytes = new TextEncoder().encode(payloadJson).length;
 
-        // 500KB threshold — comfortable margin under Render's ~1MB cap
-        const LARGE_THRESHOLD = 500 * 1024;
+        // 🐛 (lowered threshold) — کاربر روی mahdighandi1989/Lifemanager
+        // با تسک 13-مرحله‌ای Persian (~100-200KB) همچنان «network — Failed
+        // to fetch» می‌دید. هیچ POST لاگی به /tasks در backend نرسید =>
+        // Render edge قبل از رسیدن body را reject کرد. سقف واقعی Render
+        // به‌مراتب کمتر از 1MB است که قبلاً فرض شده بود. /idea-draft هم
+        // در ~50KB سوئیچ می‌کند؛ همان آستانه را برای save تسک هم به کار
+        // می‌بریم. هزینه‌اش: یک round-trip اضافی تنها برای تسک‌های متوسط
+        // به بالا — وقتی edge body سالم نیست، این هزینه ناچیزی است.
+        const LARGE_THRESHOLD = 50 * 1024;
         let res: Response;
 
         if (payloadBytes > LARGE_THRESHOLD) {
