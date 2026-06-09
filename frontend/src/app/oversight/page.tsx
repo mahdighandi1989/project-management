@@ -2276,7 +2276,15 @@ export default function OversightPage() {
           const encoder = new TextEncoder();
           const byteCap = Math.min(chunk_size_max || 32 * 1024, 32 * 1024);
           let off = 0;
+          // 🐛 (Cloudflare rate-limit) — POSTهای پشت‌سرهم به یک URL در
+          // CF rate-limit می‌افتند و 403 می‌گیرند. تأخیر 350ms بین
+          // chunkها + یک retry با تأخیر بیشتر برای ایمنی.
+          let chunkIdx = 0;
           while (off < idea.length) {
+            if (chunkIdx > 0) {
+              await new Promise((res) => setTimeout(res, 350));
+            }
+            chunkIdx++;
             // Start with a generous char-window, then shrink until the
             // encoded byte length fits the cap.
             let end = Math.min(idea.length, off + byteCap);
@@ -2287,11 +2295,19 @@ export default function OversightPage() {
               chunk = idea.slice(off, end);
               encoded = encoder.encode(chunk);
             }
-            const r = await fetch(`${API_BASE}/api/oversight/idea-draft/${draft_id}/chunk`, {
+            let r = await fetch(`${API_BASE}/api/oversight/idea-draft/${draft_id}/chunk`, {
               method: 'POST',
               headers: { 'Content-Type': 'text/plain;charset=utf-8' },
               body: encoded,
             });
+            if (r.status === 403) {
+              await new Promise((res) => setTimeout(res, 1500));
+              r = await fetch(`${API_BASE}/api/oversight/idea-draft/${draft_id}/chunk`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                body: encoded,
+              });
+            }
             if (!r.ok) throw new Error(`draft/chunk HTTP ${r.status}`);
             off = end;
           }
@@ -2618,7 +2634,18 @@ export default function OversightPage() {
           const byteCap = Math.min(chunk_size_max || 32 * 1024, 32 * 1024);
           const encoder = new TextEncoder();
           let off = 0;
+          // 🐛 (Cloudflare rate-limit) — کاربر در DevTools نشان داد که
+          // chunk دوم با 403 از سرور Cloudflare (نه Render) reject می‌شود
+          // (cf-ray header + text/html error page + no CORS headers).
+          // علت 403: POSTهای پشت‌سرهم به یک URL در رات‌لیمیت Cloudflare
+          // می‌افتند. حجم chunk مهم نیست — ریت ارسال است. تأخیر بین
+          // chunkها از rate-limit عبور می‌کند.
+          let chunkIdx = 0;
           while (off < payloadJson.length) {
+            if (chunkIdx > 0) {
+              await new Promise((r) => setTimeout(r, 350));
+            }
+            chunkIdx++;
             let end = Math.min(payloadJson.length, off + byteCap);
             let chunk = payloadJson.slice(off, end);
             let encoded = encoder.encode(chunk);
@@ -2628,7 +2655,9 @@ export default function OversightPage() {
               chunk = payloadJson.slice(off, end);
               encoded = encoder.encode(chunk);
             }
-            const chunkRes = await fetch(
+            // 🛡 (Cloudflare 403 retry) — اگر باز هم rate-limit خورد،
+            // یک بار با تأخیر بیشتر retry کن
+            let chunkRes = await fetch(
               `${API_BASE}/api/oversight/idea-draft/${encodeURIComponent(draft_id)}/chunk`,
               {
                 method: 'POST',
@@ -2636,6 +2665,17 @@ export default function OversightPage() {
                 body: encoded,
               },
             );
+            if (chunkRes.status === 403) {
+              await new Promise((r) => setTimeout(r, 1500));
+              chunkRes = await fetch(
+                `${API_BASE}/api/oversight/idea-draft/${encodeURIComponent(draft_id)}/chunk`,
+                {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+                  body: encoded,
+                },
+              );
+            }
             if (!chunkRes.ok) {
               throw new Error(`chunk upload failed: ${chunkRes.status}`);
             }
