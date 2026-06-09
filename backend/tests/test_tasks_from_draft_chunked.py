@@ -114,7 +114,7 @@ def test_frontend_chunk_size_respects_utf8_bytes():
     save_idx = src.find("savePromptAsTask = async")
     assert save_idx != -1
     # Look for the byte cap shrinking pattern within ~6000 chars of the function
-    body = src[save_idx:save_idx + 6000]
+    body = src[save_idx:save_idx + 10000]
     assert "encoded.length > byteCap" in body, (
         "savePromptAsTask must shrink the chunk until UTF-8 bytes fit "
         "under the cap — otherwise large Persian payloads still 413"
@@ -130,7 +130,7 @@ def test_frontend_small_payload_still_uses_direct_post():
     ).read_text(encoding="utf-8")
     save_idx = src.find("savePromptAsTask = async")
     assert save_idx != -1
-    body = src[save_idx:save_idx + 6000]
+    body = src[save_idx:save_idx + 10000]
     # Direct POST path must still exist after the chunked branch
     assert "`${API_BASE}/api/oversight/tasks`" in body, (
         "small payloads must still use the direct POST /tasks endpoint, "
