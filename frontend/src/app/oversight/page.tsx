@@ -2562,11 +2562,6 @@ export default function OversightPage() {
       idx++;
       const w = watched.find((x) => x.id === wid);
       try {
-        // 🚨 (Render edge body-cap fix) — payload کامل شامل prompt و
-        // task_steps ممکن است > 500KB شود → Render edge با ERR_FAILED
-        // قبل از رسیدن به backend reject می‌کند. اگر بزرگ بود، اول کل
-        // JSON را chunked به idea-draft آپلود کن سپس /tasks/from-draft
-        // را با draft_id صدا بزن (body تقریباً خالی).
         const payloadObj = {
           watched_id: wid || null,
           project_full_name: w?.repo_full_name || '',
@@ -2603,96 +2598,26 @@ export default function OversightPage() {
             }),
         };
         const payloadJson = JSON.stringify(payloadObj);
-        const payloadBytes = new TextEncoder().encode(payloadJson).length;
 
-        // 🐛 (lowered threshold) — کاربر روی mahdighandi1989/Lifemanager
-        // با تسک 13-مرحله‌ای Persian (~100-200KB) همچنان «network — Failed
-        // to fetch» می‌دید. هیچ POST لاگی به /tasks در backend نرسید =>
-        // Render edge قبل از رسیدن body را reject کرد. سقف واقعی Render
-        // به‌مراتب کمتر از 1MB است که قبلاً فرض شده بود. /idea-draft هم
-        // در ~50KB سوئیچ می‌کند؛ همان آستانه را برای save تسک هم به کار
-        // می‌بریم. هزینه‌اش: یک round-trip اضافی تنها برای تسک‌های متوسط
-        // به بالا — وقتی edge body سالم نیست، این هزینه ناچیزی است.
-        const LARGE_THRESHOLD = 50 * 1024;
-        let res: Response;
-
-        if (payloadBytes > LARGE_THRESHOLD) {
-          // chunked upload: start → chunks → from-draft
-          const startRes = await fetch(
-            `${API_BASE}/api/oversight/idea-draft/start`,
-            { method: 'POST' },
-          );
-          if (!startRes.ok) {
-            throw new Error(`draft start failed: ${startRes.status}`);
-          }
-          const { draft_id, chunk_size_max } = await startRes.json();
-          // 🐛 (chunk-size cap lowered) — کاربر در DevTools دید که
-          // chunk اول 200KB موفق (200) ولی chunk دوم 403 از Render edge
-          // می‌گرفت (0B response، 41ms). یعنی edge حتی chunkهای ~200KB
-          // را reject می‌کند. 32KB قطعاً عبور می‌کند؛ chunkهای بیشتر
-          // ولی همه موفق. backend هم cap خودش را به 32KB پایین آورده.
-          const byteCap = Math.min(chunk_size_max || 32 * 1024, 32 * 1024);
-          const encoder = new TextEncoder();
-          let off = 0;
-          // 🐛 (Cloudflare rate-limit) — کاربر در DevTools نشان داد که
-          // chunk دوم با 403 از سرور Cloudflare (نه Render) reject می‌شود
-          // (cf-ray header + text/html error page + no CORS headers).
-          // علت 403: POSTهای پشت‌سرهم به یک URL در رات‌لیمیت Cloudflare
-          // می‌افتند. حجم chunk مهم نیست — ریت ارسال است. تأخیر بین
-          // chunkها از rate-limit عبور می‌کند.
-          let chunkIdx = 0;
-          while (off < payloadJson.length) {
-            if (chunkIdx > 0) {
-              await new Promise((r) => setTimeout(r, 350));
-            }
-            chunkIdx++;
-            let end = Math.min(payloadJson.length, off + byteCap);
-            let chunk = payloadJson.slice(off, end);
-            let encoded = encoder.encode(chunk);
-            // UTF-8 byte cap (Persian text is ~2 bytes/char)
-            while (encoded.length > byteCap && end > off + 1) {
-              end = off + Math.floor((end - off) * 0.85);
-              chunk = payloadJson.slice(off, end);
-              encoded = encoder.encode(chunk);
-            }
-            // 🛡 (Cloudflare 403 retry) — اگر باز هم rate-limit خورد،
-            // یک بار با تأخیر بیشتر retry کن
-            let chunkRes = await fetch(
-              `${API_BASE}/api/oversight/idea-draft/${encodeURIComponent(draft_id)}/chunk`,
-              {
-                method: 'POST',
-                headers: { 'Content-Type': 'text/plain; charset=utf-8' },
-                body: encoded,
-              },
-            );
-            if (chunkRes.status === 403) {
-              await new Promise((r) => setTimeout(r, 1500));
-              chunkRes = await fetch(
-                `${API_BASE}/api/oversight/idea-draft/${encodeURIComponent(draft_id)}/chunk`,
-                {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'text/plain; charset=utf-8' },
-                  body: encoded,
-                },
-              );
-            }
-            if (!chunkRes.ok) {
-              throw new Error(`chunk upload failed: ${chunkRes.status}`);
-            }
-            off = end;
-          }
-          // trigger the actual task creation with the tiny draft_id
-          res = await fetch(
-            `${API_BASE}/api/oversight/tasks/from-draft?payload_draft_id=${encodeURIComponent(draft_id)}`,
-            { method: 'POST' },
-          );
-        } else {
-          res = await fetch(`${API_BASE}/api/oversight/tasks`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: payloadJson,
-          });
-        }
+        // 🐛 (Cloudflare/Render 403 — chunked path هم شکست خورد)
+        // کاربر روی موبایل با هر strategy chunked پی‌در‌پی 403 خالی از
+        // Cloudflare می‌گرفت — حتی با pacing 350ms و retry 1500ms. علتش
+        // یک rate-limiter بود که حساس به ریت POSTهای text/plain به مسیر
+        // /chunk است. حدس کاربر «طولانی بودن payload» در سطح اپ نیست،
+        // ولی شکل ارسال (چندین POST سریع text/plain) مشکل است.
+        //
+        // راه حل: یک POST مستقیم با Content-Type=application/octet-stream
+        // و body=binary-encoded JSON. این سه چیز را همزمان عوض می‌کند:
+        //   1. یک request به‌جای چندین (rate-limiter trigger نمی‌شود)
+        //   2. octet-stream به‌جای text/plain (WAF signature متفاوت)
+        //   3. preflight OPTIONS اجبار می‌شود (CORS approved request)
+        // backend `/tasks` حالا octet-stream را هم می‌پذیرد و body را
+        // به‌صورت bytes می‌خواند و دستی JSON parse می‌کند.
+        const res = await fetch(`${API_BASE}/api/oversight/tasks`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: new TextEncoder().encode(payloadJson),
+        });
         if (res.ok) {
           const result = await res.json();
           if (result.status === 'duplicate_detected' && !forceCreate) {
