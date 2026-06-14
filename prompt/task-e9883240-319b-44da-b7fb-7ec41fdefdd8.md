@@ -10,7 +10,7 @@ verification_status: pending
 watched_id: 3f34a2b1-2a8d-4ad2-904a-9835a8a5b7c9
 project: mahdighandi1989/project-management
 created_at: '2026-06-07T09:30:52.973039+00:00'
-updated_at: '2026-06-07T09:35:38.071273+00:00'
+updated_at: '2026-06-14T09:41:41.623469+00:00'
 target_files:
 - backend/app/api/routes/external_prompts.py
 ---
@@ -29,6 +29,22 @@ silent flag حیاتی است — تفاوت بین «کاربر را disturb ک
 - علت: silent flag صریحاً ست نشده — پیش‌فرض ممکن است برای event مناسب نباشد
 ---
 [scan #2 at 2026-06-07T09:30:53.604394+00:00]
+## 📋 شرح
+در `backend/app/api/routes/external_prompts.py` یک `notify_event` call پیدا شد که اولین پارامتر (event_type) رشته‌ای ساده/مبهم است یا خالی.
+
+## 🤔 چرا مهم است
+event_type کلید routing و filter در سیستم notification است. بدون آن، نمی‌توان آن event را به‌صورت per-event mute/customize کرد.
+
+## 🔍
+---
+[scan #3 at 2026-06-14T09:41:41.267491+00:00]
+## 📋 شرح
+در `backend/app/api/routes/external_prompts.py` یک notification call پیدا شد که `silent=` صریح تعیین نکرده. event_type: `?`.
+
+## 🤔 چرا مهم است
+silent flag حیاتی است — تفاوت بین «کاربر را disturb کن (critical)» و «در پس‌زمینه لاگ کن (routine)». بدون این، behavior به default وابسته است که در 
+---
+[scan #4 at 2026-06-14T09:41:41.623459+00:00]
 ## 📋 شرح
 در `backend/app/api/routes/external_prompts.py` یک `notify_event` call پیدا شد که اولین پارامتر (event_type) رشته‌ای ساده/مبهم است یا خالی.
 
