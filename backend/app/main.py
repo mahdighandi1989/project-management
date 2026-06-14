@@ -185,16 +185,28 @@ async def lifespan(app: FastAPI):
                 if not _ggt():
                     return
                 svc = _gos2()
+                # 🐛 (gate-on-claude-runner) — bootstrap sync فقط برای
+                # پروژه‌هایی که «اجرای خودکار» (claude_runner_enabled) آن‌ها
+                # روشن است. قبلاً همه پروژه‌های با prompt_sync_enabled=True
+                # (پیش‌فرض) را sync می‌کرد و روی هر redeploy ده‌ها commit
+                # روی ریپوهای پروژه‌های کاربر می‌زد + CI آن‌ها را trigger
+                # می‌کرد — حتی روی پروژه‌هایی که کاربر صریحاً runner را
+                # خاموش کرده بود.
                 dirty_n = sum(1 for t in svc.tasks if svc._is_task_dirty(t))
                 project_n = sum(
                     1 for w in svc.watched
                     if getattr(w, "prompt_sync_enabled", True)
+                    and getattr(w, "claude_runner_enabled", False)
                 )
                 if project_n == 0:
+                    logger.info(
+                        "📝 prompt-sync bootstrap: skipped — no project has "
+                        "claude_runner_enabled=True"
+                    )
                     return
                 logger.info(
                     f"📝 prompt-sync bootstrap: {dirty_n} dirty task(s), "
-                    f"rebuilding index for {project_n} project(s)"
+                    f"rebuilding index for {project_n} runner-enabled project(s)"
                 )
                 # sync سینکرون + rebuild صریح — منتظر اتمام
                 result = await svc.force_sync_and_rebuild_all()

@@ -241,12 +241,29 @@ def format_prompt_markdown(task: Any) -> str:
 def _resolve_repo_and_branch(watched: Any) -> Optional[Tuple[str, str, str]]:
     """از watched project: (owner, repo, branch). None اگر فاقد config باشد.
 
+    🐛 (gate-on-claude-runner) — قبلاً فقط `prompt_sync_enabled` چک
+    می‌شد (پیش‌فرض True). نتیجه: روی هر startup backend، bootstrap_sync
+    تسک‌های همهٔ پروژه‌ها را به `prompt/` push می‌کرد حتی برای پروژه‌هایی
+    که «اجرای خودکار» (`claude_runner_enabled`) خاموش بود. هزاران
+    commit و CI failure تولید می‌شد بدون اینکه هیچ تسکی واقعاً اجرا
+    شود.
+
+    حالا sync **فقط وقتی** انجام می‌شود که `claude_runner_enabled=True`
+    باشد. این تطابق با انتظار کاربر دارد: «اجرای خودکار خاموش = هیچ
+    تغییری در GitHub رخ ندهد». اگر کسی صریحاً sync بدون runner
+    می‌خواست (سناریوی نادر)، باید `prompt_sync_enabled=True` و
+    `claude_runner_enabled=True` هر دو ست شوند — sync دیگر sync مستقل
+    نیست.
+
     اگر repo در PROMPT_SYNC_EXCLUDE_REPOS باشد، None برمی‌گرداند تا از
     deploy loop (backend writing to its own repo) جلوگیری شود.
     """
     if watched is None:
         return None
     if not getattr(watched, "prompt_sync_enabled", True):
+        return None
+    # 🐛 master gate: اگر «اجرای خودکار» خاموش است، اصلاً sync نکن.
+    if not getattr(watched, "claude_runner_enabled", False):
         return None
     repo_full = getattr(watched, "repo_full_name", "") or ""
     if repo_full.strip().lower() in _excluded_repos():
