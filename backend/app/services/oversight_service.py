@@ -978,6 +978,15 @@ class OversightService:
             if not getattr(watched, "prompt_sync_enabled", True):
                 skipped_disabled_count += 1
                 continue
+            # 🐛 (gate-on-claude-runner) — اگر «اجرای خودکار» خاموش است،
+            # این تسک واقعاً sync نمی‌شود (_resolve_repo_and_branch آن را
+            # بلاک می‌کند). آن را در این لایه هم filter می‌کنیم تا:
+            #   1) بیهوده dispatch نشود (هزینهٔ asyncio.create_task)
+            #   2) log‌های throttling دروغ نگویند (دیگر «dispatched 5» در
+            #      حالی که هیچ push نشده وجود نخواهد داشت)
+            if not getattr(watched, "claude_runner_enabled", False):
+                skipped_disabled_count += 1
+                continue
             syncable.append(t)
 
         if not syncable:

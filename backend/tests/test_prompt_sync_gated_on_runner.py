@@ -83,3 +83,28 @@ def test_bootstrap_counts_only_runner_enabled_projects():
         "bootstrap should log a clear reason when it skips — makes "
         "future debugging easy"
     )
+
+
+def test_scheduler_syncable_filter_excludes_runner_disabled():
+    """source-level pin: the periodic prompt-sync scheduler in
+    oversight_service.py must filter OUT tasks whose watched project
+    has claude_runner_enabled=False — BEFORE the throttle picks the
+    top 5.
+
+    Without this, every scheduler tick logged misleading
+    «dispatched 5 task(s) to N project(s)» even though the actual
+    GitHub writes were silently no-op'd downstream by
+    _resolve_repo_and_branch. That made debugging «why is the repo
+    still being touched» impossible from logs alone."""
+    src = _read("app/services/oversight_service.py")
+    # Find the syncable-partition loop
+    idx = src.find("syncable: List")
+    assert idx != -1, "syncable filter loop not found in oversight_service"
+    # The runner gate should sit inside the loop (between the existing
+    # prompt_sync_enabled check and syncable.append).
+    body = src[idx:idx + 1500]
+    assert 'getattr(watched, "claude_runner_enabled", False)' in body, (
+        "scheduler must also filter on claude_runner_enabled — without "
+        "this, every tick dispatches throttled work that gets no-op'd "
+        "downstream and pollutes logs with misleading 'dispatched N' lines"
+    )
