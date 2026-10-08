@@ -32,6 +32,7 @@ from .api.routes import ai_usage  # 🆕 AI Usage tracking (token consumption + 
 from .api.routes import external_prompts  # 🆕 External Prompts (Cloud Code integration)
 from .api.routes import screen_recording  # 🆕 Screen Recording (ضبط ویدئو بازرس ویژه)
 from .api.routes import audio  # 🆕 Audio Transcription (تبدیل گفتار به متن)
+from .api.routes import auth as auth_routes  # 🆕 ورود با گوگل
 from .api.routes import inspection  # 🆕 «نظارت و سرکشی» (برگه‌های مالک + ناظرِ خودکار)
 
 # 🚨 (audit critical fix) — eager import to register OAuth dispatchers.
@@ -680,6 +681,11 @@ app = FastAPI(
 logger.info(f"🔧 Setting up CORS with origins: {settings.cors_origins_list}")
 
 # Use wildcard for simplicity - more permissive but works
+# 🆕 ورود با گوگل — the wall in front of the API (core/auth.py). Added BEFORE
+# CORS so that CORS stays the OUTER layer and a 401 still carries CORS headers.
+from .core.auth import AuthWall  # noqa: E402
+app.add_middleware(AuthWall)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Allow all origins
@@ -797,6 +803,7 @@ app.include_router(ai_usage.router, prefix="/api")  # 🆕 AI Usage tracking
 app.include_router(external_prompts.router, prefix="/api")  # 🆕 External Prompts (Cloud Code)
 app.include_router(screen_recording.router, prefix="/api")  # 🆕 Screen Recording (ضبط ویدئو)
 app.include_router(audio.router, prefix="/api")  # 🆕 Audio Transcription (گفتار به متن)
+app.include_router(auth_routes.router, prefix="/api")  # 🆕 ورود با گوگل — /api/auth
 app.include_router(inspection.router, prefix="/api")  # 🆕 «نظارت و سرکشی» — /api/inspection
 if OVERSIGHT_AVAILABLE and oversight is not None:
     app.include_router(oversight.router, prefix="/api")  # 🆕 Oversight (مرکز نظارت GitHub)

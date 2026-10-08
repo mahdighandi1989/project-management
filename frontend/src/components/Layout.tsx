@@ -23,7 +23,10 @@ import {
   EyeIcon,
   BookOpenIcon,
   ClipboardDocumentCheckIcon,
+  UsersIcon,
+  ArrowRightOnRectangleIcon,
 } from '@heroicons/react/24/outline';
+import { useAuth } from '@/lib/auth';
 import GlobalAnalysisProgress from './GlobalAnalysisProgress';
 import { InspectionProvider, InspectionToggle } from '@/lib/inspection/provider';
 import { InspectionHighlights } from '@/lib/inspection/highlights';
@@ -71,6 +74,31 @@ export default function Layout({ children }: LayoutProps) {
       <InspectionHighlights pathname={pathname} />
       <SurfaceRecorder pathname={pathname} />
     </InspectionProvider>
+  );
+}
+
+/** Who is signed in, the owner-only «کاربران» entry, and «خروج». */
+function AccountBox() {
+  const { user, role, enforced, logout } = useAuth();
+  if (!user && !enforced) return null;
+  return (
+    <div className="space-y-1">
+      {role === 'owner' && (
+        <Link href="/users" className="flex items-center gap-3 px-4 py-2 rounded-xl text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700">
+          <UsersIcon className="w-5 h-5" /><span className="font-medium">کاربران</span>
+        </Link>
+      )}
+      {user && (
+        <div className="flex items-center gap-2 px-4 py-2 text-xs text-gray-500 dark:text-gray-400">
+          {user.picture
+            // eslint-disable-next-line @next/next/no-img-element
+            ? <img src={user.picture} alt="" className="w-6 h-6 rounded-full" referrerPolicy="no-referrer" />
+            : <span>👤</span>}
+          <span className="flex-1 truncate" dir="ltr">{user.email}</span>
+          <button onClick={logout} title="خروج" className="hover:text-red-600"><ArrowRightOnRectangleIcon className="w-5 h-5" /></button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -136,6 +164,7 @@ function Shell({ children, pathname, pageLabel }: LayoutProps & { pathname: stri
 
         {/* Theme toggle */}
         <div className="p-4 border-t border-gray-200 dark:border-gray-700 space-y-1">
+          <AccountBox />
           <InspectionToggle />
           <button
             onClick={toggleDarkMode}

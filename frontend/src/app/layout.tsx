@@ -5,6 +5,7 @@ import { HelpProvider, HelpSystem } from '@/components/help';
 import '@/styles/globals.css';
 
 import InspectorBridge from "./InspectorBridge";
+import { AuthGate } from '@/lib/auth';
 
 export const metadata: Metadata = {
   title: 'سیستم مناظره و همکاری AI',
@@ -32,13 +33,16 @@ export default function RootLayout({
             __html: `window.__NEXT_PUBLIC_API_URL__ = "${apiUrl}";`,
           }}
         />
-        <HelpProvider>
-          <Layout>
-            <InspectorBridge />
-            {children}
-          </Layout>
-          <HelpSystem />
-        </HelpProvider>
+        {/* ورود با گوگل — nothing renders until signed in (when enforced) */}
+        <AuthGate>
+          <HelpProvider>
+            <Layout>
+              <InspectorBridge />
+              {children}
+            </Layout>
+            <HelpSystem />
+          </HelpProvider>
+        </AuthGate>
       </body>
     </html>
   );

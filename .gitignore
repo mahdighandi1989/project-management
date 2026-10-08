@@ -74,3 +74,10 @@ backend/storage/oversight/watched.json
 backend/storage/oversight/tasks.json
 backend/storage/oversight/reports.json
 backend/storage/oversight/removed_watched.json
+
+# 🤖 more runtime/test-run state written by the oversight services and their tests
+backend/storage/oversight/ai_balance.json
+backend/storage/oversight/inspector_context/
+backend/storage/oversight/knowledge_center.json
+backend/storage/oversight/uploads/
+backend/storage/oversight/watched_projects.json

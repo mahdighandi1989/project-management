@@ -507,6 +507,7 @@ def init_db():
     from ..models import project, debate, setting, ai_log, ai_profile, system_prompt, inspector_session, inspector_prompt_field, screen_recording
     # «نظارت و سرکشی» — sheets, shots, files (metadata only; bytes in Drive), binders, surface map
     from ..models import inspection  # noqa: F401
+    from ..models import app_user  # noqa: F401  (ورود با گوگل)
 
     # اول migration رو اجرا کن (برای جداول موجود)
     migrate_db()

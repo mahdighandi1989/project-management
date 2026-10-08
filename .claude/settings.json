@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(scripts/ship.sh *)",
+      "Bash(./scripts/ship.sh *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git fetch origin *)",
+      "Bash(git push -u origin claude/*)",
+      "Bash(git push origin HEAD:main)",
+      "Bash(git merge --no-edit origin/main)",
+      "Bash(python -m pytest *)",
+      "Bash(python3 -m pytest *)",
+      "Bash(python3 scripts/docs_gate.py)",
+      "Bash(npm run build)",
+      "Bash(npm ci *)"
+    ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/ensure-shipped.sh",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -47,14 +47,31 @@ def launch(p):
         raise
 
 
-def open_page(browser, url: str, *, width: int = 1366, height: int = 900, wait_ms: int = 2500):
-    """Open ``url`` with the inspection overlays switched OFF (so the picture shows
-    the page, not our highlights) and dark mode off. Returns (page, errors)."""
+def supervisor_session() -> str:
+    """A session token for the headless browser (the app is behind Google sign-in).
+    The supervisor token buys a `supervisor` session — never an owner's."""
+    try:
+        from client import Client
+
+        return Client().api("/api/auth/supervisor-session", body={}).get("access_token") or ""
+    except Exception:  # noqa: BLE001 - e.g. a local run without the wall: no session needed
+        return ""
+
+
+def open_page(browser, url: str, *, width: int = 1366, height: int = 900, wait_ms: int = 2500,
+              token: str | None = None):
+    """Open ``url`` signed in as the supervisor, with the inspection overlays
+    switched OFF (so the picture shows the page, not our highlights) and dark mode
+    off. Returns (page, errors)."""
+    import json as _json
+
+    tok = supervisor_session() if token is None else token
     ctx = browser.new_context(viewport={"width": width, "height": height}, locale="fa-IR")
     ctx.add_init_script(
         "try{localStorage.setItem('pm.inspection.highlights','0');"
         "localStorage.setItem('pm.inspection.active','0');"
-        "localStorage.setItem('darkMode','false');}catch(e){}")
+        + (f"localStorage.setItem('pm.auth.token',{_json.dumps(tok)});" if tok else "")
+        + "localStorage.setItem('darkMode','false');}catch(e){}")
     page = ctx.new_page()
     errors: list[str] = []
     page.on("pageerror", lambda e: errors.append(str(e)[:300]))

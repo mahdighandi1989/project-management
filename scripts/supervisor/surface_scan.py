@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from browser import launch, open_page  # noqa: E402
+from browser import launch, open_page, supervisor_session  # noqa: E402
 from client import Client, SupervisorError, frontend_url  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -41,7 +41,7 @@ TABS_JS = """() => {
   const out = [];
   const seen = new Set();
   const push = (b) => { const t = (b.innerText || b.textContent || '').trim().replace(/\\s+/g,' ');
-    if (t && !seen.has(t) && !/حذف|delete|remove|پاک|ارسال|send|deploy|اجرا|run|خروج|ثبت|ذخیره|افزودن|ایجاد|روشن|خاموش|import|sync|save|create|add|new|＋|\+|📝|⚡/i.test(t)) { seen.add(t); out.push(t); } };
+    if (t && !seen.has(t) && !/حذف|delete|remove|پاک|ارسال|send|deploy|اجرا|run|خروج|ثبت|ذخیره|افزودن|ایجاد|روشن|خاموش|import|sync|save|create|add|new|＋|\\+|📝|⚡/i.test(t)) { seen.add(t); out.push(t); } };
   document.querySelectorAll('[data-report-surface] [role="tab"]').forEach(push);
   const ACTIVE = /(^|\\s)(border-b-2|bg-white shadow|bg-primary-|bg-blue-600|bg-gray-900|bg-indigo-600|bg-purple-600)/;
   document.querySelectorAll('[data-report-surface] div, [data-report-surface] nav').forEach((bar) => {
@@ -82,6 +82,7 @@ def main() -> int:
                   file=sys.stderr)
             return 3
     report: dict = {"base": base, "pages": [], "failed": [], "no_sample": []}
+    session = supervisor_session()
     with sync_playwright() as p:
         browser = launch(p)
         for route in routes:
@@ -93,7 +94,7 @@ def main() -> int:
                     continue
                 path = sample
             try:
-                page, errors = open_page(browser, base + path)
+                page, errors = open_page(browser, base + path, token=session)
                 snaps = [page.evaluate("() => window.__pmSurfaceSnapshot && window.__pmSurfaceSnapshot()")]
                 tabs = [] if args.no_tabs else page.evaluate(TABS_JS)
                 for label in tabs:

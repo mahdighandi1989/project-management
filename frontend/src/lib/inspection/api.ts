@@ -10,6 +10,7 @@
 // by offset (resumable), finish.
 import type { SpotGeometry, UiSpot } from './spot'
 import type { NextRound } from './nextRound'
+import { withToken } from '@/lib/auth'
 
 export function apiBase(): string {
   const w = typeof window !== 'undefined'
@@ -253,8 +254,9 @@ export const inspectionApi = {
   surfaces: () => call<{ surfaces: SurfaceSummary[]; inventory: Record<string, unknown> | null }>('/surfaces'),
   surface: (id: string) => call<{ surface: SurfaceSummary & { elements: SurfaceElement[]; new_keys: string[]; removed_keys: string[] } }>(`/surfaces/${id}`),
   registerSurface: (body: unknown) => call<{ ok: boolean; new: number }>('/surfaces', { body }),
-  shotUrl: (id: string) => `${apiBase()}/api/inspection/shots/${id}`,
-  rawUrl: (fileId: string) => `${apiBase()}/api/inspection/files/${fileId}/raw`,
+  // <img>/<a> cannot send a header — the session rides in the query (GET only)
+  shotUrl: (id: string) => withToken(`${apiBase()}/api/inspection/shots/${id}`),
+  rawUrl: (fileId: string) => withToken(`${apiBase()}/api/inspection/files/${fileId}/raw`),
 }
 
 // ---------------------------------------------------------------------------

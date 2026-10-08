@@ -103,6 +103,9 @@ def _supervisor_secret() -> str:
 
 
 def is_supervisor(request: Request) -> bool:
+    # a supervisor SESSION (the Routine's headless browser) counts too
+    if getattr(request.state, "auth_role", "") == "supervisor":
+        return True
     secret = _supervisor_secret()
     got = (request.headers.get("x-supervisor-token") or "").strip()
     return bool(secret and got and hmac.compare_digest(secret, got))

@@ -1,16 +1,16 @@
 ---
 name: صفِ فوریِ «نظارت و سرکشی» — project-management
-version: 2
+version: 1
 created: 2026-10-08
 updated: 2026-10-08
-supersedes: docs/supervisor/archive/URGENT_PROMPT-v1-2026-10-08.md
+supersedes: null
 archive: docs/supervisor/archive/
 modelled_on:
   - mahdighandi1989/ALLIN1 › docs/supervisor/URGENT_PROMPT.md (v6)
   - mahdighandi1989/Detective-1 › docs/supervisor/URGENT_PROMPT.md
 ---
 
-# دستورِ روتینِ «صفِ فوری» — نسخهٔ ۲
+# دستورِ روتینِ «صفِ فوری» — نسخهٔ ۱
 
 > **این فایل تنها مرجعِ رفتارِ روتینِ صفِ فوری است.** پرامپتِ خودِ Routine عمداً کوتاه و
 > ثابت است و فقط به این آدرس اشاره می‌کند. هر تغییری **این‌جا** نوشته می‌شود و نسخه‌اش بالا
@@ -108,9 +108,6 @@ python3 scripts/supervisor/inspection.py urgent
    ```
    `partial` و `not-done` یعنی برگه بسته نشده و دورِ بعد برمی‌گردد. تا جواب ندهی، برگه از صفِ
    فوری بیرون نمی‌رود.
-
-۷. یک بخشِ امضاشده در انتهای `docs/WORKLOG.md` (چه خواسته شد، چه کردی، کامیت، چطور سنجیدی) و ارسال با
-   `scripts/ship.sh "…"` (= گیتِ سبز + دروازهٔ مستندات + پوش روی `main`). — v2
 
 ## ۴) بعد از جواب
 
