@@ -1,0 +1,805 @@
+// «نظارت و سرکشی» — a dragged rectangle over a screen → an ADDRESS the supervisor
+// can walk back to, and the precise geometry of the box.
+//
+// Ported from the sibling project ALLIN1 (`frontend/src/lib/inspectionSpot.ts`,
+// read-only reference). What changed for this app:
+//   * pages here do not carry `data-report-surface` attributes, so the Layout
+//     marks the content area with the current route, and the SECTION is inferred
+//     (an explicit `data-report-section` still wins; otherwise the nearest
+//     section/card/form/table with a heading, else the nearest heading above);
+//   * the active TAB (role=tab / aria-selected, or `?tab=`) is recorded too, so
+//     a highlight is only drawn on the tab it was filed on;
+//   * the full URL (with query string) is part of the address.
+//
+// Original notes follow.
+//
+// v141 — a dragged rectangle over a screen → an ADDRESS the supervisor can walk
+// back to.
+//
+// v150 — AND NOW THE GEOMETRY TOO, by the owner's explicit instruction: «صرفاً
+// آدرسِ اون صفحه ثبت نشه بلکه مختصاتِ فوق‌العاده دقیقِ جایی که کادر کشیده شده و
+// ابعاد و اینها هم ذکر بشه … شاید چیزی که دارم بهش اشاره می‌کنم مربوط به همون
+// قسمتِ خاص باشه».
+//
+// The original note below — «a screen has no coordinates worth recording» — was
+// right about ONE number and wrong as a conclusion. Raw viewport pixels really do
+// point somewhere else by the time anyone looks: a different window width, a
+// scrolled page, a browser zoom, and `x: 412` is meaningless. But that is an
+// argument for recording the RIGHT geometry, not for recording none. So a box now
+// carries four things, strongest first:
+//
+//   1. `anchor.path` + `anchor.rel` — the box as FRACTIONS of the element it
+//      landed on. Survives resizing, responsive reflow and scrolling, because it
+//      is not a pixel measurement at all. The selector is round-trip verified at
+//      capture: if re-querying it does not return the same element, it is not
+//      stored, because a selector that does not resolve is worse than none.
+//   2. `doc` — absolute document pixels (viewport + scroll). Survives scrolling,
+//      not resizing. The fallback when the anchor is gone.
+//   3. `view` + `scroll` + `viewport` + `dpr` — exactly what the owner was
+//      looking at, so a supervisor can reproduce the conditions.
+//   4. `doc_size` — the document at capture time, which is what makes (2)
+//      interpretable at all.
+//
+// Whoever re-places the box must say WHICH of these it used — see `placeSpot`.
+// A coordinate that has silently drifted is worse than one that admits it has.
+//
+// Screens mark themselves with two data attributes, so nothing here has to know
+// the names of the app's pages:
+//
+//     data-report-surface="/customers"   data-report-surface-label="مشتریان"
+//     data-report-section="filters"      data-report-section-label="فیلترها"
+//
+// Adding a screen to the reportable set is one attribute; a screen that forgets
+// them still files a usable sheet — one that says «جایی در رابط» and carries the
+// DOM path, which is enough to find it.
+//
+// Pure on purpose: it takes elements and returns the record, so a test can put a
+// fake DOM in front of it.
+
+export type Rect = { x: number; y: number; w: number; h: number }
+
+/** Where the box sat, measured every way that survives something different. */
+export type SpotGeometry = {
+  /** absolute document pixels — viewport coordinates plus the scroll offset */
+  doc: Rect
+  /** what the owner literally saw, in viewport pixels */
+  view: Rect
+  /** the page scroll when the box was drawn */
+  scroll: { x: number; y: number }
+  /** the window at capture time */
+  viewport: { w: number; h: number }
+  /** the whole document at capture time — what makes `doc` interpretable */
+  doc_size: { w: number; h: number }
+  /** device pixel ratio, so a retina capture is not mistaken for a huge one */
+  dpr: number
+  /** the active tab when the box was drawn — a highlight is drawn only there */
+  tab?: string
+  /**
+   * The element the box landed on, and the box expressed as FRACTIONS of it.
+   * `path` is empty when no selector round-tripped to the same element — then
+   * only `doc` is usable, and the placer must say so.
+   */
+  anchor: {
+    path: string
+    /** the anchor's own document rect at capture */
+    rect: Rect
+    /** x/y/w/h as fractions of the anchor's box (may fall outside 0..1) */
+    rel: Rect
+  }
+}
+
+export type UiSpot = {
+  page: string
+  page_label: string
+  section_id: string
+  section_label: string
+  /** THE load-bearing field: one string that puts a supervisor back here. */
+  reopen: string
+  /** the route with its query string, as the browser had it */
+  url?: string
+  dom_path: string
+  covered_text: string
+  /** kept exactly as it was — viewport pixels (v141 callers still read it) */
+  rect: Rect
+  viewport: { w: number; h: number }
+  /** v150 — the precise record. Optional so an older client still files a sheet. */
+  geometry?: SpotGeometry
+}
+
+export const CROP_MIN_PX = 24
+const MAX_TEXT = 600
+const JOIN = ' · '
+const MAX_DEPTH = 4
+
+function attrUp(el: Element | null, name: string): { el: Element; value: string } | null {
+  let node: Element | null = el
+  while (node) {
+    const v = node.getAttribute?.(name)
+    if (v) return { el: node, value: v }
+    node = node.parentElement
+  }
+  return null
+}
+
+/** `section#filters > div.row > button` — short, and enough to find. */
+export function domPath(el: Element | null, depth = 4): string {
+  const parts: string[] = []
+  let node: Element | null = el
+  while (node && parts.length < depth) {
+    const tag = node.tagName.toLowerCase()
+    if (tag === 'body' || tag === 'html') break
+    const id = node.id ? `#${node.id}` : ''
+    const cls = !id && typeof node.className === 'string' && node.className.trim()
+      ? `.${node.className.trim().split(/\s+/).slice(0, 2).join('.')}`
+      : ''
+    parts.unshift(`${tag}${id}${cls}`)
+    node = node.parentElement
+  }
+  return parts.join(' > ')
+}
+
+/**
+ * A selector that can actually be queried back — unlike `domPath`, which is for
+ * a human to read.
+ *
+ * VERIFIED, NOT ASSUMED: the caller re-queries it and keeps it only if it returns
+ * the same element. A stored selector that does not resolve is worse than an
+ * empty one, because the placer would trust it and land the highlight somewhere
+ * arbitrary. `nth-of-type` is used rather than classes, which are generated and
+ * change between builds.
+ */
+export function querySelectorPath(el: Element | null, maxDepth = 8): string {
+  if (!el || !el.tagName) return ''
+  const parts: string[] = []
+  let node: Element | null = el
+  while (node && parts.length < maxDepth) {
+    const tag = node.tagName.toLowerCase()
+    if (tag === 'html') break
+    if (tag === 'body') { parts.unshift('body'); break }
+    // an id ends the walk — it is unique and stable enough to anchor on
+    if (node.id && /^[A-Za-z][\w-]*$/.test(node.id)) {
+      parts.unshift(`#${node.id}`)
+      break
+    }
+    const parent: Element | null = node.parentElement
+    if (!parent) { parts.unshift(tag); break }
+    const sameTag = Array.from(parent.children).filter((c) => c.tagName === node!.tagName)
+    const idx = sameTag.indexOf(node) + 1
+    parts.unshift(sameTag.length > 1 ? `${tag}:nth-of-type(${idx})` : tag)
+    node = parent
+  }
+  return parts.join(' > ')
+}
+
+/** `querySelectorPath`, kept only if re-querying it returns the same element. */
+export function verifiedSelector(el: Element | null, root?: ParentNode): string {
+  if (!el) return ''
+  const path = querySelectorPath(el)
+  if (!path) return ''
+  try {
+    const scope = root ?? (typeof document !== 'undefined' ? document : null)
+    if (!scope) return ''
+    return scope.querySelector(path) === el ? path : ''
+  } catch {
+    // an unqueryable selector (exotic tag name, odd id) — treat as none
+    return ''
+  }
+}
+
+/**
+ * Measure the box every way that survives something different.
+ *
+ * `rel` is the one that matters most: fractions of the anchor element survive a
+ * resize, a responsive reflow and any scroll, because they are not pixels. `doc`
+ * is the fallback for when the anchor is gone. Both are stored; the placer
+ * chooses and reports which it used.
+ */
+export function measureSpot(input: {
+  rect: Rect
+  viewport: { w: number; h: number }
+  scroll: { x: number; y: number }
+  doc_size: { w: number; h: number }
+  dpr: number
+  anchor: Element | null
+  anchorRect: Rect | null
+  anchorPath: string
+}): SpotGeometry {
+  const { rect, scroll } = input
+  const doc: Rect = {
+    x: round2(rect.x + scroll.x), y: round2(rect.y + scroll.y),
+    w: round2(rect.w), h: round2(rect.h),
+  }
+  const ar = input.anchorRect
+  // a zero-sized anchor cannot carry fractions — guard rather than divide by 0
+  const usable = !!(input.anchorPath && ar && ar.w > 0 && ar.h > 0)
+  const rel: Rect = usable && ar
+    ? {
+      x: round4((doc.x - ar.x) / ar.w), y: round4((doc.y - ar.y) / ar.h),
+      w: round4(doc.w / ar.w), h: round4(doc.h / ar.h),
+    }
+    : { x: 0, y: 0, w: 0, h: 0 }
+  return {
+    doc,
+    view: { x: round2(rect.x), y: round2(rect.y), w: round2(rect.w), h: round2(rect.h) },
+    scroll: { x: round2(scroll.x), y: round2(scroll.y) },
+    viewport: input.viewport,
+    doc_size: input.doc_size,
+    dpr: input.dpr,
+    anchor: {
+      path: usable ? input.anchorPath : '',
+      rect: ar && usable ? { x: round2(ar.x), y: round2(ar.y), w: round2(ar.w), h: round2(ar.h) }
+        : { x: 0, y: 0, w: 0, h: 0 },
+      rel,
+    },
+  }
+}
+
+const round2 = (n: number) => Math.round(n * 100) / 100
+const round4 = (n: number) => Math.round(n * 10000) / 10000
+
+/** How a placement was arrived at — shown to the owner, never hidden. */
+export type Placement = {
+  rect: Rect
+  /** `anchor` = re-measured from the element · `document` = stored page pixels */
+  basis: 'anchor' | 'document'
+  /** true when the anchor was gone and the position may have drifted */
+  approximate: boolean
+}
+
+/**
+ * Put a stored box back on the page, in DOCUMENT coordinates.
+ *
+ * Prefers the anchor: re-measuring the element and applying the stored fractions
+ * follows the content wherever the layout has since put it. Falls back to the
+ * stored document pixels, and SAYS it did — a highlight that has quietly drifted
+ * would send the reader to the wrong control with full confidence.
+ */
+export function placeSpot(
+  geom: SpotGeometry | null | undefined,
+  lookup?: (sel: string) => { x: number; y: number; w: number; h: number } | null,
+): Placement | null {
+  if (!geom) return null
+  const path = geom.anchor?.path
+  if (path && lookup) {
+    const now = lookup(path)
+    if (now && now.w > 0 && now.h > 0) {
+      const rel = geom.anchor.rel
+      return {
+        rect: {
+          x: now.x + rel.x * now.w, y: now.y + rel.y * now.h,
+          w: rel.w * now.w, h: rel.h * now.h,
+        },
+        basis: 'anchor',
+        approximate: false,
+      }
+    }
+  }
+  if (!geom.doc || geom.doc.w <= 0 || geom.doc.h <= 0) return null
+  return { rect: { ...geom.doc }, basis: 'document', approximate: true }
+}
+
+/** Tags whose text is code, not something anyone can see on the page. */
+const UNSEEN = new Set(['STYLE', 'SCRIPT', 'NOSCRIPT', 'TEMPLATE', 'SVG', 'HEAD', 'TITLE'])
+
+/**
+ * The visible text of what was covered, collapsed and capped.
+ *
+ * `textContent` on its own runs neighbours together — a filter bar came out as
+ * «جستجونوع حسابشعبه», which is unreadable and therefore useless. So the tree is
+ * walked and each level's children are joined with a separator, down to a small
+ * depth: deep enough to reach the rows of a table, shallow enough not to split a
+ * sentence into words.
+ *
+ * v172 — AND IT SKIPS WHAT NOBODY CAN SEE. `textContent` includes `<style>`, so
+ * a box drawn on a page that carries its CSS in a `<style>` block reported the
+ * STYLESHEET as «what was in the box». One real sheet reached the supervisor
+ * saying the owner had drawn a box around
+ * «/* English serif for LATIN LETTERS ONLY …», which is why that round placed
+ * the new control by taste: the one field that says WHAT was pointed at was
+ * noise. A field that is confidently wrong is worse than one left empty.
+ */
+export function visibleText(el: Element | null, depth = MAX_DEPTH): string {
+  if (!el || UNSEEN.has(el.tagName)) return ''
+  const kids = Array.from(el.children ?? []).filter((k) => !UNSEEN.has(k.tagName))
+  if (depth > 0 && kids.length > 1) {
+    const raw = kids.map((k) => visibleText(k, depth - 1)).filter(Boolean).join(JOIN)
+    return raw.length > MAX_TEXT ? `${raw.slice(0, MAX_TEXT)}…` : raw
+  }
+  // A leaf, or a single-child chain: take the text but drop any unseen subtree,
+  // which `textContent` would otherwise fold in.
+  const own = Array.from(el.childNodes)
+    .filter((n) => n.nodeType === 3 || (n.nodeType === 1 && !UNSEEN.has((n as Element).tagName)))
+    .map((n) => n.textContent ?? '')
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return own.length > MAX_TEXT ? `${own.slice(0, MAX_TEXT)}…` : own
+}
+
+/** The nearest ancestor (starting at `el` itself) whose visible text says
+ *  something, without climbing past `stop`. */
+function nearestTelling(el: Element | null, stop: Element | null): Element | null {
+  const MIN = 8                      // «۲۷۶» is not a description; a label is
+  let cur: Element | null = el
+  let best: Element | null = null
+  for (let i = 0; cur && i < 6; i++) {
+    const t = visibleText(cur, 1)
+    if (t.length >= MIN) return cur
+    if (t && !best) best = cur       // something short is still better than nothing
+    if (cur === stop) break
+    cur = cur.parentElement
+  }
+  return best ?? el ?? stop
+}
+
+export function resolveSpot(input: {
+  rect: Rect
+  viewport: { w: number; h: number }
+  stack: readonly Element[]
+  /** v150 — supplied by the browser caller; omitted in tests that only need the address */
+  geometry?: SpotGeometry
+  /** the route and its label when no element carries `data-report-surface` */
+  fallbackPage?: string
+  fallbackLabel?: string
+  /** `?tab=…` and the rest of the query, kept so the address reopens the same tab */
+  search?: string
+}): UiSpot {
+  const innermost = input.stack[0] ?? null
+  const surface = attrUp(innermost, 'data-report-surface')
+  const explicit = attrUp(innermost, 'data-report-section')
+  const inferred = explicit ? null : inferSection(innermost, surface?.el ?? null)
+  const section = explicit
+    ? { el: explicit.el, value: explicit.value,
+        label: explicit.el.getAttribute('data-report-section-label') ?? '' }
+    : inferred
+  const page = surface?.value ?? input.fallbackPage ?? 'ui'
+  const sectionId = section?.value ?? ''
+  // The reopen key is `page#section`, or just the page when it has no sections.
+  // Deliberately the same shape a URL fragment uses, so the supervisor's tool
+  // has nothing to translate.
+  const base = `${page}${input.search || ''}`
+  const reopen = sectionId ? `${base}#${sectionId}` : base
+  // The text comes from the closest thing that actually SAYS something: the
+  // innermost element under a 200-pixel box is often a bare <span>, and «۲۷۶» on
+  // its own tells a supervisor nothing — but the whole surface tells them even
+  // less.
+  //
+  // v172 — this used to be `section ?? surface ?? innermost`, so a page with no
+  // `data-report-section` (most of them) described every box as «the entire
+  // page», and on a page that carries its CSS in a `<style>` block that came out
+  // as a stylesheet. The rule now walks OUT from the spot only until it finds
+  // something readable, and stops at the section or the surface rather than
+  // starting there.
+  const textFrom = nearestTelling(innermost, section?.el ?? surface?.el ?? null)
+  return {
+    page,
+    page_label: surface?.el.getAttribute('data-report-surface-label') ?? input.fallbackLabel ?? 'جایی در رابط',
+    section_id: sectionId,
+    section_label: section?.label ?? '',
+    reopen,
+    url: `${page}${input.search || ''}`,
+    dom_path: domPath(innermost),
+    covered_text: visibleText(textFrom),
+    rect: input.rect,
+    viewport: input.viewport,
+    ...(input.geometry ? { geometry: input.geometry } : {}),
+  }
+}
+
+/** The geometry as one line a human can read — used on the sheet and in tooltips. */
+export function geometryLabel(g: SpotGeometry | null | undefined): string {
+  if (!g) return ''
+  const d = g.doc
+  const size = `${Math.round(d.w)}×${Math.round(d.h)}`
+  const at = `x=${Math.round(d.x)} y=${Math.round(d.y)}`
+  const win = `پنجره ${g.viewport.w}×${g.viewport.h}`
+  const dpr = g.dpr && g.dpr !== 1 ? ` · dpr ${g.dpr}` : ''
+  return `${size} پیکسل در ${at} (مختصاتِ سند) · ${win}${dpr}`
+}
+
+/** How a sheet's address reads on one line. */
+export function spotAddress(s: Pick<UiSpot, 'page_label' | 'section_label' | 'reopen'>): string {
+  return s.section_label ? `${s.page_label} ← ${s.section_label}` : s.page_label
+}
+
+/**
+ * One spelling for a route, so two spellings of the same page are one page.
+ *
+ * v150 — this exists because the highlights did not appear and the reason was a
+ * slash. The static export serves `/dashboard/`, so `usePathname()` returns
+ * `/dashboard/`, while a sheet stored a moment earlier — or by any other code
+ * path — says `/dashboard`. Comparing the raw strings quietly answered «a
+ * different page», and the highlight was simply never drawn. Case is levelled
+ * too: a route is not two routes because of capitalisation.
+ */
+export function normalizePath(p: string | null | undefined): string {
+  const raw = (p || '').trim()
+  if (!raw) return '/'
+  const [path] = raw.split(/[?#]/)
+  const cut = path.replace(/\/+$/, '')
+  return (cut || '/').toLowerCase()
+}
+
+/** Are these the same page, whatever the trailing slash or case? */
+export function samePage(a: string | null | undefined, b: string | null | undefined): boolean {
+  return normalizePath(a) === normalizePath(b)
+}
+
+/** Does a stored sheet belong to the section being rendered?
+ *
+ *  The section part is compared exactly — `#filters` and `#Filters` are two
+ *  different anchors a page author chose — but the route part is normalised. */
+export function matchesSpot(reopen: string | undefined, want: string): boolean {
+  if (!reopen) return false
+  if (reopen === want) return true
+  const [ra, rb] = [reopen, want].map((v) => {
+    const i = v.indexOf('#')
+    return i === -1 ? [v, ''] : [v.slice(0, i), v.slice(i)]
+  })
+  return ra[1] === rb[1] && samePage(ra[0], rb[0])
+}
+
+// v165 — ONE SHEET OUT OF A STACK, WITHOUT POINTING THE CAMERA AT IT.
+//
+// «الان مثلا از یه فرم چند صفحه ای اسکرین گرفتم فقط یه قسمت از یه صفحه، تو
+// اسکرین و عکس ثبت شده همه صفحات داره نشون میده که لزومی نداره و فقط همون صفحه
+// باید باشه».
+//
+// The obvious fix — rasterise the sheet instead of the surface — is WRONG, and a
+// real browser said so. html-to-image re-renders the node inside an SVG
+// foreignObject, and the deeper the node, the more of the page's layout context
+// it loses: pointed at one `.psheet`, Chromium dropped the heading and the
+// paragraph outright and pushed the table 240px off the right edge, while the
+// very same rasteriser pointed at the surface rendered all three sheets
+// perfectly. A picture that is itself wrong cannot be rescued by any amount of
+// coordinate arithmetic.
+//
+// So the camera stays where v153 put it — on the whole surface, which renders
+// faithfully — and the SHEET is cut out of the finished picture afterwards. The
+// owner gets the one page they pointed at, drawn correctly.
+//
+// A sheet is a page of paper on screen. Sheets opt in with `data-report-page`;
+// the selectors of the existing printable pages are listed too, so they work
+// without being edited one by one. A screen that is not a stack of sheets has no
+// crop and is captured whole, exactly as v153 decided.
+export const PAGE_SEL =
+  '[data-report-page], .psheet, .lsheet, .csheet, .ol-page, .sn-page, #cf-sheet'
+
+/** The element to rasterise: the whole reportable surface, else the element itself. */
+export function pickCaptureTarget(
+  el: Element | null | undefined,
+  doc: ParentNode = document,
+): HTMLElement | null {
+  const surface = el?.closest?.('[data-report-surface]')
+  if (surface) return surface as HTMLElement
+  return (doc.querySelector('[data-report-surface]') ?? el ?? null) as HTMLElement | null
+}
+
+/**
+ * The sheet to cut the finished picture down to, or null when this screen is not
+ * a stack of sheets — in which case the whole capture is kept.
+ *
+ * Never returns a sheet that is not inside the captured target: cropping to
+ * something outside the picture would cut out empty space.
+ */
+export function pickCropSheet(
+  el: Element | null | undefined,
+  target: Element | null | undefined,
+): HTMLElement | null {
+  const sheet = el?.closest?.(PAGE_SEL) as HTMLElement | null
+  if (!sheet || !target) return null
+  if (sheet === target || !target.contains(sheet)) return null
+  return sheet
+}
+
+
+// v171 — WHAT BELONGS TO US, AND WHAT BELONGS TO THE PAGE.
+//
+// Everything this feature draws on top of the page — the drag layer, the report
+// dialog, the highlight overlay — carries `data-inspection-layer` on its ROOT.
+// Hit-testing has to skip all of it: a report about the page must never be a
+// report about the thing that took the report.
+//
+// THE BUG THIS EXISTS TO END. The check used to be `el.hasAttribute(...)`, which
+// asks only about the element itself. The dialog's own white card is a CHILD of
+// the layer, so it has no attribute of its own and passed the filter — and the
+// capture, which runs after the dialog has opened, asked `elementsFromPoint` at
+// the centre of the drawn box, got a div inside the dialog, and from there could
+// find neither the page's surface nor the sheet. So the crop was dropped and the
+// whole document was photographed: «وقتی یه قسمت انتخاب میکنم که رو یه صفحه‌س
+// همه صفحات فرم در اسکرین گزارش دیده میشه». The «retry capture» button inside
+// that dialog was wrong 100% of the time for the same reason.
+//
+// `closest` asks about the element AND its ancestors, which is the question that
+// was always meant, and it keeps being right for anything added to these layers
+// later — that is the point of fixing it here rather than at the two call sites.
+
+/** True when this element is part of the inspection UI rather than the page. */
+export function isOurOverlay(el: Element | null | undefined): boolean {
+  return !!el?.closest?.('[data-inspection-layer]')
+}
+
+/** The page elements under a viewport point, with our own overlays removed. */
+export function pageElementsAt(x: number, y: number, doc: Document = document): Element[] {
+  return doc.elementsFromPoint(x, y).filter((el) => !isOurOverlay(el))
+}
+
+// v176 — A CAPTURE MUST NEVER BE ABLE TO KILL THE TAB.
+//
+// «چندین بار اومدم تو چندین مرورگر متفاوت برای این قسمت گزارش بزنم، یهو صفحه
+// قفل میکنه و هنگ میکنه و بعدشم صفحه میره» — and the tab died with «Aw, Snap!»,
+// which is the renderer running out of memory, not a bug in a handler.
+//
+// Measured: the Knowledge Base surface is 1112 × 19096 px — 21.2 MEGAPIXELS, one
+// continuous handbook. Rasterising it costs ~85 MB for the bitmap alone, and the
+// pipeline then builds two more canvases of the same size (the mark, then the
+// shrink) on top of the serialised SVG of a 19000px DOM. Hundreds of megabytes
+// for a picture of one paragraph. Data Quality is 16 MP and was on the same
+// edge — this was never about one page.
+//
+// Two bounds, both needed:
+//
+//   • a target that FITS. Instead of always photographing the whole surface,
+//     take the largest ancestor of the drawn box that is under budget. On a long
+//     page that is the card or the section the box is in — which is cheaper AND
+//     more useful than a 19000-pixel strip with a mark somewhere in it.
+//   • a density that FITS, as a backstop, for the case where even the element
+//     under the box is enormous (one giant table, a canvas). Rendering at less
+//     than 1:1 is a worse picture; a dead tab is no picture.
+
+/** Pixels we are willing to rasterise. ~6 MP is a 2500×2400 picture — far more
+ *  than any screenshot needs, and ~24 MB of bitmap rather than hundreds. */
+export const CAPTURE_MAX_PX = 6_000_000
+
+/** No single side beyond this, whatever the area says: very long thin strips hit
+ *  per-dimension limits in the browser before they hit the area budget. */
+export const CAPTURE_MAX_SIDE = 8000
+
+export type Sized = { w: number; h: number; nodes?: number }
+
+/** A picture shorter than this is not evidence. Choosing by area alone once
+ *  picked a `<tr>` and produced a 1343×40 strip: inside the budget, and useless. */
+export const CAPTURE_MIN_H = 160
+
+/** The cost of a capture is not pixels — it is NODES. Measured with the real
+ *  rasteriser on the real pages:
+ *
+ *      3141 nodes → 6.3 s      4555 nodes → 5.6 s      9165 nodes → 16.3 s
+ *
+ *  and that work is SYNCHRONOUS, which is the whole point: see `withDeadline`.
+ *  5000 keeps the two heavy-but-usable pages and refuses the one that freezes. */
+export const CAPTURE_MAX_NODES = 5000
+
+/** A deadline for the parts of a capture that genuinely yield (decoding images,
+ *  loading fonts). It CANNOT interrupt the synchronous half — see `withDeadline`
+ *  — which is why the node budget above is the bound that actually protects the
+ *  page, and this one is only a net under the rest. */
+export const CAPTURE_DEADLINE_MS = 7000
+
+/**
+ * The element to rasterise, from the chain OUTERMOST → innermost (surface …
+ * element under the box). The first one that fits the budget wins, so the
+ * picture keeps as much context as it can afford.
+ *
+ * Returns the innermost when nothing fits — paired with `captureRatio`, which
+ * then brings that one down. Never returns null for a non-empty chain: the owner
+ * gets a picture.
+ */
+export function boundedCaptureTarget<T>(
+  chain: readonly T[],
+  sizeOf: (t: T) => Sized,
+  budget = CAPTURE_MAX_PX,
+  maxSide = CAPTURE_MAX_SIDE,
+): T | null {
+  if (!chain.length) return null
+  const fits = (s: Sized) =>
+    s && s.w > 0 && s.h > 0
+    && s.w * s.h <= budget && s.w <= maxSide && s.h <= maxSide
+    && s.h >= CAPTURE_MIN_H
+    && (s.nodes ?? 0) <= CAPTURE_MAX_NODES
+  for (const t of chain) if (fits(sizeOf(t))) return t
+  // Nothing fits outright. Over the PIXEL budget is survivable — `captureRatio`
+  // brings the density down — but over the NODE budget is not, because that cost
+  // is paid synchronously and no timer can take it back. So: the biggest view
+  // that is still affordable to serialise.
+  let best: T | null = null
+  let bestArea = -1
+  for (const t of chain) {
+    const s = sizeOf(t)
+    if (!s || !(s.w > 0) || s.h < CAPTURE_MIN_H) continue
+    if ((s.nodes ?? 0) > CAPTURE_MAX_NODES) continue
+    const area = s.w * s.h
+    if (area > bestArea) { bestArea = area; best = t }
+  }
+  // Still nothing: this page has no region that can be photographed without
+  // freezing the tab. Say so at once instead of trying and hanging for 16
+  // seconds — the owner can paste their own screenshot, which is better evidence
+  // anyway. Properties is this page: every candidate around the box carries
+  // 9000+ nodes.
+  return best
+}
+
+/**
+ * How densely to rasterise so the result stays inside the budget: 1 whenever it
+ * already does, and less than 1 only when the element itself is too big.
+ */
+export function captureRatio(
+  size: Sized,
+  budget = CAPTURE_MAX_PX,
+  maxSide = CAPTURE_MAX_SIDE,
+): number {
+  const w = size?.w || 0
+  const h = size?.h || 0
+  if (!(w > 0) || !(h > 0)) return 1
+  const byArea = Math.sqrt(budget / (w * h))
+  const bySide = maxSide / Math.max(w, h)
+  return Math.min(1, byArea, bySide)
+}
+
+/** The chain from the capture target down to the element under the box, outermost
+ *  first — what `boundedCaptureTarget` chooses from. */
+export function captureChain(el: Element | null | undefined,
+                             target: Element | null | undefined): Element[] {
+  const out: Element[] = []
+  let cur: Element | null = el ?? null
+  while (cur) {
+    out.push(cur)
+    if (cur === target) break
+    cur = cur.parentElement
+  }
+  if (target && !out.includes(target)) out.push(target)
+  return out.reverse()                       // outermost first
+}
+
+
+/**
+ * v177 — THE BAND. What to crop out of a finished capture when it is a long
+ * page rather than a sheet of paper.
+ *
+ * Without this, a tall capture was shrunk whole: Data Quality came out
+ * 193×2600 — a 193-pixel-wide ribbon of a 14000-pixel page, which is inside
+ * every budget and tells nobody anything. Cropping a band keeps the FULL WIDTH,
+ * where the text is, and throws away the vertical distance nobody asked about.
+ *
+ * All coordinates are in the finished picture's own pixels.
+ */
+export function bandAround(
+  box: { x: number; y: number; w: number; h: number },
+  image: { width: number; height: number },
+  viewportH = 700,
+): { x: number; y: number; w: number; h: number } | null {
+  if (!image.width || !image.height) return null
+  // Enough to read the box in its context: three times its height, and never
+  // less than a screenful, but never more than the picture has.
+  const want = Math.min(image.height, Math.max(box.h * 3, viewportH, CAPTURE_MIN_H * 2))
+  if (want >= image.height * 0.9) return null       // the picture is already a band
+  const centre = box.y + box.h / 2
+  let y = Math.round(centre - want / 2)
+  y = Math.max(0, Math.min(y, image.height - want))
+  return { x: 0, y, w: image.width, h: Math.round(want) }
+}
+
+/**
+ * Run `work`, or give up after `ms`.
+ *
+ * WHAT IT CANNOT DO, which is worth knowing before trusting it: a timer cannot
+ * interrupt SYNCHRONOUS work. The rasteriser clones the subtree and inlines every
+ * computed style on the main thread; on the Properties page that is 16.25 seconds
+ * during which no timer runs at all, so this deadline fired only after the work
+ * it was meant to cut short had already finished. Measured, not assumed — the
+ * first version of this fix relied on it and did nothing.
+ *
+ * So the real protection is the NODE BUDGET, which refuses to start such a
+ * capture. This remains as a net under the parts that do yield: decoding images,
+ * waiting on fonts, a stalled resource.
+ */
+export function withDeadline<T>(work: Promise<T>, ms: number): Promise<T | null> {
+  return new Promise((resolve) => {
+    let done = false
+    const t = setTimeout(() => { if (!done) { done = true; resolve(null) } }, ms)
+    work.then(
+      (v) => { if (!done) { done = true; clearTimeout(t); resolve(v) } },
+      () => { if (!done) { done = true; clearTimeout(t); resolve(null) } },
+    )
+  })
+}
+
+
+// ---------------------------------------------------------------------------
+// Sections and tabs, inferred — this app's pages carry no report attributes.
+// ---------------------------------------------------------------------------
+const SECTION_TAGS = new Set(['SECTION', 'ARTICLE', 'FORM', 'ASIDE', 'NAV', 'TABLE', 'DIALOG', 'FIELDSET'])
+const HEADINGS = 'h1, h2, h3, h4, legend, [role="heading"]'
+
+export function slug(text: string): string {
+  return (text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s\u200c]+/g, '-')
+    .replace(/[^\w\u0600-\u06FF-]+/g, '')
+    .slice(0, 60) || 'section'
+}
+
+function ownHeading(el: Element): string {
+  // a heading that belongs to THIS box, not to a nested one far below
+  for (const h of Array.from(el.querySelectorAll(HEADINGS)).slice(0, 3)) {
+    const t = (h.textContent || '').replace(/\s+/g, ' ').trim()
+    if (t) return t.slice(0, 120)
+  }
+  return ''
+}
+
+/** The section the box is in: the innermost section-like ancestor that has a
+ *  heading, else the nearest heading ABOVE the box inside the surface. */
+export function inferSection(el: Element | null, stop: Element | null):
+  { el: Element; value: string; label: string } | null {
+  let cur: Element | null = el
+  for (let i = 0; cur && i < 14 && cur !== stop; i++) {
+    const role = cur.getAttribute?.('role') || ''
+    const cls = typeof cur.className === 'string' ? cur.className : ''
+    const sectionish = SECTION_TAGS.has(cur.tagName) || role === 'tabpanel' || role === 'region'
+      || role === 'dialog' || /\b(card|panel|section)\b/i.test(cls)
+    if (sectionish) {
+      const label = cur.getAttribute('aria-label') || ownHeading(cur)
+      if (label) {
+        const id = cur.id && /^[A-Za-z][\w-]*$/.test(cur.id) ? cur.id : slug(label)
+        return { el: cur, value: id, label }
+      }
+    }
+    cur = cur.parentElement
+  }
+  const scope: ParentNode | null = stop ?? (typeof document !== 'undefined' ? document : null)
+  if (!el || !scope) return null
+  let best: Element | null = null
+  for (const h of Array.from(scope.querySelectorAll('h1, h2, h3'))) {
+    // eslint-disable-next-line no-bitwise
+    if (h.compareDocumentPosition(el) & 4 /* FOLLOWING */) best = h
+  }
+  if (!best) return null
+  const label = (best.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 120)
+  return label ? { el: best, value: `h-${slug(label)}`, label } : null
+}
+
+/** Tab bars built from plain buttons (this app's pages): a row with two or more
+ *  buttons as direct children, exactly one of which is styled «active». */
+const ACTIVE_CLS = /(^|\s)(border-b-2|border-b-\[|bg-white shadow|bg-primary-|bg-blue-600|bg-gray-900|bg-indigo-600|bg-purple-600)/
+
+const ACTION_WORDS = /حذف|ثبت|ذخیره|افزودن|ایجاد|ارسال|اجرا|روشن|خاموش|import|sync|save|create|delete|\+|＋|📝|⚡/i
+
+export function tabBars(root: ParentNode = document): { active: HTMLElement; buttons: HTMLElement[] }[] {
+  const out: { active: HTMLElement; buttons: HTMLElement[] }[] = []
+  try {
+    for (const bar of Array.from(root.querySelectorAll('div, nav'))) {
+      const buttons = Array.from(bar.children).filter((c) => c.tagName === 'BUTTON') as HTMLElement[]
+      if (buttons.length < 2 || buttons.length > 14) continue
+      if (buttons.length < bar.children.length * 0.6) continue
+      const active = buttons.filter((b) => b.getAttribute('aria-pressed') === 'true'
+        || b.getAttribute('aria-selected') === 'true' || ACTIVE_CLS.test(b.className || ''))
+      // a row of ACTION buttons (one of them primary-coloured) is not a tab bar
+      const labels = buttons.map((b) => (b.textContent || '').trim())
+      if (labels.some((t) => ACTION_WORDS.test(t))) continue
+      if (active.length === 1) out.push({ active: active[0], buttons })
+    }
+  } catch { /* exotic DOM */ }
+  return out
+}
+
+/** The active tab on this screen, if the screen has tabs — nested tab bars are
+ *  joined outer › inner, so a sub-tab is its own sub-page on the map. */
+export function activeTab(root: ParentNode = document, search = ''): string {
+  try {
+    const sel = '[role="tab"][aria-selected="true"], [role="tab"][data-state="active"], [data-active-tab="true"]'
+    const t = root.querySelector(sel)
+    const label = (t?.textContent || '').replace(/\s+/g, ' ').trim()
+    if (label) return label.slice(0, 80)
+    const scope = (root as Document).querySelector?.('[data-report-surface]') || root
+    const bars = tabBars(scope as ParentNode)
+    if (bars.length) {
+      return bars.slice(0, 3)
+        .map((b) => (b.active.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40))
+        .filter(Boolean).join(' › ').slice(0, 120)
+    }
+  } catch { /* exotic DOM */ }
+  const q = new URLSearchParams(search || '')
+  return q.get('tab') || q.get('view') || q.get('section') || ''
+}
