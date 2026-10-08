@@ -1,0 +1,4921 @@
+{
+ "generated_at": "2026-10-08T08:31:41+00:00",
+ "commit": "b12f70608402b9ed913e0504611c56f5811c7d13",
+ "pages": [
+  {
+   "route": "/analysis",
+   "label": "",
+   "file": "frontend/src/app/analysis/page.tsx",
+   "lines": 1079,
+   "buttons": 7,
+   "onclick": 10,
+   "inputs": 2,
+   "forms": 0,
+   "links": 1,
+   "tabs": 5
+  },
+  {
+   "route": "/archive",
+   "label": "آرشیو",
+   "file": "frontend/src/app/archive/page.tsx",
+   "lines": 754,
+   "buttons": 7,
+   "onclick": 9,
+   "inputs": 4,
+   "forms": 0,
+   "links": 5,
+   "tabs": 0
+  },
+  {
+   "route": "/creator",
+   "label": "موتور خالق",
+   "file": "frontend/src/app/creator/page.tsx",
+   "lines": 1345,
+   "buttons": 18,
+   "onclick": 20,
+   "inputs": 11,
+   "forms": 0,
+   "links": 4,
+   "tabs": 0
+  },
+  {
+   "route": "/debate",
+   "label": "مناظره",
+   "file": "frontend/src/app/debate/page.tsx",
+   "lines": 690,
+   "buttons": 7,
+   "onclick": 7,
+   "inputs": 1,
+   "forms": 0,
+   "links": 4,
+   "tabs": 0
+  },
+  {
+   "route": "/diagrams",
+   "label": "نمودارها",
+   "file": "frontend/src/app/diagrams/page.tsx",
+   "lines": 782,
+   "buttons": 12,
+   "onclick": 12,
+   "inputs": 5,
+   "forms": 0,
+   "links": 1,
+   "tabs": 0
+  },
+  {
+   "route": "/inspection",
+   "label": "نظارت و سرکشی",
+   "file": "frontend/src/app/inspection/page.tsx",
+   "lines": 109,
+   "buttons": 3,
+   "onclick": 3,
+   "inputs": 0,
+   "forms": 0,
+   "links": 0,
+   "tabs": 1
+  },
+  {
+   "route": "/knowledge-center",
+   "label": "مرکز دانش",
+   "file": "frontend/src/app/knowledge-center/page.tsx",
+   "lines": 1051,
+   "buttons": 17,
+   "onclick": 24,
+   "inputs": 13,
+   "forms": 0,
+   "links": 0,
+   "tabs": 0
+  },
+  {
+   "route": "/model-profiles",
+   "label": "",
+   "file": "frontend/src/app/model-profiles/page.tsx",
+   "lines": 814,
+   "buttons": 6,
+   "onclick": 7,
+   "inputs": 2,
+   "forms": 0,
+   "links": 1,
+   "tabs": 3
+  },
+  {
+   "route": "/models",
+   "label": "مدل‌ها",
+   "file": "frontend/src/app/models/page.tsx",
+   "lines": 1043,
+   "buttons": 13,
+   "onclick": 14,
+   "inputs": 3,
+   "forms": 0,
+   "links": 0,
+   "tabs": 0
+  },
+  {
+   "route": "/oversight",
+   "label": "مرکز نظارت",
+   "file": "frontend/src/app/oversight/page.tsx",
+   "lines": 11138,
+   "buttons": 121,
+   "onclick": 127,
+   "inputs": 86,
+   "forms": 0,
+   "links": 16,
+   "tabs": 0
+  },
+  {
+   "route": "/",
+   "label": "خانه",
+   "file": "frontend/src/app/page.tsx",
+   "lines": 104,
+   "buttons": 0,
+   "onclick": 0,
+   "inputs": 0,
+   "forms": 0,
+   "links": 1,
+   "tabs": 0
+  },
+  {
+   "route": "/project/[id]",
+   "label": "",
+   "file": "frontend/src/app/project/[id]/page.tsx",
+   "lines": 1599,
+   "buttons": 21,
+   "onclick": 27,
+   "inputs": 2,
+   "forms": 0,
+   "links": 4,
+   "tabs": 0
+  },
+  {
+   "route": "/projects/[id]",
+   "label": "",
+   "file": "frontend/src/app/projects/[id]/page.tsx",
+   "lines": 18234,
+   "buttons": 201,
+   "onclick": 228,
+   "inputs": 95,
+   "forms": 0,
+   "links": 11,
+   "tabs": 6
+  },
+  {
+   "route": "/projects",
+   "label": "پروژه‌ها",
+   "file": "frontend/src/app/projects/page.tsx",
+   "lines": 986,
+   "buttons": 17,
+   "onclick": 22,
+   "inputs": 5,
+   "forms": 0,
+   "links": 4,
+   "tabs": 3
+  },
+  {
+   "route": "/settings",
+   "label": "تنظیمات",
+   "file": "frontend/src/app/settings/page.tsx",
+   "lines": 744,
+   "buttons": 13,
+   "onclick": 13,
+   "inputs": 13,
+   "forms": 0,
+   "links": 4,
+   "tabs": 7
+  }
+ ],
+ "menu": [
+  {
+   "href": "/",
+   "label": "خانه"
+  },
+  {
+   "href": "/oversight",
+   "label": "مرکز نظارت"
+  },
+  {
+   "href": "/inspection",
+   "label": "نظارت و سرکشی"
+  },
+  {
+   "href": "/creator",
+   "label": "موتور خالق"
+  },
+  {
+   "href": "/knowledge-center",
+   "label": "مرکز دانش"
+  },
+  {
+   "href": "/debate",
+   "label": "مناظره"
+  },
+  {
+   "href": "/projects",
+   "label": "پروژه‌ها"
+  },
+  {
+   "href": "/diagrams",
+   "label": "نمودارها"
+  },
+  {
+   "href": "/archive",
+   "label": "آرشیو"
+  },
+  {
+   "href": "/models",
+   "label": "مدل‌ها"
+  },
+  {
+   "href": "/settings",
+   "label": "تنظیمات"
+  }
+ ],
+ "components": [
+  {
+   "file": "frontend/src/components/AIUsagePanel.tsx",
+   "lines": 639,
+   "buttons": 10,
+   "inputs": 4
+  },
+  {
+   "file": "frontend/src/components/ExecutingPromptsPanel.tsx",
+   "lines": 350,
+   "buttons": 4,
+   "inputs": 0
+  },
+  {
+   "file": "frontend/src/components/ExtractedFilesPanel.tsx",
+   "lines": 314,
+   "buttons": 2,
+   "inputs": 1
+  },
+  {
+   "file": "frontend/src/components/ExtractionDefaultPicker.tsx",
+   "lines": 130,
+   "buttons": 0,
+   "inputs": 1
+  },
+  {
+   "file": "frontend/src/components/FileUpload.tsx",
+   "lines": 408,
+   "buttons": 2,
+   "inputs": 1
+  },
+  {
+   "file": "frontend/src/components/FileViewer.tsx",
+   "lines": 380,
+   "buttons": 7,
+   "inputs": 0
+  },
+  {
+   "file": "frontend/src/components/GlobalAnalysisProgress.tsx",
+   "lines": 165,
+   "buttons": 0,
+   "inputs": 0
+  },
+  {
+   "file": "frontend/src/components/InspectorRecordingPanel.tsx",
+   "lines": 1306,
+   "buttons": 10,
+   "inputs": 6
+  },
+  {
+   "file": "frontend/src/components/Layout.tsx",
+   "lines": 213,
+   "buttons": 4,
+   "inputs": 0
+  },
+  {
+   "file": "frontend/src/components/NotificationSettingsPanel.tsx",
+   "lines": 949,
+   "buttons": 12,
+   "inputs": 17
+  },
+  {
+   "file": "frontend/src/components/PromptManager.tsx",
+   "lines": 888,
+   "buttons": 14,
+   "inputs": 10
+  },
+  {
+   "file": "frontend/src/components/RenderLogsPanel.tsx",
+   "lines": 1832,
+   "buttons": 30,
+   "inputs": 13
+  },
+  {
+   "file": "frontend/src/components/TaskFilePicker.tsx",
+   "lines": 426,
+   "buttons": 2,
+   "inputs": 1
+  },
+  {
+   "file": "frontend/src/components/help/HelpProvider.tsx",
+   "lines": 287,
+   "buttons": 1,
+   "inputs": 0
+  },
+  {
+   "file": "frontend/src/components/help/HelpSystem.tsx",
+   "lines": 467,
+   "buttons": 4,
+   "inputs": 1
+  },
+  {
+   "file": "frontend/src/components/help/HelpTooltip.tsx",
+   "lines": 132,
+   "buttons": 0,
+   "inputs": 0
+  },
+  {
+   "file": "frontend/src/components/inspection/Board.tsx",
+   "lines": 702,
+   "buttons": 19,
+   "inputs": 7
+  },
+  {
+   "file": "frontend/src/components/inspection/GeneralRequest.tsx",
+   "lines": 111,
+   "buttons": 3,
+   "inputs": 3
+  },
+  {
+   "file": "frontend/src/components/inspection/Panels.tsx",
+   "lines": 239,
+   "buttons": 4,
+   "inputs": 1
+  },
+  {
+   "file": "frontend/src/components/inspection/SystemMap.tsx",
+   "lines": 157,
+   "buttons": 3,
+   "inputs": 1
+  }
+ ],
+ "routes": [
+  {
+   "path": "/api/debate/create",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/debate/{debate_id}/run-round",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/debate/{debate_id}/run-full",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/debate/{debate_id}/score",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/debate/{debate_id}/judge",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/debate/{debate_id}/summary",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/debate/{debate_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/debate/",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/models/",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/models",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/models/providers",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/models/available",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/models/capabilities",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/models/aliases",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/models/profiles",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/models/leaderboard",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/models/rankings",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/models/smart-select",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/models/capability-test",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/models/capability-test/{model_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/models/capability-test-all",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/models/badges",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/models/settings",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/models/settings/{model_id}",
+   "methods": [
+    "DELETE",
+    "GET",
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/models/settings/{model_id}/toggle",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/models/settings/batch-update",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/models/task-types",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/models/settings/by-task/{task_type}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/models/{model_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/chat/",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/chat/stream",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/chat/multi",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/chat/with-fallback",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/settings/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/settings/providers",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/settings/api-keys/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/settings/api-keys",
+   "methods": [
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/settings/work-modes",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/settings/roles",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/settings/config",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/settings/deploy-keys",
+   "methods": [
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/settings/deploy-keys/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/settings/db/all",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/settings/db/category/{category}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/settings/db/{key}",
+   "methods": [
+    "DELETE",
+    "GET",
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/settings/db/bulk",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/settings/db/sync-env",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/settings/ai-limits",
+   "methods": [
+    "GET",
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/projects",
+   "methods": [
+    "GET",
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}",
+   "methods": [
+    "DELETE",
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/summary",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/next-phase",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/progress",
+   "methods": [
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/conversations",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/knowledge",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/diagram",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/sync/github",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/duplicates",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/merge",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/active",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/templates/types",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/diagrams/types",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/diagrams/architecture",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/diagrams/class",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/diagrams/sequence",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/diagrams/gantt",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/diagrams/er",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/diagrams/mindmap",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/diagrams/pie",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/diagrams/state",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/diagrams/analyze-code",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/diagrams/examples/{diagram_type}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/diagrams/projects",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/diagrams/auto-from-project",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/creator/execute",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/creator/execute-script",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/creator/files",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/creator/files/tree",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/creator/git",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/creator/services",
+   "methods": [
+    "GET",
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/creator/services/{service_id}/request",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/creator/services/{service_id}/discover",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/creator/services/{service_id}/analyze",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/creator/agents",
+   "methods": [
+    "GET",
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/creator/agents/{agent_id}/query",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/creator/agents/collaborative",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/creator/projects/create",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/creator/projects/active",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/creator/projects/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/creator/projects/{project_id}/generate-file",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/creator/projects/{project_id}/run",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/creator/workspace/info",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/creator/workspace/history",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/upload/file",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/upload/files",
+   "methods": [
+    "GET",
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/upload/debate/{debate_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/upload/project/{project_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/upload/file/{file_id}",
+   "methods": [
+    "DELETE",
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/upload/file/{file_id}/info",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/upload/stats",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/upload/tree",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/upload/debate/{debate_id}/save-output",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/upload/project/{project_id}/save-output",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/smart-setup",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/auto-build",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/start-workflow",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/workflow-status/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/generated-files/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/project-files/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/file-content/{project_id}/{file_path}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/save-file",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/download-project/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/project-summary/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/execute-task",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/evaluate",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/compare-models",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/select-model",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/model-categories",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/upload-for-analysis",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/analyze-file/{file_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/github/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/github/setup-folders",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/github/files/{entity_type}/{entity_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/github/save-output",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/performance/models",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/stats",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/smart-import/{project_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/smart-import-text/{project_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/sync-project/{project_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/process-github-file/{project_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/start-auto-sync",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/stop-auto-sync",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/project-state/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/smart-build/{project_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/github-status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/deployment-guide/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/reload-from-github",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/check-runtime/{project_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/update-all-projects",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/orchestrator/prepare-runtime/{project_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/config/",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/config",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/config/processing",
+   "methods": [
+    "GET",
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/config/storage",
+   "methods": [
+    "GET",
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/config/models",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/config/models/{model_id}",
+   "methods": [
+    "GET",
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/config/auto-adjust",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/config/recommended-models",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/config/history",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/config/reset",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/external/systems",
+   "methods": [
+    "GET",
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/external/systems/{system_id}",
+   "methods": [
+    "DELETE",
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/external/systems/{system_id}/discover",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/external/systems/{system_id}/health-check",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/external/systems/{system_id}/history",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/external/systems/{system_id}/monitoring/start",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/external/systems/{system_id}/monitoring/stop",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/external/systems/{system_id}/analyze",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/external/systems/{system_id}/request",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/external/systems/{system_id}/logs",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/external/quick-check",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/external/systems/{system_id}/openapi",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/runtime/capabilities",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/runtime/can-run/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/runtime/request-upgrade/{project_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/runtime/run",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/runtime/stop",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/runtime/status/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/runtime/logs/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/runtime/running",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/runtime/stop-all",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/runtime/apply-upgrades",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/runtime/docker-status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/recording/inspector/start",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/recording/inspector/{session_id}/audio-chunk",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/recording/inspector/{session_id}/video-chunk",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/recording/inspector/{session_id}/start-screencast",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/recording/inspector/{session_id}/frame",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/recording/inspector/{session_id}/interactions",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/recording/inspector/{session_id}/stop",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/recording/inspector/{session_id}/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/recording/inspector/{session_id}/preview",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/recording/inspector/{session_id}/regenerate-prompt",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/recording/inspector/{session_id}/finalize",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/recording/inspector/{session_id}/cancel",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/knowledge-center/entries",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/knowledge-center/entries/{entry_id}",
+   "methods": [
+    "DELETE",
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/knowledge-center/sync",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/knowledge-center/bootstrap",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/knowledge-center/ensure/{watched_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/knowledge-center/import",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/knowledge-center/settings",
+   "methods": [
+    "GET",
+    "PATCH"
+   ]
+  },
+  {
+   "path": "/api/knowledge-center/process",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/knowledge-center/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/external-projects/",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/external-projects/connect/github",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/external-projects/connect/render",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/external-projects/{project_id}",
+   "methods": [
+    "DELETE",
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/external-projects/{project_id}/sync",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/external-projects/{project_id}/files",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/external-projects/{project_id}/file/{file_path}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/external-projects/{project_id}/analyze",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/external-projects/{project_id}/readme",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/unified/projects/create",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/unified/projects",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/unified/projects/{project_id}",
+   "methods": [
+    "DELETE",
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/unified/projects/{project_id}/files",
+   "methods": [
+    "GET",
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/unified/projects/{project_id}/files/{file_path}",
+   "methods": [
+    "DELETE",
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/unified/projects/{project_id}/upload",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/unified/projects/{project_id}/sync/github",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/unified/deploy/configure/render",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/unified/deploy/render/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/unified/deploy/render/services",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/unified/projects/{project_id}/deploy/prepare",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/unified/projects/{project_id}/deploy/render",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/unified/projects/{project_id}/deploy/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/unified/projects/{project_id}/deploy/redeploy",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/unified/projects/{project_id}/deploy/stop",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/unified/projects/{project_id}/deploy/start",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/unified/projects/{project_id}/deploy/logs",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/unified/projects/{project_id}/diagrams",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/unified/projects/{project_id}/diagrams/{diagram_type}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/unified/projects/{project_id}/diagrams/custom",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/unified/projects/{project_id}/diagrams/save",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/unified/projects/{project_id}/export",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/unified/projects/import",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/unified/configure",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/unified/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/simple/projects",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/simple/projects/idea-to-prompt",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/simple/projects/create",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/simple/detect-type",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/simple/projects/{project_id}",
+   "methods": [
+    "DELETE",
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/simple/projects/{project_id}/files",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/simple/projects/{project_id}/files/{file_path}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/simple/projects/{project_id}/generate-more",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/simple/projects/{project_id}/deploy",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/simple/projects/{project_id}/deploy/render-ai",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/simple/projects/{project_id}/deploy/render-prefill",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/simple/projects/{project_id}/audit",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/simple/projects/{project_id}/apply-fixes",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/simple/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/simple/projects/{project_id}/push-to-github",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/github/check",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/github/import",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/github/imported",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/github/imported/{project_id}",
+   "methods": [
+    "DELETE",
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/github/imported/{project_id}/file",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/github/imported/{project_id}/refresh",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/github/parse-url",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/github/pr/create",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/github/issues/push",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/github/issues/{owner}/{repo}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/github/pr/from-project/{project_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/github/issues/from-project/{project_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/models/available",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/instructions",
+   "methods": [
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/fields",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/fields/{field_id}",
+   "methods": [
+    "DELETE",
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/request-feature",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/fields/upgrade-action-types",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/for-model/{model_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/chat",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/enhanced-chat-test",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/enhanced-chat",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/fields/{field_id}/trigger/toggle",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/fields/{field_id}/dependencies",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/fields/{field_id}/preview",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/fields/{field_id}/external-prompt",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/fields/{field_id}/trigger/execute",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/fields/{field_id}/archive",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/fields/{field_id}/unarchive",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/fields/archived",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/action-types",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/field-types",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/fields/by-type",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/fields/batch-execute",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/fields/batch-status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/fields/batch-control",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/fields/batch-delete",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/fields/{field_id}/attachments",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/fields/{field_id}/attachments/{attachment_id}",
+   "methods": [
+    "DELETE"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/deploy/test",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/deploy/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/deploy/set-service-id",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/deploy/set-services",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/deploy/saved-services",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/deploy/list-services",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/auto-setup",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/memory/auto-setup-all",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/auto-setup/preview",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/sync-settings",
+   "methods": [
+    "GET",
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/sync-now",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/sync-intervals",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/github-commit-diagnostic",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/fix-github-settings",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/upgrade-fields-action-type",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/export/fields/markdown",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/export/issues/markdown",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/export/report/{report_id}/markdown",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/export/field/{field_id}/markdown",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/export/issue/{issue_index}/markdown",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/quick-approval/pending",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/quick-approval/auto-convert",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/quick-approval/approve/{field_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/quick-approval/reject/{field_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/quick-approval/pre-validate/{field_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/structure",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/structure/analyze",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/structure/settings",
+   "methods": [
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/structure/node/{node_id}/activate",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/structure/live",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/journal/log",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/journal",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/journal/roadmap",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/journal/{log_id}/operations",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/journal/operation/{operation_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/journal/stats",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/journal/{log_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/reports",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/reports/generate",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/reports/generate-engineering",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/reports/generate-engineering-stream",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/reports/trigger",
+   "methods": [
+    "GET",
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/engineering/step1-validate-fields",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/engineering/step2-health-to-fields",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/engineering/step3-evaluate-models",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/engineering/step4-update-roadmap",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/engineering/run-all-steps",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/reports/{report_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/roadmap",
+   "methods": [
+    "GET",
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/journal/fix-disabled-models",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/journal/export",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/journal/export/stats",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/analysis/run",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/analysis/run-stream",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/analysis/reports",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/analysis/reports/{report_id}",
+   "methods": [
+    "DELETE",
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/analysis/reports/{report_id}/download",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/analysis/profiles",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/analysis/profiles/top",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/analysis/profiles/{model_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/analysis/profiles/{model_id}/history",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/analysis/profiles/compare",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/analysis/profiles/refresh-rankings",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/analysis/profiles/initialize",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/analysis/schedule/{project_id}",
+   "methods": [
+    "DELETE",
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/analysis/schedule",
+   "methods": [
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/analysis/stats",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/export",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/debug/single-file-test",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/debug/analysis-test",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/debug/files-content",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/debug/ai-status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/clear",
+   "methods": [
+    "DELETE"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/analyze-direct",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/analyze-stream",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/settings",
+   "methods": [
+    "GET",
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/analyze",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/file-map",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/roadmap/items/{item_id}",
+   "methods": [
+    "PATCH"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/readme",
+   "methods": [
+    "GET",
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/issues",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/issues/{issue_id}/mark-converted",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/issues/unconverted-count",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/ideal-state",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/validate-reports",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/models/profiles",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/models/{model_id}/profile",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/models/top",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/models/{model_id}/history",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/models/compare",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/progress",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/pause",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/resume",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/stop",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/clear-progress",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/general-archive",
+   "methods": [
+    "DELETE",
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/general-archive/{item_id}",
+   "methods": [
+    "DELETE",
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/general-archive/download",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/rejected-issues",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/validation-results",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/rejected-issues/{issue_id}",
+   "methods": [
+    "DELETE"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/chain-status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/file/{file_path}/view",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/file/{file_path}/generate-suggestions",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/file/{file_path}/download",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/files/download-batch",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/files/download-all",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/file/{file_path}/validate",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/health/validate-all",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/security/scan",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/security/secrets",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/security/license",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/security/dependencies",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/test-coverage",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/test-coverage/summary",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/test-coverage/untested",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/security/download",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/test-coverage/download",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/security/transfer-to-issues",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/test-coverage/transfer-to-issues",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/issues",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/issues/summary",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/issues/archive-all",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/issues/delete-all",
+   "methods": [
+    "DELETE"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/issues/{issue_id}",
+   "methods": [
+    "DELETE",
+    "PATCH"
+   ]
+  },
+  {
+   "path": "/api/render/services",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/services/refresh",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/services/{service_id}",
+   "methods": [
+    "PATCH"
+   ]
+  },
+  {
+   "path": "/api/render/services/mappings",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/services/by-project/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/logs",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/logs/fetch",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/logs/live",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/logs/search",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/settings",
+   "methods": [
+    "GET",
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/render/logs/download",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/cleanup",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/archives",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/archives/{archive_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/transfer-errors",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/transfer-status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/transfer-errors-stream",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/archive-stale-issues",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/stats",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/scheduler/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/scheduler/trigger-auto-transfer",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/auto-transfer/debug",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/auto-transfer/force-transfer",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/stream/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/stream/start",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/stream/stop",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/stream/latest",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/chat",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/chat/multi",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/models",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/smart-select-model/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/smart-task",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/task/{task_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/task/{task_id}/action",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/github/files/{owner}/{repo}",
+   "methods": [
+    "GET",
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/browser/session",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/browser/action",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/browser/session/{session_id}",
+   "methods": [
+    "DELETE"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/ai-interact",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/get-elements",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/find-and-click",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/click-at",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/visual-scan",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/sync-inspection",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/analyze-action",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/analyze-error",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/inject-bridge",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/bridge-status/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/set-github-path",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/debug-bridge/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/update-bridge/{project_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/fix-all-bridges",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/create-render-service",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/bridge-connections/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/session/create",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/sessions/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/session/{session_id}/messages",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/session/message",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/session/{session_id}/archive",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/message/{message_id}/verify",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/general-instructions/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/visual-debug-prompt/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/load-task/{task_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/project-tasks/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/prompt-fields/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/prompt-fields/archive-all-instructions/{project_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/prompt-fields/archive-all-instructions-everywhere",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/seed-memory-training/{project_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/training-impact-test/{project_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/prompt-fields",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/prompt-fields/{field_id}",
+   "methods": [
+    "DELETE",
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/prompt-fields/reorder",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/prompt-fields/test",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/prompt-fields/usage-log/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/prompt-fields/init-defaults/{project_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/models/for-investigation/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/models/quick-enable/{model_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/investigate",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/investigate-bulk",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/fix",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/smart-chat/batch-status/{task_key}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/smart-chat/batch-active/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/smart-chat/batch-cancel/{task_key}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/enhance-prompt",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/smart-chat",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/chat-cloud-code",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/cloud-code/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/cloud-code/models",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/apply-action",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/proxy/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/proxy/{project_id}/{path}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/screenshot",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/vision-models",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/visual-debug",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/visual-debug-reanalyze",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/render/env-vars/{service_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/render/env-var",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/render/env-vars/bulk",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/render/restart",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/render/deploy",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/setup-telegram-bot",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/telegram-bot/info",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/selective-scan/{session_id}/progress",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/selective-scan/{session_id}/cancel",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/selective-scan/{session_id}/debug",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/session/{session_id}/proposals/{proposal_id}/run",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/session/{session_id}/apply-all",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/projects/{project_id}/security/scan-secrets",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/projects/{project_id}/security/secrets-report",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/projects/{project_id}/security/analyze-licenses",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/projects/{project_id}/security/full-report",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/projects/{project_id}/security/test-coverage",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/projects/{project_id}/security/validate-code",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/projects/{project_id}/security/generate-diff",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/projects/{project_id}/security/dry-run-changes",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/projects/{project_id}/security/dashboard",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/prompts/categories",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/prompts",
+   "methods": [
+    "GET",
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/prompts/{prompt_id}",
+   "methods": [
+    "DELETE",
+    "GET",
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/prompts/{prompt_id}/toggle",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/prompts/{prompt_id}/duplicate",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/prompts/{prompt_id}/reset",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/prompts/executions/active",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/prompts/executions/clear-stuck",
+   "methods": [
+    "DELETE",
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/prompts/executions/history",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/prompts/executions/start",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/prompts/executions/{execution_id}/complete",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/prompts/{prompt_id}/validate",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/prompts/category/{category}/validate-all",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/prompts/restore-defaults",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/notifications/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/notifications/prefs",
+   "methods": [
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/notifications/test",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/notifications/notify",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/notifications/telegram/webhook",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/notifications/telegram/set-webhook",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/notifications/telegram/delete-webhook",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/notifications/telegram/heal-webhook",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/notifications/daily-report/preview",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/notifications/daily-report/send-now",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/ai-usage/stats",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/ai-usage/timeseries",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/ai-usage/recent",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/ai-usage/leaks",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/ai-usage/by-model",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/ai-usage/summary",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/ai-usage/balances",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/ai-usage/balances/refresh",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/ai-usage/balances/{provider}/budget",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/ai-usage/balances/{provider}/threshold",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/ai-usage/balances/{provider}",
+   "methods": [
+    "DELETE"
+   ]
+  },
+  {
+   "path": "/api/external/prompts/next",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/external/prompts/{task_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/external/prompts/{task_id}/claim",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/external/prompts/{task_id}/progress",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/external/prompts/{task_id}/complete",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/external/prompts/{task_id}/fail",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/external/prompts/_admin/backfill",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/external/prompts/_admin/rebuild-index",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/external/prompts/_admin/diagnose/{task_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/screen-recording/start",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/screen-recording/{recording_id}/upload",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/screen-recording/{recording_id}/finalize",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/screen-recording/{recording_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/screen-recording/list/{project_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/screen-recording/file/{file_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/audio/transcribe",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspection/whoami",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/inspection/",
+   "methods": [
+    "GET",
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspection",
+   "methods": [
+    "GET",
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspection/queue",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/inspection/urgent",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/inspection/urgent/claim",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspection/schedule",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/inspection/binders",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/inspection/storage",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/inspection/storage/drive/connect",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspection/storage/drive/disconnect",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspection/storage/sync",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspection/surfaces",
+   "methods": [
+    "GET",
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspection/surfaces/{surface_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/inspection/inventory",
+   "methods": [
+    "GET",
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspection/{report_id}/intake/start",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspection/intake/{upload_id}/append",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspection/intake/{upload_id}/finish",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspection/intake/{upload_id}",
+   "methods": [
+    "DELETE"
+   ]
+  },
+  {
+   "path": "/api/inspection/files/{file_id}",
+   "methods": [
+    "DELETE",
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/inspection/files/{file_id}/text",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/inspection/files/{file_id}/raw",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/inspection/shots/{shot_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/inspection/{report_id}/notes",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspection/{report_id}/notes/{note_id}",
+   "methods": [
+    "PATCH"
+   ]
+  },
+  {
+   "path": "/api/inspection/{report_id}/status",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspection/{report_id}/urgent",
+   "methods": [
+    "DELETE",
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspection/file",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspection/{report_id}",
+   "methods": [
+    "DELETE",
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/settings",
+   "methods": [
+    "GET",
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/oversight/repos",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/watched",
+   "methods": [
+    "GET",
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/watched/{watched_id}",
+   "methods": [
+    "DELETE",
+    "PATCH"
+   ]
+  },
+  {
+   "path": "/api/oversight/watched/{watched_id}/claude-runner/enable",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/watched/{watched_id}/claude-runner/disable",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/watched/{watched_id}/claude-runner/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/watched/{watched_id}/claude-runner/repair",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/watched/{watched_id}/claude-runner/refresh-yaml",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/watched/{watched_id}/claude-runner/runs",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/{task_id}/run-claude-now",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/{task_id}/verify-trace",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/watched/{watched_id}/verify-v6-config",
+   "methods": [
+    "GET",
+    "PATCH"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/{task_id}/evidence/runs",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/{task_id}/evidence/{run_id}/{file_path}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/watched/{watched_id}/feature-inventory",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/watched/{watched_id}/runtime/test-connection",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/watched/{watched_id}/runtime/autodetect",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/runtime/diagnostics",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/runtime/backfill-ac-classification",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/runtime/backfill-ac-classification/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/watched/{watched_id}/auth-recipe/test",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/watched/{watched_id}/auth-recipe/invalidate",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/{task_id}/prompt/revert",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks",
+   "methods": [
+    "GET",
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/by-project/{project_full_name}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/summary/by-project/{project_full_name}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/from-draft",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/from-idea",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/idea-draft/start",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/idea-draft/{draft_id}/chunk",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/idea-draft/{draft_id}/finalize",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/idea-to-prompt-job",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/{task_id}",
+   "methods": [
+    "DELETE",
+    "PATCH"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/{task_id}/archive",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/{task_id}/unarchive",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/watched/{watched_id}/view-prefs",
+   "methods": [
+    "GET",
+    "PATCH"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/{task_id}/reminder/snooze",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/{task_id}/reminder/done",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/{task_id}/reminder/step/{step_id}",
+   "methods": [
+    "PATCH"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/prepend-disclaimer-to-old",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/from-inspector",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/from-inspector-recording",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/{task_id}/inspector-context",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/check-similarity",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/merge-preview",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/merge-apply",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/watched/{watched_id}/audit-prompt-quality",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/watched/{watched_id}/regenerate-low-quality-prompts",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/{task_id}/regenerate-prompt",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/{task_id}/rollback-prompt/{history_idx}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/{task_id}/run",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/{task_id}/verify-now",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/watched/{watched_id}/bulk-verify",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/watched/{watched_id}/consolidate-remaining",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/super-task/{super_task_id}/unmerge",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/watched/{watched_id}/bulk-verify/eligible-count",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/watched/{watched_id}/bulk-verify/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/{task_id}/recover-after-claude-run",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/{task_id}/mark-applied-externally",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/{task_id}/full-prompt",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/{task_id}/verification-history",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/{task_id}/resolve-project",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/{task_id}/record-execution",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/watched/{watched_id}/run-now",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/bulk-approve",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/reports",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/reports/{report_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/reports/{report_id}/mark",
+   "methods": [
+    "PATCH"
+   ]
+  },
+  {
+   "path": "/api/oversight/scan/{watched_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/scan/{watched_id}/deep",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/scan/{watched_id}/progress",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/scan/{watched_id}/sections",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/scan/{watched_id}/summaries",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/scan/{watched_id}/pause",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/scan/{watched_id}/resume",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/scan/{watched_id}/stop",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/watched/{watched_id}/chain-status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/codex/{watched_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/codex/{watched_id}/refresh",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/codex/{watched_id}/roadmap",
+   "methods": [
+    "GET",
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/oversight/codex/{watched_id}/generate-roadmap",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/codex/{watched_id}/roadmap/items/{item_id}",
+   "methods": [
+    "PATCH"
+   ]
+  },
+  {
+   "path": "/api/oversight/codex/{watched_id}/readme",
+   "methods": [
+    "GET",
+    "PUT"
+   ]
+  },
+  {
+   "path": "/api/oversight/codex/{watched_id}/generate-readme",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/archive",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/migration/import-from-project/{project_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/archive/{item_type}/{item_id}",
+   "methods": [
+    "DELETE"
+   ]
+  },
+  {
+   "path": "/api/oversight/external-tasks",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/external-tasks/summary",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/external-tasks/{project_id}/{field_id}/verify-now",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/scheduler/tick",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/uploads/start",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/uploads/{session_id}/chunk",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/uploads/{session_id}/complete",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/uploads/{session_id}",
+   "methods": [
+    "DELETE",
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/uploads",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/uploads/cleanup-orphans",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/progress/{track_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/progress",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/uploads/{session_id}/check-model",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/uploads/{session_id}/extract",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/models/{model_id}/temp-activate",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/models/{model_id}/temp-revert",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/models/temp-activations",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/models/extraction-default",
+   "methods": [
+    "GET",
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/extractions/counts-by-task",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/tasks/{task_id}/extractions",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/extractions/{extraction_id}/segments",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/extractions/{extraction_id}/full-text",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/inspector/cloud-code/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/inspector/chat-cloud-code",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/oversight-summary",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/apply-oversight-task",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/verify-task/{task_id}",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/models/health",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/models/profiles/{model_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/models/profiles/{model_id}/history",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/models/profiles/{model_id}/update-score",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/models/refresh-rankings",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/health",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/{full_path}",
+   "methods": [
+    "OPTIONS"
+   ]
+  }
+ ],
+ "services": [
+  "ai_balance_service",
+  "ai_base",
+  "ai_manager",
+  "analysis_progress_manager",
+  "audio_transcribe",
+  "audio_transcription_service",
+  "background_scheduler",
+  "browser_automation",
+  "capability_detector",
+  "claude_runner_bootstrap",
+  "claude_service",
+  "cloud_code_executor",
+  "cloud_code_service",
+  "code_quality_analyzer",
+  "content_sanitizer",
+  "creator_engine",
+  "creator_idea_to_prompt",
+  "db_service",
+  "debate_service",
+  "deep_analysis_service",
+  "deepseek_service",
+  "deploy_service",
+  "diagram_service",
+  "dynamic_config",
+  "dynamic_diagram_service",
+  "external_monitor",
+  "external_project_connector",
+  "gdrive",
+  "gemini_service",
+  "github_import",
+  "github_pr_service",
+  "github_storage",
+  "health_to_issues_service",
+  "inspection_files",
+  "inspector_agent",
+  "inspector_agent_service",
+  "inspector_intent_resolver",
+  "inspector_proposal_executor",
+  "inspector_recording_finalize",
+  "inspector_recording_multimodal",
+  "inspector_recording_processor",
+  "inspector_recording_service",
+  "inspector_roles",
+  "inspector_scan_bridge",
+  "intelligent_field_creator",
+  "journal_service",
+  "knowledge_center_service",
+  "log_stream_service",
+  "log_to_issues_service",
+  "model_capability_tester",
+  "model_profiler",
+  "notification_service",
+  "oauth_model_registry",
+  "openai_service",
+  "oversight_codex_service",
+  "oversight_deep_scan_service",
+  "oversight_extraction",
+  "oversight_inspector_bridge",
+  "oversight_mega_bundle",
+  "oversight_model_temp_activate",
+  "oversight_progress",
+  "oversight_service",
+  "oversight_settings",
+  "oversight_strong_prompt",
+  "oversight_telegram_compose",
+  "oversight_upload_session",
+  "oversight_verifier",
+  "oversight_verify_pdf",
+  "perplexity_service",
+  "project_analyzer",
+  "project_auto_setup",
+  "project_health_analyzer",
+  "project_service",
+  "prompt_github_sync",
+  "prompt_helper",
+  "quick_approval_service",
+  "reference_project_service",
+  "render_service",
+  "report_validator",
+  "runtime_executor",
+  "scan_sections",
+  "security_analyzer",
+  "security_scanner",
+  "simple_creator",
+  "smart_import",
+  "smart_orchestrator",
+  "storage_service",
+  "supervisor_rounds",
+  "task_consolidation_service",
+  "task_merge_service",
+  "test_coverage_analyzer",
+  "unified_storage"
+ ],
+ "models": [
+  "ai_log",
+  "ai_profile",
+  "analysis_report",
+  "debate",
+  "inspection",
+  "inspector_prompt_field",
+  "inspector_session",
+  "project",
+  "render_log",
+  "screen_recording",
+  "setting",
+  "system_prompt"
+ ],
+ "errors": [],
+ "totals": {
+  "pages": 15,
+  "menu_items": 11,
+  "page_buttons": 463,
+  "component_buttons": 131,
+  "inputs": 309,
+  "routes": 731,
+  "services": 92,
+  "models": 12
+ }
+}
