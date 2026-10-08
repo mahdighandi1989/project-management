@@ -87,6 +87,11 @@ export function StoragePanel() {
         scope: st.drive.scope,
         ux_mode: 'popup',
         prompt: 'consent',                      // a refresh token is only issued on full consent
+        // Ask for EXACTLY drive.file. By default Google merges every scope this OAuth
+        // client was granted before (incremental auth) — this client also serves a
+        // YouTube app, and Google refuses drive.file + youtube.* in one request
+        // («scopes that cannot be requested together», Error 400: invalid_request).
+        include_granted_scopes: false,
         callback: async (resp: { code?: string; error?: string }) => {
           if (!resp.code) { toast.error(`اتصال انجام نشد${resp.error ? ` (${resp.error})` : ''}`); setBusy(false); return }
           try {

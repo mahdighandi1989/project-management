@@ -1,6 +1,6 @@
 {
- "generated_at": "2026-10-08T08:31:41+00:00",
- "commit": "b12f70608402b9ed913e0504611c56f5811c7d13",
+ "generated_at": "2026-10-08T10:12:44+00:00",
+ "commit": "47a83b8b5bbfe28f8d1060eed9ab547890a64e82",
  "pages": [
   {
    "route": "/analysis",
@@ -181,6 +181,18 @@
    "forms": 0,
    "links": 4,
    "tabs": 7
+  },
+  {
+   "route": "/users",
+   "label": "",
+   "file": "frontend/src/app/users/page.tsx",
+   "lines": 80,
+   "buttons": 4,
+   "onclick": 4,
+   "inputs": 0,
+   "forms": 0,
+   "links": 0,
+   "tabs": 0
   }
  ],
  "menu": [
@@ -280,8 +292,8 @@
   },
   {
    "file": "frontend/src/components/Layout.tsx",
-   "lines": 213,
-   "buttons": 4,
+   "lines": 242,
+   "buttons": 5,
    "inputs": 0
   },
   {
@@ -340,7 +352,7 @@
   },
   {
    "file": "frontend/src/components/inspection/Panels.tsx",
-   "lines": 239,
+   "lines": 244,
    "buttons": 4,
    "inputs": 1
   },
@@ -3857,6 +3869,48 @@
    ]
   },
   {
+   "path": "/api/auth/config",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/auth/google",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/auth/me",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/auth/logout-all",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/auth/users",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/auth/users/{user_id}",
+   "methods": [
+    "PATCH"
+   ]
+  },
+  {
+   "path": "/api/auth/supervisor-session",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
    "path": "/api/inspection/whoami",
    "methods": [
     "GET"
@@ -4897,6 +4951,7 @@
   "ai_log",
   "ai_profile",
   "analysis_report",
+  "app_user",
   "debate",
   "inspection",
   "inspector_prompt_field",
@@ -4909,13 +4964,13 @@
  ],
  "errors": [],
  "totals": {
-  "pages": 15,
+  "pages": 16,
   "menu_items": 11,
-  "page_buttons": 463,
-  "component_buttons": 131,
+  "page_buttons": 467,
+  "component_buttons": 132,
   "inputs": 309,
-  "routes": 731,
+  "routes": 738,
   "services": 92,
-  "models": 12
+  "models": 13
  }
 }

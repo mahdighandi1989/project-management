@@ -4,17 +4,17 @@
 > هر صفحه/دکمه/endpointی که بعداً اضافه شود، خودکار این‌جا ظاهر می‌شود؛ مختصاتِ دقیقِ
 > عنصرهای هر صفحه در برنامه است: «نظارت و سرکشی › نقشهٔ سامانه».
 
-تولید: 2026-10-08T08:31:41+00:00 · کامیت `b12f706084`
+تولید: 2026-10-08T10:12:44+00:00 · کامیت `47a83b8b5b`
 
 | سنجه | تعداد |
 |---|---|
-| صفحه‌ها | 15 |
+| صفحه‌ها | 16 |
 | آیتم‌های منو | 11 |
-| دکمه‌ها در صفحه‌ها / در کامپوننت‌ها | 463 / 131 |
+| دکمه‌ها در صفحه‌ها / در کامپوننت‌ها | 467 / 132 |
 | ورودی‌ها | 309 |
-| مسیرهای API | 731 |
+| مسیرهای API | 738 |
 | سرویس‌ها | 92 |
-| مدل‌ها | 12 |
+| مدل‌ها | 13 |
 
 ## منوی کناری
 
@@ -51,6 +51,7 @@
 | `/projects/[id]` | `frontend/src/app/projects/[id]/page.tsx` | 18234 | 201 | 95 | 6 |
 | `/projects` | `frontend/src/app/projects/page.tsx` | 986 | 17 | 5 | 3 |
 | `/settings` | `frontend/src/app/settings/page.tsx` | 744 | 13 | 13 | 7 |
+| `/users` | `frontend/src/app/users/page.tsx` | 80 | 4 | 0 | 0 |
 
 ## مسیرهای API
 
@@ -85,6 +86,13 @@
 | DELETE,GET | `/api/analysis/schedule/{project_id}` |
 | GET | `/api/analysis/stats` |
 | POST | `/api/audio/transcribe` |
+| GET | `/api/auth/config` |
+| POST | `/api/auth/google` |
+| POST | `/api/auth/logout-all` |
+| GET | `/api/auth/me` |
+| POST | `/api/auth/supervisor-session` |
+| GET | `/api/auth/users` |
+| PATCH | `/api/auth/users/{user_id}` |
 | POST | `/api/chat/` |
 | POST | `/api/chat/multi` |
 | POST | `/api/chat/stream` |
