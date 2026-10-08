@@ -10,6 +10,10 @@ from .system_prompt import SystemPrompt, PromptExecution
 from .inspector_session import InspectorSession, InspectorMessage
 from .inspector_prompt_field import InspectorPromptField
 from .screen_recording import ScreenRecording
+from .inspection import (
+    InspectionReport, InspectionShot, InspectionFile, InspectionUpload,
+    InspectionBinder, InspectionSurface,
+)
 
 __all__ = [
     "Project",
@@ -24,4 +28,10 @@ __all__ = [
     "InspectorMessage",
     "InspectorPromptField",
     "ScreenRecording",
+    "InspectionReport",
+    "InspectionShot",
+    "InspectionFile",
+    "InspectionUpload",
+    "InspectionBinder",
+    "InspectionSurface",
 ]

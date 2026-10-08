@@ -32,6 +32,7 @@ from .api.routes import ai_usage  # 🆕 AI Usage tracking (token consumption + 
 from .api.routes import external_prompts  # 🆕 External Prompts (Cloud Code integration)
 from .api.routes import screen_recording  # 🆕 Screen Recording (ضبط ویدئو بازرس ویژه)
 from .api.routes import audio  # 🆕 Audio Transcription (تبدیل گفتار به متن)
+from .api.routes import inspection  # 🆕 «نظارت و سرکشی» (برگه‌های مالک + ناظرِ خودکار)
 
 # 🚨 (audit critical fix) — eager import to register OAuth dispatchers.
 # `cloud_code_service` self-registers in oauth_model_registry at import time.
@@ -89,6 +90,14 @@ async def lifespan(app: FastAPI):
     # 🆕 Initialize SQLite Database
     logger.info("🗄️ Initializing SQLite database...")
     init_db()
+    # «نظارت و سرکشی» — the mover that sends spooled files/screenshots to Google
+    # Drive and empties the local disk. Non-fatal by design.
+    try:
+        from .services import inspection_files as _ifiles
+        _ifiles.start_worker()
+        _ifiles.kick()
+    except Exception as _ins_e:  # noqa: BLE001
+        logger.warning(f"inspection drive-sync worker did not start (non-fatal): {_ins_e}")
     db_info = get_db_info()
     logger.info(f"📊 Database: {db_info.get('path')} ({db_info.get('size_mb', 0)} MB)")
     if db_info.get('record_counts'):
@@ -788,6 +797,7 @@ app.include_router(ai_usage.router, prefix="/api")  # 🆕 AI Usage tracking
 app.include_router(external_prompts.router, prefix="/api")  # 🆕 External Prompts (Cloud Code)
 app.include_router(screen_recording.router, prefix="/api")  # 🆕 Screen Recording (ضبط ویدئو)
 app.include_router(audio.router, prefix="/api")  # 🆕 Audio Transcription (گفتار به متن)
+app.include_router(inspection.router, prefix="/api")  # 🆕 «نظارت و سرکشی» — /api/inspection
 if OVERSIGHT_AVAILABLE and oversight is not None:
     app.include_router(oversight.router, prefix="/api")  # 🆕 Oversight (مرکز نظارت GitHub)
     # bridge endpoints under /api/projects/{project_id}/{apply-oversight-task,verify-task,oversight-summary}
