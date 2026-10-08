@@ -23,7 +23,8 @@ the worker retries every few minutes; the moment Drive is connected everything
 pending moves and the disk is emptied. Nothing is ever silently «kept».
 
 Extraction never reports «no text» when it means «I could not try»:
-``ok | empty | unsupported | failed | image | media`` are distinct, each with a
+``ok | empty | unsupported | failed | image | pending`` (and the legacy
+``media``, now re-extracted to a transcript) are distinct, each with a
 Persian reason, because a reader who cannot tell them apart treats all of them
 as «nothing to see».
 """
@@ -252,11 +253,22 @@ def extract(data: bytes, filename: str, mime: str = "") -> dict:
                 "پس باید خودِ فایل را هم باز کنی")
         return {"status": status, "text": text, "note": note, "page_count": pages, "truncated": truncated}
 
+    from . import inspection_formats as fmt
+
+    def extra() -> Optional[dict]:
+        """Every format this function does not read itself — the whole text,
+        never a sample (inspection_formats; archive members come back here)."""
+        res = fmt.extract_extra(data, filename, mime, base=extract)
+        return None if res is None else done(res["status"], res["text"], res["note"],
+                                             int(res.get("page_count") or 0), bool(res.get("truncated")))
+
     try:
         if mime.startswith("image/") or ext in _IMAGE_EXT:
             return done("image", "", "تصویر است — متنی برای استخراج ندارد؛ ناظر باید بازش کند و نگاه کند")
-        if mime.startswith(("audio/", "video/")) or ext in _MEDIA_EXT:
-            return done("media", "", "صوت/ویدئو است — ناظر باید خودِ فایل را باز کند و گوش/نگاه کند")
+        if mime.startswith(("audio/", "video/")) or ext in _MEDIA_EXT or fmt.is_media(name, mime):
+            # was «media» (open it and listen): now «pending» until the FULL
+            # transcript exists (inspection_media; POST /files/{id}/extract)
+            return extra()
         if ext == ".pdf" or mime == "application/pdf":
             text, pages, with_text = _pdf_text(data)
             if with_text:
@@ -270,27 +282,29 @@ def extract(data: bytes, filename: str, mime: str = "") -> dict:
             text = _docx_text(data)
             return done("ok", text, "از فایلِ Word") if text.strip() else done("empty", "", "فایلِ Word متنی نداشت")
         if ext == ".doc" or mime == "application/msword":
-            return done("unsupported", "", "قالبِ قدیمیِ ‎.doc — استخراج‌کننده نداریم؛ ناظر باید بازش کند")
+            return extra()
         if ext in (".xlsx", ".xlsm") or "spreadsheetml" in mime:
             text = _xlsx_text(data)
             return done("ok", text, "از کاربرگ") if text.strip() else done("empty", "", "کاربرگ سلولِ پُری نداشت")
         if ext == ".xls" or mime == "application/vnd.ms-excel":
-            return done("unsupported", "", "قالبِ قدیمیِ ‎.xls — استخراج‌کننده نداریم؛ ناظر باید بازش کند")
+            return extra()
         if ext == ".pptx" or "presentationml" in mime:
             text = _pptx_text(data)
             if text is None:
                 return done("unsupported", "", "برای PowerPoint استخراج‌کننده نصب نیست — خودِ فایل را باز کن")
             return done("ok", text, "از PowerPoint") if text.strip() else done("empty", "", "اسلایدها متنی نداشتند")
+        if ext == ".rtf" or mime in ("application/rtf", "text/rtf"):
+            # the words, not the RTF markup (was: raw `{\\rtf1…` as «plain text»)
+            return extra()
         if ext in _TEXTY_EXT or mime.startswith("text/") or mime in ("application/json", "application/xml"):
             text = _decode(data)
             return done("ok", text, "متنِ ساده") if text.strip() else done("empty", "", "فایل خالی است")
         if ext == ".zip" or mime in ("application/zip", "application/x-zip-compressed"):
-            import zipfile
-
-            with zipfile.ZipFile(io.BytesIO(data)) as z:
-                names = z.namelist()[:1000]
-            return done("ok", "--- فهرستِ محتویاتِ آرشیو ---\n" + "\n".join(names),
-                        "فقط فهرستِ فایل‌ها؛ برای محتوا باید بازش کرد", truncated=True)
+            # every member, recursively, through its own reader — not a list of names
+            return extra()
+        found = extra()      # rtf, odt, epub, eml, msg, any real text …
+        if found is not None:
+            return found
         return done("unsupported", "", f"برای «{ext or mime or 'این نوع'}» استخراج‌کنندهٔ متن نداریم — "
                                        "ناظر باید خودِ فایل را از درایو باز کند و کامل ببیند")
     except Exception as exc:  # noqa: BLE001 - the reason is the useful part
@@ -426,6 +440,39 @@ def load_text(db, row) -> str:
         while sum(len(v) for v in _TEXT_CACHE.values()) > _TEXT_CACHE_MAX and len(_TEXT_CACHE) > 1:
             _TEXT_CACHE.popitem(last=False)
     return text
+
+
+def replace_text(db, row, text: str, report_number: int) -> None:
+    """Put a NEW extracted text where this file's text lives (re-extraction /
+    full transcript). Spool first; a file already in Drive gets a new sidecar
+    there and the old one goes to the project's «سطلِ حذف‌شده» (quarantine)."""
+    from . import gdrive
+
+    with _cache_lock:
+        _TEXT_CACHE.pop(row.id, None)
+    if row.store != "drive":
+        if not text:
+            _rm(row.spool_text_path)
+            row.spool_text_path = ""
+            return
+        path = row.spool_text_path or str(spool_dir() / f"file-{row.id}.txt")
+        Path(path).write_text(text, encoding="utf-8")
+        row.spool_text_path = path
+        return
+    old = row.text_drive_id or ""
+    row.text_drive_id, row.text_drive_link = "", ""
+    if text:
+        parent = gdrive.ensure_folder(db, gdrive.report_folder_parts(report_number))
+        name = f"{row.ref} — {row.filename}" if row.ref else row.filename
+        data = text.encode("utf-8")
+        tp = gdrive.upload(db, io.BytesIO(data), name=f"{name}.متن.txt", mime="text/plain; charset=utf-8",
+                           parent=parent, size=len(data), description=f"متنِ استخراج‌شدهٔ {row.ref}")
+        row.text_drive_id, row.text_drive_link = tp["id"], tp["link"]
+    if old:
+        try:
+            gdrive.move_to_trash_folder(db, old)
+        except Exception:  # noqa: BLE001 - the old sidecar simply stays where it was
+            pass
 
 
 def iter_raw(db, row) -> Iterator[bytes]:

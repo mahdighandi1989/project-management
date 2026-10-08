@@ -107,13 +107,13 @@ class Client:
 
     # -- calls ----------------------------------------------------------------
     def raw(self, path: str, *, data: bytes | None = None, headers: dict | None = None,
-            method: str = "GET") -> tuple[int, bytes, dict]:
+            method: str = "GET", timeout: float = TIMEOUT) -> tuple[int, bytes, dict]:
         h = {"X-Supervisor-Token": self._token}
         h.update(headers or {})
         last: tuple[int, bytes, dict] = (0, b"", {})
         for attempt in range(4):  # a cold Render instance can take a while to wake
             try:
-                last = _http(f"{self.base}{path}", data=data, headers=h, method=method)
+                last = _http(f"{self.base}{path}", data=data, headers=h, method=method, timeout=timeout)
             except SupervisorError:
                 if attempt == 3:
                     raise

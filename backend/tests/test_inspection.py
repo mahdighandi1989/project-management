@@ -354,8 +354,35 @@ def test_extract_distinguishes_no_text_states():
     from app.services.inspection_files import extract
 
     assert extract(b"", "a.png", "image/png")["status"] == "image"
-    assert extract(b"", "a.mp4", "video/mp4")["status"] == "media"
-    assert extract(b"abc", "a.bin", "application/octet-stream")["status"] == "unsupported"
+    # audio/video: no longer «media» (open-and-listen) but «pending» — a debt
+    # until the FULL transcript exists (inspection_media)
+    assert extract(b"", "a.mp4", "video/mp4")["status"] == "pending"
+    # real binary stays unsupported; bytes that ARE text are read whatever the extension
+    assert extract(b"\x00\x01\x02\xff", "a.bin", "application/octet-stream")["status"] == "unsupported"
+    assert extract(b"abc", "a.bin", "application/octet-stream")["status"] == "ok"
     assert extract(b"   ", "a.txt", "text/plain")["status"] == "empty"
     assert extract("سلام".encode(), "a.md", "")["status"] == "ok"
     assert extract(b"not a pdf", "a.pdf", "application/pdf")["status"] == "failed"
+
+
+def test_pending_audio_is_a_debt_until_its_full_transcript_is_read(env, monkeypatch):
+    from app.services import inspection_media as imedia
+
+    c = env["client"]
+    rid = _create(c)["id"]
+    f = _upload(c, rid, "voice.mp3", b"ID3....", mime="audio/mpeg")
+    assert f["extract_status"] == "pending"
+    # opening the bytes is not hearing them
+    assert c.get(f"/api/inspection/files/{f['id']}/raw", headers=SUP).status_code == 200
+    assert c.post(f"/api/inspection/{rid}/notes", headers=SUP,
+                  json={"text": "x", "outcome": "needs-owner"}).status_code == 422
+    monkeypatch.setattr(imedia, "transcribe", lambda *a, **k: {
+        "ok": True, "text": "[00:00:00] تمامِ گفتار تا آخر", "note": "", "truncated": False, "model": "m"})
+    r = c.post(f"/api/inspection/files/{f['id']}/extract", headers=SUP)
+    assert r.status_code == 200, r.text
+    g = r.json()["file"]
+    assert g["extract_status"] == "ok" and g["text_chars"] > 0 and g["read_chars"] == 0
+    page = c.get(f"/api/inspection/files/{f['id']}/text?offset=0&limit=5000", headers=SUP).json()
+    assert "تمامِ گفتار تا آخر" in page["text"] and page["fully_read"]
+    assert c.post(f"/api/inspection/{rid}/notes", headers=SUP,
+                  json={"text": "شنیدم", "outcome": "needs-owner"}).status_code == 200

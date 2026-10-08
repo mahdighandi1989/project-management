@@ -95,3 +95,48 @@
 - **[TODO]** پس از دیپلوی، مالک «اتصال به گوگل درایو» را دوباره بزند؛ اگر باز خطا بود، متنِ خطا را بفرستد.
 
 > **امضا:** `claude-opus-5-5 (Claude Code)` · 2026-10-08 · بازبینیِ production با Chromium + curl + اسکریپت‌های ناظر
+
+## 2026-10-08 (۴) — «نظارت و سرکشی»: هر قالبی کامل خوانده می‌شود — صوت/ویدیو با رونویسیِ کامل، ZIP ِ بازگشتی، doc/xls/rtf/odf/epub/ایمیل
+
+- **[OWNER]** خواستهٔ مالک برای همهٔ پروژه‌هایش (پس از آنکه در Lifemanager دید ناظر فایلِ پیوست را کامل نمی‌خواند):
+  «هر نوع فرمتی باید خونده بشه توسط ناظر … و حتی کامل هم خونده بشه نه خلاصه و یا اوایل اون فایل» — صدا، ویدیو،
+  زیپ، انواعِ عکس و متن؛ و «روتین‌ها را اشتباه نگیر، چیزی را حذف نکن، قابلیتی را خراب نکن».
+- **[FINDING]** در `backend/app/services/inspection_files.py` ِ پیش از این تغییر:
+  `.doc` و `.xls` ⇒ `unsupported`؛ ZIP ⇒ فقط **فهرستِ نام‌ها** (`truncated`)؛ صوت/ویدیو ⇒ `media` («بازش کن و
+  گوش کن») که با یک بار گرفتنِ `/raw` بدهی‌اش صاف می‌شد — یعنی ناظر بی‌آنکه صدایی شنیده باشد می‌توانست جواب بدهد
+  (ناظرِ خودکار اصلاً نمی‌تواند فایلِ صوتی را «گوش» کند)؛ هر پسوندِ ناشناخته (`.rtf`، `.odt`، `.epub`، `.eml`،
+  `.msg`، `.conf`…) ⇒ `unsupported`. CLI ِ ناظر HEIC/TIFF/BMP/AVIF را بی‌تبدیل می‌گذاشت (ابزارِ Read نشانشان
+  نمی‌دهد)، زیپ را باز نمی‌کرد، و پاک‌سازیِ `files/` با `unlink` روی زیرپوشه می‌شکست.
+- **[FINDING]** روتین‌ها (`trig_01SmGK1H3EyJoWpeSBVcqj8F` فوری، `trig_0185k7gpGZBvVs9JY9pZHiHJ` کامل) فقط به
+  `docs/supervisor/URGENT_PROMPT.md` / `PROMPT.md` اشاره می‌کنند ⇒ پرامپتِ اصلی همین فایل‌هاست؛ پیامِ روتین‌ها عوض نشد.
+- **[CHANGE]** `services/inspection_formats.py` (تازه): خوانندهٔ کامل برای `.doc` (جدولِ قطعه‌های OLE)، `.xls` (همهٔ
+  کاربرگ‌ها)، RTF، ODT/ODS/ODP، EPUB به ترتیبِ spine، `.eml`/`.msg` با **همهٔ پیوست‌ها**، ZIP ِ **بازگشتی** (هر عضو
+  از همان `extract()` ِ پروژه رد می‌شود)، SVG، و «هر بایتی که متن است، با هر پسوندی». `extract()` فقط در همان
+  نقطه‌هایی که «unsupported»/فهرستِ نام می‌داد به آن وصل شد؛ خواننده‌های موجود (PDF، docx، xlsx، pptx) دست نخوردند.
+- **[CHANGE]** صوت/ویدیو (و ZIP ِ دارای آن‌ها) ⇒ وضعیتِ تازهٔ **`pending`** (به‌جای `media`). `services/inspection_media.py`
+  (تازه): رونویسیِ **کلمه‌به‌کلمه با برچسبِ زمان** با Gemini (`GEMINI_API_KEY` که روی Render هست؛ ویدیو: + شرحِ هر
+  صحنه و نوشته‌های روی تصویر)؛ بالای ۱۵MB از Files API؛ ادامه تا نشانگرِ `<<END>>` (حداکثر ۴۰ دور، رسیدن به سقف ⇒
+  `truncated` اعلام می‌شود). بی‌کلید/بی‌مدل ⇒ `failed` **با دلیل** (صف گیر نمی‌کند، ناظر ادعای شنیدن نمی‌کند).
+- **[CHANGE]** `models/inspection.py`: `pending` بدهیِ خواندن است و با `/raw` صاف **نمی‌شود**؛ برچسبِ `media` برای
+  ردیف‌های قدیمی ماند (حذف نشد).
+- **[CHANGE]** `POST /api/inspection/files/{id}/extract` (تازه): بایت‌ها را از دیسکِ موقت/درایو می‌گیرد، با خواننده‌های
+  امروز دوباره استخراج و رونویسی می‌کند؛ اگر متن عوض شد، متن را همان‌جا که زندگی می‌کند می‌گذارد
+  (`inspection_files.replace_text`: روی دیسکِ موقت، یا فایلِ `.متن.txt` ِ تازه در پوشهٔ همان گزارش در درایو و انتقالِ
+  نسخهٔ قبلی به «سطلِ حذف‌شده» — قرنطینه، نه حذف)، کشِ متن را خالی و شمارندهٔ خواندن را صفر می‌کند.
+- **[CHANGE]** CLI: `ensure_extracted` در `pull` و `urgent` (برای `pending` و `media` ِ قدیمی) پیش از نوشتنِ کارتابل؛
+  `scripts/supervisor/inspection_view.py` (تازه): تصویرها ⇒ PNG (HEIC/TIFF ِ چندصفحه/BMP/AVIF/ICO)، SVG با playwright،
+  فریمِ ویدیو هر ۵ ثانیه (imageio-ffmpeg)، زیپ باز روی دیسک، و یادآوریِ دیدنِ همهٔ صفحه‌های PDF؛ پاک‌سازی با
+  `shutil.rmtree`؛ `client.raw(..., timeout=)`. `scripts/supervisor/requirements.txt` (تازه).
+  `backend/requirements.txt`: `olefile`، `xlrd`، `striprtf`.
+- **[CHANGE]** دستورها: `PROMPT.md` v2→**v3** و `URGENT_PROMPT.md` v2→**v3** (بخش‌های «هر قالبی، کامل» و «پیوستی که کد
+  است — بخوان، بفهم، خودت بنویس؛ عیناً کپی نکن»؛ معرفیِ `pending`)؛ نسخه‌های قبلی در `archive/`.
+- **[TEST]** `backend/tests/test_inspection_formats.py` (doc و msg ِ واقعی از دادهٔ آزمونِ Apache POI در
+  `tests/fixtures/inspection_formats/`، xls، rtf، odt، epub، eml با پیوست، zip ِ تو در تو، پسوندِ ناشناخته، `pending`،
+  ادامهٔ رونویسی تا `<<END>>` از Files API، بی‌کلید)؛ در `test_inspection.py`: بدهیِ `pending` که با `/raw` صاف نمی‌شود
+  و اندپوینتِ extract تا پاسخِ پذیرفته‌شده. تستِ قدیمیِ `"abc"` ِ `.bin` به‌روز شد (بایتِ دودوییِ واقعی هنوز
+  `unsupported` است؛ `abc` حالا متن خوانده می‌شود).
+- **[FINDING→CHANGE]** `.rtf` در `_TEXTY_EXT` بود ⇒ «متنِ ساده» با **نشانه‌گذاریِ خامِ RTF** (`{\rtf1 \u1587?…`) برمی‌گشت؛
+  حالا پیش از شاخهٔ متن به خوانندهٔ RTF می‌رود و کلمه‌ها خوانده می‌شوند (تستِ `test_rtf_with_unicode_escapes`).
+- **[EXPERIENCE]** `experiences/review-reads-every-format-in-full.md`.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-10-08 · pytest (کل مجموعه) + next build + docs gate

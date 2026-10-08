@@ -905,6 +905,44 @@ def file_text(file_id: str, request: Request, offset: int = Query(0, ge=0), limi
             "page_count": int(row.page_count or 0)}
 
 
+@router.post("/files/{file_id}/extract")
+def extract_file(file_id: str, request: Request, db: Session = Depends(get_db)):
+    """(Re)read one attachment with today's readers — and for audio/video (or an
+    archive holding some; legacy «media» rows too) produce the FULL transcript
+    (services/inspection_media). The supervisor's `pull` calls it for every file
+    still `pending`/`media`. New text is a new reading duty: the counter restarts."""
+    from ...services import inspection_media as imedia
+
+    row = _file_or_404(db, file_id)
+    r = _report_or_404(db, row.report_id)
+    try:
+        data = b"".join(ifiles.iter_raw(db, row))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=410, detail=str(exc)[:300]) from exc
+    if not data:
+        raise HTTPException(status_code=410, detail="بایت‌های این فایل در دسترس نیست")
+    name, mime = row.filename or "", row.mime or ""
+    ex = imedia.finish_extraction(ifiles.extract(data, name, mime), data, name, mime)
+    text = ex["text"] or ""
+    try:
+        old = ifiles.load_text(db, row)
+    except Exception:  # noqa: BLE001 - unreadable old text ⇒ treat as changed
+        old = None
+    if text != old:
+        try:
+            ifiles.replace_text(db, row, text, int(r.number or 0))
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            raise HTTPException(status_code=502, detail=f"متنِ تازه ذخیره نشد: {exc}"[:300]) from exc
+        row.read_chars, row.read_at = 0, None
+    row.extract_status, row.extract_note = ex["status"], ex["note"]
+    row.text_chars, row.text_truncated = len(text), bool(ex.get("truncated"))
+    row.page_count = int(ex.get("page_count") or 0)
+    db.commit()
+    db.refresh(row)
+    return {"ok": True, "success": True, "file": _file_dict(row)}
+
+
 def _disposition(kind: str, filename: str) -> str:
     from urllib.parse import quote
 

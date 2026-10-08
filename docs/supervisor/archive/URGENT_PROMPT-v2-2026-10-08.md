@@ -1,16 +1,16 @@
 ---
 name: صفِ فوریِ «نظارت و سرکشی» — project-management
-version: 3
+version: 2
 created: 2026-10-08
 updated: 2026-10-08
-supersedes: docs/supervisor/archive/URGENT_PROMPT-v2-2026-10-08.md
+supersedes: docs/supervisor/archive/URGENT_PROMPT-v1-2026-10-08.md
 archive: docs/supervisor/archive/
 modelled_on:
   - mahdighandi1989/ALLIN1 › docs/supervisor/URGENT_PROMPT.md (v6)
   - mahdighandi1989/Detective-1 › docs/supervisor/URGENT_PROMPT.md
 ---
 
-# دستورِ روتینِ «صفِ فوری» — نسخهٔ ۳
+# دستورِ روتینِ «صفِ فوری» — نسخهٔ ۲
 
 > **این فایل تنها مرجعِ رفتارِ روتینِ صفِ فوری است.** پرامپتِ خودِ Routine عمداً کوتاه و
 > ثابت است و فقط به این آدرس اشاره می‌کند. هر تغییری **این‌جا** نوشته می‌شود و نسخه‌اش بالا
@@ -90,9 +90,6 @@ python3 scripts/supervisor/inspection.py urgent
    برای چنین برگه‌ای `--place "…"` اجباری است وگرنه `fixed` پذیرفته نمی‌شود.
 1‑ب. **بندهای خواسته را بشمار** و در جواب یکی‌یکی ببند — «۱) … ۲) … ۳) …»، بندِ انجام‌نشده هم
    با دلیل.
-   **هر قالبی، کامل (v3):** متن و رونویسی‌ها را تا آخر بخوان؛ تصویرها، فریم‌های ویدیو، صفحه‌های PDF و
-   محتوای ZIP را ببین (جدولِ «هر قالبی، کامل» در `docs/supervisor/PROMPT.md`). رونویسیِ `failed` ⇒ ادعای
-   شنیدن نکن، `needs-owner`. پیوستِ کد ⇒ بفهم و **خودت بنویس**؛ عیناً کپی نکن (بخشِ «پیوستی که کد است»).
 2. `experiences/` را بخوان (قوانینِ الزام‌آور)، بعد طبقِ `docs/supervisor/PROMPT.md` کار کن
    (زنجیرهٔ وابستگی، همسایه‌ها).
 3. خواستهٔ ظاهری ⇒ خودت رندر کن و ببین. عکسِ «بعد» از **همان‌جا**:
