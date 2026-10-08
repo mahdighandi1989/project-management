@@ -1,0 +1,5 @@
+# working copies — rebuilt on every pull/urgent; only README.md is committed
+QUEUE.md
+URGENT.md
+shots/
+files/

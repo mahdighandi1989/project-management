@@ -505,6 +505,8 @@ def init_db():
     """
     # Import models تا register شوند
     from ..models import project, debate, setting, ai_log, ai_profile, system_prompt, inspector_session, inspector_prompt_field, screen_recording
+    # «نظارت و سرکشی» — sheets, shots, files (metadata only; bytes in Drive), binders, surface map
+    from ..models import inspection  # noqa: F401
 
     # اول migration رو اجرا کن (برای جداول موجود)
     migrate_db()

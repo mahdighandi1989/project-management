@@ -22,8 +22,12 @@ import {
   ArchiveBoxIcon,
   EyeIcon,
   BookOpenIcon,
+  ClipboardDocumentCheckIcon,
 } from '@heroicons/react/24/outline';
 import GlobalAnalysisProgress from './GlobalAnalysisProgress';
+import { InspectionProvider, InspectionToggle } from '@/lib/inspection/provider';
+import { InspectionHighlights } from '@/lib/inspection/highlights';
+import { SurfaceRecorder } from '@/lib/inspection/surface';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -32,6 +36,7 @@ interface LayoutProps {
 const navItems = [
   { href: '/', label: 'خانه', icon: HomeIcon },
   { href: '/oversight', label: 'مرکز نظارت', icon: EyeIcon },
+  { href: '/inspection', label: 'نظارت و سرکشی', icon: ClipboardDocumentCheckIcon },
   { href: '/creator', label: 'موتور خالق', icon: CommandLineIcon },
   { href: '/knowledge-center', label: 'مرکز دانش', icon: BookOpenIcon },
   { href: '/debate', label: 'مناظره', icon: ChatBubbleLeftRightIcon },
@@ -42,8 +47,34 @@ const navItems = [
   { href: '/settings', label: 'تنظیمات', icon: Cog6ToothIcon },
 ];
 
+/** The label of the screen the owner is on — the longest matching menu entry. */
+function labelFor(pathname: string): string {
+  let best = '';
+  let label = '';
+  for (const item of navItems) {
+    const hit = item.href === '/' ? pathname === '/' : (pathname === item.href || pathname.startsWith(`${item.href}/`));
+    if (hit && item.href.length > best.length) { best = item.href; label = item.label; }
+  }
+  if (!label && pathname.startsWith('/project/')) return 'پروژه';
+  return label || pathname;
+}
+
 export default function Layout({ children }: LayoutProps) {
-  const pathname = usePathname();
+  const pathname = usePathname() || '/';
+  const pageLabel = labelFor(pathname);
+  return (
+    // «نظارت و سرکشی» wraps the whole shell, so the capture overlay, the
+    // highlights and the surface map work on every screen — including screens
+    // added later, without touching them.
+    <InspectionProvider pathname={pathname} pageLabel={pageLabel}>
+      <Shell pathname={pathname} pageLabel={pageLabel}>{children}</Shell>
+      <InspectionHighlights pathname={pathname} />
+      <SurfaceRecorder pathname={pathname} />
+    </InspectionProvider>
+  );
+}
+
+function Shell({ children, pathname, pageLabel }: LayoutProps & { pathname: string; pageLabel: string }) {
   const [darkMode, setDarkMode] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
@@ -65,7 +96,7 @@ export default function Layout({ children }: LayoutProps) {
   return (
     <div className="min-h-screen flex">
       {/* Sidebar for desktop */}
-      <aside className="hidden md:flex md:flex-col md:w-64 bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700">
+      <aside data-report-section="sidebar" data-report-section-label="منوی کناری" className="hidden md:flex md:flex-col md:w-64 bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700">
         {/* Logo */}
         <div className="p-6 border-b border-gray-200 dark:border-gray-700">
           <Link href="/" className="flex items-center gap-3">
@@ -104,7 +135,8 @@ export default function Layout({ children }: LayoutProps) {
         <GlobalAnalysisProgress />
 
         {/* Theme toggle */}
-        <div className="p-4 border-t border-gray-200 dark:border-gray-700">
+        <div className="p-4 border-t border-gray-200 dark:border-gray-700 space-y-1">
+          <InspectionToggle />
           <button
             onClick={toggleDarkMode}
             className="flex items-center gap-3 w-full px-4 py-3 rounded-xl text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition-all"
@@ -159,7 +191,7 @@ export default function Layout({ children }: LayoutProps) {
       {/* Main content */}
       <main className="flex-1 flex flex-col min-h-screen">
         {/* Mobile header */}
-        <header className="md:hidden flex items-center justify-between p-4 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
+        <header data-report-section="mobile-header" data-report-section-label="سرصفحهٔ موبایل" className="md:hidden flex items-center justify-between p-4 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
           <button onClick={() => setSidebarOpen(true)}>
             <Bars3Icon className="w-6 h-6" />
           </button>
@@ -169,8 +201,9 @@ export default function Layout({ children }: LayoutProps) {
           </button>
         </header>
 
-        {/* Page content */}
-        <div className="flex-1 p-4 md:p-8 overflow-auto">
+        {/* Page content — the reportable surface of every screen */}
+        <div className="flex-1 p-4 md:p-8 overflow-auto"
+          data-report-surface={pathname} data-report-surface-label={pageLabel}>
           {children}
         </div>
       </main>
