@@ -140,3 +140,11 @@
 - **[EXPERIENCE]** `experiences/review-reads-every-format-in-full.md`.
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-10-08 · pytest (کل مجموعه) + next build + docs gate
+
+## 2026-10-09 — ناظرِ خودکار: ثبات‌بخشی به یک تستِ وابسته به دیتابیسِ محلی
+
+- **[FINDING]** `test_get_available_models_excludes_cloud_code_when_disabled_in_db` روی کانتینرِ تازه با `no such table: model_settings` می‌شکست.
+- **[CHANGE]** `backend/tests/test_creator_engine_projects_and_cloud_code.py`: `init_db()` پیش از استفاده از `SessionLocal`. کدِ محصول دست نخورد.
+- **[VERIFY]** `pytest` کل: ۷۱۹ قبول / ۴ skip؛ `npm run build` سبز؛ درایو در production وصل است.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-10-09 · pytest + next build

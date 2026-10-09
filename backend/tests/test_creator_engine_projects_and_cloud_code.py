@@ -142,9 +142,10 @@ def test_get_available_models_excludes_cloud_code_when_disabled_in_db():
     it must be excluded — same as any other model with enabled=False."""
     from app.services.ai_manager import get_ai_manager
     from app.services import oauth_model_registry as omr
-    from app.core.database import SessionLocal
+    from app.core.database import SessionLocal, init_db
     from app.models.ai_profile import ModelSettings
 
+    init_db()  # fresh checkout/CI has no tables yet (data/database.db absent)
     omr._BOOTSTRAP_DONE = False
     omr.is_oauth_model("cloud_code")
 
