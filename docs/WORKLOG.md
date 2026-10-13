@@ -148,3 +148,11 @@
 - **[VERIFY]** `pytest` کل: ۷۱۹ قبول / ۴ skip؛ `npm run build` سبز؛ درایو در production وصل است.
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-10-09 · pytest + next build
+
+## 2026-10-13 — ناظرِ خودکار: دورِ سبک، بدونِ برگه
+
+- **[VERIFY]** کارتابل خالی (۰ برگه/۰ فایل/۰ فوری)؛ pytest ۷۱۹ قبول/۴ skip؛ `npm run build` سبز؛ درایو در production وصل با ۰ فایلِ منتظر.
+- **[CHANGE]** فقط ثبت: `RUNLOG.md`، `runs.jsonl`، `OPEN_ITEMS.md` (بستنِ #۱). کدِ محصول دست نخورد.
+- **[TODO]** `surface_scan.py`/`inventory.py` این دور اجرا نشد.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-10-13 · pytest + next build + queue/storage در production
