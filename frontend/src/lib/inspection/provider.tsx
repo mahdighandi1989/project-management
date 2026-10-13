@@ -15,7 +15,7 @@
 // Added here: «⚡ فوری» right in the dialog, and this app's absolute API base.
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { errorText, inspectionApi, uploadFile, type InspectionReport } from './api'
-import { notifySheetsChanged } from './highlights'
+import { CAPTURE_ACTIVE_KEY, notifyCaptureChanged, notifySheetsChanged } from './highlights'
 import { shrinkShot } from './shrinkShot'
 import { rushMessage } from './nextRound'
 import { toast, Toaster } from './toast'
@@ -38,7 +38,7 @@ type Ctx = {
 const InspectionCtx = createContext<Ctx | null>(null)
 export const useInspection = () => useContext(InspectionCtx)
 
-const LS_KEY = 'pm.inspection.active'
+const LS_KEY = CAPTURE_ACTIVE_KEY
 
 export const TONE: Record<string, string> = {
   open: 'bg-amber-500',
@@ -79,6 +79,7 @@ export function InspectionProvider({ children, pathname, pageLabel }: {
   const setActive = useCallback((v: boolean) => {
     setActiveRaw(v)
     try { localStorage.setItem(LS_KEY, v ? '1' : '0') } catch { /* private mode */ }
+    notifyCaptureChanged()
   }, [])
 
   const refresh = useCallback(async () => {

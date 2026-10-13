@@ -53,6 +53,30 @@ export function readHighlightsEnabled(): boolean {
   }
 }
 
+/** The «📝 ثبتِ گزارش» switch (owned by provider.tsx). v-urgent-1: boxes are drawn
+ *  ONLY while it is on — off hides them everywhere, in every state, but never
+ *  touches the sheets: the supervisor keeps working them, and switching it on
+ *  brings every box back. */
+export const CAPTURE_ACTIVE_KEY = 'pm.inspection.active'
+
+export function readCaptureActive(): boolean {
+  try { return localStorage.getItem(CAPTURE_ACTIVE_KEY) === '1' } catch { return false }
+}
+
+/** provider.tsx calls this when the switch flips, so the overlay reacts at once. */
+export const notifyCaptureChanged = () => notify()
+
+/** A tab label as a badge-proof key: «برگه‌ها ۳» and «برگه‌ها» are the same tab. */
+const tabKey = (t: string) => t.replace(/[0-9\u06F0-\u06F9\u0660-\u0669]+/g, '').replace(/[\s\u200c›·()]+/g, '')
+
+/** Was a box filed on the tab that is showing now? Counts in the label move. */
+export function sameTab(stored: string | undefined, now: string): boolean {
+  if (!stored || !now) return true
+  if (stored === now) return true
+  const [a, b] = [tabKey(stored), tabKey(now)]
+  return !a || !b || a === b || a.includes(b) || b.includes(a)
+}
+
 export function readHighlightOpacity(): number {
   try {
     const raw = localStorage.getItem(HL_OPACITY_KEY)
@@ -152,9 +176,10 @@ export function InspectionHighlights({ pathname }: { pathname: string }) {
   const raf = useRef<number | null>(null)
 
   useEffect(() => {
-    setEnabled(readHighlightsEnabled())
+    const on = () => readHighlightsEnabled() && readCaptureActive()
+    setEnabled(on())
     setOpacity(readHighlightOpacity())
-    const onPref = () => { setEnabled(readHighlightsEnabled()); setOpacity(readHighlightOpacity()) }
+    const onPref = () => { setEnabled(on()); setOpacity(readHighlightOpacity()) }
     window.addEventListener(EVT, onPref)
     window.addEventListener('storage', onPref)   // another tab changed it
     return () => { window.removeEventListener(EVT, onPref); window.removeEventListener('storage', onPref) }
@@ -233,7 +258,7 @@ export function InspectionHighlights({ pathname }: { pathname: string }) {
         }
         for (const b of boxes) {
           // a box filed on another tab of this screen does not belong here
-          if (b.g.tab && tabNow && b.g.tab !== tabNow) continue
+          if (!sameTab(b.g.tab, tabNow)) continue
           const place = placeSpot(b.g, lookup)
           if (place) out.push({ report: r, place, key: b.key })
         }

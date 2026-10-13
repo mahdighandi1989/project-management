@@ -83,6 +83,7 @@ export default function Board({ kind, onCounts }: {
   const [peek, setPeek] = useState<{ file: InspectionFile; text: string; loading: boolean } | null>(null)
   const [editing, setEditing] = useState<{ noteId: string; text: string } | null>(null)
   const [nextRound, setNextRound] = useState<NextRound | null>(null)
+  const [fullNext, setFullNext] = useState<string | null>(null)
   const [tick, setTick] = useState(0)
   const [pageSize, setPageSize] = useState(10)
   const [page, setPage] = useState(1)
@@ -112,6 +113,8 @@ export default function Board({ kind, onCounts }: {
       countsCb.current?.({ open: d.counts?.open || 0, general: d.general_open || 0, urgent: d.urgent_waiting || 0 })
       notifySheetsChanged()
       try { setNextRound((await inspectionApi.urgentQueue()).next_round ?? null) } catch { /* courtesy */ }
+      // the periodic supervisor — shown only when a schedule exists for it
+      try { setFullNext((await inspectionApi.schedule()).full?.next_at ?? null) } catch { /* courtesy */ }
     } catch (e) { toast.error(errorText(e)) } finally { setBusy(false) }
   }, [filter, kind])
   useEffect(() => { void load() }, [load])
@@ -308,6 +311,7 @@ export default function Board({ kind, onCounts }: {
         </div>
         <div className="flex items-center gap-2">
           {nextRound && <NextRoundChip nr={nextRound} tick={tick} />}
+          {fullNext && <FullRoundChip at={fullNext} tick={tick} />}
           <button onClick={() => void load()} disabled={busy}
             className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs hover:bg-gray-50 disabled:opacity-60 dark:border-gray-600 dark:hover:bg-gray-700">
             {busy ? '…' : '↻ تازه‌سازی'}
@@ -674,6 +678,19 @@ function Shot({ r, id, caption, after, onZoom }: {
           : <span className="text-red-700" title={info.store_note}> · ⏳ هنوز در درایو نیست</span>)}
       </figcaption>
     </figure>
+  )
+}
+
+export function FullRoundChip({ at, tick }: { at: string; tick: number }) {
+  const left = Math.round((new Date(at).getTime() - Date.now()) / 60000)
+  void tick
+  if (Number.isNaN(left)) return null
+  const day = new Date(at).toDateString() === new Date().toDateString() ? '' : ` ${new Date(at).toLocaleDateString('fa-IR', { weekday: 'long' })}`
+  return (
+    <span dir="rtl" title="ناظرِ دوره‌ایِ کامل — بازرسیِ همهٔ برگه‌ها و صفحه‌ها"
+      className="rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs text-blue-800">
+      🛡 دورِ ناظرِ دوره‌ای:{day} {localClock(at)} ({humanGap(left)})
+    </span>
   )
 }
 
