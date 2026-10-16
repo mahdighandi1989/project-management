@@ -4,7 +4,7 @@
 > هر صفحه/دکمه/endpointی که بعداً اضافه شود، خودکار این‌جا ظاهر می‌شود؛ مختصاتِ دقیقِ
 > عنصرهای هر صفحه در برنامه است: «نظارت و سرکشی › نقشهٔ سامانه».
 
-تولید: 2026-10-08T10:12:44+00:00 · کامیت `47a83b8b5b`
+تولید: 2026-10-16T00:51:18+00:00 · کامیت `786355803b`
 
 | سنجه | تعداد |
 |---|---|
@@ -12,8 +12,8 @@
 | آیتم‌های منو | 11 |
 | دکمه‌ها در صفحه‌ها / در کامپوننت‌ها | 467 / 132 |
 | ورودی‌ها | 309 |
-| مسیرهای API | 738 |
-| سرویس‌ها | 92 |
+| مسیرهای API | 739 |
+| سرویس‌ها | 94 |
 | مدل‌ها | 13 |
 
 ## منوی کناری
@@ -194,6 +194,7 @@
 | GET | `/api/inspection/binders` |
 | POST | `/api/inspection/file` |
 | DELETE,GET | `/api/inspection/files/{file_id}` |
+| POST | `/api/inspection/files/{file_id}/extract` |
 | GET | `/api/inspection/files/{file_id}/raw` |
 | GET | `/api/inspection/files/{file_id}/text` |
 | DELETE | `/api/inspection/intake/{upload_id}` |

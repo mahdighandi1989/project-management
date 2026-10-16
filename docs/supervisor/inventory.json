@@ -1,6 +1,6 @@
 {
- "generated_at": "2026-10-08T10:12:44+00:00",
- "commit": "47a83b8b5bbfe28f8d1060eed9ab547890a64e82",
+ "generated_at": "2026-10-16T00:51:18+00:00",
+ "commit": "786355803b2d6fb7c73532d69ba99304bc0f8016",
  "pages": [
   {
    "route": "/analysis",
@@ -340,7 +340,7 @@
   },
   {
    "file": "frontend/src/components/inspection/Board.tsx",
-   "lines": 702,
+   "lines": 719,
    "buttons": 19,
    "inputs": 7
   },
@@ -4042,6 +4042,12 @@
    ]
   },
   {
+   "path": "/api/inspection/files/{file_id}/extract",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
    "path": "/api/inspection/files/{file_id}/raw",
    "methods": [
     "GET"
@@ -4888,6 +4894,8 @@
   "github_storage",
   "health_to_issues_service",
   "inspection_files",
+  "inspection_formats",
+  "inspection_media",
   "inspector_agent",
   "inspector_agent_service",
   "inspector_intent_resolver",
@@ -4969,8 +4977,8 @@
   "page_buttons": 467,
   "component_buttons": 132,
   "inputs": 309,
-  "routes": 738,
-  "services": 92,
+  "routes": 739,
+  "services": 94,
   "models": 13
  }
 }

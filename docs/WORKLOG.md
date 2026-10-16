@@ -165,3 +165,11 @@
 - **[VERIFY]** `npm run build` سبز؛ pytest در `ship.sh`. عکسِ «بعد» گرفته نشد (دیپلوی نشده).
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-10-13 · next build + pytest
+
+## 2026-10-16 — ناظرِ خودکار: دورِ سبک، بدونِ برگه
+
+- **[VERIFY]** کارتابل خالی؛ pytest ۷۱۹ قبول/۴ skip؛ `npm run build` سبز؛ production healthy.
+- **[CHANGE]** فقط ثبت: `RUNLOG.md`، `runs.jsonl`، و تازه‌سازیِ `INVENTORY.md`/`inventory.json`. کدِ محصول دست نخورد.
+- **[TODO]** `surface_scan.py` این دور اجرا نشد (playwright نصب نبود).
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-10-16 · pytest + next build + inventory
