@@ -44,3 +44,11 @@
 - **سنجیده نشد:** `surface_scan.py` (playwright نصب نبود و نصبش این دور انجام نشد)، `GET /storage` (بدونِ نشست ۴۰۱ می‌دهد و `inspection.py` فرمانِ storage ندارد)، «فلسفهٔ سه صفحه».
 - **یافتهٔ جدید:** ندارد؛ کدِ محصول دست نخورد.
 - **ماند:** OPEN_ITEMS #۵ (`ADMIN_EMAILS`) و #۳.
+
+## اجرای ۴ — ۲۰۲۶-۱۰-۲۰ — روتینِ زمان‌بندی‌شده (v3)
+
+- **کارتابل:** `whoami` ok (supervisor)؛ `file` ۰، `pull` ۰ برگه/۰ فایل، `urgent` خالی.
+- **اجرا:** `pytest` ۷۱۹ قبول / ۴ skip / ۰ شکست؛ `npm run build` سبز؛ production `/health` healthy. نکته: در کانتینرِ تازه Pillowِ سیستمی خراب بود (`cannot import name '_imaging'`) و ۶ تستِ `test_inspector_recording_telegram_video` قرمز شد ⇒ با `pip install --force-reinstall Pillow` سبز شد (مشکلِ محیط، نه محصول).
+- **سنجیده نشد:** `surface_scan.py`، `inventory.py`، «فلسفهٔ سه صفحه»، `GET /storage` — دورِ سبک.
+- **یافتهٔ جدید:** ندارد؛ کدِ محصول دست نخورد. از دورِ قبل هیچ کامیتِ تازه‌ای نبود.
+- **ماند:** OPEN_ITEMS #۵ (`ADMIN_EMAILS`) و #۳.

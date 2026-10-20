@@ -173,3 +173,11 @@
 - **[TODO]** `surface_scan.py` این دور اجرا نشد (playwright نصب نبود).
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-10-16 · pytest + next build + inventory
+
+## 2026-10-20 — ناظرِ خودکار: دورِ سبک، بدونِ برگه
+
+- **[VERIFY]** کارتابل خالی؛ pytest ۷۱۹ قبول/۴ skip (پس از بازنصبِ Pillow در کانتینر)؛ `npm run build` سبز؛ production healthy.
+- **[CHANGE]** فقط ثبت: `RUNLOG.md`، `runs.jsonl`. کدِ محصول دست نخورد.
+- **[TODO]** `surface_scan.py` این دور اجرا نشد.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-10-20 · pytest + next build
