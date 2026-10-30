@@ -189,3 +189,11 @@
 - **[TODO]** `surface_scan.py` این دور اجرا نشد.
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-10-27 · pytest + next build
+
+## 2026-10-30 — ناظرِ خودکار: دورِ سبک، بدونِ برگه
+
+- **[VERIFY]** کارتابل خالی؛ pytest ۷۱۹ قبول/۴ skip؛ `npm run build` سبز؛ production healthy.
+- **[CHANGE]** فقط ثبت: `RUNLOG.md`، `runs.jsonl`. کدِ محصول دست نخورد.
+- **[TODO]** `surface_scan.py` این دور اجرا نشد.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-10-30 · pytest + next build

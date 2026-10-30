@@ -60,3 +60,11 @@
 - **سنجیده نشد:** `surface_scan.py` (playwright نصب نبود)، `GET /storage`، «فلسفهٔ سه صفحه».
 - **یافتهٔ جدید:** ندارد؛ کدِ محصول دست نخورد.
 - **ماند:** OPEN_ITEMS #۵ (`ADMIN_EMAILS`) و #۳.
+
+## اجرای ۶ — ۲۰۲۶-۱۰-۳۰ — روتینِ زمان‌بندی‌شده (v3)
+
+- **کارتابل:** `whoami` ok (supervisor)؛ `file` ۰، `pull` ۰ برگه/۰ فایل، `urgent` خالی. production: `inspection_reports` = ۱ (قبلاً بایگانی/بدونِ بدهی؛ `owed` = ۰).
+- **اجرا:** `pytest` ۷۱۹ قبول / ۴ skip / ۰ شکست (پس از `pip install` و بازنصبِ Pillow؛ مشکلِ محیط، نه محصول)؛ `npm run build` سبز؛ production `/health` healthy.
+- **سنجیده نشد:** `surface_scan.py`، `inventory.py`، `GET /storage`، «فلسفهٔ سه صفحه» — دورِ سبک.
+- **یافتهٔ جدید:** ندارد؛ کدِ محصول دست نخورد. از دورِ قبل کامیتِ تازه‌ای نبود.
+- **ماند:** OPEN_ITEMS #۵ (`ADMIN_EMAILS`) و #۳.
