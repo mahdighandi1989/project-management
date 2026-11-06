@@ -76,3 +76,11 @@
 - **سنجیده نشد:** `surface_scan.py`، `inventory.py`، `GET /storage`، «فلسفهٔ سه صفحه» — دورِ سبک.
 - **یافتهٔ جدید:** ندارد؛ کدِ محصول دست نخورد. از دورِ قبل کامیتِ تازه‌ای نبود.
 - **ماند:** OPEN_ITEMS #۵ (`ADMIN_EMAILS`) و #۳.
+
+## اجرای ۸ — ۲۰۲۶-۱۱-۰۶ — روتینِ زمان‌بندی‌شده (v3)
+
+- **کارتابل:** `whoami` ok (supervisor)؛ `file` ۰، `pull` ۰ برگه/۰ فایل، `urgent` خالی.
+- **اجرا:** `pytest` ۷۱۹ قبول / ۴ skip / ۰ شکست؛ `npm run build` سبز؛ production `/health` healthy (`inspection_reports`=۱، `app_users`=۱). `inventory.py --post`: ۱۶ صفحه، ۴۶۷ دکمهٔ صفحه، ۷۳۹ مسیر API، ۹۴ سرویس، ۱۳ مدل (بدونِ کاهش).
+- **سنجیده نشد:** `surface_scan.py`، `GET /storage`، «فلسفهٔ سه صفحه» — دورِ سبک.
+- **یافتهٔ جدید:** ندارد؛ کدِ محصول دست نخورد. از دورِ قبل کامیتِ تازه‌ای نبود.
+- **ماند:** OPEN_ITEMS #۵ (`ADMIN_EMAILS`) و #۳.
