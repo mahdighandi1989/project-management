@@ -213,3 +213,8 @@
 - **[TODO]** `surface_scan.py` این دور اجرا نشد.
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-06 · pytest + next build
+
+### 2026-11-10 — اجرای ۹ ناظر (فقط ثبت)
+- **VERIFY:** pytest ۷۱۹ سبز، build سبز، production healthy، کارتابل خالی. کدِ محصول دست نخورد.
+- **CHANGE:** افزودنِ ورودی به `docs/supervisor/RUNLOG.md` و `runs.jsonl`.
+— ناظرِ خودکار (Claude)
