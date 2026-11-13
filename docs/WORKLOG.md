@@ -218,3 +218,8 @@
 - **VERIFY:** pytest ۷۱۹ سبز، build سبز، production healthy، کارتابل خالی. کدِ محصول دست نخورد.
 - **CHANGE:** افزودنِ ورودی به `docs/supervisor/RUNLOG.md` و `runs.jsonl`.
 — ناظرِ خودکار (Claude)
+
+### 2026-11-13 — اجرای ۱۰ ناظر (فقط ثبت)
+- **VERIFY:** pytest ۷۱۹ سبز، build سبز، production healthy، کارتابل خالی، inventory بدونِ کاهش. کدِ محصول دست نخورد.
+- **CHANGE:** افزودنِ ورودی به `docs/supervisor/RUNLOG.md` و `runs.jsonl`؛ بازتولیدِ `INVENTORY.md`/`inventory.json`.
+— ناظرِ خودکار (Claude)
