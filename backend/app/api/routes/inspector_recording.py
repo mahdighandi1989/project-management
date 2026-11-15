@@ -124,6 +124,34 @@ async def start_recording(payload: StartRecordingRequest):
     }
 
 
+class ResumeRecordingRequest(StartRecordingRequest):
+    elapsed_sec: float = 0.0
+
+
+@router.post("/{session_id}/resume")
+async def resume_recording(session_id: str, payload: ResumeRecordingRequest):
+    """(2026-11-15) Re-create, under the same id, a session the server lost on a deploy/restart — the browser then
+    re-uploads the chunks it kept. A session that still exists is returned as is (resumed=false)."""
+    if payload.mode not in ("A", "B"):
+        raise HTTPException(status_code=400, detail="mode باید 'A' یا 'B' باشد")
+    svc = get_inspector_recording_service()
+    try:
+        session, resumed = await svc.resume_session(
+            session_id,
+            started_ago_sec=max(0.0, payload.elapsed_sec),
+            project_id=payload.project_id,
+            project_full_name=payload.project_full_name,
+            mode=payload.mode,  # type: ignore[arg-type]
+            audio_mic=payload.audio_mic,
+            audio_system=payload.audio_system,
+            mic_device_id=payload.mic_device_id,
+            target_fps=payload.target_fps,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)[:200])
+    return {"success": True, "resumed": resumed, "session": session.to_status_dict()}
+
+
 @router.post("/{session_id}/audio-chunk")
 async def append_audio_chunk(
     session_id: str,

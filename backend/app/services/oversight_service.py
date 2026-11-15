@@ -624,6 +624,8 @@ class OversightReport:
     ac_probe_details: List[Dict[str, Any]] = field(default_factory=list)
     verify_version: str = "v5"
     config_used: Dict[str, Any] = field(default_factory=dict)
+    # 💾 (2026-11-15) {drive_id, link, file, at} once the heavy fields went to Drive (services/reports_archive.py)
+    archived_to: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -666,6 +668,77 @@ def _write_json(path: Path, data: Any) -> None:
         # with only a warning line. Recorded for /api/oversight/disk and the janitor's Telegram alert.
         logger.error(f"oversight: failed to write {path}: {e}")
         _LAST_WRITE_ERROR.update(msg=f"{path.name}: {e}", at=now_iso() if "now_iso" in globals() else "")
+
+
+# --------------------------------------------------------------------
+# 💾 (2026-11-15) tasks.json / reports.json off the event loop. They are rewritten on every change (52 call sites) and
+# serialising + writing a multi-MB file on the loop stalled every request for that long. The snapshot is still taken
+# on the loop (`to_dict` = `asdict`, a deep copy — so the thread never sees a list that is being mutated); only
+# json.dump + write + rename run in ONE background thread, newest snapshot per file wins (older pending ones are
+# skipped — the file is a snapshot, not a log). Outside a running loop (scripts, sync tests) it stays synchronous.
+# `flush_pending_writes()` is awaited at shutdown so the last change is never lost. OVERSIGHT_SYNC_WRITES=1 = old way.
+# --------------------------------------------------------------------
+import threading as _threading
+
+_BG_LOCK = _threading.Lock()      # guards the queue
+_WRITE_LOCK = _threading.Lock()   # one physical write at a time
+_BG_PENDING: Dict[Path, Tuple[int, Any]] = {}
+_BG_SEQ = [0]
+_WRITTEN_SEQ: Dict[Path, int] = {}  # never let an older snapshot overwrite a newer one (sync and thread writes mix)
+_BG_THREAD: Optional[_threading.Thread] = None
+_BG_IDLE = _threading.Event()
+_BG_IDLE.set()
+
+
+def _write_ordered(path: Path, seq: int, data: Any) -> None:
+    with _WRITE_LOCK:
+        if seq <= _WRITTEN_SEQ.get(path, 0):
+            return
+        _write_json(path, data)
+        _WRITTEN_SEQ[path] = seq
+
+
+def _bg_writer() -> None:
+    global _BG_THREAD
+    while True:
+        with _BG_LOCK:
+            if not _BG_PENDING:
+                _BG_THREAD = None
+                _BG_IDLE.set()
+                return
+            path = next(iter(_BG_PENDING))
+            seq, data = _BG_PENDING.pop(path)
+        _write_ordered(path, seq, data)
+
+
+def _write_json_soon(path: Path, data: Any) -> None:
+    global _BG_THREAD
+    with _BG_LOCK:
+        _BG_SEQ[0] += 1
+        seq = _BG_SEQ[0]
+    try:
+        asyncio.get_running_loop()
+        in_loop = True
+    except RuntimeError:
+        in_loop = False
+    if not in_loop or os.environ.get("OVERSIGHT_SYNC_WRITES") == "1":
+        with _BG_LOCK:
+            pend = _BG_PENDING.get(path)
+            if pend and pend[0] < seq:
+                _BG_PENDING.pop(path, None)  # superseded by this newer snapshot
+        _write_ordered(path, seq, data)
+        return
+    with _BG_LOCK:
+        _BG_PENDING[path] = (seq, data)
+        _BG_IDLE.clear()
+        if _BG_THREAD is None:
+            _BG_THREAD = _threading.Thread(target=_bg_writer, name="oversight-json-writer", daemon=True)
+            _BG_THREAD.start()
+
+
+def flush_pending_writes(timeout: float = 30.0) -> bool:
+    """Block until every queued snapshot is on disk (True) or the timeout passed (False)."""
+    return _BG_IDLE.wait(timeout)
 
 
 # ====================================================================
@@ -902,7 +975,7 @@ class OversightService:
         consolidation، archive، regenerate، …) همگام‌سازی خودکار اتفاق
         می‌افتد — بدون نیاز به hook دستی در هر نقطه.
         """
-        _write_json(TASKS_FILE, [t.to_dict() for t in self.tasks])
+        _write_json_soon(TASKS_FILE, [t.to_dict() for t in self.tasks])
         if skip_sync:
             return
         self._sync_dirty_tasks_to_github()
@@ -1067,7 +1140,7 @@ class OversightService:
             def _make_on_done(task_id: Optional[str]) -> Any:
                 def _on_done() -> None:
                     try:
-                        _write_json(TASKS_FILE, [tt.to_dict() for tt in self.tasks])
+                        _write_json_soon(TASKS_FILE, [tt.to_dict() for tt in self.tasks])
                     except Exception as e:
                         logger.debug(f"prompt-sync persist after sync failed: {e}")
                     finally:
@@ -1140,7 +1213,7 @@ class OversightService:
 
         def _persist():
             try:
-                _write_json(TASKS_FILE, [t.to_dict() for t in self.tasks])
+                _write_json_soon(TASKS_FILE, [t.to_dict() for t in self.tasks])
             except Exception as e:
                 logger.debug(f"force_sync persist failed: {e}")
 
@@ -1202,7 +1275,7 @@ class OversightService:
                 })
         # یک save نهایی برای ذخیرهٔ تمام متادیتای جدید (sha/path/synced_at)
         try:
-            _write_json(TASKS_FILE, [t.to_dict() for t in self.tasks])
+            _write_json_soon(TASKS_FILE, [t.to_dict() for t in self.tasks])
         except Exception:
             pass
         return {
@@ -1264,7 +1337,7 @@ class OversightService:
         def _persist_after_sync() -> None:
             """callback ذخیرهٔ متادیتای جدید — بدون trigger مجدد sync."""
             try:
-                _write_json(TASKS_FILE, [t.to_dict() for t in self.tasks])
+                _write_json_soon(TASKS_FILE, [t.to_dict() for t in self.tasks])
             except Exception as e:
                 logger.debug(f"prompt-sync persist after sync failed: {e}")
 
@@ -1311,7 +1384,7 @@ class OversightService:
                 )
 
     def _save_reports(self) -> None:
-        _write_json(REPORTS_FILE, [r.to_dict() for r in self.reports])
+        _write_json_soon(REPORTS_FILE, [r.to_dict() for r in self.reports])
 
     def _save_settings(self) -> None:
         _write_json(SETTINGS_FILE, self.settings)

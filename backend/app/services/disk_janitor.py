@@ -173,6 +173,12 @@ async def run_all(db=None, root: Optional[Path] = None, min_age_days: Optional[f
         result["freed"] += await drop_extraction_caches()
     except Exception as e:  # noqa: BLE001
         result["errors"].append(f"extractions: {type(e).__name__}")
+    try:  # old oversight reports: full copies to Drive, slim copies stay (services/reports_archive.py)
+        from . import reports_archive
+
+        result["reports"] = await reports_archive.run(db)
+    except Exception as e:  # noqa: BLE001
+        result["errors"].append(f"reports: {type(e).__name__}: {str(e)[:100]}")
     return result
 
 

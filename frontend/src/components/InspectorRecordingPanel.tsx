@@ -78,6 +78,10 @@ interface InspectorRecordingPanelProps {
 // Component
 // ────────────────────────────────────────────────────────────────────────────
 
+
+// how much recorded media the browser keeps for a resume after a server restart (beyond it: no resume, as before)
+const KEEP_LIMIT_BYTES = 512 * 1024 * 1024;
+
 export default function InspectorRecordingPanel(props: InspectorRecordingPanelProps) {
   const {
     projectId,
@@ -98,6 +102,15 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
   const stopRecordingRef = useRef<() => Promise<void>>(async () => {});
   // every chunk upload in flight — awaited before /stop so the LAST 10–15 s are never lost (they used to get 409)
   const pendingUploadsRef = useRef<Promise<unknown>[]>([]);
+  // 🩹 (2026-11-15) resume after a server deploy/restart: recording sessions live in the server's memory, so the
+  // browser keeps every audio/video chunk it recorded (up to KEEP_LIMIT_BYTES); on «session_not_found» it re-creates
+  // the session under the same id (/resume) and re-uploads them, and the recording simply goes on.
+  const keptChunksRef = useRef<{ path: string; blob: Blob; seq: number }[]>([]);
+  const keptBytesRef = useRef(0);
+  const resumableRef = useRef(true);
+  const startParamsRef = useRef<Record<string, unknown> | null>(null);
+  const resumingRef = useRef<Promise<boolean> | null>(null);
+  const failedUploadsRef = useRef<{ path: string; blob: Blob; seq: number }[]>([]);
   const [mode, setMode] = useState<RecordingMode>('A');
   const [audioConfig, setAudioConfig] = useState<AudioConfig>({
     mic: true,
@@ -151,7 +164,9 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
       const j = await res.json().catch(() => ({}));
       // 🩹 (2026-11-15) recording sessions live in the server's memory: a deploy/restart loses them — say so plainly
       if (res.status === 404 && /session/i.test(String(j?.detail || ''))) {
-        throw new Error('جلسهٔ ضبط با به‌روزرسانی/ری‌استارتِ سرور از دست رفت — لطفاً دوباره ضبط کنید (تکه‌های قبلی روی سرور نیست).');
+        const lost: any = new Error('جلسهٔ ضبط با به‌روزرسانی/ری‌استارتِ سرور از دست رفت — لطفاً دوباره ضبط کنید (تکه‌های قبلی روی سرور نیست).');
+        lost.sessionLost = true;
+        throw lost;
       }
       if (!res.ok) throw new Error(j?.detail || `HTTP ${res.status}`);
       return j;
@@ -181,21 +196,79 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
       });
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
-        throw new Error(j?.detail || `upload HTTP ${res.status}`);
+        const err: any = new Error(j?.detail || `upload HTTP ${res.status}`);
+        if (res.status === 404 && /session/i.test(String(j?.detail || ''))) err.sessionLost = true;
+        throw err;
       }
     },
     [],
   );
 
+  // re-create the lost server session under the same id and re-upload every kept chunk (single flight)
+  const resumeServerSession = useCallback(async (): Promise<boolean> => {
+    if (resumingRef.current) return resumingRef.current;
+    const sid = sessionIdRef.current;
+    if (!sid || !resumableRef.current || !startParamsRef.current) return false;
+    const p = (async () => {
+      try {
+        setProcessingStage('سرور ری‌استارت شد — بازگرداندنِ جلسهٔ ضبط و ارسالِ دوبارهٔ تکه‌ها...');
+        await apiPost(`/${sid}/resume`, {
+          ...startParamsRef.current,
+          elapsed_sec: startedAtRef.current ? (Date.now() - startedAtRef.current) / 1000 : 0,
+        });
+        for (const c of keptChunksRef.current.slice()) {
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try { await apiUploadBlob(c.path, c.blob, c.seq); break; } catch (err) {
+              if (attempt === 2) throw err;
+              await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+            }
+          }
+        }
+        failedUploadsRef.current = [];
+        setProcessingStage('');
+        return true;
+      } catch (err) {
+        console.warn('recording resume failed', err);
+        return false;
+      } finally {
+        resumingRef.current = null;
+      }
+    })();
+    resumingRef.current = p;
+    return p;
+  }, [apiPost, apiUploadBlob]);
+
   // 🩹 (2026-11-15) a chunk upload: retried 3× with backoff and tracked, so stop can wait for it
   const trackUpload = useCallback(async (path: string, blob: Blob, seq: number) => {
+    // keep the chunk for a possible resume (the first chunk carries the webm header, so it is all or nothing)
+    if (resumableRef.current) {
+      if (keptBytesRef.current + blob.size > KEEP_LIMIT_BYTES) {
+        resumableRef.current = false;
+        keptChunksRef.current = [];
+        keptBytesRef.current = 0;
+      } else {
+        keptChunksRef.current.push({ path, blob, seq });
+        keptBytesRef.current += blob.size;
+      }
+    }
     const p = (async () => {
+      let resumed = false;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
           await apiUploadBlob(path, blob, seq);
           return true;
-        } catch (err) {
-          if (attempt === 2) { console.warn('chunk upload failed after 3 tries', path, seq, err); return false; }
+        } catch (err: any) {
+          if (err?.sessionLost && !resumed) {
+            resumed = true;
+            // the resume re-uploads the chunks kept so far; this one is sent again anyway (the server counts each seq
+            // once), since it may have been kept after the resume took its snapshot
+            if (await resumeServerSession()) { attempt--; continue; }
+          }
+          if (attempt === 2) {
+            console.warn('chunk upload failed after 3 tries', path, seq, err);
+            failedUploadsRef.current.push({ path, blob, seq });
+            return false;
+          }
           await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
         }
       }
@@ -203,7 +276,7 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
     })();
     pendingUploadsRef.current.push(p);
     return p;
-  }, [apiUploadBlob]);
+  }, [apiUploadBlob, resumeServerSession]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // Open picker — enumerate microphones
@@ -247,14 +320,20 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
     setPhase('starting');
     setErrorMsg(null);
     try {
-      const startRes = await apiPost('/start', {
+      const startParams = {
         project_id: projectId,
         project_full_name: projectFullName || null,
         mode,
         audio_mic: audioConfig.mic,
         audio_system: audioConfig.system,
         mic_device_id: audioConfig.micDeviceId,
-      });
+      };
+      keptChunksRef.current = [];
+      keptBytesRef.current = 0;
+      resumableRef.current = true;
+      failedUploadsRef.current = [];
+      startParamsRef.current = startParams;
+      const startRes = await apiPost('/start', startParams);
       const sid = startRes?.session?.session_id;
       if (!sid) throw new Error('session_id not returned');
       setSessionId(sid);
@@ -715,6 +794,17 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
     })();
     await Promise.race([allDone, new Promise((r) => setTimeout(r, 90_000))]);
     pendingUploadsRef.current = [];
+    // chunks whose 3 tries all failed (a flaky line, not a lost session) get one more round before /stop
+    if (failedUploadsRef.current.length) {
+      const retry = failedUploadsRef.current.splice(0);
+      setProcessingStage(`ارسالِ دوبارهٔ ${retry.length} تکهٔ ناموفق...`);
+      for (const c of retry) {
+        try { await apiUploadBlob(c.path, c.blob, c.seq); } catch (err: any) {
+          if (err?.sessionLost) { await resumeServerSession(); break; }
+          console.warn('chunk retry before stop failed', c.path, c.seq, err);
+        }
+      }
+    }
     cleanupStreams();
 
     const sid = sessionIdRef.current;
@@ -739,11 +829,22 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
     try {
       const consoleLogs = getConsoleLogsSnapshot?.() || [];
       const backendLogs = getBackendLogsSnapshot?.() || [];
-      await apiPost(`/${sid}/stop`, {
+      const stopBody = {
         user_note: userNote,
         console_logs: consoleLogs,
         backend_logs: backendLogs,
-      });
+      };
+      try {
+        await apiPost(`/${sid}/stop`, stopBody);
+      } catch (err: any) {
+        // the server restarted between the last chunk and «stop» — bring the session back, then stop it
+        if (!err?.sessionLost || !(await resumeServerSession())) throw err;
+        if (interactionEventsRef.current.length > 0) {
+          await apiPost(`/${sid}/interactions`, { events: interactionEventsRef.current }).catch(() => {});
+        }
+        setProcessingStage('در حال آماده‌سازی...');
+        await apiPost(`/${sid}/stop`, stopBody);
+      }
       // پس از stop سرور processing را همزمان اجرا می‌کند → الان response آمده
       // یعنی processing تمام شده. preview را fetch کن.
       await fetchPreview(sid);

@@ -199,10 +199,17 @@ class InspectorRecordingService:
         audio_system: bool = False,
         mic_device_id: Optional[str] = None,
         target_fps: Optional[int] = None,
+        session_id: Optional[str] = None,
+        started_ago_sec: float = 0.0,
     ) -> RecordingSession:
+        """session_id / started_ago_sec: only for `resume_session` — the browser re-creating, under the SAME id, a
+        session the server lost on a deploy/restart (it then re-uploads every chunk it kept)."""
         if mode not in ("A", "B"):
             raise ValueError(f"mode must be 'A' or 'B', got {mode!r}")
-        session_id = str(uuid.uuid4())
+        if session_id is not None:
+            session_id = str(uuid.UUID(session_id))  # raises ValueError on anything that is not a plain uuid
+        else:
+            session_id = str(uuid.uuid4())
         if target_fps is None:
             target_fps = 2 if mode == "A" else 15
         session = RecordingSession(
@@ -213,11 +220,18 @@ class InspectorRecordingService:
             audio=AudioConfig(mic=audio_mic, system=audio_system, mic_device_id=mic_device_id),
             target_fps=target_fps,
         )
+        if started_ago_sec > 0:
+            session.started_at = time.time() - min(float(started_ago_sec), MAX_RECORDING_MIN * 60 + 600)
         # ساخت دایرکتوری‌ها
         session.audio_dir.mkdir(parents=True, exist_ok=True)
         session.video_dir.mkdir(parents=True, exist_ok=True)
         if mode == "A":
             session.frames_dir.mkdir(parents=True, exist_ok=True)
+        # a resumed session may find its old chunks still on disk (process restart on the same machine) — count them
+        session.audio_chunks_count = sum(1 for _ in session.audio_dir.glob("chunk_*.webm"))
+        session.video_chunks_count = sum(1 for _ in session.video_dir.glob("chunk_*.webm"))
+        if session.frames_dir.is_dir():
+            session.frames_count = sum(1 for _ in session.frames_dir.glob("frame_*"))
         async with self._lock:
             self._sessions[session_id] = session
         # transition به recording — در commit های بعدی Playwright/MediaRecorder در همینجا
@@ -229,6 +243,19 @@ class InspectorRecordingService:
             f"(mode={mode}, project={project_full_name or project_id}, fps={target_fps})"
         )
         return session
+
+    async def resume_session(self, session_id: str, *, started_ago_sec: float = 0.0, **start_kwargs: Any
+                             ) -> tuple:
+        """(2026-11-15) Sessions live in memory, so a deploy/restart used to throw the whole recording away. The
+        browser keeps every chunk it recorded; on «session_not_found» it calls this to re-create the session under
+        the same id and re-uploads them. Returns (session, resumed). An existing session is returned untouched."""
+        async with self._lock:
+            existing = self._sessions.get(session_id)
+        if existing is not None:
+            return existing, False
+        s = await self.start_session(session_id=session_id, started_ago_sec=started_ago_sec, **start_kwargs)
+        logger.warning(f"inspector_recording: session {session_id} re-created after a server restart (resume)")
+        return s, True
 
     def get_session(self, session_id: str) -> Optional[RecordingSession]:
         return self._sessions.get(session_id)
@@ -252,8 +279,10 @@ class InspectorRecordingService:
                 f"cannot append audio in phase={session.phase} (must be recording|stopping)"
             )
         path = session.audio_dir / f"chunk_{seq:06d}.webm"
+        existed = path.exists()  # a resumed upload re-sends chunks — count each seq once
         path.write_bytes(chunk_bytes)
-        session.audio_chunks_count += 1
+        if not existed:
+            session.audio_chunks_count += 1
         session.touch()
 
     # ------------------------------------------------------------------
@@ -421,8 +450,10 @@ class InspectorRecordingService:
         if ext not in ("png", "jpg", "jpeg", "webp"):
             ext = "png"
         path = session.frames_dir / f"frame_{seq:06d}.{ext}"
+        existed = path.exists()
         path.write_bytes(frame_bytes)
-        session.frames_count += 1
+        if not existed:
+            session.frames_count += 1
         session.touch()
 
     async def attach_logs_snapshot(
@@ -456,8 +487,10 @@ class InspectorRecordingService:
                 f"cannot append video in phase={session.phase}"
             )
         path = session.video_dir / f"chunk_{seq:06d}.webm"
+        existed = path.exists()  # a resumed upload re-sends chunks — count each seq once
         path.write_bytes(chunk_bytes)
-        session.video_chunks_count += 1
+        if not existed:
+            session.video_chunks_count += 1
         session.touch()
 
     async def append_interactions(

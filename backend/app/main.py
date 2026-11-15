@@ -385,6 +385,14 @@ async def lifespan(app: FastAPI):
         await get_oversight_service().close()
     except Exception:
         pass
+    # 💾 tasks.json / reports.json are written by a background thread — make sure the last snapshot is on disk
+    try:
+        import asyncio as _aio
+        from .services.oversight_service import flush_pending_writes
+        if not await _aio.to_thread(flush_pending_writes, 20.0):
+            logger.warning("oversight: pending JSON writes did not finish before shutdown")
+    except Exception as e:
+        logger.warning(f"oversight flush at shutdown failed: {e}")
 
     # 🔬 (Runtime Verify Stage 9) — browser pool را shutdown کن
     try:

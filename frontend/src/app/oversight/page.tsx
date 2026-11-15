@@ -325,6 +325,10 @@ interface Report {
   flagged?: boolean;
   user_goal?: string;
   touched_codex?: Record<string, any>;
+  // 💾 (2026-11-15) old report whose full copy went to Google Drive (backend services/reports_archive.py)
+  archived_to?: { drive_id?: string; link?: string; file?: string; at?: string };
+  restored_from_archive?: boolean;
+  archive_error?: string;
 }
 
 interface Status {
@@ -1546,6 +1550,17 @@ export default function OversightPage() {
   const [reportSinceFilter, setReportSinceFilter] = useState<string>('');
   const [reportFlaggedOnly, setReportFlaggedOnly] = useState(false);
   const [viewingReport, setViewingReport] = useState<Report | null>(null);
+  // 💾 an archived report opens slim — bring its full copy back from Drive (GET /reports/{id} merges it)
+  useEffect(() => {
+    const r = viewingReport;
+    if (!r || !r.archived_to?.drive_id || r.restored_from_archive || r.archive_error) return;
+    let alive = true;
+    fetch(`${API_BASE}/api/oversight/reports/${encodeURIComponent(r.id)}`)
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+      .then((full) => { if (alive) setViewingReport((cur) => (cur && cur.id === r.id ? { ...cur, ...full } : cur)); })
+      .catch((e) => { if (alive) setViewingReport((cur) => (cur && cur.id === r.id ? { ...cur, archive_error: String(e?.message || e) } : cur)); });
+    return () => { alive = false; };
+  }, [viewingReport]);
   // 🆕 (Phase 5 V4 — bug A2) — Evidence drill-down modal for inspector probes
   // یک probe + reference به report برای ساختن لینک‌ها
   const [drillDownProbe, setDrillDownProbe] = useState<{
@@ -5276,6 +5291,19 @@ export default function OversightPage() {
         {viewingReport && (
           <Modal onClose={() => setViewingReport(null)} title="📊 جزئیات گزارش">
             <div className="space-y-3">
+              {viewingReport.archived_to?.drive_id && (
+                <div className="text-xs rounded-lg p-2 bg-sky-50 dark:bg-sky-900/30 text-sky-800 dark:text-sky-200">
+                  💾 نسخهٔ کاملِ این گزارشِ قدیمی (خروجیِ خام، شواهد، trace) در گوگل درایو بایگانی شده است —{' '}
+                  {viewingReport.restored_from_archive
+                    ? 'از درایو بازیابی و در زیر نشان داده شد.'
+                    : viewingReport.archive_error
+                    ? `بازیابی نشد: ${viewingReport.archive_error}`
+                    : 'در حالِ بازیابی از درایو…'}
+                  {viewingReport.archived_to.link && (
+                    <> {' '}<a className="underline" href={viewingReport.archived_to.link} target="_blank" rel="noreferrer">فایلِ بایگانی</a></>
+                  )}
+                </div>
+              )}
               <div className="flex items-center gap-2 flex-wrap">
                 <span
                   className={`px-2 py-1 rounded text-sm ${

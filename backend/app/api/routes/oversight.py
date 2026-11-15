@@ -639,14 +639,19 @@ async def get_verify_trace(task_id: str, report_id: Optional[str] = None):
             raise HTTPException(status_code=404, detail=f"report {report_id} یافت نشد")
     else:
         report = sorted(reports, key=lambda r: r.run_at, reverse=True)[0]
+    rd = report.to_dict()
+    if rd.get("archived_to"):  # 💾 full copy in Drive (services/reports_archive.py)
+        from ...services.reports_archive import full_report
+        rd = await full_report(rd)
     return {
         "task_id": task_id,
         "report_id": report.id,
         "run_at": report.run_at,
         "verify_version": getattr(report, "verify_version", "v5"),
-        "verify_trace": list(getattr(report, "verify_trace", []) or []),
-        "ac_probe_details": list(getattr(report, "ac_probe_details", []) or []),
-        "config_used": dict(getattr(report, "config_used", {}) or {}),
+        "verify_trace": list(rd.get("verify_trace") or []),
+        "ac_probe_details": list(rd.get("ac_probe_details") or []),
+        "config_used": dict(rd.get("config_used") or {}),
+        "archived_to": rd.get("archived_to") or {},
     }
 
 
@@ -3062,6 +3067,9 @@ async def get_report(report_id: str):
     r = await service.get_report(report_id)
     if not r:
         raise HTTPException(status_code=404, detail="گزارش یافت نشد")
+    if r.get("archived_to"):  # old report whose full copy went to Drive — bring it back transparently
+        from ...services.reports_archive import full_report
+        r = await full_report(r)
     return r
 
 
