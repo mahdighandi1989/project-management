@@ -9,7 +9,7 @@ import json
 import logging
 from fastapi import APIRouter, HTTPException, Query, Depends, Body, Request
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from sqlalchemy.orm import Session
 
 from ...services.oversight_service import get_oversight_service
@@ -43,30 +43,30 @@ class WatchedUpdate(BaseModel):
     tags: Optional[List[str]] = None
     schedule_enabled: Optional[bool] = None
     interval_hours: Optional[float] = None
-    autonomy_level: Optional[str] = None
+    autonomy_level: Optional[Literal["manual", "assist", "auto"]] = None
     allow_push: Optional[bool] = None
     allow_create_issue: Optional[bool] = None
     scan_interval_hours: Optional[float] = None
     # 🆕 (commit 2.3) عمق scan + وزن‌های معیار — مهاجرت از Health
-    scan_depth: Optional[str] = None  # quick | standard | deep | thorough
+    scan_depth: Optional[Literal["quick", "standard", "balanced", "deep", "thorough", "ultra"]] = None
     scan_criteria_weights: Optional[Dict[str, float]] = None
     # 🆕 (audit fix) فیلدهایی که در UI و backend model بودند ولی در schema جا افتاده بودند
-    default_execution_mode: Optional[str] = None  # manual | auto_via_projects_page | auto_via_pr
+    default_execution_mode: Optional[Literal["manual", "auto_via_projects_page", "auto_via_pr"]] = None
     verify_only_mode: Optional[bool] = None
     verify_interval_hours: Optional[float] = None
     # 🆕 (auto-loop) ping-pong مداوم تا verify=done
     auto_continue_until_done: Optional[bool] = None
-    max_auto_loop_rounds: Optional[int] = None
+    max_auto_loop_rounds: Optional[int] = Field(None, ge=1, le=20)
     # 🆕 (silent-stop fix v2) — حد نصاب درصدی (0..1) برای ارشیو خودکار
     # بعد از هر verify partial. ≥ این مقدار → archive + remaining به TODO.
-    auto_archive_done_ratio: Optional[float] = None
+    auto_archive_done_ratio: Optional[float] = Field(None, ge=0, le=1)
     # 🆕 (P1) مدل‌های auto-scan — لیست ID مدل‌ها (مثل deepseek-coder)
     selected_models: Optional[List[str]] = None
     # 🆕 (Smart Task Lifecycle)
     auto_regenerate_old_prompts: Optional[bool] = None
-    prompt_quality_threshold: Optional[int] = None  # 0..100
+    prompt_quality_threshold: Optional[int] = Field(None, ge=0, le=100)  # 0..100
     dedup_in_manual_create: Optional[bool] = None
-    dedup_score_threshold: Optional[float] = None  # 0..1
+    dedup_score_threshold: Optional[float] = Field(None, ge=0.3, le=1)  # 0..1
     # 🔬 (Runtime Verify Stage 4) — base URLs + auth + repo_path برای probe ها
     frontend_base_url: Optional[str] = None
     backend_base_url: Optional[str] = None
@@ -83,7 +83,7 @@ class WatchedUpdate(BaseModel):
     logic_audit_enabled: Optional[bool] = None
     notification_audit_enabled: Optional[bool] = None
     inspector_session_enabled: Optional[bool] = None
-    auto_task_checklist_mode: Optional[str] = None
+    auto_task_checklist_mode: Optional[Literal["auto", "always", "never"]] = None
     cleanup_tasks_enabled: Optional[bool] = None
     auto_task_notify_sound: Optional[bool] = None
     scan_notify_sound: Optional[bool] = None
@@ -290,6 +290,10 @@ _MIN_INTERVAL_HOURS = 0.25
 def _clamp_intervals(body: BaseModel) -> None:
     for name in ("interval_hours", "scan_interval_hours", "verify_interval_hours"):
         v = getattr(body, name, None)
+        # (2026-11-15 audit) exactly 0 = «off» for the periodic scan and verify (the scheduler skips them); the run
+        # interval has no «off» (that is «زمان‌بندی فعال»), so it is clamped too
+        if v is not None and v == 0 and name != "interval_hours":
+            continue
         if v is not None and (v != v or v < _MIN_INTERVAL_HOURS):  # v != v → NaN
             setattr(body, name, _MIN_INTERVAL_HOURS)
 
@@ -2182,7 +2186,7 @@ async def watched_regenerate_low_quality(
     payload = payload or RegenerateLowQualityRequest()
     return await service.regenerate_low_quality_prompts(
         watched_id,
-        max_count=int(payload.max_count or 5),
+        max_count=max(1, min(10, int(payload.max_count or 5))),  # (audit) clamp — each one is a model call
         reason=payload.reason or "manual_override",
     )
 
@@ -3177,8 +3181,10 @@ async def deep_scan_project(watched_id: str, payload: Optional[DeepScanRequest] 
                 focus_notes=payload.focus_notes,
             )
         except Exception as e:
-            from ...services.oversight_deep_scan_service import write_progress as _wp
-            _wp(watched_id, status="error", message=str(e))
+            from ...services.oversight_deep_scan_service import write_progress as _wp, ScanAlreadyRunning
+            # (2026-11-15 audit) a second click that lost the race must not stamp «error» over the RUNNING scan
+            if not isinstance(e, ScanAlreadyRunning):
+                _wp(watched_id, status="error", message=str(e))
         finally:
             revert_temp_enables(_scan_revert)
 

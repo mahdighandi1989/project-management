@@ -153,6 +153,7 @@ class WatchedProject:
     last_scan_at: Optional[str] = None
     scan_interval_hours: float = 168.0  # هفتگی
     next_scan_at: Optional[str] = None
+    scan_fail_count: int = 0  # (2026-11-15) consecutive failed scheduled scans — back-off 1h/6h/24h + one alert
     # 🆕 تنظیمات autonomy گسترش‌یافته
     default_execution_mode: str = "manual"  # manual | auto_via_projects_page | auto_via_pr
     verify_only_mode: bool = False
@@ -409,6 +410,7 @@ class OversightTask:
     # 🆕 (P4) prompt history — وقتی پرامپت regenerate می‌شود، نسخهٔ قبلی اینجا
     # ذخیره می‌شود (max 10 آیتم). هر آیتم: {prompt, raw_idea, model_id, generated_at}
     prompt_history: List[Dict[str, Any]] = field(default_factory=list)
+    last_regenerated_at: Optional[str] = None  # (2026-11-15) 7-day cooldown for automatic prompt regeneration
     # 🆕 (Smart Task Lifecycle) merge / quality tracking
     # merge_count: چندبار این تسک با تسک دیگری ادغام شده (manual یا auto)
     merge_count: int = 0
@@ -754,6 +756,9 @@ LARGE_IDEA_CHARS: int = 500_000  # synthesis: bump output budget + add per-file 
 # ====================================================================
 # Service
 # ====================================================================
+
+_RUNNING_VERIFIES: set = set()  # (2026-11-15) projects whose scheduled verify batch is still running in the background
+
 
 class OversightService:
     """سرویس اصلی نظارت."""
@@ -2401,12 +2406,14 @@ class OversightService:
                                     v = "deep"
                             setattr(w, k, v)
                     w.updated_at = now_iso()
-                    if w.schedule_enabled:
+                    # (2026-11-15, card audit D1) only a change to the schedule itself moves «بعدی» — editing a note,
+                    # a tag or a weight used to push the next run back by a whole interval every time
+                    if not w.schedule_enabled:
+                        w.next_run_at = None
+                    elif ("schedule_enabled" in updates or "interval_hours" in updates or not w.next_run_at):
                         w.next_run_at = (
                             datetime.now(timezone.utc) + timedelta(hours=w.interval_hours)
                         ).isoformat()
-                    else:
-                        w.next_run_at = None
                     self._save_watched()
                     return w.to_dict()
         return None
@@ -2582,7 +2589,10 @@ class OversightService:
         result = await uninstall_runner(watched, gh_token=gh_token)
         async with self._lock:
             watched.claude_runner_enabled = False
-            watched.claude_runner_workflow_path = None
+            # (2026-11-15 audit) forget the workflow only when it was really removed — a failed uninstall used to
+            # hide a still-armed workflow in the repo
+            if result.get("success"):
+                watched.claude_runner_workflow_path = None
             watched.claude_runner_last_error = (
                 None if result.get("success") else "; ".join(result.get("errors") or [])
             )
@@ -3749,6 +3759,7 @@ class OversightService:
                 priority="low",
                 project_name=project_name,
                 watched_id=watched.id if watched else None,
+                silent=not bool(getattr(watched, "auto_task_notify_sound", False)),  # card switch (audit D5)
             )
         except Exception as e:
             logger.debug(f"_notify_duplicate_detected failed: {e}")
@@ -3920,6 +3931,18 @@ class OversightService:
                     continue
                 if t.verification_status == "done":
                     continue
+                # (2026-11-15 audit) never rewrite a task that is being worked on or waiting for its verify (its ACs
+                # and per-AC evidence would be replaced mid-run), nor one regenerated in the last 7 days
+                if t.status in ("running", "claimed") or getattr(t, "external_locked_by", None) \
+                        or t.verification_status == "applied_externally_pending_verify":
+                    continue
+                _lr = getattr(t, "last_regenerated_at", None)
+                if _lr:
+                    try:
+                        if datetime.now(timezone.utc) - datetime.fromisoformat(_lr) < timedelta(days=7):
+                            continue
+                    except Exception:
+                        pass
                 scanned += 1
                 q = self._score_prompt_quality(t)
                 t.prompt_quality_score = q
@@ -4005,6 +4028,8 @@ class OversightService:
                         priority="low",
                         project_name=res.get("project_full_name") or "",
                         watched_id=res.get("watched_id"),
+                        # (card audit D5) the card's «🔔 صدا برای auto-tasks» switch — silent unless the owner wants sound
+                        silent=not bool(getattr(self._find_watched(res.get("watched_id") or watched_id), "auto_task_notify_sound", False)),
                     )
                 except Exception:
                     pass
@@ -4150,7 +4175,8 @@ class OversightService:
             if not task:
                 return None
             task.prompt_history.insert(0, history_entry)
-            task.prompt_history = task.prompt_history[:10]  # cap به 10
+            task.prompt_history = task.prompt_history[:50]  # (2026-11-15) 10 dropped old versions — «nothing deleted»
+            task.last_regenerated_at = now_iso()
             task.raw_idea = raw
             task.prompt = new_data.get("prompt") or task.prompt
             new_target_files = new_data.get("target_files") or []
@@ -9505,7 +9531,7 @@ AC = «طراحی شیک‌تر باشد»:
                 "source": f"followup_round_{(task.followup_round or 0) + 1}",
             }
             task.prompt_history.insert(0, history_entry)
-            task.prompt_history = task.prompt_history[:10]  # cap
+            task.prompt_history = task.prompt_history[:50]  # cap (was 10)
             # جایگزین prompt اصلی با followup
             task.prompt = new_prompt
             if extracted_locs:
@@ -9661,12 +9687,13 @@ AC = «طراحی شیک‌تر باشد»:
                     _write_todo_for_task as _wtt,
                     _emit_runner_notification as _ern,
                 )
+                _todo_written = False
                 try:
-                    await _wtt(
+                    _todo_written = bool(await _wtt(
                         task=task,
                         watched=watched,
                         verify_result=_verify_result_for_todo,
-                    )
+                    ))
                 except Exception as _todo_e:
                     logger.warning(
                         f"auto-loop cleanup: _write_todo_for_task failed "
@@ -9706,17 +9733,19 @@ AC = «طراحی شیک‌تر باشد»:
                             f"حد نصاب ۹۰٪ checklist محرز شد "
                             f"(ratio={_cleanup_ratio:.0%}, "
                             f"round={task.followup_round}/{_max_rounds_val}).\n"
-                            f"تسک ارشیو شد. باقی‌مانده‌ها در "
-                            f"TO-DO/todo-task-{(task.id or '')[:8]}.md ثبت شد.\n"
-                            f"برای ادامهٔ کارهای جزئی: TODO را بخوان."
+                            f"تسک ارشیو شد. باقی‌مانده‌ها "
+                            + (f"در TO-DO/todo-task-{(task.id or '')[:8]}.md ثبت شد.\n"
+                               if _todo_written else "در گزارشِ تسک (اتاق فرمان) مانده‌اند — فایلِ TO-DO نوشته نشد (اجرای خودکار خاموش).\n")
+                            + f"برای ادامهٔ کارهای جزئی: باقی‌مانده‌ها را بخوان."
                         )
                     else:
                         _extra_msg = (
                             f"auto-loop به سقف ۶ تلاش رسید بدون رسیدن به "
                             f"حد نصاب (ratio={_cleanup_ratio:.0%}).\n"
-                            f"تسک به‌زور ارشیو شد و باقی‌مانده‌ها در "
-                            f"TO-DO/todo-task-{(task.id or '')[:8]}.md ثبت شد.\n"
-                            f"برای ادامه: TODO را مطالعه، مشکل را رفع، و در "
+                            f"تسک به‌زور ارشیو شد و باقی‌مانده‌ها "
+                            + (f"در TO-DO/todo-task-{(task.id or '')[:8]}.md ثبت شد.\n"
+                               if _todo_written else "در گزارشِ تسک مانده‌اند (فایلِ TO-DO نوشته نشد — اجرای خودکار خاموش).\n")
+                            + f"برای ادامه: باقی‌مانده‌ها را مطالعه، مشکل را رفع، و در "
                             f"پنل تسک را un-archive کن یا «اجرا با کلاد» را "
                             f"دستی بزن."
                         )
@@ -10221,14 +10250,49 @@ AC = «طراحی شیک‌تر باشد»:
         tasks.add(t)
         t.add_done_callback(tasks.discard)
 
-    async def _scheduled_scan(self, w, model_ids: List[str]) -> None:
-        from .oversight_deep_scan_service import run_deep_scan
+    async def _scheduled_verify(self, watched_id: str, task_ids: List[str], include_runtime: bool) -> None:
         try:
+            from .oversight_verifier import verify_task as _verify_task
+            for tid in task_ids:
+                try:
+                    await _verify_task(tid, model_id=None, triggered_by="scheduler", include_runtime=include_runtime)
+                except Exception as e:
+                    logger.warning(f"scheduled verify {tid} failed: {e}")
+        finally:
+            _RUNNING_VERIFIES.discard(watched_id)
+
+    async def _scheduled_scan(self, w, model_ids: List[str]) -> None:
+        """One scheduled deep scan in the background (2026-11-15 audit: model choice, failure back-off, one alert).
+
+        * Model: the project's «مدل‌های AI برای auto-scan»; empty ⇒ the best model that is already ON for the analyst
+          role (same rule as the manual Deep Scan — `pick_scan_model`). Unattended runs never switch on a model the
+          owner switched off: if that would be needed, the scan fails with a clear message instead.
+        * A scan in which no model answered (ScanNoModel), a timeout or any error retries after 1 h, then 6 h, then
+          24 h, then the normal interval — not every hour forever — and Telegram «scan_failed» goes out once per streak
+          (first failure) and again at the third.
+        """
+        from .oversight_deep_scan_service import run_deep_scan
+        revert: List[Dict[str, Any]] = []
+        try:
+            if len(model_ids) <= 1:
+                from .ai_manager import get_ai_manager
+                from .inspector_roles import pick_scan_model, revert_temp_enables
+
+                picked, revert = pick_scan_model(get_ai_manager(), model_ids[0] if model_ids else None, model_ids or None)
+                if revert:  # it would have to switch on a model the owner switched off — not unattended
+                    revert_temp_enables(revert)
+                    revert = []
+                    picked = None
+                if not picked:
+                    raise RuntimeError("هیچ مدلِ روشنی برای اسکنِ خودکار نیست — «مدل‌ها و تنظیمات» ⇐ تبِ «مدل‌ها»")
+                model_ids = [picked]
+            logger.info(f"auto-scan {w.id}: models={model_ids}")
             await run_deep_scan(
                 w.id,
                 model_id=model_ids[0] if model_ids else None,
                 model_ids=model_ids if len(model_ids) > 1 else None,
             )
+            w.scan_fail_count = 0
             # 🆕 (Smart Task Lifecycle) auto-regenerate — پس از scan، تسک‌های کم‌کیفیت (rate-limit 5)
             if getattr(w, "auto_regenerate_old_prompts", False):
                 try:
@@ -10237,11 +10301,38 @@ AC = «طراحی شیک‌تر باشد»:
                     logger.warning(f"auto-regen after scan {w.id} failed: {_re}")
         except Exception as e:
             logger.warning(f"auto-scan {w.id} failed: {e}")
+            fails = int(getattr(w, "scan_fail_count", 0) or 0) + 1
+            w.scan_fail_count = fails
+            interval = float(w.scan_interval_hours or 0)
+            wait_h = {1: 1.0, 2: 6.0, 3: 24.0}.get(fails, interval or 24.0)
+            wait_h = min(wait_h, interval) if interval > 0 else wait_h
             now = datetime.now(timezone.utc)
-            # retry in ~1 h (not on every tick)
-            w.next_scan_at = (now + timedelta(hours=1)).isoformat()
-            w.last_scan_at = (now - timedelta(hours=max(float(w.scan_interval_hours or 0) - 1, 0))).isoformat()
+            w.next_scan_at = (now + timedelta(hours=wait_h)).isoformat()
+            w.last_scan_at = (now - timedelta(hours=max(interval - wait_h, 0))).isoformat()
+            if fails in (1, 3):
+                try:
+                    from .notification_service import notification_service
+                    await notification_service.notify_event(
+                        "scan_failed",
+                        (
+                            f"💥 *اسکنِ دوره‌ای انجام نشد* — `{w.repo_full_name}`\n"
+                            f"علت: {str(e)[:300]}\n"
+                            f"تلاشِ بعدی حدودِ {wait_h:g} ساعتِ دیگر (شکستِ پیاپیِ {fails})."
+                        ),
+                        subject="اسکنِ دوره‌ای انجام نشد",
+                        priority="high",
+                        project_name=w.repo_full_name,
+                        watched_id=w.id,
+                    )
+                except Exception:
+                    pass
         finally:
+            if revert:
+                try:
+                    from .inspector_roles import revert_temp_enables
+                    revert_temp_enables(revert)
+                except Exception:
+                    pass
             try:
                 self._save_watched()
             except Exception:
@@ -10346,9 +10437,11 @@ AC = «طراحی شیک‌تر باشد»:
                 logger.warning(f"scan check {w.id} failed: {e}")
 
             # ----- 2) Verify دوره‌ای (مستقل از execution) -----
+            # (2026-11-15, owner audit) «زمان‌بندی فعال» is the master switch for EVERYTHING periodic — verify used to
+            # keep running (deep probes + model calls every 12 h) on a project whose schedule the owner had paused.
             try:
                 vh = float(getattr(w, "verify_interval_hours", 0) or 0)
-                if vh > 0:
+                if vh > 0 and w.schedule_enabled and w.id not in _RUNNING_VERIFIES:
                     last_verify = (
                         datetime.fromisoformat(w.last_verify_at)
                         if getattr(w, "last_verify_at", None)
@@ -10365,8 +10458,14 @@ AC = «طراحی شیک‌تر باشد»:
                                 "applied_externally_pending_verify",
                                 "partial",
                                 "regressed",
+                                # (2026-11-15 audit) a verify that failed for lack of a model parked the task in
+                                # «error» for good — the scheduler never looked at it again
+                                "error",
                             )
                             and t.status not in ("done", "cancelled")
+                            # (2026-11-15 audit) a scan SUGGESTION the owner never approved is not verified on a
+                            # schedule — a NOT_DONE verdict used to promote it to «pending», i.e. runnable
+                            and t.status != "suggested"
                             and not getattr(t, "archived", False)  # 🩹 2026-11-15: archived = owner closed it
                         ]
                         # اولویت: applied_externally_pending_verify اول
@@ -10374,6 +10473,9 @@ AC = «طراحی شیک‌تر باشد»:
                             key=lambda t: (
                                 0 if t.verification_status == "applied_externally_pending_verify" else 1,
                                 {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(t.priority, 9),
+                                # (audit) then the one checked longest ago — the same two tasks used to be re-checked
+                                # every interval and the rest never
+                                getattr(t, "last_verified_at", None) or "",
                             )
                         )
                         # 🆕 (Phase 4) — حالت verify از watched.verify_mode
@@ -10381,17 +10483,13 @@ AC = «طراحی شیک‌تر باشد»:
                         # fast = include_runtime=False (سریع، بدون probe).
                         _w_verify_mode = (getattr(w, "verify_mode", "deep") or "deep").lower()
                         _include_runtime = (_w_verify_mode != "fast")
-                        for t in candidates[:max_runs]:
-                            try:
-                                from .oversight_verifier import verify_task as _verify_task
-                                await _verify_task(
-                                    t.id, model_id=None,
-                                    triggered_by="scheduler",
-                                    include_runtime=_include_runtime,
-                                )
-                                verified.append(t.id)
-                            except Exception as e:
-                                logger.warning(f"scheduled verify {t.id} failed: {e}")
+                        # (2026-11-15 audit) in the background, one batch per project — each verify takes ~90 s and
+                        # used to hold the whole tick (reminders, daily report, other projects) for minutes
+                        _batch = [t.id for t in candidates[:max_runs]]
+                        if _batch:
+                            verified.extend(_batch)
+                            _RUNNING_VERIFIES.add(w.id)
+                            self._spawn_bg(self._scheduled_verify(w.id, _batch, _include_runtime))
                         w.last_verify_at = now.isoformat()
                         w.next_verify_at = (now + timedelta(hours=vh)).isoformat()
             except Exception as e:
@@ -10421,8 +10519,8 @@ AC = «طراحی شیک‌تر باشد»:
                 and t.execution_mode in ("auto_via_projects_page", "auto_via_pr")
             ]
             if not pending:
+                # (2026-11-15 audit) nothing ran ⇒ «آخرین اجرا» is not touched (it used to show a run that never happened)
                 w.next_run_at = (now + timedelta(hours=w.interval_hours)).isoformat()
-                w.last_run_at = now.isoformat()
                 continue
 
             for t in pending[:max_runs]:

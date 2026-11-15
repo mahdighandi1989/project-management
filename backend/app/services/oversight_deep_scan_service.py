@@ -192,6 +192,20 @@ def mark_interrupted_scans() -> int:
                        stop_requested=False, pause_requested=False, updated_at=now_iso())
             _write_json(f, cur)
             n += 1
+            # (2026-11-15, audit) the scheduler booked the next slot when this scan STARTED — a restart in the middle
+            # (≈15 deploys on a busy day) skipped the project for a whole week. Retry in about an hour instead.
+            try:
+                svc = get_oversight_service()
+                w = svc._find_watched(f.stem)
+                if w is not None and float(getattr(w, "scan_interval_hours", 0) or 0) > 1:
+                    from datetime import timedelta as _td
+
+                    _now = datetime.now(timezone.utc)
+                    w.last_scan_at = (_now - _td(hours=float(w.scan_interval_hours) - 1)).isoformat()
+                    w.next_scan_at = (_now + _td(hours=1)).isoformat()
+                    svc._save_watched()
+            except Exception:  # noqa: BLE001
+                pass
     return n
 
 
@@ -1606,6 +1620,10 @@ class ScanAlreadyRunning(RuntimeError):
     pass
 
 
+class ScanNoModel(RuntimeError):
+    """Every AI pass failed — the scan produced nothing trustworthy (2026-11-15)."""
+
+
 async def run_deep_scan(watched_id: str, **kwargs) -> Dict[str, Any]:
     """🩹 (2026-11-15, «اتاق فرمان» audit) — one deep scan per project at a time (two used to write the same progress
     file and race on the duplicate check) and an overall time limit (a hung model call left the scan in «phase3_…»
@@ -2225,6 +2243,7 @@ async def _run_deep_scan_impl(
         # ----- فاز ۳ -----
         all_findings: List[Dict[str, Any]] = []
         passes_done = 0
+        ai_passes_ok = 0  # (2026-11-15) passes where at least one model really answered
         critical_count = 0
         # 🆕 خلاصه‌های ساختاریافته از هر pass (مثلاً security_summary از
         # security_deep، coverage_summary از coverage). در structure scan
@@ -2342,11 +2361,14 @@ async def _run_deep_scan_impl(
                 )
                 pass_findings: List[Dict[str, Any]] = []
                 pass_summaries_local: Dict[str, Any] = {}
+                _pass_ok = False
                 for mid in models_to_run:
                     try:
                         response = await service._ai_generate(
                             prompt, model_id=mid, max_tokens=4500, temperature=0.2
                         )
+                        if (response or "").strip():
+                            _pass_ok = True
                         parsed = service._extract_json(response) or {}
                         m_findings = parsed.get("findings") or []
                         for f in m_findings:
@@ -2374,11 +2396,24 @@ async def _run_deep_scan_impl(
                     findings_count=len(all_findings),
                     critical_count=critical_count,
                 )
+                if _pass_ok:
+                    ai_passes_ok += 1
             except Exception as e:
                 logger.warning(f"deep_scan pass {pass_id} failed: {e}")
 
             passes_done += 1
             write_progress(watched_id, passes_done=passes_done)
+
+        # 🩹 (2026-11-15, owner audit) — no model answered ANY pass (all models off / no key / provider down): this is a
+        # failed scan, not a finished one. It used to complete from static analysis only — Telegram «12/12», a PDF,
+        # tasks, and the schedule moved a whole week ahead. Now: error status, nothing recorded, and the scheduler
+        # retries with back-off and alerts once (oversight_service._scheduled_scan).
+        if enabled and ai_passes_ok == 0:
+            write_progress(
+                watched_id, status="error",
+                message="هیچ مدلی به هیچ pass ِ اسکن پاسخ نداد — مدل‌ها در «مدل‌ها و تنظیمات» خاموش‌اند یا کلید/اعتبار ندارند",
+            )
+            raise ScanNoModel("هیچ مدلی به اسکن پاسخ نداد (همهٔ pass ها بی‌پاسخ ماندند)")
 
         # ----- فاز ۴: تجمیع، dedup هوشمند، اولویت‌بندی -----
         # (مهاجرت از Health analysis _merge_similar_issues — قبلاً فقط
@@ -2793,7 +2828,9 @@ async def _run_deep_scan_impl(
             from .scan_v5._findings_to_tasks import phase5_findings_to_standard
 
             _phase5_findings = phase5_findings_to_standard(
-                stale=scan_v5_stale,
+                # (card audit D5) «🗑 cleanup tasks» off ⇒ stale items are still detected and documented, but no
+                # cleanup tasks are made from them
+                stale=(scan_v5_stale if getattr(watched, "cleanup_tasks_enabled", True) else None),
                 anti_patterns=scan_v5_anti_patterns,
                 coherence_issues=(scan_v5_coherence.get("issues") or []),
                 effectiveness_issues=scan_v5_effectiveness_issues,
@@ -3035,7 +3072,7 @@ async def _run_deep_scan_impl(
                     "models_used_list": list(model_ids) if model_ids else ([model_id] if model_id else []),
                     "depth": getattr(watched, "scan_depth", "deep"),
                     "passes": passes_done,
-                    "passes_total": len(PASSES),
+                    "passes_total": len(enabled),
                     "files_count": len(all_files),
                     "scan_id": read_progress(watched.id).get("started_at") or now_iso(),
                     "scanned_at": now_iso(),
@@ -3229,7 +3266,10 @@ async def _run_deep_scan_impl(
 
         # به‌روزرسانی last_scan_at روی watched — فقط در حالت scan معمولی.
         # اسکن موردی Inspector نباید scheduler دوره‌ای را reset کند.
-        if _inspector_session_id is None:
+        # (2026-11-15, audit) a partial scan (chosen sections / paths / keywords) is not the periodic full scan — it no
+        # longer postpones it by a whole interval
+        _full_scan = not (selected_sections or custom_paths or semantic_keywords)
+        if _inspector_session_id is None and _full_scan:
             watched.last_scan_at = now_iso()
             try:
                 from datetime import timedelta
@@ -3252,7 +3292,7 @@ async def _run_deep_scan_impl(
             "models_used_list": list(model_ids) if model_ids else ([model_id] if model_id else []),
             "scan_depth": getattr(watched, "scan_depth", "deep"),
             "passes_run": passes_done,
-            "passes_total": len(PASSES),
+            "passes_total": len(enabled),
             "files_analyzed_count": len(all_files),
             "scan_id": read_progress(watched_id).get("started_at") or now_iso(),
         }
@@ -3293,7 +3333,7 @@ async def _run_deep_scan_impl(
                         f"• {len(created_tasks)} تسک جدید ساخته شد\n"
                         f"• {len(duplicates_skipped)} تسک تکراری (skip)\n"
                         f"• {critical_count} مورد critical\n"
-                        f"• {passes_done}/{len(PASSES)} pass اجرا شد"
+                        f"• {ai_passes_ok}/{len(enabled)} pass با پاسخِ مدل"
                     ),
                     action_type="scan_completed",
                 )
@@ -3350,7 +3390,7 @@ async def _run_deep_scan_impl(
                 f"📁 `{repo_name}`",
                 f"🤖 مدل: `{models_label}`",
                 f"🔍 depth: *{depth_used}*",
-                f"📊 *{passes_done}/{len(PASSES)}* pass اجرا شد",
+                f"📊 *{ai_passes_ok}/{len(enabled)}* pass با پاسخِ مدل",
                 f"📑 *{len(all_files)}* فایل بررسی شد",
                 f"🔎 *{len(unique)}* یافتهٔ منحصربه‌فرد",
                 f"📝 *{len(created_tasks)}* تسک جدید ساخته شد",

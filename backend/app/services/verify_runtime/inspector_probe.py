@@ -56,6 +56,15 @@ _STATIC_EXTENSIONS = (
 _MAX_UI_STEPS = 12  # حداکثر step در هر probe
 _DEFAULT_STEP_TIMEOUT_MS = 5000
 
+_DESTRUCTIVE_WORDS = ("delete", "remove", "destroy", "drop", "reset", "pay", "purchase", "checkout", "submit",
+                      "حذف", "پاک", "پرداخت", "خرید", "ثبت نهایی", "ارسال نهایی", "logout", "خروج")
+
+
+def _writes_allowed() -> bool:
+    import os as _os
+    return _os.environ.get("RUNTIME_VERIFY_ALLOW_WRITES", "").strip() in ("1", "true", "yes")
+
+
 # action های مجاز در ui_steps
 _SUPPORTED_ACTIONS = frozenset({
     "navigate", "click", "fill", "submit", "select",
@@ -1194,6 +1203,19 @@ async def _execute_ui_step(
         result["error"] = f"unknown action: {action}"
         result["message"] = "action skipped"
         return result
+
+    # (2026-11-15, owner audit) verification runs against the LIVE site with a logged-in session: submitting forms
+    # or clicking a destructive control could change real data. Like api_probe, writes need RUNTIME_VERIFY_ALLOW_WRITES=1;
+    # reading, navigating, opening tabs and typing into a field (without submitting) stay allowed.
+    if not _writes_allowed():
+        _blob = f"{selector or ''} {step.get('text') or ''} {value or ''}".lower()
+        if action == "submit" or (action == "press_key" and str(value or "").lower() == "enter") or (
+                action in ("click", "check", "uncheck", "select") and any(w in _blob for w in _DESTRUCTIVE_WORDS)):
+            result["error"] = "write_blocked"
+            result["message"] = "گامِ تغییردهنده روی سایتِ زنده اجرا نشد (RUNTIME_VERIFY_ALLOW_WRITES خاموش)"
+            result["success"] = True  # skipped on purpose — not a failure of the feature under test
+            result["skipped"] = True
+            return result
 
     try:
         if action == "navigate":

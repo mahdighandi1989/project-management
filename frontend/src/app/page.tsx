@@ -89,6 +89,7 @@ export default function HomePage() {
   const [inspection, setInspection] = useState<any>(null);
   const [recent, setRecent] = useState<Recent | null>(null);
   const [disk, setDisk] = useState<any>(null);
+  const [enabledModels, setEnabledModels] = useState<any[] | null>(null);
 
   useEffect(() => {
     getJson<Provider[]>('/api/settings/providers').then((d) => setProviders(Array.isArray(d) ? d : []));
@@ -96,9 +97,12 @@ export default function HomePage() {
     getJson<any>('/api/inspection?limit=1').then(setInspection);
     getJson<Recent>('/api/handbook/recent?limit=6').then(setRecent);
     getJson<any>('/api/oversight/disk').then(setDisk);
+    getJson<any[]>('/api/models/available').then((m) => { if (Array.isArray(m)) setEnabledModels(m); });
   }, []);
 
   const activeProviders = (providers || []).filter((p) => p.available);
+  // (2026-11-15, review) «مدل‌های فعال» = models switched ON (with a key), not providers with a key — it used to say
+  // «3» while every model was switched off in «مدل‌ها و تنظیمات»
   const groups = (['main', 'tools', 'system'] as const).map((g) => ({
     id: g, label: GROUP_LABELS[g], items: SITE.filter((s) => s.group === g && s.home),
   }));
@@ -126,10 +130,12 @@ export default function HomePage() {
         </div>
       )}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-8" data-report-section="home-status" data-report-section-label="وضعیتِ زنده">
-        <Stat href="/settings?view=models" label="مدل‌های فعال"
-          value={providers === null ? '…' : activeProviders.length}
-          hint={providers === null ? '' : activeProviders.length ? activeProviders.map((p) => p.name).join('، ') : 'کلیدی تنظیم نشده — مدل‌ها و تنظیمات'}
-          tone={providers && activeProviders.length === 0 ? 'amber' : 'green'} />
+        <Stat href="/settings?view=models" label="مدل‌های روشن"
+          value={enabledModels === null ? '…' : enabledModels.length}
+          hint={enabledModels === null ? '' : enabledModels.length
+            ? `کلیدِ ${activeProviders.map((p) => p.name).join('، ') || '—'}`
+            : (activeProviders.length ? 'همهٔ مدل‌ها خاموش‌اند — در «مدل‌ها و تنظیمات» روشن کنید' : 'کلیدی تنظیم نشده — مدل‌ها و تنظیمات')}
+          tone={enabledModels !== null && enabledModels.length === 0 ? 'amber' : 'green'} />
         <Stat href="/oversight?tab=watched" label="مخازنِ تحتِ پایش (اتاق فرمان)"
           value={oversight ? oversight.watched_count : '…'}
           hint={oversight ? `GitHub ${oversight.github_token ? 'متصل' : 'بی‌توکن'} · Render ${oversight.render_token ? 'متصل' : 'بی‌توکن'}` : ''}

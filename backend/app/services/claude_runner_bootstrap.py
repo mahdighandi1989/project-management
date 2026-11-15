@@ -103,22 +103,32 @@ MASTER_PROMPT = (
     "\n"
     "## مرحله ۳ — فایل تسک را کامل بخوان\n"
     "\n"
-    "`cat prompt/<task_id>.md` (نه head/tail/sed). محتوا = پرامپت + AC + Steps.\n"
+    "`cat prompt/task-<task_id>.md` (نه head/tail/sed). محتوا = پرامپت + AC + Steps.\n"
+    "اگر فایل نبود، متنِ تسک را از backend بگیر:\n"
+    "`curl -fsS -H \"X-External-Token: $OVERSIGHT_EXTERNAL_TOKEN\" \"$OVERSIGHT_BACKEND_URL/api/external/prompts/<task_id>\"`\n"
     "\n"
     "## مرحله ۴ — کار را انجام بده\n"
     "\n"
     "هر AC را پیاده‌سازی کن. کد را با Edit/Write بنویس، تست کن.\n"
     "\n"
-    "## مرحله ۵ — commit و push مستقیم به شاخهٔ اصلیِ مخزن\n"
+    "## مرحله ۵ — commit و push (طبقِ «اجازهٔ push» ِ مالک)\n"
     "\n"
     "```bash\n"
     "git add -A\n"
     "git commit -m \"[<task_id>] <خلاصهٔ کوتاه>\" || echo 'no changes'\n"
-    "B=$(git rev-parse --abbrev-ref HEAD)  # شاخهٔ اصلیِ همین مخزن (main یا master یا …)\n"
-    "git push origin \"$B\" || { git pull --rebase origin \"$B\" && git push origin \"$B\"; } || exit 1\n"
+    "if [ \"$OVERSIGHT_PUSH_MODE\" = \"direct\" ]; then\n"
+    "  B=$(git rev-parse --abbrev-ref HEAD)  # مالک اجازهٔ push ِ مستقیم داده\n"
+    "  git push origin \"$B\" || { git pull --rebase origin \"$B\" && git push origin \"$B\"; } || exit 1\n"
+    "else\n"
+    "  BASE=$(git rev-parse --abbrev-ref HEAD)\n"
+    "  B=\"oversight/task-<task_id>\"\n"
+    "  git checkout -B \"$B\" && git push -f origin \"$B\" || exit 1\n"
+    "  gh pr create --base \"$BASE\" --head \"$B\" --title \"[oversight] <خلاصهٔ کوتاه>\" \\\n"
+    "    --body \"تسکِ <task_id> از «اتاق فرمان» — برای بازبینی و ادغامِ مالک.\" || true\n"
+    "fi\n"
     "```\n"
     "\n"
-    "هرگز PR نزن. هرگز branch جدا نساز. مستقیم به همان شاخه‌ای که checkout شده.\n"
+    "پیش‌فرض (بی‌اجازهٔ push): شاخهٔ جدا + PR؛ هرگز مستقیم روی شاخهٔ اصلی. فقط با OVERSIGHT_PUSH_MODE=direct مستقیم.\n"
     "\n"
     "## مرحله ۶ — complete اعلام کن (حیاتی — اگر اینجا fail شود، تسک معلق می‌ماند)\n"
     "\n"
@@ -163,7 +173,7 @@ MASTER_PROMPT = (
     "  سرویس خارجی. هرگز برای UI، endpoint، migration، test، integration\n"
     "  (با stub بساز).\n"
     "- اگر تسک نیاز به credential دارد → /fail با reason \"needs user credential\".\n"
-    "- مستقیم به main commit و push (no PR، no branch).\n"
+    "- push فقط طبقِ مرحلهٔ ۵ (شاخهٔ جدا + PR، مگر OVERSIGHT_PUSH_MODE=direct).\n"
     "- فقط **یک تسک** را در این run اجرا کن، سپس exit. هرگز loop نکن.\n"
     "- **هرگز exit 0 بدون /complete موفق نکن.** اگر /complete fail شد → exit 1.\n"
     "\n"
@@ -193,6 +203,7 @@ def build_workflow_yaml(
     watched_id: str,
     repo_full_name: str,
     branch: str = "main",
+    push_mode: str = "branch",
     claude_args: str = (
         # 🆕 (dynamic model selection) — مدل به‌صورت ${{ inputs.claude_model }}
         # در workflow ذکر می‌شود تا backend در زمان dispatch، آخرین Opus/Sonnet/
@@ -279,7 +290,7 @@ jobs:
     # + setup + overhead). 90 دقیقه buffer امن دارد.
     timeout-minutes: 90
     permissions:
-      contents: write       # برای commit + push به main
+      contents: write       # commit + push (to a branch + PR unless the owner allowed direct push)
       pull-requests: write  # ذخیره برای آینده (الان استفاده نمی‌کنیم)
       id-token: write       # احیاناً برای OIDC در آینده
     steps:
@@ -303,6 +314,10 @@ jobs:
           OVERSIGHT_EXTERNAL_TOKEN: ${{{{ secrets.{SECRET_EXTERNAL} }}}}
           WATCHED_ID: "{watched_id}"
           REPO_FULL_NAME: "{repo_full_name}"
+          # (2026-11-15) «اجازهٔ صریح push/PR» on the project card: direct = push to the checked-out branch;
+          # anything else = a separate branch + PR for the owner to review
+          OVERSIGHT_PUSH_MODE: "{push_mode}"
+          GH_TOKEN: ${{{{ github.token }}}}
           # 🆕 (target_task_id) — اگر backend در حال retry روی یک تسک خاص است
           # (بعد از verify=partial)، این مقدار task_id را به master prompt
           # می‌رساند تا Claude همان تسک را بگیرد به‌جای صدا زدن /next.
@@ -728,6 +743,10 @@ async def install_runner(
         errors.append(f"workflow_permissions: {perm_res.get('error')}")
 
     # 1) سه secret را نصب کن
+    # (2026-11-15 audit) the repo gets a key that only opens /api/external/prompts for THIS project — never the
+    # backend's master token (core/auth.runner_token_for)
+    from ..core.auth import runner_token_for
+    external_token = runner_token_for(watched.id) or external_token
     for secret_name, secret_value in (
         (SECRET_OAUTH, oauth_token),
         (SECRET_EXTERNAL, external_token),
@@ -753,6 +772,7 @@ async def install_runner(
         "watched_id": watched.id,
         "repo_full_name": watched.repo_full_name,
         "branch": branch,
+        "push_mode": "direct" if getattr(watched, "allow_push", False) else "branch",
     }
     if claude_args is not None:
         _build_kwargs["claude_args"] = claude_args
@@ -802,7 +822,7 @@ async def uninstall_runner(
 
     Returns: {"success": bool, "errors": [str, ...]}
     """
-    resolved = _resolve_repo_and_branch(watched, explicit=True)  # 🩹 2026-11-15: owner-started actions
+    resolved = _resolve_repo_and_branch(watched, explicit=True, allow_excluded=True)  # uninstall: always allowed
     if not resolved:
         return {"success": False, "errors": ["repo_not_resolvable"]}
     owner, repo, branch = resolved

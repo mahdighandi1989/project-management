@@ -64,11 +64,20 @@ def _commit_message(verb: str, *, details: str = "", target_repo: str = "") -> s
 
 # repo های مستثنی (مثلاً backend خودش) — از env var
 # PROMPT_SYNC_EXCLUDE_REPOS خوانده می‌شود (comma-separated).
+# (2026-11-15, owner audit) the backend's OWN repo is always excluded — it deploys to production on every push to
+# main, and a runner/sync commit there bypasses scripts/ship.sh (tests, build, docs gate, WORKLOG). Render sets
+# RENDER_GIT_REPO_SLUG on every service; the literal is the fallback for local runs.
+_SELF_REPOS = {"mahdighandi1989/project-management"}
+
+
 def _excluded_repos() -> set:
+    out = set(_SELF_REPOS)
+    slug = os.environ.get("RENDER_GIT_REPO_SLUG", "").strip().lower()
+    if slug:
+        out.add(slug)
     raw = os.environ.get("PROMPT_SYNC_EXCLUDE_REPOS", "").strip()
-    if not raw:
-        return set()
-    return {r.strip().lower() for r in raw.split(",") if r.strip()}
+    out |= {r.strip().lower() for r in raw.split(",") if r.strip()}
+    return out
 
 # نگاشت priority متنی → عدد پایه (کوچک‌تر = اولویت بالاتر)
 PRIORITY_BASE = {
@@ -238,7 +247,8 @@ def format_prompt_markdown(task: Any) -> str:
     return "\n".join(body_parts).rstrip() + "\n"
 
 
-def _resolve_repo_and_branch(watched: Any, explicit: bool = False) -> Optional[Tuple[str, str, str]]:
+def _resolve_repo_and_branch(watched: Any, explicit: bool = False,
+                             allow_excluded: bool = False) -> Optional[Tuple[str, str, str]]:
     """از watched project: (owner, repo, branch). None اگر فاقد config باشد.
 
     🐛 (gate-on-claude-runner) — قبلاً فقط `prompt_sync_enabled` چک
@@ -270,7 +280,8 @@ def _resolve_repo_and_branch(watched: Any, explicit: bool = False) -> Optional[T
         if not getattr(watched, "claude_runner_enabled", False):
             return None
     repo_full = getattr(watched, "repo_full_name", "") or ""
-    if repo_full.strip().lower() in _excluded_repos():
+    # allow_excluded: only for UNINSTALLING the runner — removing it from an excluded repo must always be possible
+    if repo_full.strip().lower() in _excluded_repos() and not allow_excluded:
         return None
     owner, repo = _parse_repo(repo_full)
     if not owner or not repo:

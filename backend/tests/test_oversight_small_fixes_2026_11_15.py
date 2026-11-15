@@ -24,9 +24,14 @@ def test_zero_or_negative_interval_is_clamped():
     ok = R.WatchedUpdate(interval_hours=6)
     R._clamp_intervals(ok)
     assert ok.interval_hours == 6
-    s = R.SettingsUpdate(scan_interval_hours=0)
+    s = R.SettingsUpdate(scan_interval_hours=0.1)
     R._clamp_intervals(s)
     assert s.scan_interval_hours == R._MIN_INTERVAL_HOURS
+    # exactly 0 = off for scan / verify; the run interval is still clamped
+    off = R.WatchedUpdate(scan_interval_hours=0, verify_interval_hours=0, interval_hours=0)
+    R._clamp_intervals(off)
+    assert off.scan_interval_hours == 0 and off.verify_interval_hours == 0
+    assert off.interval_hours == R._MIN_INTERVAL_HOURS
 
 
 def test_bulk_verify_claims_slot_before_spawning():

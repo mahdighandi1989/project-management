@@ -95,7 +95,11 @@ def _check_external_token(provided: Optional[str]) -> None:
             status_code=503,
             detail="EXTERNAL_TOOL_TOKEN env var تنظیم نشده — endpoint غیرفعال است.",
         )
-    if not provided or provided.strip() != expected:
+    import hmac as _hmac
+    from ...core.auth import runner_token_watched
+    p = (provided or "").strip()
+    # the master token (owner tools), or the scoped per-project runner token (claude_runner_bootstrap) — constant-time
+    if not p or not (_hmac.compare_digest(p, expected) or runner_token_watched(p)):
         raise HTTPException(status_code=401, detail="Invalid X-External-Token")
 
 
@@ -407,7 +411,14 @@ async def complete_prompt(task_id: str, payload: CompleteRequest):
             # claude_runner_enabled اجرا شود (تنها شرط: workflow نصب شده باشد).
             # اگر کاربر manual single-task trigger زده، انتظار دارد همان موقع
             # verify شود و در صورت partial، Claude دوباره روی همان تسک کار کند.
-            if (
+            # (2026-11-15, owner audit) without «اجازهٔ صریح push» the runner pushes to a separate branch + PR: the
+            # change is not on the main branch yet, so verifying now would find nothing and send the task round again.
+            # The task waits for the owner's review/merge; the periodic verify checks it after the merge.
+            if watched is not None and not getattr(watched, "allow_push", False):
+                t.status = "awaiting_review"
+                service._save_tasks()
+                logger.info(f"complete: task {t.id} → awaiting_review (branch + PR mode; verify after merge)")
+            elif (
                 watched is not None
                 and getattr(watched, "claude_runner_workflow_path", None)
             ):
@@ -729,7 +740,7 @@ async def _verify_then_chain_body(
         )
     elif action in ("max_retries_todo", "regressed_todo"):
         # TODO file + chain-next
-        await _write_todo_for_task(
+        _todo_ok = await _write_todo_for_task(
             task=task, watched=watched, verify_result=verify_result,
         )
         # 🚨 (loop-bug fix) — قبلاً فقط TODO نوشته می‌شد ولی task همچنان
@@ -758,8 +769,9 @@ async def _verify_then_chain_body(
             agent_id=agent_id,
             extra=(
                 f"verify={vstatus}, retries={retries_done}/{max_retries}.\n"
-                f"تسک با علت `{task.archived_reason}` آرشیو شد و در TO-DO/ ثبت گردید.\n"
-                f"سراغ تسک بعدی می‌رویم."
+                f"تسک با علت `{task.archived_reason}` آرشیو شد"
+                + (" و در TO-DO/ ثبت گردید.\n" if _todo_ok else " (فایلِ TO-DO نوشته نشد — باقی‌مانده‌ها در گزارشِ تسک).\n")
+                + "سراغ تسک بعدی می‌رویم."
             ),
         )
     else:
@@ -831,7 +843,7 @@ async def _verify_then_chain(
 
 async def _write_todo_for_task(
     *, task: Any, watched: Any, verify_result: Dict[str, Any],
-) -> None:
+) -> bool:
     """نوشتن فایل TO-DO/todo-task-{id}.md به ریپوی watched.
 
     این مسیر فقط برای تسک‌هایی است که Claude نتوانست در سقف retry تمام کند.
@@ -845,13 +857,16 @@ async def _write_todo_for_task(
         )
         from ...services.oversight_service import get_github_token
         from ...services.oversight_verifier import _ac_text_of
-        resolved = _resolve_repo_and_branch(watched, explicit=True)  # 🩹 2026-11-15: result of an owner-started run/repair
+        # (2026-11-15, owner audit) this runs from AUTOMATIC paths (the verify chain, the auto-loop cleanup), so it
+        # obeys the automatic gate: a TO-DO is committed only for a project whose «اجرای خودکار» the owner switched
+        # on. It used to use explicit=True and commit to the target repo's main with nobody having asked.
+        resolved = _resolve_repo_and_branch(watched, explicit=False)
         if not resolved:
-            return
+            return False
         owner, repo, branch = resolved
         token = get_github_token()
         if not token:
-            return
+            return False
         short_id = (task.id or "")[:8]
         path = f"TO-DO/todo-task-{short_id}.md"
 
@@ -1057,8 +1072,10 @@ async def _write_todo_for_task(
             token=token,
         )
         logger.info(f"_write_todo_for_task: wrote {path} for task {task.id}")
+        return True
     except Exception as _e:
         logger.warning(f"_write_todo_for_task failed: {_e}")
+        return False
 
 
 @router.post("/{task_id}/fail", dependencies=[Depends(require_external_token)])

@@ -160,6 +160,30 @@ def supervisor_secret() -> str:
             or (os.environ.get("EXTERNAL_TOOL_TOKEN") or "").strip())
 
 
+# ---------------------------------------------------------------------------
+# (2026-11-15, owner audit) the GitHub-Actions Claude Runner gets its OWN key, scoped to /api/external/prompts and
+# to one watched project. Before this, the master EXTERNAL_TOOL_TOKEN was copied into every watched repo's secrets —
+# opening almost the whole API to a process that runs with --dangerously-skip-permissions on repo content.
+# ---------------------------------------------------------------------------
+RUNNER_PATH_PREFIX = "/api/external/prompts"
+
+
+def runner_token_for(watched_id: str) -> str:
+    master = (os.environ.get("EXTERNAL_TOOL_TOKEN") or "").strip()
+    if not master or not watched_id:
+        return ""
+    sig = hmac.new(master.encode(), f"runner:{watched_id}".encode(), "sha256").hexdigest()[:40]
+    return f"rt_{watched_id}_{sig}"
+
+
+def runner_token_watched(token: str) -> Optional[str]:
+    """The watched id a valid runner token belongs to, else None."""
+    if not token or not token.startswith("rt_"):
+        return None
+    wid = token[3:].rsplit("_", 1)[0]
+    return wid if _eq(token, runner_token_for(wid)) else None
+
+
 def machine_caller(headers: dict) -> Optional[str]:
     """`supervisor` / `external` / `admin` when the request carries a valid secret."""
     ext = (os.environ.get("EXTERNAL_TOOL_TOKEN") or "").strip()
@@ -268,6 +292,8 @@ class AuthWall:
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
         state = scope.setdefault("state", {})
         role = machine_caller(headers)
+        if not role and path.startswith(RUNNER_PATH_PREFIX) and runner_token_watched(headers.get("x-external-token", "")):
+            role = "runner"
         claims = None if role else session_from(headers, scope.get("query_string", b"").decode("latin-1"), method)
         if claims:
             role = "supervisor" if claims.get("role") == "supervisor" else (claims.get("role") or "member")

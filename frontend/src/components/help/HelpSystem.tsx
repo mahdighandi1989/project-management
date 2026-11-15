@@ -297,7 +297,7 @@ export default function HelpSystem() {
                   <span className="text-3xl">📖</span>
                   <div>
                     <h2 className="text-xl font-bold">{pageHelp.title}</h2>
-                    <p className="text-sm opacity-80">{pageHelp.path}</p>
+                    <p className="text-sm opacity-80" dir="ltr">{typeof window !== 'undefined' ? pathname + window.location.search : pageHelp.path}</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-2">

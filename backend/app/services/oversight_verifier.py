@@ -3779,7 +3779,9 @@ async def verify_task(
                 # UPGRADE
                 if (
                     _aggregate_reconciliation_allowed
-                    and status_val in (VERIFICATION_NOT_DONE, VERIFICATION_PARTIAL)
+                    # (2026-11-15 audit) only PARTIAL may be lifted: v6 can say «done» from grep hits alone (names
+                    # that already existed), so it must never overturn the AI's «not_done» — same rule as runtime
+                    and status_val == VERIFICATION_PARTIAL
                     and _v6_done_ratio >= 0.8
                     and _v6_avg_conf >= 0.85
                     # 🩹 (2026-11-15, owner decision) one concrete AC verdict was enough to upgrade; now the concrete

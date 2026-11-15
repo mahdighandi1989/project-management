@@ -84,3 +84,6 @@ backend/storage/oversight/watched_projects.json
 
 # «دستیار» conversations (runtime data on the Render disk)
 backend/storage/assistant/
+backend/storage/oversight/scan_progress/
+backend/storage/oversight/scan_results/
+backend/storage/oversight/structure/

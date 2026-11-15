@@ -1208,6 +1208,21 @@ export default function ProjectDetailPage() {
     }
   }, [searchParams, linkedTaskId, loadLinkedTask]);
 
+  // (2026-11-15, review) «اتاق فرمان» links here with ?tab=inspector[&session=ID] or ?load_task=ID — they used to
+  // land on «فایل‌ها». Open the inspector tab, and the named past session once its list can be read.
+  const deepLinkSessionDone = useRef(false);
+  useEffect(() => {
+    if (!searchParams) return;
+    const tab = searchParams.get('tab');
+    if (tab === 'inspector' || searchParams.get('load_task')) setActiveTab('inspector');
+    const sid = Number(searchParams.get('session') || '');
+    if (sid && !deepLinkSessionDone.current) {
+      deepLinkSessionDone.current = true;
+      void loadArchivedSession(sid);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
   // 🆕 (Addendum v5 §3.4) — polling سبک وقتی پنل تسک‌های پروژه باز است.
   // هر ۳۰ ثانیه refresh می‌کند تا تسک‌های ساخته‌شده از /oversight یا تسک‌های
   // قدیمی که status‌شان تغییر کرد، اتوماتیک sync شوند. cleanup صحیح در unmount

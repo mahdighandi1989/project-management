@@ -3378,7 +3378,8 @@ async def get_available_models_for_inspector(db: Session = Depends(get_db)):
 
             # بررسی فعال بودن
             setting = settings_map.get(model_id)
-            is_enabled = setting.enabled if setting else True
+            # (2026-11-15, review) same rule as /api/models/available: no DB row ⇒ the registry default
+            is_enabled = bool(setting.enabled) if setting else bool(getattr(model, "enabled", True))
             provider_available = provider in [str(p.value) if hasattr(p, 'value') else str(p) for p in available_providers]
 
             model_info = {

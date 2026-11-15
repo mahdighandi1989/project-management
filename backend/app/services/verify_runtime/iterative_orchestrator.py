@@ -357,15 +357,13 @@ def _model_available(model_id: str) -> bool:
         return False
     if model_id not in registry:
         return False
-    # api key check
-    info = registry.get(model_id) or {}
-    provider = info.get("provider") if isinstance(info, dict) else None
-    if not provider:
-        return True
-    # ساده‌ترین چک: env var با نام PROVIDER_API_KEY
-    import os
-    env_var = f"{str(provider).upper().replace('-', '_')}_API_KEY"
-    return bool(os.environ.get(env_var, "").strip())
+    # (2026-11-15 audit) registry entries are AIModel objects, not dicts — this check always said «available».
+    # The real answer: the model is switched on, its provider has a key and is not in its error state.
+    try:
+        from ..ai_manager import get_ai_manager
+        return model_id in {m.id for m in get_ai_manager().get_available_models()}
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -475,14 +473,14 @@ async def _strong_model_judgment(
     confidence = 0.0
     reason = ""
     try:
-        from ..ai_manager import ai_manager
-        resp = await ai_manager.generate(
-            model_id=model_id,
-            prompt=full_prompt,
-            max_tokens=600,
-            temperature=0.2,
+        # (2026-11-15 audit) `from ..ai_manager import ai_manager` never existed (ImportError) and generate() takes
+        # messages, not prompt= — iteration 3 always ended «unclear», so v6 was grep-only. Same path every other
+        # oversight AI call uses (OAuth models included):
+        from ..oversight_service import get_oversight_service
+        text = await get_oversight_service()._ai_generate(
+            full_prompt, model_id=model_id, max_tokens=600, temperature=0.2,
         )
-        text = (resp or {}).get("text", "") if isinstance(resp, dict) else str(resp or "")
+        text = str(text or "")
         # parse JSON
         import re as _re, json as _json
         m = _re.search(r"\{[^{}]*\"verdict\"[^{}]*\}", text, _re.DOTALL)

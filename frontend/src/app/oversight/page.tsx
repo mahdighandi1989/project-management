@@ -2195,7 +2195,15 @@ export default function OversightPage() {
         const w = await res.json();
         setWatched((prev) => prev.map((x) => (x.id === id ? w : x)));
       } else {
-        showError('خطا در بروزرسانی');
+        // (card audit D7) say WHAT was refused — the 422 detail names the field and the allowed range
+        const j = await res.json().catch(() => ({} as any));
+        const d = j?.detail;
+        const why = Array.isArray(d)
+          ? d.map((x: any) => `${(x.loc || []).slice(-1)[0] || ''}: ${x.msg || ''}`).join('؛ ')
+          : (d || '');
+        showError(`ذخیره نشد (${res.status})${why ? ` — ${why}` : ''}`);
+        // reload the project so every control shows what the server really holds
+        setWatched((prev) => prev.map((x) => (x.id === id ? { ...x } : x)));
       }
     } catch (e: any) {
       showError(e.message);
@@ -2212,6 +2220,9 @@ export default function OversightPage() {
         setWatched((prev) => prev.filter((x) => x.id !== id));
         showSuccess('حذف شد');
         reloadStatus();
+      } else {
+        const j = await res.json().catch(() => ({} as any));
+        showError(`حذف نشد (${res.status})${j?.detail ? ` — ${j.detail}` : ''}`);
       }
     } catch (e: any) {
       showError(e.message);
@@ -6515,6 +6526,48 @@ function Section({ title, items }: { title: string; items: string[] }) {
   );
 }
 
+// 🔢 (2026-11-15, card audit D4) a number setting that is pleasant to edit: the raw text is kept while typing (no
+// «|| 24» snapping back, no caret jumps), it is saved once on blur/Enter, out-of-range values are refused with an
+// inline message instead of being silently replaced, and it follows the server value when that changes.
+function NumField({
+  value, fallback, min, max, step, integer, onSave, className,
+}: {
+  value: number | null | undefined; fallback: number; min: number; max?: number; step?: number; integer?: boolean;
+  onSave: (v: number) => void; className?: string;
+}) {
+  const server = value ?? fallback;
+  const [text, setText] = useState<string>(String(server));
+  const [err, setErr] = useState<string>('');
+  useEffect(() => { setText(String(server)); setErr(''); }, [server]);
+  const commit = () => {
+    const t = text.trim().replace(/[۰-۹]/g, (d) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)));
+    const v = integer ? parseInt(t, 10) : parseFloat(t);
+    if (!t || isNaN(v) || v < min || (max !== undefined && v > max)) {
+      setErr(`عددی بین ${min}${max !== undefined ? ` و ${max}` : ' به بالا'} وارد کنید`);
+      setText(String(server));
+      return;
+    }
+    setErr('');
+    if (v !== server) onSave(v);
+  };
+  return (
+    <span className="block">
+      <input
+        type="number"
+        min={min}
+        max={max}
+        step={step ?? (integer ? 1 : 'any')}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+        className={className || 'w-full p-1.5 border rounded text-sm dark:bg-gray-700 dark:text-white dark:border-gray-600'}
+      />
+      {err && <span className="block text-[10px] text-red-600 dark:text-red-400 mt-0.5">{err}</span>}
+    </span>
+  );
+}
+
 function WatchedCard({
   w,
   taskCount,
@@ -6562,6 +6615,15 @@ function WatchedCard({
   const [tagInput, setTagInput] = useState('');
   const [intervalH, setIntervalH] = useState(w.interval_hours);
   const [scanH, setScanH] = useState(w.scan_interval_hours ?? 168);
+  const [weightsDraft, setWeightsDraftState] = useState<Record<string, number> | null>(null);
+  const weightsDraftRef = useRef<Record<string, number> | null>(null);
+  const setWeightsDraft = (d: Record<string, number> | null) => { weightsDraftRef.current = d; setWeightsDraftState(d); };
+  const commitWeights = () => {
+    const d = weightsDraftRef.current;
+    if (!d) return;
+    setWeightsDraft(null);
+    onChange({ scan_criteria_weights: d } as any);
+  };
   // 🤖 (Claude Auto-Runner) — لوکال state برای toggle و نمایش وضعیت/خطا
   const [runnerEnabled, setRunnerEnabled] = useState<boolean>(
     !!w.claude_runner_enabled,
@@ -6844,7 +6906,8 @@ function WatchedCard({
   // 🆕 (C2) — eligible-count را در mount و وقتی watched عوض می‌شود تازه کن
   useEffect(() => {
     refreshBvEligible();
-  }, [w.id, refreshBvEligible]);
+    // (card audit D10) also after a scan — new tasks used to stay invisible to the bulk-verify buttons until a reload
+  }, [w.id, w.last_scan_at, (w as any).last_scan_metadata?.completed_at, refreshBvEligible]);
 
   const addTag = () => {
     const v = tagInput.trim();
@@ -6859,12 +6922,16 @@ function WatchedCard({
   };
 
   return (
-    <div className={`bg-white dark:bg-gray-800 rounded-xl shadow p-5 ${
-      isScanning ? 'ring-2 ring-orange-400 dark:ring-orange-500 animate-pulse' : ''
+    // (2026-11-15, owner) each project in its own clearly bounded box — a full border, a coloured stripe on its
+    // starting edge and a title bar — not more spacing between cards
+    <div className={`rounded-xl border-2 border-s-[6px] bg-white dark:bg-gray-800 shadow-md ${
+      isScanning
+        ? 'border-orange-400 dark:border-orange-500'
+        : 'border-slate-300 border-s-indigo-500 dark:border-slate-600 dark:border-s-indigo-400'
     }`}>
       {/* 🆕 (P4) banner در حین scan */}
       {isScanning && scanProgress && (
-        <div className="mb-3 -mx-5 -mt-5 px-5 py-2 bg-orange-100 dark:bg-orange-900/30 border-b border-orange-300 dark:border-orange-800 rounded-t-xl text-xs flex items-center justify-between flex-wrap gap-2">
+        <div className="px-5 py-2 bg-orange-100 dark:bg-orange-900/30 border-b border-orange-300 dark:border-orange-800 rounded-t-[10px] text-xs flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-2 text-orange-800 dark:text-orange-200">
             <span className="animate-spin">🔬</span>
             <span className="font-semibold">scan در حال اجرا</span>
@@ -6886,14 +6953,14 @@ function WatchedCard({
           )}
         </div>
       )}
-      <div className="flex items-start justify-between gap-3 flex-wrap mb-3">
+      <div className={`flex items-start justify-between gap-3 flex-wrap px-5 py-3 bg-slate-100 dark:bg-slate-900/70 border-b-2 border-slate-300 dark:border-slate-600 ${isScanning && scanProgress ? '' : 'rounded-t-[10px]'}`}>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
             <a
               href={w.repo_url}
               target="_blank"
               rel="noreferrer"
-              className="font-bold dark:text-white hover:underline truncate"
+              className="text-base sm:text-lg font-extrabold text-slate-900 dark:text-white hover:underline truncate"
               dir="ltr"
             >
               {w.repo_full_name}
@@ -6958,18 +7025,34 @@ function WatchedCard({
             )}
           </div>
 
-          <div className="flex items-center gap-2 mt-2 text-xs text-gray-500 dark:text-gray-400 flex-wrap">
-            {w.schedule_enabled ? (
-              <span>⏰ هر {w.interval_hours} ساعت</span>
-            ) : (
-              <span>⏸ زمان‌بندی غیرفعال</span>
+          {/* (card audit D1) one line per clock, saying what each really does */}
+          <div className="mt-2 text-xs text-gray-600 dark:text-gray-400 space-y-0.5">
+            {!w.schedule_enabled && (
+              <div className="text-amber-700 dark:text-amber-300">⏸ زمان‌بندی خاموش — اسکن، verify و اجرای دوره‌ای همه متوقف‌اند (دکمه‌های دستی کار می‌کنند)</div>
             )}
-            {w.last_run_at && <span>آخرین: {new Date(w.last_run_at).toLocaleString('fa-IR')}</span>}
-            {w.next_run_at && <span>بعدی: {new Date(w.next_run_at).toLocaleString('fa-IR')}</span>}
-            {w.last_scan_at && <span>scan: {new Date(w.last_scan_at).toLocaleString('fa-IR')}</span>}
+            {w.schedule_enabled && (w.scan_interval_hours ?? 168) === 0 && <div>🔎 اسکنِ دوره‌ای خاموش (بازه = ۰)</div>}
+            {w.schedule_enabled && (w.scan_interval_hours ?? 168) > 0 && (
+              <div>
+                🔎 اسکن هر {w.scan_interval_hours ?? 168} ساعت
+                {(w as any).scan_fail_count > 0 && <span className="text-red-600 dark:text-red-400"> · ⚠️ {(w as any).scan_fail_count} شکستِ پیاپی (تلاشِ بعدی: {(w as any).next_scan_at ? new Date((w as any).next_scan_at).toLocaleString('fa-IR') : '—'})</span>}
+                {(w as any).last_scan_metadata?.completed_at && <> · آخرینِ کامل: {new Date((w as any).last_scan_metadata.completed_at).toLocaleString('fa-IR')}</>}
+                {w.last_scan_at && <> · آخرین شروع: {new Date(w.last_scan_at).toLocaleString('fa-IR')}</>}
+              </div>
+            )}
+            {w.schedule_enabled && w.autonomy_level === 'auto' && (
+              <div>
+                ▶️ اجرای خودکارِ تسک‌ها هر {w.interval_hours} ساعت
+                {w.last_run_at && <> · آخرین: {new Date(w.last_run_at).toLocaleString('fa-IR')}</>}
+                {w.next_run_at && <> · بعدی: {new Date(w.next_run_at).toLocaleString('fa-IR')}</>}
+              </div>
+            )}
+            {w.schedule_enabled && (
+              <div>{(w.verify_interval_hours ?? 12) > 0 ? `✅ verify ِ دوره‌ای هر ${w.verify_interval_hours ?? 12} ساعت` : '✅ verify ِ دوره‌ای خاموش (بازه = ۰)'}</div>
+            )}
           </div>
         </div>
       </div>
+      <div className="p-5 pt-4">
 
       <div className="mb-3">
         <label className="text-xs text-gray-500 dark:text-gray-400 mb-1 block flex items-center gap-1">
@@ -7030,7 +7113,7 @@ function WatchedCard({
           <span className="block text-gray-500 dark:text-gray-400 mb-1 flex items-center gap-1">
             سطح خودمختاری
             <span
-              title="manual: AI فقط بررسی و گزارش می‌دهد. assist: پیشنهاد می‌دهد ولی اعمال نمی‌کند. auto: اجازهٔ اعمال خودکار با opt-in جداگانه (allow_push)"
+              title="manual: اسکن و verify فقط گزارش و تسکِ پیشنهادی می‌سازند؛ هیچ تسکی خودکار اجرا نمی‌شود. assist: فعلاً همان manual است. auto: تسک‌های pending با مسیرِ اجرای auto هر «بازهٔ run» ساعت به‌طورِ خودکار ارزیابی/اجرا می‌شوند. اجرای واقعیِ کد با Claude فقط با دکمهٔ «🤖 اجرای خودکار» روشن می‌شود."
               className="cursor-help text-blue-400"
             >
               ⓘ
@@ -7042,7 +7125,7 @@ function WatchedCard({
             className="w-full p-1.5 border rounded text-sm dark:bg-gray-700 dark:text-white dark:border-gray-600"
           >
             <option value="manual">manual</option>
-            <option value="assist">assist</option>
+            <option value="assist">assist (فعلاً = manual)</option>
             <option value="auto">auto</option>
           </select>
         </label>
@@ -7050,44 +7133,27 @@ function WatchedCard({
           <span className="block text-gray-500 dark:text-gray-400 mb-1 flex items-center gap-1">
             بازه run (ساعت)
             <span
-              title="هر چند ساعت، تسک‌های pending شما اجرا و گزارش‌گیری می‌شوند (فقط در حالت auto)"
+              title="فقط در حالت auto و با «زمان‌بندی فعال»: هر چند ساعت، تسک‌های pending که مسیرِ اجرایشان auto است ارزیابی/اجرا می‌شوند. تسک‌های اسکن با مسیرِ «مسیر اجرا» ِ زمانِ ساخت ساخته می‌شوند (پیش‌فرض manual = اجرا نمی‌شوند)."
               className="cursor-help text-blue-400"
             >
               ⓘ
             </span>
           </span>
-          <input
-            type="number"
-            min="1"
-            value={intervalH}
-            onChange={(e) => setIntervalH(parseFloat(e.target.value) || 24)}
-            onBlur={() => {
-              if (intervalH !== w.interval_hours) onChange({ interval_hours: intervalH });
-            }}
-            className="w-full p-1.5 border rounded text-sm dark:bg-gray-700 dark:text-white dark:border-gray-600"
-          />
+          <NumField value={w.interval_hours} fallback={24} min={0.25} step={0.25}
+            onSave={(v) => { setIntervalH(v); onChange({ interval_hours: v }); }} />
         </label>
         <label className="text-xs">
           <span className="block text-gray-500 dark:text-gray-400 mb-1 flex items-center gap-1">
             بازه scan (ساعت)
             <span
-              title="هر چند ساعت، AI خود پروژه را از صفر بررسی می‌کند تا نیازها/مشکلات جدید پیدا کند"
+              title="هر چند ساعت، AI پروژه را از صفر بررسی می‌کند تا نیازها/مشکلات جدید پیدا کند (فقط وقتی «زمان‌بندی فعال» روشن است). ۰ = اسکنِ دوره‌ای خاموش. اگر هیچ مدلی پاسخ ندهد، اسکن «ناموفق» ثبت و ۱، ۶ و ۲۴ ساعت بعد دوباره امتحان می‌شود."
               className="cursor-help text-blue-400"
             >
               ⓘ
             </span>
           </span>
-          <input
-            type="number"
-            min="1"
-            value={scanH}
-            onChange={(e) => setScanH(parseFloat(e.target.value) || 168)}
-            onBlur={() => {
-              if (scanH !== (w.scan_interval_hours ?? 168))
-                onChange({ scan_interval_hours: scanH });
-            }}
-            className="w-full p-1.5 border rounded text-sm dark:bg-gray-700 dark:text-white dark:border-gray-600"
-          />
+          <NumField value={w.scan_interval_hours} fallback={168} min={0} step={0.25}
+            onSave={(v) => { setScanH(v); onChange({ scan_interval_hours: v }); }} />
         </label>
         <label className="text-xs flex items-center gap-2 mt-5">
           <input
@@ -7096,7 +7162,7 @@ function WatchedCard({
             onChange={(e) => onChange({ schedule_enabled: e.target.checked })}
             className="w-4 h-4"
           />
-          <span className="dark:text-gray-200">زمان‌بندی فعال</span>
+          <span className="dark:text-gray-200" title="کلیدِ اصلیِ همهٔ کارهای دوره‌ای این پروژه: اسکن، verify و اجرای خودکار. خاموش = هیچ‌کدام خودکار اجرا نمی‌شوند (دکمه‌های دستی کار می‌کنند).">زمان‌بندی فعال</span>
         </label>
       </div>
 
@@ -7104,7 +7170,7 @@ function WatchedCard({
           Replaces the user's expectation of a 4-tab redesign without
           breaking the existing structure. Clicking a tab scrolls to the
           relevant section AND opens its <details> if collapsed. */}
-      <div className="mt-3 flex flex-wrap gap-1 sticky top-0 bg-white/95 dark:bg-gray-900/95 backdrop-blur z-10 py-1.5 border-b border-gray-200 dark:border-gray-700">
+      <div className="mt-3 flex flex-wrap gap-1 sticky top-0 bg-white/95 dark:bg-gray-800/95 backdrop-blur z-10 py-1.5 border-b border-gray-200 dark:border-gray-700">
         {[
           { id: 'coverage', label: '🔍 Coverage', color: 'cyan', anchor: `settings-coverage-${w.id}` },
           { id: 'intelligence', label: '🧠 Intelligence', color: 'fuchsia', anchor: `settings-intelligence-${w.id}` },
@@ -7156,12 +7222,15 @@ function WatchedCard({
               onChange={(e) => onChange({ scan_depth: e.target.value as any })}
               className="w-full p-1.5 border rounded text-sm dark:bg-gray-700 dark:text-white dark:border-gray-600"
             >
-              <option value="quick">⚡ quick (3 pass — سریع: frontend + backend + security)</option>
-              <option value="standard">⚖ standard (6 pass — متعادل + logical_alignment)</option>
-              <option value="balanced">🎯 balanced (Phase 5 — recommended) — pass های اصلی + delta + stale + runtime</option>
-              <option value="deep">🔍 deep (12 pass — کامل)</option>
-              <option value="thorough">🔬 thorough (12 pass + per-file health + roadmap)</option>
-              <option value="ultra">🧠 ultra (Phase 5 — همه + logic audit + outcome + notification audit + inspector session)</option>
+              {/* (2026-11-15, card audit D6) the texts now say what the backend really does — oversight_deep_scan_service
+                  run_deep_scan: passes by depth + how many files are read in full (deep_read_count ×2). The Phase-5
+                  analyses (logic audit, outcome, …) are the separate «Scan v5 Intelligence» switches, not the depth. */}
+              <option value="quick">⚡ quick — ۳ pass (frontend، backend، امنیت) · حدودِ ۵۰ فایل کامل خوانده می‌شود</option>
+              <option value="standard">⚖ standard — ۶ pass (+ کیفیت، کامل‌بودن، منطق) · حدودِ ۷۰ فایل</option>
+              <option value="balanced">🎯 balanced — هر ۱۲ pass · حدودِ ۷۰ فایل (ارزان‌تر از deep)</option>
+              <option value="deep">🔍 deep (پیش‌فرض) — هر ۱۲ pass · حدودِ ۱۰۰ فایل</option>
+              <option value="thorough">🔬 thorough — هر ۱۲ pass · حدودِ ۱۵۰ فایل</option>
+              <option value="ultra">🧠 ultra — هر ۱۲ pass · همهٔ فایل‌ها (گران‌ترین)</option>
             </select>
           </label>
           <div className="text-xs text-gray-500 dark:text-gray-400 self-end">
@@ -7172,7 +7241,7 @@ function WatchedCard({
             </div>
           </div>
           {(['security', 'quality', 'tests', 'completeness', 'logical_alignment', 'functional_correctness'] as const).map(key => {
-            const weights = w.scan_criteria_weights || {};
+            const weights = weightsDraft || w.scan_criteria_weights || {};
             const defaultValue = (
               key === 'security' ? 1.5 :
               key === 'tests' ? 1.2 :
@@ -7209,9 +7278,12 @@ function WatchedCard({
                   step={0.1}
                   value={value}
                   onChange={(e) => {
-                    const newWeights = { ...weights, [key]: parseFloat(e.target.value) };
-                    onChange({ scan_criteria_weights: newWeights });
+                    // (card audit D3) dragging only moves a local draft; one save when the slider is released
+                    setWeightsDraft({ ...weights, [key]: parseFloat(e.target.value) });
                   }}
+                  onPointerUp={commitWeights}
+                  onKeyUp={commitWeights}
+                  onBlur={commitWeights}
                   className="w-full"
                 />
               </label>
@@ -7354,23 +7426,14 @@ function WatchedCard({
           <span className="block text-gray-500 dark:text-gray-400 mb-1 flex items-center gap-1">
             بازه verify (ساعت)
             <span
-              title="هر چند ساعت، تسک‌های اعمال‌شده (یا نشده) دوباره بررسی می‌شوند تا تأیید نهایی — مستقل از مسیر اجرا و autonomy_level"
+              title="هر چند ساعت حداکثر ۲ تسک (اول اعمال‌شده‌ها، بعد بر اساسِ اولویت و قدیمی‌ترین بررسی) دوباره بررسی می‌شوند — مستقل از مسیرِ اجرا، ولی فقط با «زمان‌بندی فعال». پیشنهادهای تأییدنشدهٔ اسکن بررسی نمی‌شوند. ۰ = خاموش."
               className="cursor-help text-blue-400"
             >
               ⓘ
             </span>
           </span>
-          <input
-            type="number"
-            min="1"
-            defaultValue={w.verify_interval_hours ?? 12}
-            onBlur={(e) => {
-              const v = parseFloat(e.target.value) || 12;
-              if (v !== (w.verify_interval_hours ?? 12))
-                onChange({ verify_interval_hours: v });
-            }}
-            className="w-full p-1.5 border rounded text-sm dark:bg-gray-700 dark:text-white dark:border-gray-600"
-          />
+          <NumField value={w.verify_interval_hours} fallback={12} min={0} step={0.25}
+            onSave={(v) => onChange({ verify_interval_hours: v })} />
         </label>
 
         {/* مسیر اجرا و verify_only فقط وقتی autonomy=auto معنی دارند —
@@ -7381,7 +7444,7 @@ function WatchedCard({
               <span className="block text-gray-500 dark:text-gray-400 mb-1 flex items-center gap-1">
                 مسیر اجرا
                 <span
-                  title="فقط در autonomy=auto معنی دارد. auto_via_projects_page: از طریق صفحهٔ /projects اعمال شود. auto_via_pr: AI خودش PR می‌سازد. manual: scheduler نمی‌نویسد، فقط verify."
+                  title="فقط در autonomy=auto و فقط برای تسک‌هایی که از این به بعد ساخته شوند. هر دو گزینهٔ auto فقط «ارزیابیِ AI» می‌کنند (چت بازرس / گزارش) و خودشان کد نمی‌نویسند و PR نمی‌سازند — تغییرِ واقعیِ کد فقط با «🤖 اجرای خودکار» (Claude در GitHub Actions). manual: scheduler اجرا نمی‌کند، فقط verify."
                   className="cursor-help text-blue-400"
                 >
                   ⓘ
@@ -7395,8 +7458,8 @@ function WatchedCard({
                 className="w-full p-1.5 border rounded text-sm dark:bg-gray-700 dark:text-white dark:border-gray-600"
               >
                 <option value="manual">manual (اعمال بیرونی)</option>
-                <option value="auto_via_projects_page">auto via /projects</option>
-                <option value="auto_via_pr">auto via PR</option>
+                <option value="auto_via_projects_page">auto — ارزیابی در چتِ بازرس</option>
+                <option value="auto_via_pr">auto — ارزیابیِ AI (بدونِ PR)</option>
               </select>
             </label>
             <label className="text-xs flex items-center gap-2 mt-5">
@@ -7460,13 +7523,13 @@ function WatchedCard({
                   🔍 code-aware (commit diffs) • 📊 backend-log •
                   🧭 smart navigation • 📸 screenshot evidence.
                   <span className="block opacity-80 mt-0.5">
-                    ~30 ثانیه طول می‌کشد، ولی شواهد دقیق‌تری برای checklist
+                    حدودِ ۱ تا ۵ دقیقه برای هر تسک طول می‌کشد، ولی شواهد دقیق‌تری برای checklist
                     تولید می‌کند (به‌خصوص برای feature های backend-internal).
                   </span>
                 </>
               ) : (
                 <>
-                  فقط grep + AI verifier (~5 ثانیه). probe، Vision،
+                  جست‌وجوی کد در GitHub + AI verifier (ده‌ها ثانیه). probe، Vision،
                   code-aware، backend-log، smart-nav <strong>اجرا نمی‌شوند</strong>.
                   مناسب وقتی شواهد runtime نیاز ندارید یا verify باید سریع باشد.
                   <span className="block text-amber-700 dark:text-amber-400 mt-0.5">
@@ -7847,19 +7910,11 @@ function WatchedCard({
         {w.dedup_in_manual_create !== false && (
           <label className="block text-xs mt-1 mb-3 dark:text-gray-200">
             <span>آستانهٔ شباهت (0.50..0.95)</span>
-            <input
-              type="number"
-              min="0.50"
-              max="0.95"
-              step="0.05"
-              defaultValue={w.dedup_score_threshold ?? 0.65}
-              onBlur={(e) => {
-                const v = parseFloat(e.target.value) || 0.65;
-                if (v !== (w.dedup_score_threshold ?? 0.65))
-                  onChange({ dedup_score_threshold: v });
-              }}
-              className="w-24 mr-2 p-1.5 border rounded dark:bg-gray-700 dark:text-white dark:border-gray-600"
-            />
+            <span className="inline-block w-24 mr-2 align-middle">
+              <NumField value={w.dedup_score_threshold} fallback={0.65} min={0.5} max={0.95} step={0.05}
+                onSave={(v) => onChange({ dedup_score_threshold: v })}
+                className="w-24 p-1.5 border rounded dark:bg-gray-700 dark:text-white dark:border-gray-600" />
+            </span>
             <span className="text-gray-500 dark:text-gray-400 text-[11px]">
               (پیش‌فرض 0.65 — کوچک‌تر = حساس‌تر)
             </span>
@@ -7879,26 +7934,18 @@ function WatchedCard({
             </div>
             <div className="text-[11px] text-gray-600 dark:text-gray-300 mt-0.5">
               پس از هر scan خودکار، پرامپت‌های با کیفیت پایین (کمتر از آستانه)
-              با AI بازتولید می‌شوند. حداکثر ۵ تسک در هر tick.
+              با AI بازتولید می‌شوند. حداکثر ۵ تسک پس از هر اسکنِ خودکار؛ تسکِ در حالِ اجرا دست نمی‌خورد و هر تسک حداکثر هفته‌ای یک بار.
             </div>
           </div>
         </label>
         {w.auto_regenerate_old_prompts && (
           <label className="block text-xs mt-1 dark:text-gray-200">
             <span>آستانهٔ کیفیت (40..90)</span>
-            <input
-              type="number"
-              min="40"
-              max="90"
-              step="5"
-              defaultValue={w.prompt_quality_threshold ?? 60}
-              onBlur={(e) => {
-                const v = parseInt(e.target.value, 10) || 60;
-                if (v !== (w.prompt_quality_threshold ?? 60))
-                  onChange({ prompt_quality_threshold: v });
-              }}
-              className="w-24 mr-2 p-1.5 border rounded dark:bg-gray-700 dark:text-white dark:border-gray-600"
-            />
+            <span className="inline-block w-24 mr-2 align-middle">
+              <NumField value={w.prompt_quality_threshold} fallback={60} min={40} max={90} step={5} integer
+                onSave={(v) => onChange({ prompt_quality_threshold: v })}
+                className="w-24 p-1.5 border rounded dark:bg-gray-700 dark:text-white dark:border-gray-600" />
+            </span>
             <span className="text-gray-500 dark:text-gray-400 text-[11px]">
               (تسک‌های با کیفیت کمتر بازتولید می‌شوند)
             </span>
@@ -8274,7 +8321,9 @@ function WatchedCard({
                     );
                     if (r.ok) {
                       const data = await r.json();
-                      if (data.watched) onChange(data.watched);
+                      // (card audit D9) the server already saved it — just show it; PATCHing the whole object back
+                      // (secrets included) was a needless second write
+                      if (data.watched) (onReplaced ? onReplaced(data.watched) : onChange(data.watched));
                       alert('✅ استخراج خودکار + تست اتصال انجام شد');
                     } else {
                       alert('❌ autodetect ناموفق');
@@ -8302,7 +8351,8 @@ function WatchedCard({
                     if (r.ok) {
                       const data = await r.json();
                       // patch local view با نتیجهٔ تست تا UI تازه بشه
-                      onChange({ runtime_connection_test: data });
+                      if (onReplaced) onReplaced({ ...w, runtime_connection_test: data });
+                      else onChange({ runtime_connection_test: data });
                       alert('✅ تست اتصال انجام شد');
                     } else {
                       alert('❌ تست اتصال ناموفق');
@@ -8348,20 +8398,13 @@ function WatchedCard({
           {w.auto_continue_until_done && (
             <label className="block text-xs mt-2 dark:text-gray-200">
               <span>حداکثر تعداد دور (max rounds)</span>
-              <input
-                type="number"
-                min="1"
-                max="20"
-                defaultValue={w.max_auto_loop_rounds ?? 5}
-                onBlur={(e) => {
-                  const v = parseInt(e.target.value, 10) || 5;
-                  if (v !== (w.max_auto_loop_rounds ?? 5))
-                    onChange({ max_auto_loop_rounds: v });
-                }}
-                className="w-24 mr-2 p-1.5 border rounded dark:bg-gray-700 dark:text-white dark:border-gray-600"
-              />
+              <span className="inline-block w-24 mr-2 align-middle">
+                <NumField value={w.max_auto_loop_rounds} fallback={6} min={1} max={20} integer
+                  onSave={(v) => onChange({ max_auto_loop_rounds: v })}
+                  className="w-24 p-1.5 border rounded dark:bg-gray-700 dark:text-white dark:border-gray-600" />
+              </span>
               <span className="text-gray-500 dark:text-gray-400">
-                (پیش‌فرض ۵ — برای جلوگیری از infinite loop)
+                (پیش‌فرض ۶ — برای جلوگیری از infinite loop)
               </span>
             </label>
           )}
@@ -8388,8 +8431,8 @@ function WatchedCard({
               onChange={(e) => onChange({ allow_push: e.target.checked })}
               className="w-4 h-4"
             />
-            <span className="dark:text-red-300">
-              ⚠️ اجازهٔ صریح push/PR در حالت auto
+            <span className="dark:text-red-300" title="روشن: Claude ِ «اجرای خودکار» کار را مستقیم روی شاخهٔ اصلیِ مخزن push می‌کند و verify بلافاصله اجرا می‌شود؛ و پس از اجرای خودکار issue هم ساخته می‌شود. خاموش (پیش‌فرض): Claude روی شاخهٔ جدا push و PR باز می‌کند و تسک منتظرِ بازبینی و ادغامِ شما می‌ماند. با نصب/نصبِ دوبارهٔ «اجرای خودکار» اعمال می‌شود.">
+              ⚠️ اجازهٔ push ِ مستقیم (بدونِ PR) برای «اجرای خودکار»
             </span>
           </label>
         )}
@@ -8543,7 +8586,7 @@ function WatchedCard({
         </span>
       </label>
 
-      <div className="flex gap-2 flex-wrap">
+      <div className="flex gap-2 flex-wrap mt-4 pt-3 border-t border-slate-200 dark:border-slate-700">
         <button
           onClick={() => (scanFullProject ? onDeepScan() : onOpenSectionPicker('deep'))}
           title={
@@ -8586,7 +8629,7 @@ function WatchedCard({
             title={
               bvPolling || bvState?.running
                 ? 'یک Bulk Verify در حال اجراست'
-                : `Bulk Verify سریع — فقط code-aware + AI، بدون runtime probe، ~۳۰s/task. ` +
+                : `Bulk Verify سریع — جست‌وجوی کد + AI، بدون runtime probe (Playwright/Vision/code-aware). ` +
                   `فقط روی ${bvEligible?.scan_generated_count ?? 0} تسک scan-generated. ` +
                   (bvEligible?.manual_count
                     ? `(${bvEligible.manual_count} تسک دستی skip می‌شوند) `
@@ -8815,6 +8858,7 @@ function WatchedCard({
           </div>
         </details>
       )}
+      </div>{/* card body */}
     </div>
   );
 }
