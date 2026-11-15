@@ -75,7 +75,58 @@ _MODELS_CACHE_TTL_SEC = 3600.0
 # the CLI". The beta string includes both `oauth-2025-04-20` and
 # `claude-code-20250219` so the call is treated as a Claude Code session.
 CLOUD_CODE_OAUTH_BETA = "oauth-2025-04-20,claude-code-20250219"
-CLOUD_CODE_USER_AGENT = "claude-cli/1.0.110 (external, cli)"
+# (2026-11-15, PM-INS-0006) 1.0.110 was too old: newer models answer 400 «Claude Code 1.0.110 does not
+# support this model; version … or later». The version is now an env override + a newer default, and a
+# 400 that names a required version upgrades it in-process and retries once (see _maybe_upgrade_cli_version).
+CLOUD_CODE_CLI_VERSION = (os.environ.get("CLOUD_CODE_CLI_VERSION") or "2.1.0").strip()
+CLOUD_CODE_USER_AGENT = f"claude-cli/{CLOUD_CODE_CLI_VERSION} (external, cli)"
+# Models the API refused for this CLI identity even after an upgrade — the picker skips them in this process.
+_UNSUPPORTED_MODELS: set = set()
+
+
+def _version_tuple(v: str) -> Tuple[int, ...]:
+    try:
+        return tuple(int(x) for x in v.split("."))
+    except Exception:
+        return (0,)
+
+
+def _is_unsupported_model_error(snippet: str) -> bool:
+    low = (snippet or "").lower()
+    return "does not support this model" in low or "not support this model" in low
+
+
+def _maybe_upgrade_cli_version(snippet: str) -> bool:
+    """If an «unsupported model» 400 names a newer CLI version, adopt it. Returns True when it changed."""
+    global CLOUD_CODE_CLI_VERSION, CLOUD_CODE_USER_AGENT
+    found = re.findall(r"\b(\d+\.\d+\.\d+)\b", snippet or "")
+    newer = [v for v in found if _version_tuple(v) > _version_tuple(CLOUD_CODE_CLI_VERSION)]
+    if not newer:
+        return False
+    best = max(newer, key=_version_tuple)
+    logger.warning("cloud_code: API asked for a newer CLI identity %s → %s", CLOUD_CODE_CLI_VERSION, best)
+    CLOUD_CODE_CLI_VERSION = best
+    CLOUD_CODE_USER_AGENT = f"claude-cli/{best} (external, cli)"
+    return True
+
+
+async def _alternate_model(tried: set) -> Optional[str]:
+    """Next model to try after an «unsupported model» 400: newest listed model not tried yet, else a tier alias."""
+    try:
+        models = await list_available_models()
+    except Exception:
+        models = []
+    ids = [m.get("id") for m in sorted(models, key=_model_sort_key, reverse=True) if m.get("id")]
+    for mid in ids + list(CLOUD_CODE_TIER_FALLBACKS.values()):
+        if mid and mid not in tried and mid not in _UNSUPPORTED_MODELS:
+            return mid
+    return None
+
+
+_UNSUPPORTED_HINT = (
+    "نسخهٔ شناسهٔ Claude Code برای این مدل قدیمی است — متغیرِ CLOUD_CODE_CLI_VERSION را روی Render "
+    "به نسخهٔ خواسته‌شده بگذارید؛ تا آن موقع بازرس خودکار سراغِ مدلِ بعدی می‌رود."
+)
 
 
 def get_cloud_code_token() -> Optional[str]:
@@ -285,7 +336,7 @@ def _build_headers(token: str) -> Dict[str, str]:
         "Authorization": f"Bearer {token}",
         "anthropic-version": CLOUD_CODE_API_VERSION,
         "anthropic-beta": CLOUD_CODE_OAUTH_BETA,
-        "User-Agent": CLOUD_CODE_USER_AGENT,
+        "User-Agent": f"claude-cli/{CLOUD_CODE_CLI_VERSION} (external, cli)",
         "X-App": "cli",
         "Accept": "application/json",
     }
@@ -599,7 +650,7 @@ async def pick_best_model(
         tier = "sonnet"
         reason = f"unknown tier requested, defaulted to sonnet"
 
-    models = await list_available_models()
+    models = [m for m in await list_available_models() if m.get("id") not in _UNSUPPORTED_MODELS]
     in_tier = [m for m in models if _infer_tier_from_model_id(m.get("id", "")) == tier]
     if in_tier:
         in_tier.sort(key=_model_sort_key, reverse=True)
@@ -695,13 +746,18 @@ async def cloud_code_stream_chat(
     # کل feature های Cloud Code (regenerate prompt، auto-runner verify،
     # monitoring، …) را silently break می‌کند. حالا اگر این خطای خاص را
     # گرفتیم، payload را بدون temperature retry می‌کنیم.
-    _attempt_payloads = [payload]
-    _no_temp_payload = {k: v for k, v in payload.items() if k != "temperature"}
-    _attempt_payloads.append(_no_temp_payload)
+    # (PM-INS-0006) retries are state-driven: drop temperature once, upgrade the CLI identity once, and
+    # walk to another model (max 3) when the API says this CLI identity does not support the model.
+    _attempt_payloads = [payload, {k: v for k, v in payload.items() if k != "temperature"}]
+    _try_payload: Dict[str, object] = dict(_attempt_payloads[0])
+    _tried_models = {model}
+    _upgraded = False
+    _rounds = 0
 
     async with httpx.AsyncClient(timeout=timeout) as client:
-        for _attempt_idx, _try_payload in enumerate(_attempt_payloads):
-            _is_last_attempt = _attempt_idx == len(_attempt_payloads) - 1
+        while True:
+            _rounds += 1
+            _is_last_attempt = _rounds >= 6
             async with client.stream(
                 "POST",
                 CLOUD_CODE_API_URL,
@@ -717,6 +773,7 @@ async def cloud_code_stream_chat(
                     if (
                         response.status_code == 400
                         and not _is_last_attempt
+                        and "temperature" in _try_payload
                         and ("temperature" in snippet.lower()
                              and "deprecated" in snippet.lower())
                     ):
@@ -725,7 +782,23 @@ async def cloud_code_stream_chat(
                             "(400 deprecated). Retrying without temperature.",
                             model,
                         )
+                        _try_payload = {**_attempt_payloads[1], "model": _try_payload.get("model", model)}
                         continue
+                    if response.status_code == 400 and not _is_last_attempt and _is_unsupported_model_error(snippet):
+                        if not _upgraded and _maybe_upgrade_cli_version(snippet):
+                            _upgraded = True
+                            continue
+                        _UNSUPPORTED_MODELS.add(model)
+                        _alt = await _alternate_model(_tried_models) if len(_tried_models) < 3 else None
+                        if _alt:
+                            logger.warning("cloud_code: %s unsupported for this CLI identity → trying %s", model, _alt)
+                            _tried_models.add(_alt)
+                            model = _alt
+                            _try_payload = {**_try_payload, "model": _alt}
+                            if metadata_sink is not None:
+                                metadata_sink["picked_model"] = _alt
+                                metadata_sink["pick_reason"] = "previous model unsupported for this CLI identity"
+                            continue
                     logger.warning(
                         "cloud_code stream error %s: %s",
                         response.status_code,
@@ -747,6 +820,8 @@ async def cloud_code_stream_chat(
                             "اگر تکرار شد، sandbox/IP رو از Anthropic رفع‌محدودیت "
                             "بخواه یا quota اشتراک Claude Code رو چک کن."
                         )
+                    elif _is_unsupported_model_error(snippet):
+                        hint = _UNSUPPORTED_HINT
                     else:
                         hint = "جزئیات در پاسخ Anthropic."
                     raise RuntimeError(
@@ -910,13 +985,17 @@ async def cloud_code_message(
 
     # 🚨 (temperature deprecation retry) — مثل cloud_code_stream_chat،
     # اگر مدل temperature را reject کرد با 400، بدون temperature retry کن.
-    _attempt_payloads = [payload]
-    _attempt_payloads.append({k: v for k, v in payload.items() if k != "temperature"})
+    _attempt_payloads = [payload, {k: v for k, v in payload.items() if k != "temperature"}]
+    _try_payload: Dict[str, Any] = dict(_attempt_payloads[0])
+    _tried_models = {model}
+    _upgraded = False
+    _rounds = 0
 
     response = None
     async with httpx.AsyncClient(timeout=timeout) as client:
-        for _attempt_idx, _try_payload in enumerate(_attempt_payloads):
-            _is_last_attempt = _attempt_idx == len(_attempt_payloads) - 1
+        while True:
+            _rounds += 1
+            _is_last_attempt = _rounds >= 6
             response = await client.post(
                 CLOUD_CODE_API_URL,
                 headers=_build_headers(token),
@@ -928,6 +1007,7 @@ async def cloud_code_message(
             if (
                 response.status_code == 400
                 and not _is_last_attempt
+                and "temperature" in _try_payload
                 and ("temperature" in snippet.lower()
                      and "deprecated" in snippet.lower())
             ):
@@ -936,11 +1016,26 @@ async def cloud_code_message(
                     "(400 deprecated). Retrying without temperature.",
                     model,
                 )
+                _try_payload = {**_attempt_payloads[1], "model": _try_payload.get("model", model)}
                 continue
+            if response.status_code == 400 and not _is_last_attempt and _is_unsupported_model_error(snippet):
+                if not _upgraded and _maybe_upgrade_cli_version(snippet):
+                    _upgraded = True
+                    continue
+                _UNSUPPORTED_MODELS.add(model)
+                _alt = await _alternate_model(_tried_models) if len(_tried_models) < 3 else None
+                if _alt:
+                    logger.warning("cloud_code_message: %s unsupported → trying %s", model, _alt)
+                    _tried_models.add(_alt)
+                    model = _alt
+                    _try_payload = {**_try_payload, "model": _alt}
+                    continue
             if response.status_code == 401:
                 hint = "OAuth token نامعتبر یا منقضی. با `claude setup-token` تازه بساز."
             elif response.status_code == 429:
                 hint = "rate limit — یا انتی-abuse تشخیص داد. چند ثانیه صبر کن."
+            elif _is_unsupported_model_error(snippet):
+                hint = _UNSUPPORTED_HINT
             else:
                 hint = "جزئیات در پاسخ Anthropic."
             raise RuntimeError(

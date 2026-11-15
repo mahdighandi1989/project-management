@@ -3345,6 +3345,21 @@ async def inspector_chat_multi(
         }
 
 
+def _github_token_from_db(db) -> str:
+    """(2026-11-15, PM-INS-0006) the inspector read only «api_key_github», while project sync
+    (simple_projects / oversight) also reads «github_token» / «GITHUB_TOKEN» — so a project synced from
+    GitHub showed «⚠️ GitHub متصل نیست» in the inspector. Same key order as the sync path."""
+    from ...models.setting import Setting as _GhSetting
+    for _k in ("api_key_github", "github_token", "GITHUB_TOKEN"):
+        try:
+            _v = _GhSetting.get_value(db, _k)
+        except Exception:
+            _v = None
+        if _v:
+            return _v
+    return ""
+
+
 def _oauth_model_ready(model_id: str) -> bool:
     """(2026-11-15, PM-INS-0002) OAuth-dispatched models (cloud_code) have no API-key service in
     ai_manager._services, so the old «provider in services» test always said «unavailable» — with
@@ -3425,7 +3440,7 @@ async def get_available_models_for_inspector(db: Session = Depends(get_db)):
         # روش 2: اگر نبود، از دیتابیس بخون و در environment ست کن
         if not github_key:
             try:
-                github_key = Setting.get_value(db, "api_key_github") or ""
+                github_key = _github_token_from_db(db) or ""
                 if github_key:
                     os.environ["GITHUB_TOKEN"] = github_key
                     slog.info("Loaded GitHub token from database and set in environment")
@@ -3746,7 +3761,7 @@ async def execute_smart_task(
         from ...models.setting import Setting
         github_key = os.environ.get("GITHUB_TOKEN", "")
         if not github_key:
-            github_key = Setting.get_value(db, "api_key_github") or ""
+            github_key = _github_token_from_db(db) or ""
             if github_key:
                 os.environ["GITHUB_TOKEN"] = github_key
         github_connected = bool(github_key) and len(github_key) > 10
@@ -4899,7 +4914,7 @@ async def synchronized_inspection(
         from ...models.setting import Setting
         github_key = os.environ.get("GITHUB_TOKEN", "")
         if not github_key:
-            github_key = Setting.get_value(db, "api_key_github") or ""
+            github_key = _github_token_from_db(db) or ""
             if github_key:
                 os.environ["GITHUB_TOKEN"] = github_key
         github_connected = bool(github_key) and len(github_key) > 10
@@ -5070,7 +5085,7 @@ async def analyze_error_from_source(
         # توکن GitHub
         github_token = os.environ.get("GITHUB_TOKEN", "")
         if not github_token:
-            github_token = Setting.get_value(db, "api_key_github") or ""
+            github_token = _github_token_from_db(db) or ""
 
         if not github_token:
             return {
@@ -6614,7 +6629,7 @@ async def inject_bridge_script(
         # توکن GitHub
         github_token = os.environ.get("GITHUB_TOKEN", "")
         if not github_token:
-            github_token = Setting.get_value(db, "api_key_github") or ""
+            github_token = _github_token_from_db(db) or ""
 
         if not github_token:
             return {
@@ -7561,7 +7576,7 @@ async def check_bridge_status(
 
         github_token = os.environ.get("GITHUB_TOKEN", "")
         if not github_token:
-            github_token = Setting.get_value(db, "api_key_github") or ""
+            github_token = _github_token_from_db(db) or ""
 
         if not github_token:
             return {"success": False, "has_bridge": False, "error": "توکن GitHub تنظیم نشده"}
@@ -7751,7 +7766,7 @@ async def debug_bridge_injection(
         # چک توکن
         github_token = os.environ.get("GITHUB_TOKEN", "")
         if not github_token:
-            github_token = Setting.get_value(db, "api_key_github") or ""
+            github_token = _github_token_from_db(db) or ""
 
         if not github_token:
             result["error"] = "توکن GitHub تنظیم نشده"
@@ -7911,7 +7926,7 @@ async def update_bridge_to_latest(
 
         github_token = os.environ.get("GITHUB_TOKEN", "")
         if not github_token:
-            github_token = Setting.get_value(db, "api_key_github") or ""
+            github_token = _github_token_from_db(db) or ""
         if not github_token:
             return {"success": False, "error": "توکن GitHub تنظیم نشده"}
 
@@ -8097,7 +8112,7 @@ async def fix_all_bridges(
     try:
         github_token = os.environ.get("GITHUB_TOKEN", "")
         if not github_token:
-            github_token = Setting.get_value(db, "api_key_github") or ""
+            github_token = _github_token_from_db(db) or ""
         if not github_token:
             return {"success": False, "error": "توکن GitHub تنظیم نشده"}
 
@@ -10602,7 +10617,7 @@ async def investigate_error(request: InvestigateRequest, db: Session = Depends(g
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
         from ...models.setting import Setting as _InvSetting
-        token = _InvSetting.get_value(db, "api_key_github") or ""
+        token = _github_token_from_db(db) or ""
     model_ids = request.model_ids
 
     # ساخت context کامل خطا
@@ -11061,7 +11076,7 @@ async def investigate_errors_bulk(request: BulkInvestigateRequest, db: Session =
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
         from ...models.setting import Setting as _BulkSetting
-        token = _BulkSetting.get_value(db, "api_key_github") or ""
+        token = _github_token_from_db(db) or ""
 
     model_ids = request.model_ids
 
@@ -11384,7 +11399,7 @@ async def fix_error(request: FixRequest, db: Session = Depends(get_db)):
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
         from ...models.setting import Setting as _FixSetting
-        token = _FixSetting.get_value(db, "api_key_github") or ""
+        token = _github_token_from_db(db) or ""
     model_ids = request.model_ids
     primary_model = model_ids[0] if model_ids else "gemini-2.0-flash"
 
@@ -14185,12 +14200,122 @@ def _reduce_prompt_for_retry(prompt: str) -> str:
 
 
 # ─── انتخاب هوشمند مدل بر اساس آرشیو چت‌ها ───
+def _inspector_model_usable(model_id: str, db_map: dict, ai_manager, allow_oauth: bool = True) -> bool:
+    """Enabled, not an image generator, and its provider reachable (API key, not in error state);
+    OAuth-dispatched models (cloud_code) only when allow_oauth."""
+    from ...core.models_registry import MODEL_REGISTRY
+    reg = MODEL_REGISTRY.get(model_id)
+    if not reg or reg.is_image_generator:
+        return False
+    setting = db_map.get(model_id)
+    is_enabled = bool(setting.enabled) if setting else reg.enabled
+    if not is_enabled:
+        return False
+    try:
+        if reg.provider in ai_manager._services:
+            svc = ai_manager._services[reg.provider]
+            return bool(svc.api_key) and not svc.is_in_error_state()
+    except Exception:
+        pass
+    # OAuth-dispatched (cloud_code): no API-key service, but usable when configured
+    if not allow_oauth:
+        return False
+    return _oauth_model_ready(model_id)
+
+
+# (2026-11-15, PM-INS-0006) owner: «کار با ضعیف‌ترین مدل‌ها» — cheap API models first when one fails.
+_INSPECTOR_FALLBACK_PREFERENCE = ["gemini-2.5-flash", "deepseek-chat", "gemini-2.0-flash", "gpt-4o-mini"]
+
+
+def _inspector_fallback_chain(db, exclude: set, limit: int = 4) -> List[str]:
+    """Usable models to try after a model call failed: preferred cheap API models, then any other usable
+    API model (CODE-capable first), then OAuth models (cloud_code) last."""
+    from ...models.ai_profile import ModelSettings
+    from ...core.models_registry import MODEL_REGISTRY, ModelCapability
+    from ...services.ai_manager import get_ai_manager
+    try:
+        aim = get_ai_manager()
+        db_map = {s.model_id: s for s in db.query(ModelSettings).all()}
+    except Exception:
+        return []
+    chain: List[str] = []
+    for mid in _INSPECTOR_FALLBACK_PREFERENCE:
+        if mid not in exclude and _inspector_model_usable(mid, db_map, aim, allow_oauth=False):
+            chain.append(mid)
+    rest = [
+        mid for mid, m in MODEL_REGISTRY.items()
+        if mid not in exclude and mid not in chain and _inspector_model_usable(mid, db_map, aim, allow_oauth=False)
+    ]
+    rest.sort(key=lambda mid: ModelCapability.CODE not in MODEL_REGISTRY[mid].capabilities)
+    chain.extend(rest)
+    for mid in MODEL_REGISTRY:
+        if mid not in exclude and mid not in chain and _inspector_model_usable(mid, db_map, aim, allow_oauth=True):
+            chain.append(mid)
+    return chain[:limit]
+
+
+class InspectorModelError(RuntimeError):
+    """Every model in the chain failed — a MODEL problem, never to be shown as a GitHub access error."""
+
+
+class _FallbackAIManager:
+    """(2026-11-15, PM-INS-0006) Per-request proxy over ai_manager for the inspector chat: when a model
+    call fails (e.g. cloud_code 400 «Claude Code … does not support this model»), retry the same call on
+    the next usable model and stay on the one that worked for the rest of the request. The real answering
+    model is in response.model_id; switch notes are drained into the SSE stream by the caller."""
+
+    def __init__(self, inner, db):
+        self._inner = inner
+        self._db = db
+        self._sticky: Dict[str, str] = {}
+        self._failed: set = set()
+        self.notes: List[str] = []
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def drain_notes(self) -> List[str]:
+        out, self.notes = self.notes, []
+        return out
+
+    async def generate(self, model_id: str, messages, *args, **kwargs):
+        first = self._sticky.get(model_id, model_id)
+        tried: List[str] = []
+        errors: List[str] = []
+        candidates = [first]
+        while candidates:
+            mid = candidates.pop(0)
+            if mid in tried:
+                continue
+            tried.append(mid)
+            try:
+                resp = await self._inner.generate(mid, messages, *args, **kwargs)
+                if mid != model_id:
+                    self._sticky[model_id] = mid
+                return resp
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                err = str(getattr(e, "message", None) or e)
+                errors.append(f"{mid}: {err[:160]}")
+                self._failed.add(mid)
+                slog.warning(f"[smart-chat fallback] {mid} failed: {err[:200]}")
+                if not candidates:
+                    candidates = _inspector_fallback_chain(self._db, exclude=set(tried) | self._failed)
+                if candidates:
+                    self.notes.append(f"⚠️ مدل {mid} خطا داد ({err[:90]}) — خودکار با {candidates[0]} ادامه می‌دهم")
+        raise InspectorModelError("همهٔ مدل‌ها خطا دادند — " + " | ".join(errors))
+
+
 async def _smart_select_model(db, project_id: str) -> str:
     """
     انتخاب هوشمند مدل بر اساس:
     1. بیشترین استفاده موفق در آرشیو چت‌های پروژه
     2. فقط مدل‌های فعال و با provider در دسترس
     3. اگر همه غیرفعال بودن → بهترین مدل فعال فعلی
+
+    (2026-11-15, PM-INS-0006) این مسیرِ «Local AI» است: اول فقط مدل‌های API (gemini/deepseek/…)؛
+    cloud_code (OAuth) فقط وقتی هیچ مدلِ API ِ قابل‌استفاده‌ای نیست — همان خواستهٔ PM-INS-0002.
     """
     from ...models.inspector_session import InspectorMessage, InspectorSession
     from ...models.ai_profile import ModelSettings
@@ -14207,36 +14332,12 @@ async def _smart_select_model(db, project_id: str) -> str:
         db_settings = db.query(ModelSettings).all()
         db_map = {s.model_id: s for s in db_settings}
 
-        def _is_model_available(model_id: str) -> bool:
-            """بررسی فعال بودن و در دسترس بودن provider"""
-            reg = MODEL_REGISTRY.get(model_id)
-            if not reg:
-                return False
-            if reg.is_image_generator:
-                return False
-            # بررسی enabled
-            setting = db_map.get(model_id)
-            is_enabled = bool(setting.enabled) if setting else reg.enabled
-            if not is_enabled:
-                return False
-            # بررسی provider
-            try:
-                if reg.provider in ai_manager._services:
-                    svc = ai_manager._services[reg.provider]
-                    return bool(svc.api_key) and not svc.is_in_error_state()
-            except Exception:
-                pass
-            # OAuth-dispatched (cloud_code): no API-key service, but usable when configured
-            return _oauth_model_ready(model_id)
-
         # ─── مرحله ۲: آمار استفاده از مدل‌ها در آرشیو پروژه ───
-        # سشن‌های آرشیو شده
         archived_sessions = db.query(InspectorSession.id).filter(
             InspectorSession.project_id == project_id,
             InspectorSession.status == "archived"
         ).subquery()
 
-        # آمار مدل‌ها: تعداد استفاده + تعداد verified=True
         from sqlalchemy import case as sql_case
         model_stats = db.query(
             InspectorMessage.model_id,
@@ -14259,12 +14360,6 @@ async def _smart_select_model(db, project_id: str) -> str:
             key=lambda st: (((st[2] or 0) + 1) / ((st[1] or 0) + 2), st[1] or 0),
             reverse=True,
         )
-        # از آرشیو: مدل‌هایی که زیاد استفاده شدن و موفق بودن
-        for stat in model_stats:
-            mid = stat[0]  # model_id
-            if mid and _is_model_available(mid):
-                slog.info(f"[smart-select] از آرشیو: انتخاب {mid} (استفاده: {stat[1]}, موفق: {stat[2]})")
-                return mid
 
         # ─── مرحله ۳: سشن فعال فعلی ───
         active_sessions = db.query(InspectorSession.id).filter(
@@ -14283,37 +14378,43 @@ async def _smart_select_model(db, project_id: str) -> str:
             desc("total_uses")
         ).all()
 
-        for stat in active_model_stats:
-            mid = stat[0]
-            if mid and _is_model_available(mid):
-                slog.info(f"[smart-select] از سشن فعال: انتخاب {mid} (استفاده: {stat[1]})")
-                return mid
-
-        # ─── مرحله ۴: بهترین مدل فعال با بالاترین اولویت ───
-        # مدل‌های دارای قابلیت CODE ترجیح دارند
         from ...core.models_registry import ModelCapability
 
-        best_available = None
-        best_score = -1
-        for model_id, model in MODEL_REGISTRY.items():
-            if not _is_model_available(model_id):
-                continue
-            score = 0
-            caps = model.capabilities
-            if ModelCapability.CODE in caps:
-                score += 10
-            if ModelCapability.REASONING in caps:
-                score += 5
-            setting = db_map.get(model_id)
-            if setting and setting.priority:
-                score += max(0, 10 - setting.priority)  # اولویت ۱ = بالاترین
-            if score > best_score:
-                best_score = score
-                best_available = model_id
+        for allow_oauth in (False, True):
+            def _ok(mid: str) -> bool:
+                return bool(mid) and _inspector_model_usable(mid, db_map, ai_manager, allow_oauth=allow_oauth)
 
-        if best_available:
-            slog.info(f"[smart-select] بهترین مدل فعال: {best_available} (امتیاز: {best_score})")
-            return best_available
+            for stat in model_stats:
+                if _ok(stat[0]):
+                    slog.info(f"[smart-select] از آرشیو: انتخاب {stat[0]} (استفاده: {stat[1]}, موفق: {stat[2]})")
+                    return stat[0]
+            for stat in active_model_stats:
+                if _ok(stat[0]):
+                    slog.info(f"[smart-select] از سشن فعال: انتخاب {stat[0]} (استفاده: {stat[1]})")
+                    return stat[0]
+
+            # ─── مرحله ۴: بهترین مدل فعال با بالاترین اولویت (CODE ترجیح دارد) ───
+            best_available = None
+            best_score = -1
+            for model_id, model in MODEL_REGISTRY.items():
+                if not _ok(model_id):
+                    continue
+                score = 0
+                caps = model.capabilities
+                if ModelCapability.CODE in caps:
+                    score += 10
+                if ModelCapability.REASONING in caps:
+                    score += 5
+                setting = db_map.get(model_id)
+                if setting and setting.priority:
+                    score += max(0, 10 - setting.priority)  # اولویت ۱ = بالاترین
+                if score > best_score:
+                    best_score = score
+                    best_available = model_id
+
+            if best_available:
+                slog.info(f"[smart-select] بهترین مدل فعال: {best_available} (امتیاز: {best_score}, oauth={allow_oauth})")
+                return best_available
 
     except Exception as e:
         slog.warning(f"[smart-select] خطا: {e}")
@@ -14649,7 +14750,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
         from ...models.setting import Setting as _ChatSetting
-        token = _ChatSetting.get_value(db, "api_key_github") or ""
+        token = _github_token_from_db(db) or ""
 
     # 🆕 (inspector-scan) — تشخیص intent برای trigger خودکار scan موردی.
     # اگر کاربر در حال درخواست بررسی/اصلاح است، به‌جای single-shot smart-chat
@@ -14857,10 +14958,15 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
     async def event_stream():
         github_svc = get_github_import_service()
-        ai_manager = get_ai_manager()
+        # (PM-INS-0006) a failing model falls through to the next usable one instead of ending the chat
+        ai_manager = _FallbackAIManager(get_ai_manager(), db)
 
         def sse(event: str, data: dict) -> str:
-            return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+            _pre = "".join(
+                f"event: progress\ndata: {json.dumps({'step': 'model_fallback', 'message': _n}, ensure_ascii=False)}\n\n"
+                for _n in ai_manager.drain_notes()
+            )
+            return _pre + f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
         nonlocal primary_model  # 🆕 (فاز ۲) — اجازهٔ override به Claude برای کارهای کد/خطا
 
@@ -15678,10 +15784,33 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         slog.warning(f"[smart-chat QUESTION] get_repo_tree failed: {tree_result.get('error', 'unknown')}")
                 except Exception as e:
                     yield sse("progress", {
-                        "step": "github_error",
-                        "message": f"⚠️ خطا در دسترسی GitHub: {str(e)[:60]}"
+                        "step": "model_error" if isinstance(e, InspectorModelError) else "github_error",
+                        # (PM-INS-0006) a model failure here used to be reported as a GitHub error
+                        "message": (f"⚠️ خطای مدل در انتخاب فایل‌ها (نه GitHub): {str(e)[:160]}"
+                                    if isinstance(e, InspectorModelError)
+                                    else f"⚠️ خطا در دسترسی GitHub: {str(e)[:60]}")
                     })
                     slog.warning(f"[smart-chat QUESTION] GitHub access exception: {e}")
+
+            # (PM-INS-0006) «آخرین commit چیست؟» — the prompt never had the commit history; read the last 5.
+            q_commits_text = ""
+            if owner and repo:
+                try:
+                    _cs = await github_svc._get_session()
+                    async with _cs.get(f"https://api.github.com/repos/{owner}/{repo}/commits?per_page=5",
+                                       headers=github_svc._get_headers(token), timeout=15) as _cr:
+                        if _cr.status == 200:
+                            _lines = []
+                            for _c in (await _cr.json())[:5]:
+                                _cm = (_c.get("commit") or {})
+                                _lines.append(
+                                    f"- {(_c.get('sha') or '')[:7]} · {((_cm.get('committer') or {}).get('date') or '')} · "
+                                    f"{(_cm.get('message') or '').splitlines()[0][:160] if _cm.get('message') else ''}"
+                                )
+                            if _lines:
+                                q_commits_text = "## آخرین کامیت‌های شاخهٔ اصلی (تازه‌ترین اول، زنده از GitHub):\n" + "\n".join(_lines)
+                except Exception as _ce:
+                    slog.warning(f"[smart-chat QUESTION] recent commits unavailable: {_ce}")
 
             has_q_code = bool(question_code_context and question_code_context.strip())
             q_structure_text = q_tree_summary
@@ -15710,6 +15839,8 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 {logs_text[-1500:] if logs_text else 'لاگی موجود نیست'}
 
 ## URL فرانت‌اند: {request.frontend_url or 'نامشخص'}
+
+{q_commits_text}
 
 {f'## کد فایل‌های مرتبط:{question_code_context}' if has_q_code else ''}
 
@@ -16561,8 +16692,11 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
                 except Exception as e:
                     yield sse("progress", {
-                        "step": "github_error",
-                        "message": f"⚠️ خطا در دسترسی GitHub: {str(e)[:60]}"
+                        "step": "model_error" if isinstance(e, InspectorModelError) else "github_error",
+                        # (PM-INS-0006) a model failure here used to be reported as a GitHub error
+                        "message": (f"⚠️ خطای مدل در انتخاب فایل‌ها (نه GitHub): {str(e)[:160]}"
+                                    if isinstance(e, InspectorModelError)
+                                    else f"⚠️ خطا در دسترسی GitHub: {str(e)[:60]}")
                     })
 
             # --- تحلیل عمیق و تولید پاسخ + اکشن ---
@@ -17473,7 +17607,7 @@ async def inspector_chat_cloud_code(
                 gh_token = os.environ.get("GITHUB_TOKEN", "")
                 if not gh_token:
                     from ...models.setting import Setting as _S
-                    gh_token = _S.get_value(db, "api_key_github") or ""
+                    gh_token = _github_token_from_db(db) or ""
                 gh_svc = get_github_pr_service() if owner and repo else None
                 # 🆕 (audit fix #1) — file_list را از GitHub trees API
                 # (همان pattern smart-chat) بگیر. github_pr_service متد
@@ -17891,7 +18025,7 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
         from ...models.setting import Setting
-        token = Setting.get_value(db, "api_key_github") or ""
+        token = _github_token_from_db(db) or ""
     if not token:
         return {"success": False, "error": "توکن GitHub تنظیم نشده است. لطفاً در تنظیمات وارد کنید."}
 
@@ -19462,7 +19596,7 @@ async def visual_debug_endpoint(request: VisualDebugRequest, db: Session = Depen
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
         from ...models.setting import Setting as _VDSetting
-        token = _VDSetting.get_value(db, "api_key_github") or ""
+        token = _github_token_from_db(db) or ""
 
     model_ids = request.model_ids
     if not model_ids:
@@ -19906,7 +20040,7 @@ async def visual_debug_reanalyze_endpoint(request: VisualDebugReanalyzeRequest, 
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
         from ...models.setting import Setting as _RASetting
-        token = _RASetting.get_value(db, "api_key_github") or ""
+        token = _github_token_from_db(db) or ""
 
     reanalyze_model = request.model_id
 

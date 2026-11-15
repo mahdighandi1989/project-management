@@ -5519,10 +5519,27 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
     } as any]);
   };
 
+  // (2026-11-15, PM-INS-0006) «Failed to fetch» = the backend did not answer at all (deploy restart / cold
+  // start) — nothing to do with the preview power button. Wait for /health instead of retrying blindly after 3s.
+  const _isNetworkFailure = (msg?: string) => !!msg && /failed to fetch|networkerror|network|err_quic|load failed/i.test(msg);
+  const waitForBackend = async (maxMs = 90000): Promise<boolean> => {
+    const until = Date.now() + maxMs;
+    while (Date.now() < until) {
+      try {
+        const r = await fetch(`${API_BASE}/health`, { cache: 'no-store' });
+        if (r.ok) return true;
+      } catch { /* still down */ }
+      await new Promise(res => setTimeout(res, 3000));
+    }
+    return false;
+  };
+  const SERVER_DOWN_NOTE = 'سرور پاسخ نداد (احتمالاً در حال دیپلوی یا بیدار شدن است — ربطی به پاورِ پیش‌نمایش ندارد)';
+
   const sendInspectorChat = async (
     overrideMessage?: string,
     _isRetry = false,
     _bypassOversightCheck = false,
+    _forceLocal = false,  // (PM-INS-0006) Cloud Code failed → same message through Local AI (auto model)
   ) => {
     // 🆕 (Inspector → Oversight) اگر تیک ارسال به نظارت فعال است، مسیر متفاوت
     // _bypassOversightCheck برای دکمهٔ «🔍 بررسی همین پرامپت در چت» استفاده می‌شود
@@ -5539,7 +5556,7 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
     // مسیر کاملاً متفاوتی طی می‌شود: مستقیم به /inspector/chat-cloud-code
     // می‌رود (بدون smart-prompt enhancement، بدون selective scan،
     // بدون model selection)، چون این موتور خودش Claude است.
-    if (inspectorEngine === 'cloud_code') {
+    if (inspectorEngine === 'cloud_code' && !_forceLocal) {
       if (cloudCodeAvailable === false) {
         setInspectorChatMessages(prev => [...prev, {
           id: `cc_unavail_${Date.now()}`,
@@ -5560,6 +5577,7 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
       } as any]);
       const asstMsgId = `cc_a_${Date.now()}`;
       let asstBuffer = '';
+      let ccError = '';
       setInspectorChatMessages(prev => [...prev, {
         id: asstMsgId,
         role: 'assistant' as const,
@@ -5678,6 +5696,7 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
                       : m
                   ));
                 } else if (eventType === 'error') {
+                  ccError = data.message || 'خطا';
                   setInspectorChatMessages(prev => prev.map(m =>
                     m.id === asstMsgId
                       ? { ...m, content: `❌ ${data.message || 'خطا'}` } as any
@@ -5689,18 +5708,35 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
           }
         }
       } catch (e: any) {
+        ccError = String(e?.message || e);
         setInspectorChatMessages(prev => prev.map(m =>
           m.id === asstMsgId
-            ? { ...m, content: `❌ خطا در Cloud Code: ${e?.message || e}` } as any
+            ? { ...m, content: _isNetworkFailure(ccError) ? `❌ ${SERVER_DOWN_NOTE}` : `❌ خطا در Cloud Code: ${ccError}` } as any
             : m
         ));
       } finally {
         setInspectorChatLoading(false);
       }
+      // (PM-INS-0006) no dead end: Cloud Code failed without an answer → the next model answers (Local AI, auto)
+      if (ccError && !asstBuffer.trim()) {
+        if (_isNetworkFailure(ccError)) {
+          setInspectorChatMessages(prev => [...prev, {
+            id: `cc_wait_${Date.now()}`, role: 'system' as const,
+            content: `⏳ ${SERVER_DOWN_NOTE} — تا ۹۰ ثانیه منتظر می‌مانم...`, timestamp: new Date(),
+          } as any]);
+          if (!(await waitForBackend())) return;
+        }
+        setInspectorChatMessages(prev => [...prev, {
+          id: `cc_fallback_${Date.now()}`, role: 'system' as const,
+          content: '↪️ Cloud Code جواب نداد — همین پیام خودکار با Local AI (انتخابِ خودکارِ مدل: gemini/deepseek/…) فرستاده می‌شود؛ نامِ مدلِ پاسخ‌دهنده زیرِ پاسخ می‌آید.',
+          timestamp: new Date(),
+        } as any]);
+        await sendInspectorChat(rawMessage, false, true, true);
+      }
       return;
     }
 
-    if (!inspectorAutoSelect && inspectorSelectedModels.length === 0) return;
+    if (!_forceLocal && !inspectorAutoSelect && inspectorSelectedModels.length === 0) return;
 
     // 🆕 (concurrency guard) — ریشهٔ قاتی‌شدن پیام‌ها: کاربر پیام جدید
     // می‌فرستد در حالی که scan یا یک عملیات دیگر هنوز در حال اجراست. هر دو
@@ -5735,7 +5771,7 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
     // 🧠 بهینه‌سازی پرامپت (اگر فعال باشه) — با نشانگر بارگذاری
     let userMessage = rawMessage;
     let wasEnhanced = false;
-    if (inspectorSmartPrompt && rawMessage.length >= 10 && !_isRetry) {
+    if (inspectorSmartPrompt && rawMessage.length >= 10 && !_isRetry && !_forceLocal) {
       const _enhLoadId = `enhance_load_${Date.now()}`;
       setInspectorChatMessages(prev => [...prev, {
         id: _enhLoadId,
@@ -5771,12 +5807,24 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
       }
 
       if (!wasEnhanced && enhResult.error) {
+        const _down = _isNetworkFailure(enhResult.error);
         setInspectorChatMessages(prev => [...prev, {
           id: `enhance_warn_${Date.now()}`,
           role: 'system' as const,
-          content: `⚠️ ساختارمندسازی ناموفق: ${enhResult.error?.slice(0, 100)} — پیام اصلی ارسال می‌شود`,
+          content: _down
+            ? `⏳ ساختارمندسازی انجام نشد: ${SERVER_DOWN_NOTE}. تا ۹۰ ثانیه منتظرِ سرور می‌مانم و بعد پیام اصلی را می‌فرستم...`
+            : `⚠️ ساختارمندسازی ناموفق: ${enhResult.error?.slice(0, 100)} — پیام اصلی ارسال می‌شود`,
           timestamp: new Date(),
         }]);
+        if (_down && !(await waitForBackend())) {
+          setInspectorChatMessages(prev => [...prev, {
+            id: `error_${Date.now()}`, role: 'assistant' as const,
+            content: `❌ ${SERVER_DOWN_NOTE}. پس از ۹۰ ثانیه هم بالا نیامد — کمی بعد دوباره بفرستید.`,
+            timestamp: new Date(),
+          }]);
+          setInspectorChatLoading(false);
+          return;
+        }
       }
     }
     if (!userMessage) return;
@@ -6381,11 +6429,12 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
             return [...filtered, {
               id: `retry_${Date.now()}`,
               role: 'assistant',
-              content: '🔄 اتصال قطع شد — تلاش خودکار برای ادامه از جایی که متوقف شده...',
+              content: `🔄 ${SERVER_DOWN_NOTE} — منتظرِ بالا آمدنِ سرور می‌مانم (تا ۹۰ ثانیه) و خودکار دوباره می‌فرستم...`,
               timestamp: new Date()
             }];
           });
-          setTimeout(() => sendInspectorChat(userMessage, true), 3000);
+          // (PM-INS-0006) wait for /health, not a blind 3s timer that lands in the middle of a deploy
+          waitForBackend().then(() => sendInspectorChat(userMessage, true, false, _forceLocal));
           return;
         }
         // retry هم جواب نداد یا خطای غیرشبکه‌ای
@@ -6395,7 +6444,7 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
             id: `error_${Date.now()}`,
             role: 'assistant',
             content: isNetworkError
-              ? '❌ ارتباط با سرور قطع شد. تلاش خودکار هم ناموفق بود. لطفاً دوباره تلاش کنید.'
+              ? `❌ ${SERVER_DOWN_NOTE}. تلاش خودکار هم ناموفق بود — کمی بعد دوباره بفرستید.`
               : `❌ خطا در اتصال به سرور: ${err.message?.slice(0, 100) || 'ناشناخته'}`,
             timestamp: new Date()
           }];
