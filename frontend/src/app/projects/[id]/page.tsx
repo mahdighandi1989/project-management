@@ -6,7 +6,7 @@ import { useParams, useSearchParams } from 'next/navigation';
 // ProjectHealthPanel در commit 3.3a حذف شد — همهٔ قابلیت‌ها در /oversight
 import PromptManager from '@/components/PromptManager';
 import BrowserAgentPanel from '@/components/BrowserAgentPanel';
-import { ensurePreviewTicket } from '@/lib/previewTicket';
+import { ensurePreviewTicket, getPreviewTicket } from '@/lib/previewTicket';
 import ExecutingPromptsPanel from '@/components/ExecutingPromptsPanel';
 import InspectorRecordingPanel from '@/components/InspectorRecordingPanel';  // 🆕 🎬 ضبط بازرس ویژه دوحالته (A + B)
 import ReactFlow, {
@@ -2528,10 +2528,13 @@ export default function ProjectDetailPage() {
         ws = new WebSocket(wsUrl);
         bridgeWsRef.current = ws;
 
-        ws.onopen = () => {
+        ws.onopen = async () => {
           if (isCancelled) { ws?.close(); return; }
           console.log('🌐 Bridge WS: Connected, registering as inspector');
-          ws?.send(JSON.stringify({ type: 'register', role: 'inspector' }));
+          // 🩹 (2026-11-15) the inspector side proves it is the signed-in owner with the project's preview ticket
+          let ticket = getPreviewTicket(projectId);
+          if (!ticket) { await ensurePreviewTicket(projectId); ticket = getPreviewTicket(projectId); }
+          ws?.send(JSON.stringify({ type: 'register', role: 'inspector', ticket }));
         };
 
         ws.onmessage = (event) => {
@@ -5604,6 +5607,11 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
                     content: data.message,
                     timestamp: new Date(),
                   } as any]);
+                } else if (eventType === 'action_plan' && data.action_plan) {
+                  // 🩹 (2026-11-15) Cloud Code mode: the plan the agent submitted (used to be dropped) ⇒ Apply button
+                  setInspectorChatMessages(prev => prev.map(m =>
+                    m.id === asstMsgId ? { ...m, action_plan: data.action_plan } as any : m
+                  ));
                 } else if (eventType === 'done' && data.actual_model) {
                   // 🌥️ مدل واقعی + tier + reason ای که picker انتخاب کرد.
                   // Claude خودش را در متن اغلب اشتباه معرفی می‌کند، پس

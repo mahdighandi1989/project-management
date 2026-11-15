@@ -10,6 +10,12 @@
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 const timers: Record<string, ReturnType<typeof setTimeout>> = {};
+const tickets: Record<string, string> = {};
+
+/** The current ticket of a project (also proves the inspector side of the bridge WebSocket). */
+export function getPreviewTicket(projectId: string): string {
+  return tickets[projectId] || '';
+}
 
 export async function ensurePreviewTicket(projectId: string): Promise<boolean> {
   if (!projectId || typeof document === 'undefined') return false;
@@ -21,6 +27,7 @@ export async function ensurePreviewTicket(projectId: string): Promise<boolean> {
     });
     if (!r.ok) return false;
     const t = await r.json();
+    tickets[projectId] = t.ticket;
     const secure = window.location.protocol === 'https:' ? '; secure' : '';
     document.cookie = `${t.cookie}=${t.ticket}; path=${t.path}; max-age=${t.expires_in}; samesite=strict${secure}`;
     clearTimeout(timers[projectId]);

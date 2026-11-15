@@ -8793,6 +8793,17 @@ async def websocket_bridge_hub(websocket: WebSocket, project_id: str):
             return
 
         role = first_msg["role"]
+        # 🩹 (2026-11-15) the «inspector» side can send click/navigate COMMANDS into the owner's signed-in pages, and the
+        # login wall does not cover WebSockets — so it must prove it is the owner: the project's preview ticket
+        # (core/auth.preview_ticket, issued only to a signed-in user) in the register message or `?ticket=`. The
+        # «bridge» side (scripts injected into watched apps) only REPORTS events and stays as it was.
+        if role == "inspector":
+            from ...core import auth as _auth
+            _t = str(first_msg.get("ticket") or websocket.query_params.get("ticket") or "")
+            if _auth.auth_enforced() and not _auth.preview_ticket_ok(_t, project_id):
+                await websocket.send_json({"type": "error", "message": "inspector needs a valid preview ticket"})
+                await websocket.close(code=4401)
+                return
 
         async with _bridge_lock:
             _bridge_connections[project_id][f"{role}s"].add(websocket)
@@ -17373,6 +17384,7 @@ async def inspector_chat_cloud_code(
     agent_executor = None
     agent_tools_schema = None
     agent_ctx_summary: Dict[str, Any] = {}
+    _cc_plans: List[Dict[str, Any]] = []  # 🩹 (2026-11-15) action plans the Cloud Code agent submitted
     if request.enable_tools:
         try:
             from ...models.project import Project as _Proj
@@ -17405,12 +17417,22 @@ async def inspector_chat_cloud_code(
                 # (همان pattern smart-chat) بگیر. github_pr_service متد
                 # list_repository_files ندارد، پس direct REST call می‌زنیم.
                 file_list_resolved: List[str] = []
+                _cc_branch = str(extra.get("default_branch") or "main")
                 if owner and repo and gh_token:
                     try:
                         import httpx as _httpx_fl
                         async with _httpx_fl.AsyncClient(timeout=15.0) as _fl_cli:
+                            # 🩹 (2026-11-15) the repo's real default branch (was hard-coded «main» ⇒ empty tree on master repos)
+                            try:
+                                _ri = await _fl_cli.get(f"https://api.github.com/repos/{owner}/{repo}",
+                                                        headers={"Authorization": f"token {gh_token}",
+                                                                 "Accept": "application/vnd.github+json"})
+                                if _ri.status_code == 200:
+                                    _cc_branch = _ri.json().get("default_branch") or _cc_branch
+                            except Exception:
+                                pass
                             _fl_res = await _fl_cli.get(
-                                f"https://api.github.com/repos/{owner}/{repo}/git/trees/main?recursive=1",
+                                f"https://api.github.com/repos/{owner}/{repo}/git/trees/{_cc_branch}?recursive=1",
                                 headers={
                                     "Authorization": f"token {gh_token}",
                                     "Accept": "application/vnd.github+json",
@@ -17449,9 +17471,11 @@ async def inspector_chat_cloud_code(
                         render_service=render_svc,
                         owner=owner,
                         repo=repo,
-                        branch="main",
+                        branch=_cc_branch,
                         github_token=gh_token,
                         file_list=file_list_resolved,
+                        # 🩹 (2026-11-15) plans submitted in this mode used to be DROPPED (no callback) — no Apply button
+                        on_submit_action_plan=_cc_plans.append,
                     )
                     agent_tools_schema = get_phase_3_tool_schemas()
                     agent_ctx_summary = {
@@ -17614,6 +17638,12 @@ async def inspector_chat_cloud_code(
                 # دید (assembled). final_text فقط آخرین round را نگه می‌دارد
                 # — برای DB ناقص است. assembled صفر فقط اگر مدل اصلاً متن
                 # نداده باشد → آنگاه از final_text/stop_reason پیام بساز.
+                # 🩹 (2026-11-15) hand the submitted plan to the UI (same `action_plan` shape as smart-chat ⇒ Apply button)
+                if _cc_plans:
+                    _p = _cc_plans[-1] or {}
+                    yield ("event: action_plan\ndata: " + json.dumps({"action_plan": {
+                        "files": _p.get("files") or [], "commit_message": _p.get("commit_message") or "",
+                        "analysis": _p.get("analysis") or ""}}, ensure_ascii=False) + "\n\n")
                 full_text = "".join(assembled).strip()
                 if not full_text:
                     fb = (loop_result.get("final_text") or "").strip()
@@ -17984,6 +18014,20 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
                             dropped_files.append({"path": file_path, "reason": "فایل اصلی خالی"})
                             continue
                         merge_result = _apply_section_modifications(original_content, f["sections"])
+                        # 🩹 (2026-11-15) a file whose sections only PARTLY matched used to be committed with the missing edits
+                        # silently absent (a half-applied fix). Now it is not committed and the reason is shown, unless
+                        # INSPECTOR_ALLOW_PARTIAL_APPLY=1. (find-texts are verified before the plan is accepted — 12-ب.)
+                        if (0 < merge_result["applied"] < merge_result["total"]
+                                and os.environ.get("INSPECTOR_ALLOW_PARTIAL_APPLY", "") != "1"):
+                            _miss = "; ".join(str(e)[:80] for e in (merge_result.get("errors") or [])[:2])
+                            yield sse("progress", {
+                                "step": "sections_partial_refused",
+                                "message": (f"⛔ {file_path}: فقط {merge_result['applied']}/{merge_result['total']} بخش با فایلِ واقعی "
+                                            f"جور شد — نیمه‌کاره commit نمی‌شود. {_miss}")
+                            })
+                            dropped_files.append({"path": file_path, "reason":
+                                                  f"اعمالِ ناقص: {merge_result['applied']}/{merge_result['total']} بخش — {_miss}"})
+                            continue
                         if merge_result["applied"] > 0:
                             f["content"] = merge_result["content"]
                             f["_sections_applied"] = merge_result["applied"]

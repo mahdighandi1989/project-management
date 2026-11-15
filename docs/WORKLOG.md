@@ -530,3 +530,19 @@
 - **[TODO]** بایگانیِ گزارش‌های بسیار قدیمیِ `reports.json` به درایو وقتی بزرگ شد (فعلاً هشدار می‌دهد)؛ نوشتنِ کاملاً غیرهمگامِ `tasks.json`.
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · pytest + next build
+
+## 2026-11-15 (۱۶) — «بازرس ویژه» (دستهٔ ۳): ویدیوی تلگرام، امنیتِ سوکتِ پل، Cloud Code، اعمالِ نیمه‌کاره
+
+- **[FINDING]** (TODO های (۱۰) تا (۱۲)) webm ِ MediaRecorder در تلگرام پخش نمی‌شد و برشِ بایتیِ ۴۵MB بخش‌های ۲ به بعد را خراب می‌کرد؛ سمتِ «inspector» ِ سوکتِ
+  `/api/render/ws/bridge/{project}` بی‌احراز بود (دیوارِ ورود WebSocket را نمی‌بیند) و هر کس نامِ کانال را داشت می‌توانست به صفحه‌های واردشدهٔ مالک فرمانِ کلیک/ناوبری
+  بفرستد؛ `chat-cloud-code` پلانِ ثبت‌شده را دور می‌ریخت (callback نداشت) و شاخه را `main` فرض می‌کرد؛ `apply-action` فایلی را که بخش‌هایش نیمه جور شده بود commit می‌کرد.
+- **[CHANGE]** `inspector_recording_finalize.webm_to_mp4_parts` (H.264/AAC، faststart، تقسیمِ زمانی) و `webm_audio_to_m4a` (بازگشت به مسیرِ قبلی اگر ffmpeg شکست خورد)؛
+  `render_logs` سوکتِ پل: ثبتِ «inspector» با `preview_ticket` (پیام یا `?ticket=`)، «bridge» بی‌تغییر؛ فرانت: `getPreviewTicket` و ارسالِ بلیت در register؛
+  `chat-cloud-code`: شاخهٔ پیش‌فرضِ واقعی از GitHub، `on_submit_action_plan` و رویدادِ SSE ِ `action_plan` ⇐ دکمهٔ اعمال؛ `apply-action`: ردِ اعمالِ ناقص
+  (`INSPECTOR_ALLOW_PARTIAL_APPLY=1` برای اجازه) با پیامِ روشن.
+- **[VERIFY]** `test_recording_keyframes.py` (+۲: MP4 و m4a با ffmpeg ِ واقعی)، `test_preview_ticket.py` (+۱: سوکت با روترِ واقعی — بی‌بلیت رد، با بلیت پذیرفته، bridge
+  بی‌تغییر)؛ pytest ۷۷۲ سبز؛ build سبز.
+- **[TODO]** ماندگاریِ جلسه‌های ضبط پس از ری‌استارت؛ بردنِ ویدیوی نهایی به گوگل درایو؛ حالتِ اسکرینِ سمتِ سرور برای سایت‌هایی که پروکسی را نمی‌پذیرند؛ ورودِ خودکارِ
+  عاملِ مرورگر با Auth Recipe.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · pytest (ffmpeg و WebSocket ِ واقعی) + next build

@@ -62,3 +62,33 @@ def test_auth_wall_end_to_end(monkeypatch):
     assert c.get("/api/render/inspector/proxy/gh_o_r/_next/app.js").json() == {"pid": "gh_o_r", "path": "_next/app.js"}
     assert c.get("/api/render/inspector/proxy/gh_other/x").status_code == 401
     assert c.get("/api/oversight/tasks").status_code == 401
+
+
+def test_bridge_websocket_inspector_needs_the_ticket(monkeypatch):
+    import pytest
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+
+    from app.api.routes import render_logs
+    from app.core import auth as A
+
+    monkeypatch.setattr(A, "_key", "k" * 40)
+    monkeypatch.setenv("AUTH_DISABLED", "0")
+    monkeypatch.setenv("ADMIN_EMAILS", "owner@example.com")
+    app = FastAPI()
+    app.include_router(render_logs.router)  # its own prefix is /api/render
+    c = TestClient(app)
+    url = "/api/render/ws/bridge/gh_o_r"
+    with c.websocket_connect(url) as ws:
+        ws.send_json({"type": "register", "role": "inspector"})
+        assert "ticket" in ws.receive_json()["message"]
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_json()
+    with c.websocket_connect(url) as ws:
+        ws.send_json({"type": "register", "role": "inspector", "ticket": A.preview_ticket("gh_o_r", ttl=60)})
+        msg = ws.receive_json()
+        assert msg.get("type") != "error", msg
+    with c.websocket_connect(url) as ws:  # the reporting side is unchanged
+        ws.send_json({"type": "register", "role": "bridge"})
+        assert ws.receive_json().get("type") != "error"

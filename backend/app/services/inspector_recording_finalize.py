@@ -317,6 +317,75 @@ def _build_animated_webp_from_frames(
         return None
 
 
+def _ffmpeg_ok() -> bool:
+    import shutil
+    return bool(shutil.which("ffmpeg"))
+
+
+def webm_to_mp4_parts(webm: bytes, max_mb: int = MAX_TELEGRAM_FILE_MB, stem: str = "recording") -> List[Tuple[bytes, str]]:
+    """🩹 (2026-11-15, owner plan item 12) — browser MediaRecorder webm has no duration/seek index and Telegram does not
+    play it inline; a raw byte split made part 2+ unplayable. ffmpeg ⇒ H.264/AAC MP4 with +faststart; over the limit ⇒
+    TIME segments that each play on their own. [] when ffmpeg is missing or fails (the caller keeps the old path)."""
+    import subprocess
+    import tempfile
+
+    if not webm or not _ffmpeg_ok():
+        return []
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "in.webm"
+        src.write_bytes(webm)
+        out = Path(td) / "out.mp4"
+        cmd = ["ffmpeg", "-v", "error", "-y", "-i", str(src), "-vf", "scale='min(1280,iw)':-2",
+               "-c:v", "libx264", "-preset", "veryfast", "-crf", "30", "-pix_fmt", "yuv420p",
+               "-c:a", "aac", "-b:a", "64k", "-movflags", "+faststart", str(out)]
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=900, check=True)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"webm→mp4 failed: {e}")
+            return []
+        size = out.stat().st_size
+        limit = max_mb * 1024 * 1024
+        if size <= limit:
+            return [(out.read_bytes(), f"{stem}.mp4")]
+        try:
+            dur = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
+                                        str(out)], capture_output=True, text=True, timeout=60).stdout.strip() or 0)
+        except Exception:  # noqa: BLE001
+            dur = 0.0
+        if dur <= 0:
+            return []
+        seg = max(10, int(dur * (limit / size) * 0.85))
+        pattern = Path(td) / "part_%03d.mp4"
+        try:
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(out), "-c", "copy", "-map", "0", "-f", "segment",
+                            "-segment_time", str(seg), "-reset_timestamps", "1", "-segment_format_options",
+                            "movflags=+faststart", str(pattern)], capture_output=True, timeout=600, check=True)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"mp4 segmenting failed: {e}")
+            return []
+        parts = sorted(Path(td).glob("part_*.mp4"))
+        return [(p.read_bytes(), f"{stem}_part{i + 1}of{len(parts)}.mp4") for i, p in enumerate(parts)]
+
+
+def webm_audio_to_m4a(audio: bytes) -> Optional[bytes]:
+    """sendAudio plays MP3/M4A — not webm/opus. None when ffmpeg is missing or fails."""
+    import subprocess
+    import tempfile
+
+    if not audio or not _ffmpeg_ok():
+        return None
+    with tempfile.TemporaryDirectory() as td:
+        src, out = Path(td) / "a.webm", Path(td) / "a.m4a"
+        src.write_bytes(audio)
+        try:
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(src), "-vn", "-c:a", "aac", "-b:a", "64k", str(out)],
+                           capture_output=True, timeout=300, check=True)
+            return out.read_bytes()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"webm→m4a failed: {e}")
+            return None
+
+
 def _split_bytes(data: bytes, chunk_size_mb: int = MAX_TELEGRAM_FILE_MB) -> List[bytes]:
     """اگر data > chunk_size_mb، آن را به chunks تقسیم می‌کند.
 
@@ -728,7 +797,12 @@ async def finalize_recording_session(
     # getDisplayMedia + canvas crop, producing the same webm chunk
     # format as mode B. The pipeline below is identical for both.
     video_bytes = _assemble_video_from_chunks(session.video_dir)
-    if video_bytes:
+    _mp4_parts = await asyncio.to_thread(webm_to_mp4_parts, video_bytes, MAX_TELEGRAM_FILE_MB,
+                                         f"recording_{session.session_id[:8]}") if video_bytes else []
+    if _mp4_parts:
+        for data_, name_ in _mp4_parts:
+            media_items.append((data_, name_, "video"))
+    elif video_bytes:
         chunks = _split_bytes(video_bytes, MAX_TELEGRAM_FILE_MB)
         for i, ch in enumerate(chunks):
             name = (
@@ -764,7 +838,10 @@ async def finalize_recording_session(
     # audio (جداگانه، اگر موجود)
     from .inspector_recording_processor import _assemble_audio
     audio_bytes = _assemble_audio(session.audio_dir)
-    if audio_bytes and len(audio_bytes) >= 1024:
+    _m4a = await asyncio.to_thread(webm_audio_to_m4a, audio_bytes) if audio_bytes and len(audio_bytes) >= 1024 else None
+    if _m4a:
+        media_items.append((_m4a, f"recording_{session.session_id[:8]}.m4a", "audio"))
+    elif audio_bytes and len(audio_bytes) >= 1024:
         # audio احتمالاً کوچک است، تقسیم لازم نیست در عمل
         chunks = _split_bytes(audio_bytes, MAX_TELEGRAM_FILE_MB)
         for i, ch in enumerate(chunks):

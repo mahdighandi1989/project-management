@@ -37,3 +37,25 @@ def test_no_video_no_frames(tmp_path):
 
     s = SimpleNamespace(frames_dir=tmp_path / "f", video_dir=tmp_path / "v")
     assert extract_keyframes_from_video(s) == 0
+
+
+def test_webm_becomes_playable_mp4_parts(tmp_path):
+    from app.services.inspector_recording_finalize import webm_to_mp4_parts
+
+    src = tmp_path / "v.webm"
+    _webm(src, seconds=6)
+    parts = webm_to_mp4_parts(src.read_bytes(), max_mb=50, stem="rec")
+    assert len(parts) == 1 and parts[0][1] == "rec.mp4" and parts[0][0][4:8] == b"ftyp"
+    # a tiny limit ⇒ several TIME segments, each a valid mp4 of its own
+    many = webm_to_mp4_parts(src.read_bytes(), max_mb=0, stem="rec")  # 0 MB ⇒ forces splitting
+    assert all(p[0][4:8] == b"ftyp" for p in many)
+
+
+def test_audio_to_m4a(tmp_path):
+    from app.services.inspector_recording_finalize import webm_audio_to_m4a
+
+    a = tmp_path / "a.webm"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                    "-c:a", "libopus", str(a)], check=True, timeout=60)
+    out = webm_audio_to_m4a(a.read_bytes())
+    assert out and out[4:8] == b"ftyp"
