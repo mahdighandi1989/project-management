@@ -387,12 +387,19 @@ export default function InspectorBridge() {
     const attachOverlay = (node: Element) => {
       if (__attachedOverlays.has(node)) return;
       __attachedOverlays.add(node);
-      sendToInspector("error-overlay", {
-        elementInfo:
-          "\u0644\u0627\u06CC\u0647 \u062E\u0637\u0627: " +
-          (node.textContent || "").slice(0, 200),
-        level: "error",
-      });
+      // (2026-11-15, PM-INS-0012) any big fixed/absolute layer (a modal, the agent panel) used to be logged as
+      // «لایه خطا»; only a layer that LOOKS like an error (dev error overlay or error words) is reported now.
+      const __txt = (node.textContent || "").slice(0, 400);
+      const __tag = ((node as HTMLElement).tagName || "").toLowerCase() + " " + ((node as HTMLElement).id || "") + " " + String((node as HTMLElement).className || "");
+      if (/nextjs-portal|vite-error-overlay|webpack-dev-server-client-overlay|react-error-overlay/i.test(__tag) ||
+          /(unhandled|runtime error|exception|traceback|stack trace|failed to compile|application error|internal server error|\b5\d\d\b|خطا|ناموفق)/i.test(__txt)) {
+        sendToInspector("error-overlay", {
+          elementInfo:
+            "\u0644\u0627\u06CC\u0647 \u062E\u0637\u0627: " +
+            __txt.slice(0, 200),
+          level: "error",
+        });
+      }
       node.addEventListener(
         "click",
         (e: Event) => {

@@ -5763,7 +5763,8 @@ INSPECTOR_BRIDGE_SCRIPT = '''
     if (__attachedOverlays.has(node)) return;
     __attachedOverlays.add(node);
     var overlayText = (node.textContent || '').slice(0, 500);
-    sendToInspector('error-overlay', {
+    // (2026-11-15, PM-INS-0012) only a layer that looks like an error is «لایه خطا» — not every modal/panel
+    if ((/nextjs-portal|vite-error-overlay|webpack-dev-server-client-overlay|react-error-overlay/i.test(String(node.tagName||'') + ' ' + String(node.id||'') + ' ' + String(node.className||'')) || /(unhandled|runtime error|exception|traceback|stack trace|failed to compile|application error|internal server error|خطا|ناموفق)/i.test(overlayText))) sendToInspector('error-overlay', {
       target: node.tagName,
       elementInfo: 'لایه خطا شناسایی شد: ' + overlayText.slice(0, 200),
       position: { xPercent: 50, yPercent: 50 },
@@ -6052,7 +6053,7 @@ if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
   const attachOverlay = (node) => {
     if (__attachedOverlays.has(node)) return;
     __attachedOverlays.add(node);
-    sendToInspector('error-overlay', { elementInfo: 'لایه خطا: ' + (node.textContent||'').slice(0,200), level: 'error' });
+    if ((/nextjs-portal|vite-error-overlay|webpack-dev-server-client-overlay|react-error-overlay/i.test(String(node.tagName||'') + ' ' + String(node.id||'') + ' ' + String(node.className||'')) || /(unhandled|runtime error|exception|traceback|stack trace|failed to compile|application error|internal server error|خطا|ناموفق)/i.test((node.textContent||'').slice(0,400)))) sendToInspector('error-overlay', { elementInfo: 'لایه خطا: ' + (node.textContent||'').slice(0,200), level: 'error' });
     node.addEventListener('click', (e) => {
       sendToInspector('click', { elementInfo: getElementInfo(e.target) + ' (overlay)', position: getPositionPercent(e) });
     }, true);
@@ -6417,7 +6418,7 @@ export default function InspectorBridge() {
     const attachOverlay = (node) => {
       if (__attachedOverlays.has(node)) return;
       __attachedOverlays.add(node);
-      sendToInspector("error-overlay", { elementInfo: "لایه خطا: " + (node.textContent||"").slice(0,200), level: "error" });
+      if ((/nextjs-portal|vite-error-overlay|webpack-dev-server-client-overlay|react-error-overlay/i.test(String(node.tagName||'') + ' ' + String(node.id||'') + ' ' + String(node.className||'')) || /(unhandled|runtime error|exception|traceback|stack trace|failed to compile|application error|internal server error|خطا|ناموفق)/i.test((node.textContent||'').slice(0,400)))) sendToInspector("error-overlay", { elementInfo: "لایه خطا: " + (node.textContent||"").slice(0,200), level: "error" });
       node.addEventListener("click", (e) => {
         sendToInspector("click", { elementInfo: getElementInfo(e.target) + " (overlay)", position: getPositionPercent(e) });
       }, true);

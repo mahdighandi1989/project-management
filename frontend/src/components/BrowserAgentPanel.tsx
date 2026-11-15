@@ -96,7 +96,17 @@ export default function BrowserAgentPanel({ projectId, defaultUrl, onSendToChat 
     try {
       const r = await fetch(`${BASE}/runs`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task, start_url: url, allowed_hosts: hosts.split(/[\s,،]+/).filter(Boolean), model_id: modelId || null, project_id: projectId, max_steps: maxSteps, use_login: useLogin }),
+        body: JSON.stringify((() => {
+          // (2026-11-15, PM-INS-0012) the agent on THIS app: sign in with the current session (no Auth Recipe needed)
+          // and let it reach this app's API host, or every data call is blocked and the page looks logged out
+          let _same = false;
+          let _apiHost = '';
+          try { _same = new URL(url).host === window.location.host; _apiHost = new URL(API_BASE).host; } catch { /* bad url */ }
+          const _hosts = hosts.split(/[\s,،]+/).filter(Boolean);
+          if (_same && _apiHost && !_hosts.includes(_apiHost)) _hosts.push(_apiHost);
+          return { task, start_url: url, allowed_hosts: _hosts, model_id: modelId || null, project_id: projectId,
+                   max_steps: maxSteps, use_login: useLogin, use_session: useLogin && _same };
+        })()),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d?.detail || `HTTP ${r.status}`);

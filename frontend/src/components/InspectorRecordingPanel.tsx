@@ -16,6 +16,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 const API_BASE =
   (typeof process !== 'undefined' ? (process as any).env?.NEXT_PUBLIC_API_URL : '') || '';
@@ -284,10 +285,16 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
 
   const openPicker = useCallback(async () => {
     setErrorMsg(null);
+    // (2026-11-15, PM-INS-0012) the window opens FIRST — it used to wait for the microphone permission prompt, and a
+    // pending / silently blocked prompt meant the owner's click showed nothing at all. The mic check fills in after.
+    setPhase('picker');
     // درخواست permission میکروفون برای enumerate (labels فقط با permission)
     let micPermissionOk = false;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await Promise.race([
+        navigator.mediaDevices.getUserMedia({ audio: true }),
+        new Promise<MediaStream>((_, rej) => setTimeout(() => rej(new Error('mic permission timeout')), 15000)),
+      ]);
       stream.getTracks().forEach((t) => t.stop()); // فقط برای permission
       micPermissionOk = true;
     } catch {
@@ -309,7 +316,6 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
     if (!micPermissionOk || mics.length === 0) {
       setAudioConfig((prev) => ({ ...prev, mic: false, micDeviceId: null }));
     }
-    setPhase('picker');
   }, []);
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -1107,6 +1113,9 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
         ضبط
       </button>
 
+      {/* (2026-11-15, PM-INS-0012) every window/status bar goes to <body>: inside the screen toolbar a transformed or
+          overflow-clipped ancestor made the «fixed» modal invisible — the click «did nothing» */}
+      {typeof document !== 'undefined' && createPortal(<>
       {/* Picker modal */}
       {phase === 'picker' && (
         <div className="fixed inset-0 bg-black/60 z-[9999] flex items-center justify-center p-4">
@@ -1447,6 +1456,7 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
           </div>
         </div>
       )}
+      </>, document.body)}
     </>
   );
 }

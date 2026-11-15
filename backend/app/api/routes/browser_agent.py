@@ -7,7 +7,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -29,6 +29,11 @@ class RunIn(BaseModel):
     project_id: Optional[str] = None
     max_steps: int = BA.MAX_STEPS_DEFAULT
     use_login: bool = True  # sign in first with the project's Auth Recipe («اتاق فرمان» card), when it has one
+    # (2026-11-15, PM-INS-0012) the start page is THIS app (same site as the caller's page): with no Auth Recipe, sign the
+    # agent in with the caller's own session (their bearer token → the app's localStorage key in the agent's throwaway
+    # browser context). Never a broader identity than the person who pressed «شروع».
+    use_session: bool = False
+    session_storage_key: str = "pm.auth.token"
 
 
 class Reply(BaseModel):
@@ -43,8 +48,22 @@ async def models() -> List[Dict[str, Any]]:
     return [{**m, "vision": BA.model_supports_vision(m["id"])} for m in available_models()]
 
 
+def _own_session_state(request: Request, start_url: str, key: str) -> Optional[dict]:
+    """storage_state carrying the caller's own token for the start page's origin — only when the start page is the
+    same site the request came from (Origin header), so a token never goes to a third-party site."""
+    from urllib.parse import urlparse
+
+    auth = request.headers.get("authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    origin = request.headers.get("origin", "") or ""
+    su, ou = urlparse(start_url), urlparse(origin)
+    if not token or not ou.netloc or su.netloc.lower() != ou.netloc.lower() or not re.match(r"^[\w.\-]{1,64}$", key or ""):
+        return None
+    return {"cookies": [], "origins": [{"origin": f"{su.scheme}://{su.netloc}", "localStorage": [{"name": key, "value": token}]}]}
+
+
 @router.post("/runs")
-async def start(body: RunIn) -> Dict[str, Any]:
+async def start(body: RunIn, request: Request) -> Dict[str, Any]:
     if not _enabled():
         raise HTTPException(503, "عاملِ مرورگر خاموش است (BROWSER_AGENT_ENABLED=0)")
     if not re.match(r"^https?://", body.start_url):
@@ -62,6 +81,13 @@ async def start(body: RunIn) -> Dict[str, Any]:
     run = BA.new_run(body.task, body.start_url, body.allowed_hosts, model_id=model_id, project_id=body.project_id)
     model = await BA.default_model(model_id)
     state, login_note = (await BA.login_state_for(body.start_url)) if body.use_login else (None, "")
+    if body.use_login and state is None:
+        _own = _own_session_state(request, body.start_url, body.session_storage_key) if body.use_session else None
+        if _own is not None:
+            state, login_note = _own, "🔑 با نشستِ واردشدهٔ خودِ شما (همین مرورگر) وارد شد — Auth Recipe لازم نشد"
+        elif not login_note:
+            login_note = ("⚠️ برای این سایت Auth Recipe ای در «اتاق فرمان» نیست — عامل بدونِ ورود شروع کرد؛ "
+                          "اگر صفحه ورود خواست، Recipe را در کارتِ همان پروژه بگذارید")
     if login_note:
         run.summary = login_note
     t = asyncio.create_task(BA.run_agent(run, model, vision=BA.model_supports_vision(model_id), max_steps=body.max_steps,
