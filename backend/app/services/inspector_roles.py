@@ -227,8 +227,9 @@ def apply_temp_enables(model_ids: List[str]) -> List[Dict]:
                     "prev_enabled": int(row.enabled or 0),
                     "prev_temp": int(getattr(row, "temporary_enabled", 0) or 0),
                 })
+                # (2026-11-15) the flag means «switched on by us»: a model that was already on is not marked temporary
+                row.temporary_enabled = 0 if int(row.enabled or 0) else 1
                 row.enabled = 1
-                row.temporary_enabled = 1
             else:
                 revert.append({"model_id": mid, "existed": False})
                 db.add(ModelSettings(model_id=mid, enabled=1, temporary_enabled=1))

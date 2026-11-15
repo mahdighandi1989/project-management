@@ -146,7 +146,12 @@ async def temp_revert_model(model_id: str, trigger: str = "") -> Dict[str, Any]:
 
     async with _lock:
         info = _active.pop(model_id, None)
-        original_enabled = info.get("original_enabled", False) if info else False
+        if info is None:
+            # 🩹 (2026-11-15) THE «all models are gone» bug: with no record of the original state (a restart in between,
+            # or a second revert of the same model) this used to assume «it was off» and switch the model OFF — models
+            # the owner had switched on disappeared one by one. Without a record we change nothing.
+            return {"model_id": model_id, "reverted": False, "reason": "not in active list — left as it is"}
+        original_enabled = bool(info.get("original_enabled", False))
         db = SessionLocal()
         try:
             s = _db_setting(db, model_id)
@@ -205,9 +210,8 @@ async def cleanup_stale_temp_activations_on_boot() -> int:
             # بهتر است خودش دوباره enable کند، پس فعلاً temporary_enabled=0
             # می‌کنیم ولی enabled را دست نمی‌زنیم (محافظت در برابر حذف ناخواسته).
             s.temporary_enabled = 0
-            # 🩹 (2026-11-15) temporary_enabled=1 ⇔ the model was OFF and we switched it on; the revert never happened
-            # (crash/restart) ⇒ switch it off again. It used to stay on for good.
-            s.enabled = 0
+            # (2026-11-15) enabled is NOT touched: older code and inspector_roles set this flag on models that were
+            # already on, so «flag ⇒ switch off» switched off the owner's own models (reverted the same day).
             n += 1
         if n:
             db.commit()
