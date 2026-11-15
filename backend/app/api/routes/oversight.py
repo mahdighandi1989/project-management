@@ -1,7 +1,7 @@
 """
 Oversight API
 =============
-API routes برای مرکز نظارت و مدیریت پروژه‌های گیت‌هاب.
+API routes برای اتاق فرمان و مدیریت پروژه‌های گیت‌هاب.
 """
 
 import asyncio
@@ -2029,7 +2029,7 @@ async def create_task_from_inspector_recording(payload: FromInspectorRecordingRe
 async def get_inspector_context(task_id: str):
     """خواندن inspector_context کامل (شامل screenshots base64) برای یک تسک.
 
-    استفاده: نمایش جزئیات در UI مرکز نظارت یا fetch توسط مدل اجراکننده.
+    استفاده: نمایش جزئیات در UI اتاق فرمان یا fetch توسط مدل اجراکننده.
     """
     from ...services.oversight_inspector_bridge import read_inspector_context
     data = read_inspector_context(task_id)

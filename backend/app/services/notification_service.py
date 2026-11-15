@@ -311,7 +311,7 @@ EVENT_REGISTRY: Dict[str, Dict[str, Any]] = {
     # 🆕 (Inspector → Oversight Bridge) تسک‌های آمده از بازرس ویژه
     "task_from_inspector": {
         "label": "📥 تسک از بازرس ویژه",
-        "help": "وقتی کاربر از بازرس ویژه (در /projects) درخواست را به مرکز نظارت ارسال می‌کند",
+        "help": "وقتی کاربر از بازرس ویژه (در /projects) درخواست را به اتاق فرمان ارسال می‌کند",
         "default_enabled": True,
         "default_sound": True,
         "icon": "📥",
@@ -7824,14 +7824,14 @@ class NotificationService:
                 kb_rows.append([{"text": "👁 GitHub repo", "url": repo_url}])
             if base:
                 kb_rows.append([
-                    {"text": "🏠 مرکز نظارت", "url": f"{base}/oversight"},
+                    {"text": "🏠 اتاق فرمان", "url": f"{base}/oversight"},
                     {"text": "📋 تسک‌ها", "url": f"{base}/oversight?tab=tasks"},
                 ])
             kb = {"inline_keyboard": kb_rows} if kb_rows else None
 
             tech_label = ", ".join(technologies) or "(پیش‌فرض)"
             status_text = (
-                "✓ خودکار به مرکز نظارت اضافه شد\n"
+                "✓ خودکار به اتاق فرمان اضافه شد\n"
                 "✓ autonomy: auto (scan خودکار)\n"
                 "✓ execution: manual (apply با کلیک شما)\n"
                 "✓ scan_depth: deep (تمام 12 pass)\n"
@@ -7846,7 +7846,7 @@ class NotificationService:
                 f"🔧 تکنولوژی: {tech_label}\n"
                 f"📄 فایل‌های ساخته‌شده: *{files_count}*\n\n"
                 f"💡 *کارکرد:*\n_{description[:300]}_\n\n"
-                f"👁 *وضعیت در مرکز نظارت:*\n{status_text}\n\n"
+                f"👁 *وضعیت در اتاق فرمان:*\n{status_text}\n\n"
                 f"#project_created #{project_type} #{name.replace('-', '_').replace(' ', '_')}",
                 silent=False,
                 reply_markup=kb,
@@ -8263,7 +8263,7 @@ class NotificationService:
                 kb_rows.append([{"text": "👁 GitHub repo", "url": repo_url}])
             if base:
                 kb_rows.append([
-                    {"text": "🏠 مرکز نظارت", "url": f"{base}/oversight"},
+                    {"text": "🏠 اتاق فرمان", "url": f"{base}/oversight"},
                     {"text": "📋 تسک‌ها", "url": f"{base}/oversight?tab=tasks"},
                 ])
             kb = {"inline_keyboard": kb_rows} if kb_rows else None
@@ -8281,7 +8281,7 @@ class NotificationService:
                 f"• فایل‌های تولیدشده: *{files_count}*\n"
                 f"• مدت زمان: *{elapsed_str}*\n\n"
                 f"💡 *کارکرد:*\n_{(structured.get('structured_description') or idea)[:300]}_\n\n"
-                f"👁 *وضعیت در مرکز نظارت:*\n"
+                f"👁 *وضعیت در اتاق فرمان:*\n"
                 f"✓ خودکار به watched اضافه شد\n"
                 f"✓ autonomy: auto · execution: manual\n\n"
                 f"#project_created #{project_type} #{name.replace('-', '_')} #{elapsed_str.replace(' ', '')}",

@@ -1,7 +1,7 @@
 """
 Oversight Service
 =================
-سرویس مرکز نظارت و مدیریت پروژه‌های گیت‌هاب
+سرویس اتاق فرمان و مدیریت پروژه‌های گیت‌هاب
 
 - ذخیره‌سازی JSON-based در backend/storage/oversight/
 - یکپارچگی با AI Manager موجود
@@ -7784,8 +7784,8 @@ AC = «طراحی شیک‌تر باشد»:
             message = await self.build_followup_for_task(task, last_report)
         else:
             message = (
-                f"# اجرای تسک از مرکز نظارت\n\n"
-                f"این تسک از مرکز نظارت برای اجرا فرستاده شده. "
+                f"# اجرای تسک از اتاق فرمان\n\n"
+                f"این تسک از اتاق فرمان برای اجرا فرستاده شده. "
                 f"لطفاً action تولید کنید تا apply-action کد را اعمال کند.\n\n"
                 f"## تسک:\n{task.title}\n\n"
                 f"## prompt:\n{task.prompt[:5000]}"
@@ -7926,7 +7926,7 @@ AC = «طراحی شیک‌تر باشد»:
     async def sync_to_inspector_memory_training(
         self, watched_id: str
     ) -> Dict[str, Any]:
-        """🆕 (C7v2 Section 4) سینک خودکار memory و training از مرکز نظارت.
+        """🆕 (C7v2 Section 4) سینک خودکار memory و training از اتاق فرمان.
 
         منابع:
           - memory ← watched.user_notes + OversightCodex (تنها زمانی که
@@ -8634,7 +8634,7 @@ AC = «طراحی شیک‌تر باشد»:
         include_archived: bool = False,
     ) -> List[Dict[str, Any]]:
         """خواندن dynamic_fields از تمام پروژه‌های local و تبدیل آنها به ساختار
-        تسک‌مانند برای نمایش در مرکز نظارت.
+        تسک‌مانند برای نمایش در اتاق فرمان.
 
         فیلدهایی که شرط دارند:
           - action_type ∈ {'github_commit', 'github_multi_commit', 'file_edit'}

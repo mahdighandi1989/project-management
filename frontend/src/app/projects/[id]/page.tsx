@@ -376,7 +376,7 @@ export default function ProjectDetailPage() {
     logs_checked?: number;
     error_logs_count?: number;
     checked_logs?: Array<{ level: string; message: string; timestamp: string | null; service_id?: string }>;
-    // 🆕 (Inspector → Oversight) برای پیام‌هایی که به مرکز نظارت ارسال شده‌اند
+    // 🆕 (Inspector → Oversight) برای پیام‌هایی که به اتاق فرمان ارسال شده‌اند
     sent_to_oversight?: boolean;
     oversight_task_id?: string;
     oversight_url?: string;
@@ -684,7 +684,7 @@ export default function ProjectDetailPage() {
   // 🆕 (inspector temp-activate) — مدل‌های Vision که برای این درخواست
   // موقتاً فعال شدند؛ پس از پایان (success یا error) auto-revert می‌شوند.
   const [tempActivatedVisionModels, setTempActivatedVisionModels] = useState<string[]>([]);
-  // 🆕 (Inspector → Oversight) دو تیک جداگانه برای ارسال به مرکز نظارت
+  // 🆕 (Inspector → Oversight) دو تیک جداگانه برای ارسال به اتاق فرمان
   const [sendToOversightChat, setSendToOversightChat] = useState(false);
   const [sendToOversightVisual, setSendToOversightVisual] = useState(false);
   const [sendToOversightLoading, setSendToOversightLoading] = useState(false);
@@ -752,7 +752,7 @@ export default function ProjectDetailPage() {
   const [generalInstructions, setGeneralInstructions] = useState<Array<{id: string; title: string; content: string; icon: string; prompt_detail?: string}>>([]);
   const [generalInstructionsOpen, setGeneralInstructionsOpen] = useState(false);
 
-  // 🔗 (C7 Bridge Phase 3) — اتصال تب inspector به یک تسک از مرکز نظارت.
+  // 🔗 (C7 Bridge Phase 3) — اتصال تب inspector به یک تسک از اتاق فرمان.
   // وقتی صفحه با ?load_task=ID باز می‌شود، این state ها پر می‌شوند تا:
   //   - smart-chat با task_id فراخوانی شود
   //   - کارت اطلاعاتی تسک در بالای chat نمایش داده شود
@@ -1140,7 +1140,7 @@ export default function ProjectDetailPage() {
   const [createRenderLoading, setCreateRenderLoading] = useState(false);
 
   // ==========================================================
-  // 🔗 Oversight bridge — وضعیت تسک‌های مرکز نظارت برای این پروژه
+  // 🔗 Oversight bridge — وضعیت تسک‌های اتاق فرمان برای این پروژه
   // ==========================================================
   const [oversightBridgeSummary, setOversightBridgeSummary] = useState<{
     project_id: string;
@@ -5238,7 +5238,7 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
   };
 
   // 🆕 ارسال پیام به AI
-  // 🆕 (Inspector → Oversight) ارسال درخواست به مرکز نظارت به‌جای اجرای مدل
+  // 🆕 (Inspector → Oversight) ارسال درخواست به اتاق فرمان به‌جای اجرای مدل
   const sendToOversight = async (
     mode: 'chat' | 'visual_debug',
     overrideMessage?: string,
@@ -5271,7 +5271,7 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
     setInspectorChatMessages(prev => [...prev, {
       id: `sending_oversight_${Date.now()}`,
       role: 'system' as const,
-      content: `⏳ در حال ساخت پرامپت غنی و ارسال به مرکز نظارت...${mode === 'visual_debug' ? ` (${visualDebugScreenshots.length} عکس با vision model به‌صورت موازی توصیف می‌شود)${payloadSizeWarning}` : ''}`,
+      content: `⏳ در حال ساخت پرامپت غنی و ارسال به اتاق فرمان...${mode === 'visual_debug' ? ` (${visualDebugScreenshots.length} عکس با vision model به‌صورت موازی توصیف می‌شود)${payloadSizeWarning}` : ''}`,
       timestamp: new Date(),
     }]);
 
@@ -5345,7 +5345,7 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
         setInspectorChatMessages(prev => [...prev, {
           id: `oversight_err_${Date.now()}`,
           role: 'system' as const,
-          content: `❌ خطا در ارسال به مرکز نظارت: ${errMsg}`,
+          content: `❌ خطا در ارسال به اتاق فرمان: ${errMsg}`,
           timestamp: new Date(),
         }]);
         setSendToOversightLoading(false);
@@ -5370,7 +5370,7 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
       const sysMsg = {
         id: `oversight_ack_${Date.now() + 1}`,
         role: 'system' as const,
-        content: `✅ *به مرکز نظارت ارسال شد*\n\n📁 ${data.project_full_name}\n📋 تسک ID: \`${data.task_id?.slice(0, 8) || '?'}…\`${data.vision_descriptions_count ? `\n📸 ${data.vision_descriptions_count} عکس با vision توصیف شد` : ''}${taskExcerpt}\n\n🔗 [📋 مشاهدهٔ تسک در مرکز نظارت](${data.oversight_url})\n\n⏳ *هیچ مدلی روی این پیام trigger نشد* — برای اجرای مدل، روی دکمهٔ «🔍 بررسی همین پرامپت در چت» در پیام بالا کلیک کنید.`,
+        content: `✅ *به اتاق فرمان ارسال شد*\n\n📁 ${data.project_full_name}\n📋 تسک ID: \`${data.task_id?.slice(0, 8) || '?'}…\`${data.vision_descriptions_count ? `\n📸 ${data.vision_descriptions_count} عکس با vision توصیف شد` : ''}${taskExcerpt}\n\n🔗 [📋 مشاهدهٔ تسک در اتاق فرمان](${data.oversight_url})\n\n⏳ *هیچ مدلی روی این پیام trigger نشد* — برای اجرای مدل، روی دکمهٔ «🔍 بررسی همین پرامپت در چت» در پیام بالا کلیک کنید.`,
         timestamp: new Date(),
         oversight_task_id: data.task_id,
       } as any;
@@ -5405,7 +5405,7 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
       setInspectorChatMessages(prev => [...prev, {
         id: `oversight_err_${Date.now()}`,
         role: 'system' as const,
-        content: `❌ خطای شبکه در ارسال به مرکز نظارت: ${e.message || e}`,
+        content: `❌ خطای شبکه در ارسال به اتاق فرمان: ${e.message || e}`,
         timestamp: new Date(),
       }]);
       setSendToOversightLoading(false);
@@ -9809,7 +9809,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                     `• ${oversightBridgeSummary?.pending || 0} در انتظار\n` +
                     `• ${oversightBridgeSummary?.in_review || 0} در حال بررسی\n` +
                     `• ${oversightBridgeSummary?.done || 0} تکمیل‌شده\n` +
-                    `• ${oversightExternalCount} فیلد قابل verify در مرکز نظارت\n\n` +
+                    `• ${oversightExternalCount} فیلد قابل verify در اتاق فرمان\n\n` +
                     `کلیک: باز کردن /oversight با فیلتر این پروژه`
                   }
                 >
@@ -11371,7 +11371,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                                   href={`/oversight?project=${encodeURIComponent(projectId as string)}`}
                                   onClick={(e) => e.stopPropagation()}
                                   title={
-                                    'این فیلد از طریق مرکز نظارت ساخته شده.\n' +
+                                    'این فیلد از طریق اتاق فرمان ساخته شده.\n' +
                                     'کلیک: باز کردن /oversight با فیلتر این پروژه'
                                   }
                                   className="px-2 py-0.5 bg-cyan-100 dark:bg-cyan-900/40 text-cyan-700 dark:text-cyan-300 text-xs rounded hover:bg-cyan-200 dark:hover:bg-cyan-900/60"
@@ -13719,13 +13719,13 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
             {linkedTaskId && linkedTaskData?.task && (
               <div
                 className="rounded-lg border-2 border-indigo-400 dark:border-indigo-600 bg-indigo-50 dark:bg-indigo-900/20 p-3 animate-in slide-in-from-top-2 fade-in-0 duration-300"
-                title="این تسک از مرکز نظارت به session بازرس ویژه متصل است. system prompt شامل AC، remaining_parts، done_parts، target_files و scan_metadata می‌شود. اگر می‌خواهید chat آزاد باشد، روی «قطع اتصال» کلیک کنید."
+                title="این تسک از اتاق فرمان به session بازرس ویژه متصل است. system prompt شامل AC، remaining_parts، done_parts، target_files و scan_metadata می‌شود. اگر می‌خواهید chat آزاد باشد، روی «قطع اتصال» کلیک کنید."
               >
                 <div className="flex items-center justify-between gap-2 mb-2">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span
                       className="px-2 py-0.5 bg-indigo-600 text-white rounded text-xs cursor-help"
-                      title="این تسک از مرکز نظارت به session بازرس ویژه متصل است. system prompt شامل AC، remaining_parts، done_parts، target_files و scan_metadata می‌شود."
+                      title="این تسک از اتاق فرمان به session بازرس ویژه متصل است. system prompt شامل AC، remaining_parts، done_parts، target_files و scan_metadata می‌شود."
                     >
                       🔗 متصل به تسک
                     </span>
@@ -15346,7 +15346,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                         {(msg as any).sent_to_oversight && (
                           <div className="mb-1.5 flex items-center gap-1.5 flex-wrap">
                             <span className="inline-block text-[9px] bg-cyan-400/30 text-cyan-100 px-1.5 py-0.5 rounded-full">
-                              📤 ارسال به مرکز نظارت ({(msg as any).oversight_mode === 'visual_debug' ? 'بصری' : 'چت'})
+                              📤 ارسال به اتاق فرمان ({(msg as any).oversight_mode === 'visual_debug' ? 'بصری' : 'چت'})
                             </span>
                             {(msg as any).oversight_url && (
                               <a
@@ -15367,7 +15367,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                                   sendInspectorChat(msg.content, false, true);
                                 }}
                                 className="text-[10px] px-1.5 py-0.5 bg-blue-500 hover:bg-blue-600 text-white rounded"
-                                title="مدل را روی همین پرامپت در چت اجرا کن (مستقل از مرکز نظارت)"
+                                title="مدل را روی همین پرامپت در چت اجرا کن (مستقل از اتاق فرمان)"
                               >
                                 🔍 بررسی همین پرامپت در چت
                               </button>
@@ -16794,7 +16794,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                         })}
                       </div>
 
-                      {/* 🆕 (Inspector → Oversight) تیک ارسال به مرکز نظارت — حالت بصری */}
+                      {/* 🆕 (Inspector → Oversight) تیک ارسال به اتاق فرمان — حالت بصری */}
                       <label className="flex items-start gap-1.5 text-[10px] text-purple-700 dark:text-purple-300 cursor-pointer mb-1.5 p-1.5 rounded bg-purple-50 dark:bg-purple-900/30 border border-purple-200 dark:border-purple-700/50">
                         <input
                           type="checkbox"
@@ -16804,7 +16804,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                           disabled={sendToOversightLoading}
                         />
                         <span className="leading-tight">
-                          📤 <strong>ارسال به مرکز نظارت</strong> — به‌جای تحلیل بصری در inspector، یک تسک جدید در /oversight ذیل این پروژه بساز.
+                          📤 <strong>ارسال به اتاق فرمان</strong> — به‌جای تحلیل بصری در inspector، یک تسک جدید در /oversight ذیل این پروژه بساز.
                           عکس‌ها با vision model به متن غنی تبدیل می‌شوند تا مدل‌های غیر بصری هم بفهمند.
                         </span>
                       </label>
@@ -16815,7 +16815,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                           value={visualDebugDescription}
                           onChange={(e) => setVisualDebugDescription(e.target.value)}
                           placeholder={sendToOversightVisual
-                            ? 'توضیح درخواست (الزامی برای مرکز نظارت)...'
+                            ? 'توضیح درخواست (الزامی برای اتاق فرمان)...'
                             : 'توضیح اختیاری درباره مشکل... (مثلاً: دکمه لاگین کار نمیکنه)'}
                           className="flex-1 text-xs bg-white dark:bg-gray-700 border border-purple-200 dark:border-purple-700 rounded-lg px-3 py-1.5 resize-none focus:outline-none focus:ring-1 focus:ring-purple-400"
                           rows={2}
@@ -16885,7 +16885,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                     </div>
                   )}
 
-                  {/* 🆕 (Inspector → Oversight) تیک ارسال به مرکز نظارت — حالت چت */}
+                  {/* 🆕 (Inspector → Oversight) تیک ارسال به اتاق فرمان — حالت چت */}
                   <label className="flex items-start gap-1.5 text-[10px] text-cyan-700 dark:text-cyan-300 cursor-pointer mb-1.5 p-1.5 rounded bg-cyan-50 dark:bg-cyan-900/30 border border-cyan-200 dark:border-cyan-700/50">
                     <input
                       type="checkbox"
@@ -16895,7 +16895,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                       disabled={sendToOversightLoading || inspectorOpLock}
                     />
                     <span className="leading-tight">
-                      📤 <strong>ارسال به مرکز نظارت</strong> — به‌جای اجرای مدل در inspector، یک تسک جدید در /oversight ذیل این پروژه بساز.
+                      📤 <strong>ارسال به اتاق فرمان</strong> — به‌جای اجرای مدل در inspector، یک تسک جدید در /oversight ذیل این پروژه بساز.
                       درخواست به پرامپت غنی (با URLs و لاگ‌ها) تبدیل و ذخیره می‌شود — بعداً می‌توانید روی «🔍 بررسی همین پرامپت در چت» کلیک کنید.
                     </span>
                   </label>
@@ -16948,7 +16948,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
               </div>
             </div>
 
-            {/* 🔗 (C7 Bridge Phase 3) — پنل تسک‌های مرکز نظارت برای این پروژه */}
+            {/* 🔗 (C7 Bridge Phase 3) — پنل تسک‌های اتاق فرمان برای این پروژه */}
             <div className="mt-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden" dir="rtl">
               <button
                 onClick={() => {
@@ -16962,7 +16962,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                 <div className="flex items-center gap-3">
                   <span className="text-2xl">📌</span>
                   <div className="text-right">
-                    <h3 className="font-bold text-sm text-cyan-800 dark:text-cyan-200">تسک‌های این پروژه از مرکز نظارت</h3>
+                    <h3 className="font-bold text-sm text-cyan-800 dark:text-cyan-200">تسک‌های این پروژه از اتاق فرمان</h3>
                     <p className="text-xs text-cyan-600 dark:text-cyan-400">
                       {projectTasksPanel.length > 0
                         ? `${projectTasksPanel.length} تسک — کلیک «ارسال به چت» تا با کانتکست کامل کار کنی`
@@ -16995,7 +16995,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                 <div className="px-3 py-3 max-h-[480px] overflow-y-auto space-y-2">
                   {projectTasksPanel.length === 0 && (
                     <p className="text-xs text-gray-500 text-center py-4">
-                      هیچ تسکی برای این پروژه در مرکز نظارت یافت نشد.
+                      هیچ تسکی برای این پروژه در اتاق فرمان یافت نشد.
                     </p>
                   )}
                   {projectTasksPanel.map((t: any) => (
@@ -17026,7 +17026,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                               await loadLinkedTask(t.id);
                               // ارسال یک پیام شروع‌کننده به چت
                               setTimeout(() => {
-                                const msg = `این تسک از مرکز نظارت را انجام بده:\n\n${t.title}\n\nلطفاً action_plan تولید کن.`;
+                                const msg = `این تسک از اتاق فرمان را انجام بده:\n\n${t.title}\n\nلطفاً action_plan تولید کن.`;
                                 sendInspectorChat(msg, false);
                               }, 300);
                             }}
@@ -17190,7 +17190,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                       ))}
                     </div>
                     {/* 🆕 (C7v2 Section 1) — دکمه افزودن فیلد دستی حذف شد.
-                        فیلدهای جدید فقط از طریق auto-sync مرکز نظارت ساخته می‌شوند. */}
+                        فیلدهای جدید فقط از طریق auto-sync اتاق فرمان ساخته می‌شوند. */}
                     {/* 🆕 (C7v2 Section 3) — دکمهٔ سنجش اثر memory/training */}
                     <button
                       onClick={async () => {
@@ -17310,7 +17310,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                           </h4>
                           {promptFieldActiveCategory === 'memory' ? (
                             <div className="text-xs text-blue-700 dark:text-blue-300 leading-relaxed space-y-1">
-                              <p>حافظهٔ پروژه خودکار از مرکز نظارت سینک می‌شود از سه منبع:</p>
+                              <p>حافظهٔ پروژه خودکار از اتاق فرمان سینک می‌شود از سه منبع:</p>
                               <ol className="list-decimal pr-4 space-y-0.5">
                                 <li>متن <b>یادداشت کاربر</b> (user_notes) — حداقل ۳۰ کاراکتر</li>
                                 <li><b>OversightCodex</b> پروژه (ساخته‌شده با scan)</li>
@@ -17320,7 +17320,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                             </div>
                           ) : (
                             <div className="text-xs text-blue-700 dark:text-blue-300 leading-relaxed space-y-1">
-                              <p>آموزش‌ها از مرکز نظارت سینک می‌شوند از دو منبع:</p>
+                              <p>آموزش‌ها از اتاق فرمان سینک می‌شوند از دو منبع:</p>
                               <ol className="list-decimal pr-4 space-y-0.5">
                                 <li><b>key_changes</b> از تسک‌های done — حداقل ۲ تسک با الگوی مشترک</li>
                                 <li><b>action_plan_summary</b> از تسک‌های done با خلاصهٔ ≥۵۰ کاراکتر</li>
@@ -17358,7 +17358,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                           {/* Inline message اگر inspector project به watched متصل نیست */}
                           {promptFieldActiveCategory === 'memory' && !linkedWatched && (
                             <div className="mt-3 pt-3 border-t border-blue-200 dark:border-blue-700 text-xs text-amber-700 dark:text-amber-300">
-                              ⚠️ این پروژه به مرکز نظارت متصل نیست — برای فعال‌سازی memory/training، ابتدا پروژه را در <a href="/oversight" target="_blank" className="underline">/oversight</a> به نظارت اضافه کنید
+                              ⚠️ این پروژه به اتاق فرمان متصل نیست — برای فعال‌سازی memory/training، ابتدا پروژه را در <a href="/oversight" target="_blank" className="underline">/oversight</a> به نظارت اضافه کنید
                             </div>
                           )}
 
@@ -17371,7 +17371,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                                 title="بدون منتظر ماندن برای scan/verify، الان sync را اجرا کن"
                                 className="px-3 py-1.5 bg-amber-500 text-white rounded text-xs hover:bg-amber-600 disabled:opacity-40"
                               >
-                                {seedingMemoryTraining ? '⏳ در حال سینک...' : '✨ سینک خودکار از مرکز نظارت'}
+                                {seedingMemoryTraining ? '⏳ در حال سینک...' : '✨ سینک خودکار از اتاق فرمان'}
                               </button>
                               <button
                                 onClick={triggerScanNow}
@@ -17439,10 +17439,10 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                                   </div>
                                 </div>
                                 <div className="flex items-center gap-1.5">
-                                  {/* 🆕 (C7v2 Section 4) — Badge فیلدهای auto_synced از مرکز نظارت */}
+                                  {/* 🆕 (C7v2 Section 4) — Badge فیلدهای auto_synced از اتاق فرمان */}
                                   {(field as any).auto_synced && (
                                     <span
-                                      title="این فیلد خودکار از مرکز نظارت سینک شده — دستی ساخته نشده"
+                                      title="این فیلد خودکار از اتاق فرمان سینک شده — دستی ساخته نشده"
                                       className="text-[10px] bg-cyan-100 dark:bg-cyan-900/30 text-cyan-700 dark:text-cyan-300 px-2 py-0.5 rounded-full"
                                     >
                                       🔄 خودکار
@@ -17654,9 +17654,9 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                     <ul className="space-y-1 list-disc pr-4">
                       <li><strong>🧠 حافظه:</strong> واقعیت‌های ثابت پروژه (معماری، تصمیمات فنی) — همیشه در system prompt مدل تزریق می‌شود</li>
                       <li><strong>📚 آموزش:</strong> الگوها و کانوانشن‌های پروژه — مدل در هر کار به این‌ها مراجعه می‌کند</li>
-                      <li><strong>🔗 اتصال به تسک:</strong> وقتی از مرکز نظارت یک تسک را load می‌کنید، system prompt شامل AC + remaining_parts + history می‌شود</li>
-                      <li><strong>📌 پنل تسک‌های پروژه:</strong> لیست تسک‌های فعال این پروژه از مرکز نظارت — کلیک «ارسال به چت» تا با کانتکست کامل کار کنید</li>
-                      <li><strong>🔄 خودکار:</strong> فیلدهایی با این badge، خودکار از مرکز نظارت سینک شده‌اند — دستی ساخته نشده‌اند</li>
+                      <li><strong>🔗 اتصال به تسک:</strong> وقتی از اتاق فرمان یک تسک را load می‌کنید، system prompt شامل AC + remaining_parts + history می‌شود</li>
+                      <li><strong>📌 پنل تسک‌های پروژه:</strong> لیست تسک‌های فعال این پروژه از اتاق فرمان — کلیک «ارسال به چت» تا با کانتکست کامل کار کنید</li>
+                      <li><strong>🔄 خودکار:</strong> فیلدهایی با این badge، خودکار از اتاق فرمان سینک شده‌اند — دستی ساخته نشده‌اند</li>
                       <li><strong>🗄 آرشیو:</strong> فیلدهایی که برای مدت طولانی (&gt;۳۰ روز) استفاده نشده‌اند به آرشیو می‌روند ولی حذف نمی‌شوند</li>
                       <li><strong>🧪 تست زنده:</strong> مدل AI واقعاً فراخوانی شده و تأیید می‌کند فیلد را خوانده</li>
                       <li><strong>🟢 هایلایت سبز:</strong> وقتی مدل در حال استفاده از یک فیلد است، آن فیلد سبز رنگ می‌شود</li>

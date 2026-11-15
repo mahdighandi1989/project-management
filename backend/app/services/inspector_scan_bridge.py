@@ -5,7 +5,7 @@
 
 طراحی:
 - یک scan در background دارد
-- progress در همان InspectorSession لاگ می‌شود (نه به مرکز نظارت)
+- progress در همان InspectorSession لاگ می‌شود (نه به اتاق فرمان)
 - در پایان، لیست proposals در یک InspectorMessage `scan_complete` لاگ می‌شود
 - target_files یا commit نمی‌سازد — این مرحله بعد است (apply_all / run_proposal)
 """

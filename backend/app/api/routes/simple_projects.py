@@ -3160,7 +3160,7 @@ async def push_to_github(project_id: str, request: Optional[PushToGitHubRequest]
                 f"📁 نوع: `{project.project_type or '—'}`\n"
                 f"📄 فایل‌های push شده: *{len(uploaded)}*\n\n"
                 f"💡 *کارکرد:*\n{(project.description or '')[:400]}\n\n"
-                f"👁 خودکار به مرکز نظارت اضافه شد",
+                f"👁 خودکار به اتاق فرمان اضافه شد",
                 subject="Project created",
                 priority="medium",
                 project_name=full_name,

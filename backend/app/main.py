@@ -55,7 +55,7 @@ except Exception as _cc_e:
 
 # Defensive import for oversight (mustn't block app boot if storage/AI deps misbehave)
 try:
-    from .api.routes import oversight  # 🆕 Oversight (مرکز نظارت پروژه‌های GitHub)
+    from .api.routes import oversight  # 🆕 Oversight (اتاق فرمان پروژه‌های GitHub)
     OVERSIGHT_AVAILABLE = True
 except Exception as _e:
     import logging as _logging
@@ -806,7 +806,7 @@ app.include_router(audio.router, prefix="/api")  # 🆕 Audio Transcription (گ�
 app.include_router(auth_routes.router, prefix="/api")  # 🆕 ورود با گوگل — /api/auth
 app.include_router(inspection.router, prefix="/api")  # 🆕 «نظارت و سرکشی» — /api/inspection
 if OVERSIGHT_AVAILABLE and oversight is not None:
-    app.include_router(oversight.router, prefix="/api")  # 🆕 Oversight (مرکز نظارت GitHub)
+    app.include_router(oversight.router, prefix="/api")  # 🆕 Oversight (اتاق فرمان GitHub)
     # bridge endpoints under /api/projects/{project_id}/{apply-oversight-task,verify-task,oversight-summary}
     try:
         app.include_router(oversight.projects_bridge_router, prefix="/api")

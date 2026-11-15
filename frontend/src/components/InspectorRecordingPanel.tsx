@@ -1237,7 +1237,7 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
                   checked={sendToOversight}
                   onChange={(e) => setSendToOversight(e.target.checked)}
                 />
-                ارسال به مرکز نظارت (ساخت تسک جدید زیر همین پروژه)
+                ارسال به اتاق فرمان (ساخت تسک جدید زیر همین پروژه)
               </label>
               <div className="text-xs text-gray-600 dark:text-gray-300 mt-1 pr-6">
                 اگر تیک نخورد: پرامپت به چت inspector اضافه می‌شود.

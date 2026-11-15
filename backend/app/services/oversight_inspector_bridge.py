@@ -1,12 +1,12 @@
 """Inspector → Oversight bridge.
 
 این سرویس درخواست‌های آمده از ویجت «بازرس ویژه» (در `/projects/[id]`) را
-به تسک‌های مرکز نظارت تبدیل می‌کند.
+به تسک‌های اتاق فرمان تبدیل می‌کند.
 
 ویژگی‌ها:
 - پرامپت غنی (strong prompt) با همهٔ context (متن، URL، logs، screenshots)
 - توصیف بصری screenshots با vision model (در صورت موجود) → متن قابل خواندن
-  برای مدل‌های غیر بصری مرکز نظارت
+  برای مدل‌های غیر بصری اتاق فرمان
 - ذخیره inspector_context کامل (screenshots base64 + logs) در فایل جداگانه
 - بدون محدودیت طول پرامپت (می‌تواند ۲۵٬۰۰۰+ کاراکتر باشد)
 - ساخت OversightTask با `source="inspector_chat"` یا `"inspector_visual"`
@@ -540,7 +540,7 @@ def build_inspector_meta_summary(
     related_urls: Optional[List[str]] = None,
     inspector_session_id: Optional[str] = None,
 ) -> str:
-    """متن meta جدا — نمایش در UI مرکز نظارت در کنار پرامپت اصلی، نه داخلش.
+    """متن meta جدا — نمایش در UI اتاق فرمان در کنار پرامپت اصلی، نه داخلش.
 
     شامل: page_url، timestamps، session id، توصیف اینکه این تسک از کجا آمده.
     این بخش‌ها به‌درد سیستم بیرونی نمی‌خورند ولی برای trace/audit مفیدند.
@@ -731,7 +731,7 @@ async def process_from_inspector(
 
     if watched is None:
         raise ValueError(
-            f"این پروژه ({project_id}) به مرکز نظارت اضافه نشده است. "
+            f"این پروژه ({project_id}) به اتاق فرمان اضافه نشده است. "
             f"از پنل /oversight ابتدا آن را add watched کنید."
         )
 

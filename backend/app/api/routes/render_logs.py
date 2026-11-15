@@ -3079,7 +3079,7 @@ async def inspector_chat(
         # 🆕 (inspector-scan) — قبل از فراخوانی chat، intent را resolve کن.
         # اگر کاربر در حال درخواست بررسی/اصلاح است، به‌جای پاسخ یک‌شات سطحی،
         # یک scan موردی deep در background trigger می‌کنیم و پاسخ مناسب
-        # برمی‌گردانیم. هیچ‌چیز در مرکز نظارت ذخیره نمی‌شود — تنها در همان
+        # برمی‌گردانیم. هیچ‌چیز در اتاق فرمان ذخیره نمی‌شود — تنها در همان
         # session chat لاگ می‌شود.
         if request.enable_selective_scan:
             try:
@@ -9617,7 +9617,7 @@ async def get_visual_debug_prompt(project_id: str, db: Session = Depends(get_db)
 
 @router.get("/inspector/load-task/{task_id}")
 async def inspector_load_task(task_id: str, db: Session = Depends(get_db)):
-    """بارگذاری یک تسک مرکز نظارت در صفحهٔ inspector با کانتکست کامل.
+    """بارگذاری یک تسک اتاق فرمان در صفحهٔ inspector با کانتکست کامل.
 
     خروجی JSON شامل:
       - task: کل OversightTask.to_dict()
@@ -9711,7 +9711,7 @@ async def inspector_load_task(task_id: str, db: Session = Depends(get_db)):
 
 @router.get("/inspector/project-tasks/{project_id}")
 async def inspector_project_tasks(project_id: str, db: Session = Depends(get_db)):
-    """لیست تسک‌های مرکز نظارت برای یک inspector project (برای panel).
+    """لیست تسک‌های اتاق فرمان برای یک inspector project (برای panel).
 
     این endpoint جایگزین panel «۵۱ فیلد» در صفحهٔ inspector است.
     تسک‌های watched مرتبط با همین project را برمی‌گرداند.
@@ -9928,7 +9928,7 @@ async def seed_memory_training(project_id: str, db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=404,
             detail=(
-                "این inspector project به هیچ watched ای در مرکز نظارت متصل نیست. "
+                "این inspector project به هیچ watched ای در اتاق فرمان متصل نیست. "
                 "ابتدا پروژه را در /oversight به نظارت اضافه کنید."
             ),
         )
@@ -11648,7 +11648,7 @@ class SmartChatRequest(BaseModel):
     # هیچ action_plan ای تولید نمی‌شود. این flag از این conflict جلوگیری
     # می‌کند. default True (رفتار v3 معمولی).
     enable_selective_scan: bool = True
-    # 🔗 (Bug C7 — Bridge Phase 2) — اتصال به تسک مرکز نظارت
+    # 🔗 (Bug C7 — Bridge Phase 2) — اتصال به تسک اتاق فرمان
     # اگر داده شود، system prompt شامل بلوک «🎯 کانتکست تسک متصل» می‌شود با
     # acceptance_criteria + remaining_parts + task_steps + done_parts + scan_metadata.
     # backward compatible: None یعنی chat آزاد مثل قبل.
@@ -11670,7 +11670,7 @@ class ApplyActionRequest(BaseModel):
     action_files: List[dict]  # [{path, content, operation: 'modify'|'create'|'delete'|'modify_sections', sections?: [{find, replace}]}]
     commit_message: str
     original_message: str  # پیام اصلی کاربر
-    # 🔗 (Bug C7 — Bridge Phase 1+3) — اتصال به تسک مرکز نظارت برای write-back.
+    # 🔗 (Bug C7 — Bridge Phase 1+3) — اتصال به تسک اتاق فرمان برای write-back.
     # اگر داده شود، پس از موفقیت apply:
     #   - verify v6 stack روی تسک اجرا می‌شود
     #   - task.action_plan و task.applied_evidence به‌روز می‌شوند
@@ -11748,7 +11748,7 @@ def _build_task_context_block(task_id: str, *, max_size_bytes: int = 30_000) -> 
         lines: List[str] = []
         lines.append("## 🎯 کانتکست تسک متصل")
         lines.append(
-            "شما در حال کار روی تسک زیر از مرکز نظارت هستید. "
+            "شما در حال کار روی تسک زیر از اتاق فرمان هستید. "
             "هرگز از حیطهٔ این تسک خارج نشوید — پاسخ شما باید مستقیماً "
             "به انجام acceptance criteria یا remaining_parts منجر شود."
         )
@@ -12020,7 +12020,7 @@ async def _writeback_task_after_apply(
     commit_message: str,
     model_ids: List[str],
 ) -> bool:
-    """به‌روزرسانی تسک مرکز نظارت پس از apply موفق در inspector.
+    """به‌روزرسانی تسک اتاق فرمان پس از apply موفق در inspector.
 
     - task.action_plan با خلاصهٔ apply
     - task.applied_evidence با pr_url + files + models
@@ -18662,7 +18662,7 @@ _ساخته شده توسط بازرس ویژه (Inspector)_"""
         if getattr(request, "task_id", None):
             yield sse("progress", {
                 "step": "writing_back",
-                "message": "📝 در حال به‌روزرسانی تسک مرکز نظارت...",
+                "message": "📝 در حال به‌روزرسانی تسک اتاق فرمان...",
             })
             try:
                 _wb_ok = await _writeback_task_after_apply(

@@ -544,7 +544,7 @@ export default function DiagramsPage() {
                   </select>
                   {projects.length === 0 && !projectsLoading && (
                     <p className="text-xs text-gray-500 mt-1">
-                      ابتدا یک پروژه در «موتور خالق» بسازید یا در «مرکز نظارت» مخزنی را تحت نظارت بگیرید.
+                      ابتدا یک پروژه در «موتور خالق» بسازید یا در «اتاق فرمان» مخزنی را تحت نظارت بگیرید.
                     </p>
                   )}
                 </div>

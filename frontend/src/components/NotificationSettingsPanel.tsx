@@ -62,7 +62,7 @@ const EVENT_GROUPS: Array<{ title: string; icon: string; keys: string[] }> = [
   },
   // 🆕 (Inspector → Oversight) تسک از بازرس ویژه
   {
-    title: 'بازرس ویژه → مرکز نظارت',
+    title: 'بازرس ویژه → اتاق فرمان',
     icon: '📥',
     keys: ['task_from_inspector'],
   },

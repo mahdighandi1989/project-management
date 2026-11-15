@@ -2456,7 +2456,7 @@ async def run_deep_scan(
         try:
             # (audit fix I2) — در حالت Inspector scan موردی، scan_v5 session
             # جدید نسازیم؛ این scan در همان session chat در حال اجراست و یک
-            # session موازی در مرکز نظارت سردرگم‌کننده است.
+            # session موازی در اتاق فرمان سردرگم‌کننده است.
             if getattr(watched, "inspector_session_enabled", True) and _output_target_session_id is None:
                 from .scan_v5.scan_inspector_session import (
                     create_scan_session, log_scan_message,

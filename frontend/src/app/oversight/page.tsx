@@ -3597,7 +3597,7 @@ export default function OversightPage() {
         <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
           <div>
             <h1 className="text-2xl font-bold dark:text-white flex items-center gap-2">
-              🛰️ مرکز نظارت پروژه‌ها
+              🛰️ اتاق فرمان پروژه‌ها
             </h1>
             <p className="text-gray-500 dark:text-gray-400 text-sm">
               مدیریت یکپارچه مخازن گیت‌هاب با AI - ایده، پرامپت، اجرا، گزارش
