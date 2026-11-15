@@ -4,16 +4,16 @@
 > هر صفحه/دکمه/endpointی که بعداً اضافه شود، خودکار این‌جا ظاهر می‌شود؛ مختصاتِ دقیقِ
 > عنصرهای هر صفحه در برنامه است: «نظارت و سرکشی › نقشهٔ سامانه».
 
-تولید: 2026-11-13T00:40:59+00:00 · کامیت `a22d5cd7a6`
+تولید: 2026-11-15T07:37:35+00:00 · کامیت `fb72c82d29`
 
 | سنجه | تعداد |
 |---|---|
 | صفحه‌ها | 16 |
-| آیتم‌های منو | 11 |
-| دکمه‌ها در صفحه‌ها / در کامپوننت‌ها | 467 / 132 |
-| ورودی‌ها | 309 |
-| مسیرهای API | 739 |
-| سرویس‌ها | 94 |
+| آیتم‌های منو | 9 |
+| دکمه‌ها در صفحه‌ها / در کامپوننت‌ها | 439 / 165 |
+| ورودی‌ها | 313 |
+| مسیرهای API | 743 |
+| سرویس‌ها | 96 |
 | مدل‌ها | 13 |
 
 ## منوی کناری
@@ -21,13 +21,11 @@
 | مسیر | برچسب |
 |---|---|
 | `/` | خانه |
-| `/oversight` | مرکز نظارت |
+| `/projects` | پروژه‌ها و نمودارها |
+| `/oversight` | اتاق فرمان |
 | `/inspection` | نظارت و سرکشی |
 | `/creator` | موتور خالق |
 | `/knowledge-center` | مرکز دانش |
-| `/debate` | مناظره |
-| `/projects` | پروژه‌ها |
-| `/diagrams` | نمودارها |
 | `/archive` | آرشیو |
 | `/models` | مدل‌ها |
 | `/settings` | تنظیمات |
@@ -39,8 +37,8 @@
 | `/analysis` | `frontend/src/app/analysis/page.tsx` | 1079 | 7 | 2 | 5 |
 | `/archive` | `frontend/src/app/archive/page.tsx` | 754 | 7 | 4 | 0 |
 | `/creator` | `frontend/src/app/creator/page.tsx` | 1345 | 18 | 11 | 0 |
-| `/debate` | `frontend/src/app/debate/page.tsx` | 690 | 7 | 1 | 0 |
-| `/diagrams` | `frontend/src/app/diagrams/page.tsx` | 782 | 12 | 5 | 0 |
+| `/debate` | `frontend/src/app/debate/page.tsx` | 695 | 7 | 1 | 0 |
+| `/diagrams` | `frontend/src/app/diagrams/page.tsx` | 18 | 0 | 0 | 0 |
 | `/inspection` | `frontend/src/app/inspection/page.tsx` | 109 | 3 | 0 | 1 |
 | `/knowledge-center` | `frontend/src/app/knowledge-center/page.tsx` | 1051 | 17 | 13 | 0 |
 | `/model-profiles` | `frontend/src/app/model-profiles/page.tsx` | 814 | 6 | 2 | 3 |
@@ -49,7 +47,7 @@
 | `/` | `frontend/src/app/page.tsx` | 104 | 0 | 0 | 0 |
 | `/project/[id]` | `frontend/src/app/project/[id]/page.tsx` | 1599 | 21 | 2 | 0 |
 | `/projects/[id]` | `frontend/src/app/projects/[id]/page.tsx` | 18234 | 201 | 95 | 6 |
-| `/projects` | `frontend/src/app/projects/page.tsx` | 986 | 17 | 5 | 3 |
+| `/projects` | `frontend/src/app/projects/page.tsx` | 67 | 1 | 0 | 1 |
 | `/settings` | `frontend/src/app/settings/page.tsx` | 744 | 13 | 13 | 7 |
 | `/users` | `frontend/src/app/users/page.tsx` | 80 | 4 | 0 | 0 |
 
@@ -85,6 +83,10 @@
 | PUT | `/api/analysis/schedule` |
 | DELETE,GET | `/api/analysis/schedule/{project_id}` |
 | GET | `/api/analysis/stats` |
+| POST | `/api/assistant/ask` |
+| GET | `/api/assistant/conversations` |
+| DELETE,GET | `/api/assistant/conversations/{cid}` |
+| GET | `/api/assistant/models` |
 | POST | `/api/audio/transcribe` |
 | GET | `/api/auth/config` |
 | POST | `/api/auth/google` |

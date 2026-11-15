@@ -28,19 +28,21 @@ export interface SiteEntry {
   icon?: string;
   /** page tabs, `?tab=` keys → label (the assistant links them) */
   tabs?: Record<string, string>;
+  /** the query key that selects a tab (default `tab`) */
+  tabParam?: string;
   /** where an old address now lives (kept working, see the page itself) */
   movedTo?: string;
 }
 
 export const SITE: SiteEntry[] = [
   { href: '/', label: 'خانه', emoji: '🏠', desc: 'نمای کلیِ برنامه، وضعیتِ مدل‌ها و دسترسیِ سریع به همهٔ بخش‌ها', group: 'main', menu: true, icon: 'home' },
-  { href: '/projects', label: 'پروژه‌ها', emoji: '📁', desc: 'پروژه‌ها، واردکردن از GitHub، تب‌های هر پروژه (از جمله «بازرس ویژه»)', group: 'main', menu: true, home: true, icon: 'rocket' },
+  { href: '/projects', label: 'پروژه‌ها و نمودارها', emoji: '📁', desc: 'پروژه‌ها، واردکردن/همگام‌سازی از GitHub، تکراری‌ها، تب‌های هر پروژه (از جمله «بازرس ویژه») و تولیدِ نمودار از پروژه‌ها', group: 'main', menu: true, home: true, icon: 'rocket',
+    tabs: { projects: 'پروژه‌ها', diagrams: 'نمودارها' }, tabParam: 'view' },
   { href: '/oversight', label: 'اتاق فرمان', emoji: '🛰️', desc: 'پایشِ مخازنِ GitHub با AI: اسکنِ عمیق، ایده، تسک، اجرا، تأیید و گزارش', group: 'main', menu: true, home: true, icon: 'eye',
     tabs: { watched: 'پروژه‌های تحتِ پایش', tasks: 'تسک‌ها', reports: 'گزارش‌ها', ideas: 'ایده‌ها' } },
   { href: '/inspection', label: 'نظارت و سرکشی', emoji: '📋', desc: 'برگه‌های ایراد/پیشنهادِ مالک روی هر صفحه و پاسخِ ناظرِ خودکار', group: 'main', menu: true, home: true, icon: 'clipboard' },
   { href: '/creator', label: 'موتور خالق', emoji: '🚀', desc: 'ساختِ پروژهٔ تازه از یک ایده با AI', group: 'tools', menu: true, home: true, icon: 'command' },
   { href: '/knowledge-center', label: 'مرکز دانش', emoji: '📚', desc: 'تجربه‌های قابلِ استفادهٔ مجدد از همهٔ پروژه‌ها', group: 'tools', menu: true, home: true, icon: 'book' },
-  { href: '/diagrams', label: 'نمودارها', emoji: '📊', desc: 'تولیدِ نمودار از پروژه‌ها', group: 'tools', menu: true, home: true, icon: 'chart' },
   { href: '/archive', label: 'آرشیو', emoji: '📦', desc: 'تاریخچه: گفت‌وگوهای دستیار، فایل‌ها، پروژه‌ها و مناظره‌های قدیمی', group: 'tools', menu: true, home: true, icon: 'archive' },
   { href: '/models', label: 'مدل‌ها', emoji: '🧠', desc: 'مدل‌های AI: فعال/غیرفعال، اولویت، تستِ توانایی', group: 'system', menu: true, home: true, icon: 'cpu' },
   { href: '/settings', label: 'تنظیمات', emoji: '⚙️', desc: 'کلیدهای API، توکن‌ها، اعلان‌ها و تلگرام، محدودیت‌ها', group: 'system', menu: true, home: true, icon: 'cog' },
@@ -50,6 +52,7 @@ export const SITE: SiteEntry[] = [
   { href: '/project/[id]', label: 'پروژهٔ موتور خالق', emoji: '🧩', desc: 'جزئیاتِ پروژه‌ای که موتور خالق ساخته', group: 'hidden' },
   { href: '/projects/[id]', label: 'یک پروژه', emoji: '🗂️', desc: 'تب‌های پروژه: فایل‌ها، لاگ‌ها، بازرس ویژه، حافظه و …', group: 'hidden' },
   { href: '/debate', label: 'مناظره (بایگانی)', emoji: '🥊', desc: 'صفحهٔ قدیمیِ مناظرهٔ چندمدلی — جایش را «دستیار» گرفت؛ از آرشیو در دسترس است', group: 'hidden' },
+  { href: '/diagrams', label: 'نمودارها', emoji: '📊', desc: 'نشانیِ قدیمی؛ اکنون تبِ «نمودارها» در «پروژه‌ها و نمودارها»', group: 'hidden', movedTo: '/projects?view=diagrams' },
   { href: '/users', label: 'کاربران', emoji: '👥', desc: 'تأیید و مدیریتِ کاربرانِ واردشده با گوگل (فقط مالک)', group: 'hidden' },
 ];
 
@@ -72,6 +75,6 @@ export function siteMapForAssistant() {
   return SITE.map((s) => ({
     href: s.href,
     label: s.label,
-    desc: s.desc + (s.tabs ? ` — تب‌ها: ${Object.entries(s.tabs).map(([k, v]) => `${v} (?tab=${k})`).join('، ')}` : '') + (s.menu ? '' : ' [خارج از منو]'),
+    desc: s.desc + (s.tabs ? ` — تب‌ها: ${Object.entries(s.tabs).map(([k, v]) => `${v} (?${s.tabParam || 'tab'}=${k})`).join('، ')}` : '') + (s.menu ? '' : ' [خارج از منو]'),
   }));
 }

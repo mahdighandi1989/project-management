@@ -52,8 +52,16 @@ def _route_of(page: Path) -> str:
 
 
 def menu() -> list[dict]:
+    """Side-menu entries. Since 2026-11-15 the menu is built from the single page registry
+    ``frontend/src/lib/siteMap.ts`` (entries with ``menu: true``); older Layout.tsx lists still parse."""
+    out = []
+    for line in _read(FE / "lib" / "siteMap.ts").splitlines():
+        m = re.search(r"\{\s*href:\s*'([^']+)',\s*label:\s*'([^']+)'", line)
+        if m and "menu: true" in line:
+            out.append({"href": m.group(1), "label": m.group(2)})
     src = _read(FE / "components" / "Layout.tsx")
-    return [{"href": h, "label": l} for h, l in re.findall(r"\{\s*href:\s*'([^']+)',\s*label:\s*'([^']+)'", src)]
+    out += [{"href": h, "label": l} for h, l in re.findall(r"\{\s*href:\s*'([^']+)',\s*label:\s*'([^']+)'", src)]
+    return out
 
 
 def pages() -> list[dict]:

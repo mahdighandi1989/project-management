@@ -1,6 +1,6 @@
 {
- "generated_at": "2026-11-13T00:40:59+00:00",
- "commit": "a22d5cd7a6f1c45fb35a9249d41f14581cdc7dd1",
+ "generated_at": "2026-11-15T07:37:35+00:00",
+ "commit": "fb72c82d290530e2cee7302ff3987e28bb2c135b",
  "pages": [
   {
    "route": "/analysis",
@@ -40,24 +40,24 @@
   },
   {
    "route": "/debate",
-   "label": "مناظره",
+   "label": "",
    "file": "frontend/src/app/debate/page.tsx",
-   "lines": 690,
+   "lines": 695,
    "buttons": 7,
    "onclick": 7,
    "inputs": 1,
    "forms": 0,
-   "links": 4,
+   "links": 5,
    "tabs": 0
   },
   {
    "route": "/diagrams",
-   "label": "نمودارها",
+   "label": "",
    "file": "frontend/src/app/diagrams/page.tsx",
-   "lines": 782,
-   "buttons": 12,
-   "onclick": 12,
-   "inputs": 5,
+   "lines": 18,
+   "buttons": 0,
+   "onclick": 0,
+   "inputs": 0,
    "forms": 0,
    "links": 1,
    "tabs": 0
@@ -112,7 +112,7 @@
   },
   {
    "route": "/oversight",
-   "label": "مرکز نظارت",
+   "label": "اتاق فرمان",
    "file": "frontend/src/app/oversight/page.tsx",
    "lines": 11138,
    "buttons": 121,
@@ -160,15 +160,15 @@
   },
   {
    "route": "/projects",
-   "label": "پروژه‌ها",
+   "label": "پروژه‌ها و نمودارها",
    "file": "frontend/src/app/projects/page.tsx",
-   "lines": 986,
-   "buttons": 17,
-   "onclick": 22,
-   "inputs": 5,
+   "lines": 67,
+   "buttons": 1,
+   "onclick": 1,
+   "inputs": 0,
    "forms": 0,
-   "links": 4,
-   "tabs": 3
+   "links": 0,
+   "tabs": 1
   },
   {
    "route": "/settings",
@@ -201,8 +201,12 @@
    "label": "خانه"
   },
   {
+   "href": "/projects",
+   "label": "پروژه‌ها و نمودارها"
+  },
+  {
    "href": "/oversight",
-   "label": "مرکز نظارت"
+   "label": "اتاق فرمان"
   },
   {
    "href": "/inspection",
@@ -215,18 +219,6 @@
   {
    "href": "/knowledge-center",
    "label": "مرکز دانش"
-  },
-  {
-   "href": "/debate",
-   "label": "مناظره"
-  },
-  {
-   "href": "/projects",
-   "label": "پروژه‌ها"
-  },
-  {
-   "href": "/diagrams",
-   "label": "نمودارها"
   },
   {
    "href": "/archive",
@@ -246,6 +238,12 @@
    "file": "frontend/src/components/AIUsagePanel.tsx",
    "lines": 639,
    "buttons": 10,
+   "inputs": 4
+  },
+  {
+   "file": "frontend/src/components/AssistantChat.tsx",
+   "lines": 205,
+   "buttons": 4,
    "inputs": 4
   },
   {
@@ -292,7 +290,7 @@
   },
   {
    "file": "frontend/src/components/Layout.tsx",
-   "lines": 242,
+   "lines": 239,
    "buttons": 5,
    "inputs": 0
   },
@@ -361,6 +359,18 @@
    "lines": 157,
    "buttons": 3,
    "inputs": 1
+  },
+  {
+   "file": "frontend/src/components/views/DiagramsView.tsx",
+   "lines": 782,
+   "buttons": 12,
+   "inputs": 5
+  },
+  {
+   "file": "frontend/src/components/views/ProjectsView.tsx",
+   "lines": 986,
+   "buttons": 17,
+   "inputs": 5
   }
  ],
  "routes": [
@@ -4098,6 +4108,31 @@
    ]
   },
   {
+   "path": "/api/assistant/models",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/assistant/ask",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/assistant/conversations",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/assistant/conversations/{cid}",
+   "methods": [
+    "DELETE",
+    "GET"
+   ]
+  },
+  {
    "path": "/api/oversight/status",
    "methods": [
     "GET"
@@ -4864,6 +4899,7 @@
   "ai_base",
   "ai_manager",
   "analysis_progress_manager",
+  "assistant",
   "audio_transcribe",
   "audio_transcription_service",
   "background_scheduler",
@@ -4940,6 +4976,7 @@
   "quick_approval_service",
   "reference_project_service",
   "render_service",
+  "repo_docs",
   "report_validator",
   "runtime_executor",
   "scan_sections",
@@ -4973,12 +5010,12 @@
  "errors": [],
  "totals": {
   "pages": 16,
-  "menu_items": 11,
-  "page_buttons": 467,
-  "component_buttons": 132,
-  "inputs": 309,
-  "routes": 739,
-  "services": 94,
+  "menu_items": 9,
+  "page_buttons": 439,
+  "component_buttons": 165,
+  "inputs": 313,
+  "routes": 743,
+  "services": 96,
   "models": 13
  }
 }

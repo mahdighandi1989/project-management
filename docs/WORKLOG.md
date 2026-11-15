@@ -264,3 +264,21 @@
 - **[TODO]** بند ۴: تبِ «گفت‌وگوهای دستیار» در آرشیو (`/archive?tab=assistant`).
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · pytest + next build + Playwright محلی
+
+## 2026-11-15 (۳) — بند ۳: «پروژه‌ها» + «نمودارها» ⇐ یک صفحه، بلافاصله پس از «خانه»
+
+- **[OWNER]** دو صفحهٔ `/projects` و `/diagrams` هم‌راستا هستند؛ زیرِ یک صفحه ادغام شوند بی‌هیچ آسیب یا کاهشِ قابلیت (حتی
+  کوچک‌ترین) و بی‌به‌هم‌خوردنِ سیم‌کشی؛ در منو گزینهٔ بعد از «خانه» باشد.
+- **[DECISION]** کدِ دو صفحه **بی‌تغییر** (فقط نامِ تابعِ export) با `git mv` به `components/views/ProjectsView.tsx` و
+  `components/views/DiagramsView.tsx` رفت؛ صفحهٔ تازهٔ `/projects` فقط بینِ آن دو تب می‌زند (`?view=diagrams`). هر نما بارِ
+  اولِ باز شدن mount و سپس پنهان نگه داشته می‌شود تا تعویضِ تب کارِ نیمه‌تمام (نمودارِ در حالِ ساخت، import ِ باز) را از
+  دست ندهد. `/projects?id=…` همچنان کار می‌کند؛ `/diagrams` به `/projects?view=diagrams` هدایت می‌شود (پیوندهای قدیمی سالم).
+  `/projects/[id]` (صفحهٔ هر پروژه و «بازرس ویژه») دست نخورد.
+- **[CHANGE]** `app/projects/page.tsx` (تب‌ها)، `app/diagrams/page.tsx` (هدایت)، `lib/siteMap.ts` (منو: «پروژه‌ها و نمودارها»
+  دومین گزینه؛ «نمودارها» بیرون از منو با `movedTo`)، `scripts/supervisor/inventory.py` (منو را از `siteMap.ts` می‌خواند).
+- **[FINDING]** سیاههٔ ناظر: دکمه‌های صفحه‌ها ۴۶۷⇐۴۳۹ و دکمه‌های کامپوننت‌ها ۱۳۲⇐۱۶۵ — **جابه‌جایی است نه کاهش** (جمع ۵۹۹⇐۶۰۴).
+  منو ۱۱⇐۹ آگاهانه است: «مناظره» (بند ۲، قرنطینه) و «نمودارها» (اکنون تب). ناظرِ خودکار این را کاهش نشمارد.
+- **[VERIFY]** build سبز؛ Playwright محلی: `/projects` دو تب، تبِ نمودارها کامل (رسمِ خودکار، نمونه‌ها، پیش‌نمایشِ Mermaid)،
+  `/diagrams` ⇐ `/projects?view=diagrams`، بی‌خطای کنسول.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · next build + Playwright محلی + inventory
