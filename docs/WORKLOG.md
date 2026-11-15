@@ -484,3 +484,17 @@
   با Auth Recipe ِ پروژه (`auth_runner`).
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · pytest با Chromium ِ واقعی + next build
+
+## 2026-11-15 (۱۳) — بند ۱۲-د: پنج فراخوانیِ بی‌مسیرِ صفحهٔ پروژه؛ قفلِ «سیم‌کشیِ» فرانت↔بک‌اند در ارسالِ خودکار
+
+- **[FINDING]** (`scripts/check_frontend_api.py` + بازبینِ چت، تأییدشده) در `projects/[id]/page.tsx` پنج دکمه/بارگذاری به مسیری می‌رفتند که هرگز در بک‌اند
+  نبوده (`git -S` هیچ): فهرستِ فایل‌ها و خواندنِ فایل برای پروژه‌های موتور خالق (`/api/projects/{id}/files…`)، «Deploy» (`/deploy/render`)، «تولیدِ فایل‌های
+  بیشتر» (`/api/creator/projects/{id}/generate`) و `validateHealthAnalysis` (کدِ بی‌فراخوان).
+- **[CHANGE]** به مسیرهای واقعیِ `/api/simple/projects/{id}/…` (`files`، `files/{path}` با کدگذاریِ هر بخش، `deploy` با نمایشِ `url` و حالتِ «اول به GitHub
+  ببرید»، `generate-more` با پرسیدنِ مسیرِ فایل‌ها) و `/health/validate-reports`. `check_frontend_api.py`: فهرستِ ۸ مثبتِ کاذبِ دستی‌بررسی‌شده.
+- **[CHANGE]** `scripts/ship.sh` اکنون `check_frontend_api.py` را اجرا می‌کند (و `AGENTS.md` آن را نام می‌برد) ⇒ هر تغییرِ آینده‌ای که صفحه‌ای را به مسیرِ
+  ناموجود یا متدِ اشتباه وصل کند، ارسال نمی‌شود — پاسخِ مستقیم به خواستِ مالک «سیم‌کشی‌ها به هم نخورد».
+- **[VERIFY]** کلِ فرانت: ۳۹۸ فراخوانیِ متمایز، ۷۵۶ مسیرِ بک‌اند، **۰ بی‌مسیر**؛ build و pytest ۷۵۸ سبز؛ دروازهٔ مستندات سبز.
+- **[OWNER]** بند ۱۲ و با آن کلِ طرحِ ۱۲ بندی انجام و ارسال شد؛ کارهای بازِ نیازمندِ تصمیمِ مالک: [OVERSIGHT.md §۱۲](handbook/OVERSIGHT.md) و TODO های (۱۰) تا (۱۲).
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · check_frontend_api (۰ بی‌مسیر) + pytest + next build

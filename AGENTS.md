@@ -24,6 +24,7 @@ production change.
 | the ignored-source check inside `scripts/ship.sh` | Source files hidden by `.gitignore` (would be missing on Render). |
 | `pytest` (`cd backend && python -m pytest -q`) | API behaviour, the login wall, inspection guards, Drive pipeline. |
 | `npm ci` (`cd frontend && npm ci`, only when `node_modules` is missing) | Lockfile in sync. |
+| `scripts/check_frontend_api.py` (`python3 scripts/check_frontend_api.py`) | Every `/api/...` call in the frontend reaches a real backend route with that method (wiring between pages and the API). |
 | `npm run build` (`cd frontend && npm run build`) | TypeScript types + the Next.js production build Render deploys. |
 | `scripts/docs_gate.py` (`python3 scripts/docs_gate.py`) | Entry files, this command list, docs-map paths, signed newest WORKLOG entry, lessons frontmatter. |
 

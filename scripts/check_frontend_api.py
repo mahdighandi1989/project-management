@@ -87,11 +87,17 @@ def matches(call: str, pats: list[Route], method: str = "") -> bool:
     return False
 
 
+#: verified by hand (2026-11-15) — comments, `${…}` expressions the regex cannot resolve, a WebSocket; not calls
+KNOWN_FALSE = {"/api/...", "/api/auth/", "/api/handbook/*", "/api/inspector-agent",
+               "/api/oversight/repos${forceRefresh", "/api/oversight/runtime/backfill-ac-classification${force",
+               "/api/oversight/watched/${w.id}/claude-runner/${path}", "/api/render/ws/bridge/${projectId}"}
+
+
 def main(argv: list[str]) -> int:
     targets = [Path(a).resolve() for a in argv] or [FE]
     pats = backend_routes()
     calls = frontend_calls(targets)
-    bad = {k: w for k, w in calls.items() if not matches(k[0], pats, k[1])}
+    bad = {k: w for k, w in calls.items() if k[0] not in KNOWN_FALSE and not matches(k[0], pats, k[1])}
     print(f"{len(calls)} distinct API calls, {len(pats)} backend routes, {len(bad)} unmatched")
     for (c, method), where in sorted(bad.items()):
         exists = matches(c, pats)

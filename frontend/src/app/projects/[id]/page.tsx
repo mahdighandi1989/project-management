@@ -7596,7 +7596,8 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
 
       // فایل‌های پروژه رو بگیر (برای پروژه‌های غیر GitHub)
       if (!projectId.startsWith('gh_')) {
-        const filesRes = await fetch(`${API_BASE}/api/projects/${projectId}/files`);
+        // 🩹 (2026-11-15) was /api/projects/{id}/files — no such route; creator projects live under /api/simple
+        const filesRes = await fetch(`${API_BASE}/api/simple/projects/${projectId}/files`);
         if (filesRes.ok) {
           const filesData = await filesRes.json();
           if (filesData.files) {
@@ -8713,14 +8714,14 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
   const validateHealthAnalysis = async (analysisId: string) => {
     setValidationInProgress(true);
     try {
-      const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/validate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ analysis_id: analysisId }),
-      });
+      // 🩹 (2026-11-15) was /health/validate — no such route. The real one starts a background validation of the
+      // latest reports (no body); results come later from /health/validation-results.
+      void analysisId;
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/health/validate-reports`, { method: 'POST' });
       if (res.ok) {
         const data = await res.json();
-        setValidationResult(data);
+        if (data?.message) (data.success ? showSuccess : showError)(data.message);
+        if ('correct' in (data || {})) setValidationResult(data);
         // بروزرسانی پروفایل‌ها
         loadModelProfiles();
         loadModelRankings();
@@ -9353,7 +9354,8 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
     // (selectedFile) دست‌نخورده بماند و فایل از list حذف نشود.
     const url = projectId.startsWith('gh_')
       ? `${API_BASE}/api/github/imported/${projectId}/file?path=${encodeURIComponent(filePath)}`
-      : `${API_BASE}/api/projects/${projectId}/files/${encodeURIComponent(filePath)}`;
+      // 🩹 (2026-11-15) was /api/projects/{id}/files/{path} — no such route. Each segment encoded, slashes kept ({file_path:path}).
+      : `${API_BASE}/api/simple/projects/${projectId}/files/${filePath.split('/').map(encodeURIComponent).join('/')}`;
     const result = await safeFetch<{ content: string; github_url?: string }>(url);
     if (!result.ok) {
       showError(result.status === 404 ? 'فایل یافت نشد' : `خطا در خواندن فایل: ${result.error}`);
@@ -9371,16 +9373,20 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
   const deployToRender = async () => {
     setDeploying(true);
     try {
-      const res = await fetch(`${API_BASE}/api/projects/${projectId}/deploy/render`, {
+      // 🩹 (2026-11-15) was /api/projects/{id}/deploy/render — no such route (the button always failed)
+      const res = await fetch(`${API_BASE}/api/simple/projects/${projectId}/deploy`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
       });
 
-      const data = await res.json();
-      if (data.success) {
-        showSuccess(`Deploy شروع شد! ${data.deploy_url || ''}`);
+      const data = await res.json().catch(() => ({}));
+      if (data.success && data.deployed === false) {
+        showError(data.message || (Array.isArray(data.instructions) ? data.instructions.join(' — ') : 'برای Deploy ابتدا پروژه را به GitHub ببرید'));
+      } else if (data.success) {
+        showSuccess(`Deploy شروع شد! ${data.url || data.deploy_url || data.dashboard_url || ''}`);
       } else {
-        showError(data.error || 'خطا در Deploy');
+        showError(data.error || data.detail || data.message || 'خطا در Deploy');
       }
     } catch (e) {
       showError('خطا در ارتباط');
@@ -9593,10 +9599,17 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
 
   const generateMoreFiles = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/creator/projects/${projectId}/generate`, {
+      // 🩹 (2026-11-15) was /api/creator/projects/{id}/generate — no such route. The real one needs the paths to create.
+      const raw = window.prompt('مسیرِ فایل‌هایی که باید ساخته شوند (با ویرگول جدا کنید)، مثلاً: src/utils/date.ts, tests/test_api.py');
+      const file_paths = (raw || '').split(/[,،\n]+/).map((x) => x.trim()).filter(Boolean);
+      if (!file_paths.length) return;
+      const res = await fetch(`${API_BASE}/api/simple/projects/${projectId}/generate-more`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_paths, descriptions: {} }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (!data.success && !data.error) data.error = data.detail || data.message;
       if (data.success) {
         showSuccess('فایل‌های جدید تولید شدند');
         loadProject();

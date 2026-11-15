@@ -38,6 +38,10 @@ PY="${PYTHON:-python3}"
 run_tests() { (cd backend && INSPECTION_SYNC_DISABLED=1 "$PY" -m pytest -q -p no:cacheprovider); }
 run_tests || { echo "❌ backend tests failed — not shipping"; exit 1; }
 
+say "Frontend ↔ backend API wiring"
+# every /api/... call in frontend/src must reach a real backend route with that method (2026-11-15)
+(cd "$ROOT" && "$PY" scripts/check_frontend_api.py 2>/dev/null) || { "$PY" scripts/check_frontend_api.py 2>/dev/null | tail -20; echo "❌ a frontend call has no backend route — not shipping"; exit 1; }
+
 say "Frontend build"
 (cd frontend && { [ -d node_modules ] || npm ci --no-audit --no-fund; } && NEXT_TELEMETRY_DISABLED=1 npm run build >/tmp/ship-frontend-build.log 2>&1) \
   || { tail -40 /tmp/ship-frontend-build.log; echo "❌ frontend build failed — not shipping"; exit 1; }
