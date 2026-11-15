@@ -90,19 +90,48 @@ def _extract_python_symbols(text: str) -> List[str]:
     return result[:15]
 
 
+def _service_ids_for_urls(db: Any, urls: List[str]) -> List[str]:
+    """Render services that belong to a project, from its known base URLs (2026-11-15).
+
+    Matches `RenderService.service_url` by host, then falls back to the service name equal to the onrender.com
+    subdomain (Render names the default host after the service)."""
+    from urllib.parse import urlparse
+
+    from ...models.render_log import RenderService
+
+    hosts = {(urlparse(u).hostname or "").lower() for u in urls if u}
+    hosts.discard("")
+    if not hosts:
+        return []
+    ids: List[str] = []
+    for svc in db.query(RenderService).all():
+        h = (urlparse(svc.service_url or "").hostname or "").lower()
+        name = (svc.name or "").lower()
+        if (h and h in hosts) or any(x.endswith(".onrender.com") and x.split(".", 1)[0] == name for x in hosts):
+            ids.append(svc.id)
+    return ids
+
+
 async def _fetch_relevant_logs(
     target_files: List[str],
     endpoints: List[Dict[str, str]],
     symbols: List[str],
     window_hours: int = _LOG_WINDOW_HOURS,
+    project_urls: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """لاگ‌های Render فیلتر شده بر اساس signal های تسک."""
+    """لاگ‌های Render فیلتر شده بر اساس signal های تسک.
+
+    project_urls (2026-11-15): the project's frontend/backend base URLs. When given, only the logs of that project's
+    own Render services are read — before this, one project's analysis was fed every other project's logs. When the
+    URLs are known but map to no Render service, nothing is returned (another project's logs are worse than none).
+    Without URLs the old account-wide behaviour stays (callers that do not know the project)."""
     try:
         from ...core.database import SessionLocal
         from ...models.render_log import RenderLog
     except Exception as e:
         logger.debug(f"backend_log_probe: model import failed: {e}")
         return []
+    project_urls = [u for u in (project_urls or []) if u]
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
     # نام فایل‌های پایه (مثل rule_routing_diagram.py از مسیر کامل)
@@ -117,9 +146,14 @@ async def _fetch_relevant_logs(
         try:
             # query کل پنجره زمانی، بعد فیلتر در Python
             # (SQL LIKE با چندتا keyword پیچیده است)
+            q = db.query(RenderLog).filter(RenderLog.timestamp >= cutoff)
+            if project_urls:
+                sids = _service_ids_for_urls(db, project_urls)
+                if not sids:
+                    return []
+                q = q.filter(RenderLog.service_id.in_(sids))
             rows = (
-                db.query(RenderLog)
-                .filter(RenderLog.timestamp >= cutoff)
+                q
                 .order_by(RenderLog.timestamp.desc())
                 .limit(_MAX_LOGS_TO_FETCH * 3)
                 .all()
@@ -306,6 +340,7 @@ async def run_backend_log_probe(
         target_files=target_files,
         endpoints=endpoints,
         symbols=symbols,
+        project_urls=[getattr(ctx, "backend_base_url", None), getattr(ctx, "frontend_base_url", None)],
     )
 
     if not logs:

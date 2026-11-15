@@ -102,7 +102,8 @@ async def temp_activate_model(model_id: str, trigger: str = "") -> Dict[str, Any
             s = _db_setting(db, model_id)
             was_enabled = bool(s.enabled)
             s.enabled = 1
-            s.temporary_enabled = 1
+            # 🩹 (2026-11-15) the flag now means «WE switched it on» — so a crash/restart can switch it off again
+            s.temporary_enabled = 0 if was_enabled else 1
             db.commit()
             # registry هم به‌روز کن (in-memory) — تا pick_best_extraction_model
             # بلافاصله ببیند
@@ -204,6 +205,9 @@ async def cleanup_stale_temp_activations_on_boot() -> int:
             # بهتر است خودش دوباره enable کند، پس فعلاً temporary_enabled=0
             # می‌کنیم ولی enabled را دست نمی‌زنیم (محافظت در برابر حذف ناخواسته).
             s.temporary_enabled = 0
+            # 🩹 (2026-11-15) temporary_enabled=1 ⇔ the model was OFF and we switched it on; the revert never happened
+            # (crash/restart) ⇒ switch it off again. It used to stay on for good.
+            s.enabled = 0
             n += 1
         if n:
             db.commit()

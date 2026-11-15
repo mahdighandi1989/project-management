@@ -573,3 +573,21 @@
 - **[VERIFY]** build سبز؛ Playwright محلی: هر ۵ تبِ اتاق فرمان و خانه بی‌خطای کنسول/شبکه؛ `GET /api/oversight/disk` پاسخ داد؛ pytest ۷۷۳ سبز.
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · next build + Playwright محلی + pytest
+
+## 2026-11-15 (۱۹) — آخرین دستهٔ ایرادهای تأییدشده (اتاق فرمان و بخش‌های دیگر) + پاسخ به «چهار تصمیم»
+
+- **[OWNER]** «اون ۴ موردی که گفتی تصمیمِ منه نمی‌فهمم … یا خودت بهترین رو طبقِ خواسته‌های قبلی انجام بده؛ ایرادهای بازِ اتاق فرمان و سایر قسمت‌ها رو هم انجام بده».
+- **[DECISION]** چهار تصمیم را خودم گرفتم (ورودیِ ۱۵-۱۱ در کامیتِ 67130a68): اجرای خودکار فقط با اجازهٔ صریح، تسکِ اجراشده «منتظرِ بازبینی» نه «انجام‌شده»،
+  probe های تأیید فقط خواندنی، و شاخهٔ کاری به‌جای main — همه در جهتِ «با احتیاط» و «هیچ قابلیتی حذف نشود».
+- **[CHANGE]** `oversight_upload_session.py`: بررسیِ offset/اندازهٔ تکه داخلِ قفلِ همان نشست (دو تکهٔ هم‌زمان دیگر هر دو نمی‌گذرند).
+- **[CHANGE]** `oversight_model_temp_activate.py`: موقتاً روشن‌شدن فقط وقتی «موقت» ثبت می‌شود که مدل از قبل خاموش بوده؛ پاک‌سازیِ هنگامِ راه‌اندازی مدل را واقعاً خاموش می‌کند.
+- **[CHANGE]** `verify_runtime/storage.resolve_evidence_file`: `task_id`/`run_id` فقط `[A-Za-z0-9_.-]` و بی «..» (قبلاً فقط `rel_path` بررسی می‌شد).
+- **[CHANGE]** `routes/oversight.py`: `_clamp_intervals` — `interval_hours`/`scan_interval_hours`/`verify_interval_hours` ِ صفر/منفی/NaN ⇒ ۰٫۲۵ (هم پروژه هم تنظیماتِ کلی)؛
+  `start_bulk_verify` پرچمِ running را پیش از ساختنِ task می‌گذارد (finally ِ اجرا همیشه پاکش می‌کند).
+- **[CHANGE]** `backend_log_probe._fetch_relevant_logs(project_urls=…)` + `_service_ids_for_urls`: نشانیِ فرانت/بک‌اند ⇒ سرویس‌های Render (با `service_url` یا نامِ زیردامنهٔ
+  onrender.com) ⇒ فقط لاگِ همان‌ها؛ نشانیِ ناشناخته ⇒ هیچ. فراخواننده‌ها: probe ِ تأیید، `runtime_discovery`، تحلیلِ اثربخشیِ اسکنِ عمیق. بدونِ نشانی رفتارِ قبلی.
+- **[VERIFY]** `tests/test_oversight_small_fixes_2026_11_15.py` (۴ تست، SQLite ِ واقعی برای لاگ‌ها)؛ pytest ۷۷۷ سبز.
+- **[TODO]** (اختیاری، ثبت‌شده) بایگانیِ `reports.json` ِ بزرگ در درایو؛ نوشتنِ کاملاً async ِ `tasks.json`؛ ماندگاریِ نشست‌های ضبط پس از ری‌استارت.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · pytest
+

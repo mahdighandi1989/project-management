@@ -198,6 +198,7 @@ async def discover_runtime_state(
             endpoints=[],
             symbols=[],
             window_hours=720,  # 30 روز
+            project_urls=[backend_base_url, frontend_base_url],  # only this project's services (2026-11-15)
         )
         runtime_state["_meta"]["logs_fetched"] = True
         # match endpoints

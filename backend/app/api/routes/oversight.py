@@ -282,6 +282,18 @@ class ScanRequest(BaseModel):
     focus_notes: Optional[str] = None
 
 
+# (2026-11-15) an interval of 0 or a negative one made the scheduler fire on every tick (or never, depending on the
+# reader). Clamp to a sane floor instead of rejecting so older UI builds keep working.
+_MIN_INTERVAL_HOURS = 0.25
+
+
+def _clamp_intervals(body: BaseModel) -> None:
+    for name in ("interval_hours", "scan_interval_hours", "verify_interval_hours"):
+        v = getattr(body, name, None)
+        if v is not None and (v != v or v < _MIN_INTERVAL_HOURS):  # v != v → NaN
+            setattr(body, name, _MIN_INTERVAL_HOURS)
+
+
 class WatchedUpdateExtra(BaseModel):
     """فقط برای پشتیبانی از فیلدهای جدید (allow_create_issue, scan_interval_hours)"""
     pass
@@ -316,6 +328,7 @@ async def get_settings():
 
 @router.put("/settings")
 async def update_settings(payload: SettingsUpdate):
+    _clamp_intervals(payload)
     service = get_oversight_service()
     updates = payload.model_dump(exclude_none=True)
     return await service.update_settings(updates)
@@ -357,6 +370,7 @@ async def add_watched(payload: WatchedCreate):
 
 @router.patch("/watched/{watched_id}")
 async def update_watched(watched_id: str, payload: WatchedUpdate):
+    _clamp_intervals(payload)
     service = get_oversight_service()
     # sent fields only; null is honoured for the clearable ones (a URL / auth the owner removed)
     updates = {k: v for k, v in payload.model_dump(exclude_unset=True).items()
@@ -2621,6 +2635,9 @@ async def start_bulk_verify(
     _src = (source_filter or "").strip().lower() or None
     if _src and _src not in ("auto_scan", "user"):
         raise HTTPException(status_code=400, detail="source_filter باید 'auto_scan' یا 'user' باشد")
+    # (2026-11-15) claim the slot synchronously — two quick clicks used to both pass the check above because the
+    # flag was only set once the background task started; `_run_bulk_verify`'s finally always clears it.
+    _BULK_VERIFY_STATE["running"] = True
     _aio.create_task(
         _run_bulk_verify(
             watched_id=watched_id,

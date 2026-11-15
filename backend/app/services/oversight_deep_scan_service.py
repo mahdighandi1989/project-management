@@ -2577,6 +2577,8 @@ async def _run_deep_scan_impl(
                     _render_logs = await _fetch_relevant_logs(
                         target_files=[], endpoints=[], symbols=[],
                         window_hours=720,
+                        project_urls=[getattr(watched, "backend_base_url", None),
+                                      getattr(watched, "frontend_base_url", None)],
                     )
                 except Exception as _le:
                     logger.debug(f"render logs fetch failed: {_le}")

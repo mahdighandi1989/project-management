@@ -254,6 +254,12 @@ def resolve_evidence_file(
     """
     if not run_id or not task_id or not rel_path:
         return None
+    # 🩹 (2026-11-15) task_id / run_id are path segments too — «..» there moved the base itself (rel_path was checked,
+    # the base was not). Only plain ids are accepted.
+    import re as _re
+    if not _re.match(r"^[A-Za-z0-9_.-]{1,120}$", task_id) or not _re.match(r"^[A-Za-z0-9_.-]{1,120}$", run_id) \
+            or ".." in (task_id + run_id):
+        return None
     base = (storage_root / "verify_evidence" / task_id / run_id).resolve()
     target = (base / rel_path).resolve()
     try:

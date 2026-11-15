@@ -257,21 +257,22 @@ class UploadSessionService:
         s = self._sessions.get(session_id)
         if s is None:
             raise KeyError("session یافت نشد")
-        if s.is_terminal():
-            raise ValueError(f"session در وضعیت {s.status} است — chunk پذیرفته نمی‌شود")
-        if offset < 0:
-            raise ValueError("offset منفی")
-        if offset != s.bytes_received:
-            # client باید resume کند — به offset فعلی برگردد
-            raise ValueError(
-                f"offset mismatch: expected {s.bytes_received}, got {offset}. "
-                f"از همان offset فعلی ادامه بده."
-            )
-        if s.bytes_received + len(data) > s.total_size:
-            raise ValueError("داده بیش از total_size اعلام‌شده است")
-
         lock = self._get_session_lock(session_id)
+        # 🩹 (2026-11-15) the offset/size checks now run INSIDE the per-session lock: two retried chunks for the same
+        # offset used to both pass the check and both get appended — a corrupted file.
         async with lock:
+            if s.is_terminal():
+                raise ValueError(f"session در وضعیت {s.status} است — chunk پذیرفته نمی‌شود")
+            if offset < 0:
+                raise ValueError("offset منفی")
+            if offset != s.bytes_received:
+                # client باید resume کند — به offset فعلی برگردد
+                raise ValueError(
+                    f"offset mismatch: expected {s.bytes_received}, got {offset}. "
+                    f"از همان offset فعلی ادامه بده."
+                )
+            if s.bytes_received + len(data) > s.total_size:
+                raise ValueError("داده بیش از total_size اعلام‌شده است")
             # append به temp file با aiofiles — streaming، RAM ثابت
             async with aiofiles.open(s.temp_path, "ab") as f:
                 await f.write(data)
