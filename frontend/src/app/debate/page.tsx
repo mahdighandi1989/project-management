@@ -369,6 +369,11 @@ export default function DebatePage() {
       )}
 
       <div className="max-w-5xl mx-auto p-6">
+        {/* 2026-11-15 (owner plan item 2): the menu slot went to «دستیار»; this page stays, fully working */}
+        <div className="mb-4 rounded-xl border border-amber-300 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-700 px-4 py-3 text-sm text-amber-800 dark:text-amber-200">
+          این صفحه بایگانی شده و همهٔ قابلیت‌هایش کار می‌کند؛ برای پرسش از یک یا چند مدل، دایرهٔ <strong>💬 دستیار</strong> (پایینِ هر صفحه، گزینهٔ «چند مدل») را به کار ببرید.
+          مناظره‌های گذشته در <Link href="/archive" className="underline">آرشیو</Link> هستند.
+        </div>
         {/* هدر */}
         <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
           <div>

@@ -25,7 +25,10 @@ import {
   ClipboardDocumentCheckIcon,
   UsersIcon,
   ArrowRightOnRectangleIcon,
+  DocumentTextIcon,
 } from '@heroicons/react/24/outline';
+import { MENU, entryFor } from '@/lib/siteMap';
+import AssistantChat from './AssistantChat';
 import { useAuth } from '@/lib/auth';
 import GlobalAnalysisProgress from './GlobalAnalysisProgress';
 import { InspectionProvider, InspectionToggle } from '@/lib/inspection/provider';
@@ -36,30 +39,23 @@ interface LayoutProps {
   children: React.ReactNode;
 }
 
-const navItems = [
-  { href: '/', label: 'خانه', icon: HomeIcon },
-  { href: '/oversight', label: 'اتاق فرمان', icon: EyeIcon },
-  { href: '/inspection', label: 'نظارت و سرکشی', icon: ClipboardDocumentCheckIcon },
-  { href: '/creator', label: 'موتور خالق', icon: CommandLineIcon },
-  { href: '/knowledge-center', label: 'مرکز دانش', icon: BookOpenIcon },
-  { href: '/debate', label: 'مناظره', icon: ChatBubbleLeftRightIcon },
-  { href: '/projects', label: 'پروژه‌ها', icon: RocketLaunchIcon },
-  { href: '/diagrams', label: 'نمودارها', icon: ChartBarIcon },
-  { href: '/archive', label: 'آرشیو', icon: ArchiveBoxIcon },
-  { href: '/models', label: 'مدل‌ها', icon: CpuChipIcon },
-  { href: '/settings', label: 'تنظیمات', icon: Cog6ToothIcon },
-];
+const ICONS: Record<string, typeof HomeIcon> = {
+  home: HomeIcon, eye: EyeIcon, clipboard: ClipboardDocumentCheckIcon, command: CommandLineIcon,
+  book: BookOpenIcon, chat: ChatBubbleLeftRightIcon, rocket: RocketLaunchIcon, chart: ChartBarIcon,
+  archive: ArchiveBoxIcon, cpu: CpuChipIcon, cog: Cog6ToothIcon, journal: DocumentTextIcon,
+};
+
+// The menu comes from the single registry (lib/siteMap.ts) — the same list the home
+// page, the help circle and «دستیار» read, so they never fall out of step.
+const navItems = MENU.map((m) => ({ href: m.href, label: m.label, icon: ICONS[m.icon || ''] || DocumentTextIcon }));
 
 /** The label of the screen the owner is on — the longest matching menu entry. */
+function isActiveHref(pathname: string, href: string): boolean {
+  return href === '/' ? pathname === '/' : pathname === href || pathname.startsWith(`${href}/`);
+}
+
 function labelFor(pathname: string): string {
-  let best = '';
-  let label = '';
-  for (const item of navItems) {
-    const hit = item.href === '/' ? pathname === '/' : (pathname === item.href || pathname.startsWith(`${item.href}/`));
-    if (hit && item.href.length > best.length) { best = item.href; label = item.label; }
-  }
-  if (!label && pathname.startsWith('/project/')) return 'پروژه';
-  return label || pathname;
+  return entryFor(pathname)?.label || pathname;
 }
 
 export default function Layout({ children }: LayoutProps) {
@@ -73,6 +69,7 @@ export default function Layout({ children }: LayoutProps) {
       <Shell pathname={pathname} pageLabel={pageLabel}>{children}</Shell>
       <InspectionHighlights pathname={pathname} />
       <SurfaceRecorder pathname={pathname} />
+      <AssistantChat pathname={pathname} pageLabel={pageLabel} />
     </InspectionProvider>
   );
 }
@@ -141,7 +138,7 @@ function Shell({ children, pathname, pageLabel }: LayoutProps & { pathname: stri
         {/* Navigation */}
         <nav className="flex-1 p-4 space-y-2">
           {navItems.map((item) => {
-            const isActive = pathname === item.href;
+            const isActive = isActiveHref(pathname, item.href);
             return (
               <Link
                 key={item.href}
@@ -203,7 +200,7 @@ function Shell({ children, pathname, pageLabel }: LayoutProps & { pathname: stri
                   href={item.href}
                   onClick={() => setSidebarOpen(false)}
                   className={`flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${
-                    pathname === item.href
+                    isActiveHref(pathname, item.href)
                       ? 'bg-primary-50 dark:bg-primary-900/30 text-primary-600'
                       : 'text-gray-600 dark:text-gray-400'
                   }`}

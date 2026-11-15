@@ -474,11 +474,12 @@ def test_frontend_page_exists():
 
 
 def test_sidebar_has_knowledge_center_entry():
-    src = (
-        _FRONTEND_ROOT / "components/Layout.tsx"
-    ).read_text(encoding="utf-8")
-    assert "/knowledge-center" in src
-    assert "مرکز دانش" in src
+    # 2026-11-15: the side menu is built from the single page registry (lib/siteMap.ts)
+    layout = (_FRONTEND_ROOT / "components/Layout.tsx").read_text(encoding="utf-8")
+    assert "MENU.map" in layout
+    site = (_FRONTEND_ROOT / "lib/siteMap.ts").read_text(encoding="utf-8")
+    line = next(l for l in site.splitlines() if "href: '/knowledge-center'" in l)
+    assert "مرکز دانش" in line and "menu: true" in line
 
 
 def test_dashboard_has_knowledge_center_card():

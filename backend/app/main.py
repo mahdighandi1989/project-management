@@ -34,6 +34,7 @@ from .api.routes import screen_recording  # 🆕 Screen Recording (ضبط وید
 from .api.routes import audio  # 🆕 Audio Transcription (تبدیل گفتار به متن)
 from .api.routes import auth as auth_routes  # 🆕 ورود با گوگل
 from .api.routes import inspection  # 🆕 «نظارت و سرکشی» (برگه‌های مالک + ناظرِ خودکار)
+from .api.routes import assistant as assistant_routes  # 🆕 «دستیار» سیار (جایگزینِ مناظره در منو)
 
 # 🚨 (audit critical fix) — eager import to register OAuth dispatchers.
 # `cloud_code_service` self-registers in oauth_model_registry at import time.
@@ -805,6 +806,7 @@ app.include_router(screen_recording.router, prefix="/api")  # 🆕 Screen Record
 app.include_router(audio.router, prefix="/api")  # 🆕 Audio Transcription (گفتار به متن)
 app.include_router(auth_routes.router, prefix="/api")  # 🆕 ورود با گوگل — /api/auth
 app.include_router(inspection.router, prefix="/api")  # 🆕 «نظارت و سرکشی» — /api/inspection
+app.include_router(assistant_routes.router, prefix="/api")  # 🆕 «دستیار» — /api/assistant
 if OVERSIGHT_AVAILABLE and oversight is not None:
     app.include_router(oversight.router, prefix="/api")  # 🆕 Oversight (اتاق فرمان GitHub)
     # bridge endpoints under /api/projects/{project_id}/{apply-oversight-task,verify-task,oversight-summary}

@@ -10,7 +10,9 @@ Exits 1 (listing every problem) when:
   2. AGENTS.md does not name every command scripts/ship.sh actually runs;
   3. a path in the docs map (the '## ساختار' table in CLAUDE.md) does not resolve;
   4. the NEWEST entry of docs/WORKLOG.md (bottom of the file) has no signature;
-  5. a file in experiences/ lacks the frontmatter required by experiences/README.md.
+  5. a file in experiences/ lacks the frontmatter required by experiences/README.md;
+  6. a page under frontend/src/app has no entry in the screen registry frontend/src/lib/siteMap.ts
+     (the menu, the home page, the help circle and «دستیار» all read that registry).
 """
 
 from __future__ import annotations
@@ -119,6 +121,16 @@ for f in sorted((ROOT / "experiences").glob("*.md")):
     for k in REQUIRED:
         if k not in keys:
             fail(f"[lessons] {f.name}: frontmatter missing '{k}'")
+
+# --- 6. every page is in the screen registry (frontend/src/lib/siteMap.ts) --------------
+site = read("frontend/src/lib/siteMap.ts") or ""
+known = set(re.findall(r"href:\s*'([^']+)'", site))
+app_dir = ROOT / "frontend" / "src" / "app"
+for page in sorted(app_dir.rglob("page.tsx")):
+    rel = page.parent.relative_to(app_dir).as_posix()
+    href = "/" if rel == "." else "/" + rel
+    if href not in known:
+        fail(f"[site] page {href} has no entry in frontend/src/lib/siteMap.ts")
 
 if problems:
     print(f"docs gate: {len(problems)} problem(s)")
