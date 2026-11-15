@@ -14885,6 +14885,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
         _gi_list = _build_general_instructions_list(_proj_name, _proj_tech, _proj_github)
         general_instructions_text = _build_general_instructions_text(_gi_list)
+        _gi_base_len = len(general_instructions_text)  # the prefixed task/memory/training blocks are kept apart below
 
         # 🔗 (Bug C7 Bridge Phase 2) — task context block (اگر task_id بود)
         # ترتیب نهایی system prompt (به ترتیب تزریق به prefix):
@@ -15084,6 +15085,27 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                         "model": primary_model,
                     })
 
+        # 🪶 (2026-11-15) compact prompt for weaker/smaller models — the 12 general rules are ~25k chars; a small model
+        # drowns in them. Decided on the FINAL model (after the phase-2 routing above). services/inspector_compact_prompt.py
+        _compact_prompt = False
+        try:
+            from ...services.inspector_compact_prompt import is_compact_model, compact_general_instructions
+            _fin_reg = get_reg_model(primary_model)
+            _fin_ctx = getattr(_fin_reg, "context_window", None) if _fin_reg else None
+            if is_compact_model(primary_model, _fin_ctx):
+                _compact_prompt = True
+                _gi_prefix = general_instructions_text[: len(general_instructions_text) - _gi_base_len]
+                if len(_gi_prefix) > 6000:  # task context comes first, so the cut keeps it
+                    _gi_prefix = _gi_prefix[:6000] + "\n… [ادامهٔ حافظه/آموزش‌های پروژه برای این مدل کوتاه شد]\n"
+                _before = len(general_instructions_text)
+                general_instructions_text = _gi_prefix + compact_general_instructions(_gi_list)
+                yield sse("progress", {
+                    "step": "compact_prompt",
+                    "message": f"🪶 پرامپتِ فشرده برای {primary_model}: دستورات {_before:,} ⇐ {len(general_instructions_text):,} نویسه",
+                })
+        except Exception as _cpe:
+            slog.warning(f"[smart-chat] compact prompt skipped: {_cpe}")
+
         # 🆕🆕 (agent-loop) — helper مشترک ACTION و ERROR_LOG.
         # اگر مدل tool-calling دارد (Claude)، به‌جای pipeline تک‌شات حلقهٔ عامل
         # واقعی را اجرا می‌کند: مدل خودش فایل‌ها را on-demand می‌خواند و قدم‌به‌قدم
@@ -15111,7 +15133,13 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 "model": primary_model,
             })
 
-            _act_tree = _build_project_tree_summary(code_files)
+            # 🗺 (2026-11-15) real file names (matching dirs first) instead of «dir (N files)» — fewer wrong read_file paths
+            try:
+                from ...services.inspector_compact_prompt import build_repo_map, agent_system_compact
+                _act_tree = build_repo_map(code_files, f"{request.message}\n{(logs_text or '')[-2000:]}",
+                                           max_chars=3000 if _compact_prompt else 5000)
+            except Exception:
+                _act_tree = _build_project_tree_summary(code_files)
             _agent_sys = f"""تو یک توسعه‌دهندهٔ ارشد و بازرس پروژهٔ {owner}/{repo} هستی — دقیق، کاربلد و عمل‌گرا.
 
 {general_instructions_text}
@@ -15218,6 +15246,12 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
 ## خلاصهٔ ساختار پروژه (برای جهت‌گیری — برای دیدن محتوا باید read_file بزنی)
 {_act_tree}"""
+            if _compact_prompt:
+                try:
+                    _agent_sys = agent_system_compact(owner, repo, general_instructions_text, _act_tree,
+                                                      f"{request.message}\n{(logs_text or '')[-3000:]}")
+                except Exception as _ace:
+                    slog.warning(f"[smart-chat] compact agent prompt failed, using the full one: {_ace}")
 
             _parts = [f"## درخواست کاربر:\n{request.message}"]
             if reply_context_text:
