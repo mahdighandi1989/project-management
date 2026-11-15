@@ -37,4 +37,9 @@ def test_runtime_upgrade_needs_real_passes_over_half_the_acs():
     assert not _enough_real_passes([home], task)               # the synthetic «homepage loads» alone: no
     assert not _enough_real_passes([home, p(1)], task)          # 1 of 4 ACs: no
     assert _enough_real_passes([p(1), p(2)], task)              # 2 of 4: yes
-    assert _enough_real_passes([p(1)], SimpleNamespace(acceptance_criteria=[]))
+    # (changed on purpose 2026-11-15, «موارد باز»): no stored ACs ⇒ 2 distinct ACs are needed, not one lucky pass
+    assert not _enough_real_passes([p(1)], SimpleNamespace(acceptance_criteria=[]))
+    assert _enough_real_passes([p(1), p(2)], SimpleNamespace(acceptance_criteria=[]))
+    # the same AC passing in two probe families counts once; task steps do not count
+    assert not _enough_real_passes([SimpleNamespace(ac_id="ac01_x"), SimpleNamespace(ac_id="code_ac1"),
+                                    SimpleNamespace(ac_id="step_3")], task)

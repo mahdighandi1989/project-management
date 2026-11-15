@@ -757,7 +757,8 @@ LARGE_IDEA_CHARS: int = 500_000  # synthesis: bump output budget + add per-file 
 # Service
 # ====================================================================
 
-_RUNNING_VERIFIES: set = set()  # (2026-11-15) projects whose scheduled verify batch is still running in the background
+_RUNNING_VERIFIES: set = set()
+_RUNNING_RUNS: set = set()  # (2026-11-15) projects whose scheduled auto-run batch is still running  # (2026-11-15) projects whose scheduled verify batch is still running in the background
 
 
 class OversightService:
@@ -1094,6 +1095,15 @@ class OversightService:
             #   2) log‌های throttling دروغ نگویند (دیگر «dispatched 5» در
             #      حالی که هیچ push نشده وجود نخواهد داشت)
             if not getattr(watched, "claude_runner_enabled", False):
+                skipped_disabled_count += 1
+                continue
+            # (2026-11-15, owner: «موارد باز») turning «اجرای خودکار» on used to commit EVERY task of the project (~900,
+            # one commit each — created and at once moved to archive/) onto the repo's main. A task that was never on
+            # GitHub and is already finished, archived or only a scan suggestion has nothing for the runner to do.
+            if not getattr(t, "github_prompt_synced_at", None) and (
+                getattr(t, "archived", False)
+                or t.status in ("done", "cancelled", "abandoned", "suggested")
+            ):
                 skipped_disabled_count += 1
                 continue
             syncable.append(t)
@@ -9984,6 +9994,8 @@ AC = «طراحی شیک‌تر باشد»:
             "tasks_active_count": _total - _archived,
             "tasks_archived_count": _archived,
             "reports_count": len(self.reports),
+            # (2026-11-15) per-project counts — the card used to count inside the last 300 reports of ALL projects
+            "report_counts_by_watched": self._report_counts_by_watched(),
             "tasks_by_status": {
                 s: sum(1 for t in self.tasks if t.status == s)
                 for s in (
@@ -10095,6 +10107,13 @@ AC = «طراحی شیک‌تر باشد»:
                     await res
             except Exception as e:
                 logger.warning(f"subscriber error on {event}: {e}")
+
+    def _report_counts_by_watched(self) -> Dict[str, int]:
+        out: Dict[str, int] = {}
+        for r in self.reports:
+            if r.watched_id:
+                out[r.watched_id] = out.get(r.watched_id, 0) + 1
+        return out
 
     async def get_report(self, report_id: str) -> Optional[Dict[str, Any]]:
         for r in self.reports:
@@ -10249,6 +10268,49 @@ AC = «طراحی شیک‌تر باشد»:
         t = asyncio.create_task(coro)
         tasks.add(t)
         t.add_done_callback(tasks.discard)
+
+    async def _scheduled_run(self, watched_id: str, task_ids: List[str]) -> None:
+        """The scheduler's automatic run of pending auto-mode tasks, in the background (2026-11-15)."""
+        try:
+                for t in [x for x in self.tasks if x.id in task_ids]:
+                    try:
+                        # 🔗 (C7 Bridge Phase 4) — اتصال scheduler به smart-chat
+                        # اگر execution_mode == "auto_via_projects_page" یعنی کاربر
+                        # خواسته که این تسک از طریق inspector smart-chat اجرا شود.
+                        # ping-pong rounds (followup_round > 0) همیشه از طریق
+                        # inspector اجرا می‌شوند چون کانتکست تسک حیاتی است.
+                        _use_inspector = (
+                            t.execution_mode == "auto_via_projects_page"
+                            or (t.followup_round or 0) > 0
+                        )
+                        if _use_inspector:
+                            _inspector_result = await self.execute_task_via_inspector(
+                                t.id,
+                                model_ids=None,
+                                followup_only=((t.followup_round or 0) > 0),
+                            )
+                            if not _inspector_result.get("success"):
+                                # fallback به run_task سنتی
+                                logger.warning(
+                                    f"scheduled inspector exec for {t.id} failed: "
+                                    f"{_inspector_result.get('error')} — fallback to run_task"
+                                )
+                                await self.run_task(t.id, model_id=None)
+                            else:
+                                logger.info(
+                                    f"scheduled inspector exec for {t.id} succeeded "
+                                    f"(followup_round={t.followup_round or 0})"
+                                )
+                        else:
+                            await self.run_task(t.id, model_id=None)
+                    except Exception as e:
+                        logger.warning(f"scheduled run_task {t.id} failed: {e}")
+        finally:
+            _RUNNING_RUNS.discard(watched_id)
+            try:
+                self._save_tasks()
+            except Exception:
+                pass
 
     async def _scheduled_verify(self, watched_id: str, task_ids: List[str], include_runtime: bool) -> None:
         try:
@@ -10523,41 +10585,14 @@ AC = «طراحی شیک‌تر باشد»:
                 w.next_run_at = (now + timedelta(hours=w.interval_hours)).isoformat()
                 continue
 
-            for t in pending[:max_runs]:
-                try:
-                    # 🔗 (C7 Bridge Phase 4) — اتصال scheduler به smart-chat
-                    # اگر execution_mode == "auto_via_projects_page" یعنی کاربر
-                    # خواسته که این تسک از طریق inspector smart-chat اجرا شود.
-                    # ping-pong rounds (followup_round > 0) همیشه از طریق
-                    # inspector اجرا می‌شوند چون کانتکست تسک حیاتی است.
-                    _use_inspector = (
-                        t.execution_mode == "auto_via_projects_page"
-                        or (t.followup_round or 0) > 0
-                    )
-                    if _use_inspector:
-                        _inspector_result = await self.execute_task_via_inspector(
-                            t.id,
-                            model_ids=None,
-                            followup_only=((t.followup_round or 0) > 0),
-                        )
-                        if not _inspector_result.get("success"):
-                            # fallback به run_task سنتی
-                            logger.warning(
-                                f"scheduled inspector exec for {t.id} failed: "
-                                f"{_inspector_result.get('error')} — fallback to run_task"
-                            )
-                            await self.run_task(t.id, model_id=None)
-                        else:
-                            logger.info(
-                                f"scheduled inspector exec for {t.id} succeeded "
-                                f"(followup_round={t.followup_round or 0})"
-                            )
-                    else:
-                        await self.run_task(t.id, model_id=None)
-                    ran.append(t.id)
-                except Exception as e:
-                    logger.warning(f"scheduled run_task {t.id} failed: {e}")
-
+            # (2026-11-15, owner: «موارد باز») in the background, one batch per project — each run (inspector chat / AI
+            # assessment) takes minutes and used to hold the whole tick (reminders, daily report, other projects)
+            if w.id in _RUNNING_RUNS:
+                continue
+            _run_ids = [t.id for t in pending[:max_runs]]
+            ran.extend(_run_ids)
+            _RUNNING_RUNS.add(w.id)
+            self._spawn_bg(self._scheduled_run(w.id, _run_ids))
             w.last_run_at = now.isoformat()
             w.next_run_at = (now + timedelta(hours=w.interval_hours)).isoformat()
 

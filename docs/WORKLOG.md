@@ -679,3 +679,14 @@
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · ۵ بازبینِ مستقل + pytest + next build + Playwright محلی + لاگ‌های Render
 
+## 2026-11-15 (۲۴) — «موارد باز» ِ بازبینیِ کارتِ پروژه، بسته شد
+
+- **[OWNER]** «موارد باز مانده رو هم انجام بده».
+- **[CHANGE]** `routes/oversight.py`: `_BULK_VERIFY_STATE` (سراسری) ⇐ `_new_bulk_state()` + `_BULK_STATES[watched_id]` + `_bulk_running_other`؛ شروع با `_spawn_bg` (مرجع نگه داشته می‌شود).
+  `oversight_service`: `report_counts_by_watched` در `/status`؛ `_scheduled_run` + `_RUNNING_RUNS` (اجرای خودکار در پس‌زمینه)؛ فیلترِ همگام‌سازیِ اول. `external_prompts.require_external_token`:
+  محدودهٔ کلیدِ runner (۴۰۳ برای پروژهٔ دیگر). `oversight_verifier._enough_real_passes`: نرمال‌سازی به شمارهٔ AC و حداقلِ ۲ بی AC ِ ذخیره‌شده (تستِ قبلی آگاهانه تغییر کرد).
+  فرانت: شمارهٔ گزارش‌ها از سرور؛ ادغامِ polling تسکِ تازه‌بایگانی‌شده را نگه می‌دارد.
+- **[VERIFY]** `tests/test_oversight_open_items_2026_11_15.py` (۵ تست) + به‌روزرسانیِ دو تستِ قبلی؛ pytest ۸۰۸ سبز؛ next build سبز.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · pytest + next build
+

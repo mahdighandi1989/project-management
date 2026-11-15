@@ -15,7 +15,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from ...services.oversight_service import get_oversight_service, now_iso
@@ -104,10 +104,27 @@ def _check_external_token(provided: Optional[str]) -> None:
 
 
 def require_external_token(
+    request: Request,
     x_external_token: Optional[str] = Header(default=None, alias="X-External-Token"),
 ) -> None:
-    """FastAPI dependency برای endpoint های ابزار خارجی."""
+    """FastAPI dependency برای endpoint های ابزار خارجی.
+
+    (2026-11-15, owner: «موارد باز») a per-project RUNNER token (core/auth.runner_token_for) may only touch its own
+    project: /next must name that watched_id, and /{task_id}/… must be a task of that project. The master token is
+    unrestricted (the owner's own tools)."""
     _check_external_token(x_external_token)
+    from ...core.auth import runner_token_watched
+    scope = runner_token_watched((x_external_token or "").strip())
+    if not scope:
+        return
+    task_id = request.path_params.get("task_id")
+    if task_id:
+        from ...services.oversight_service import get_oversight_service
+        t = next((x for x in get_oversight_service().tasks if x.id == task_id), None)
+        if t is None or getattr(t, "watched_id", None) != scope:
+            raise HTTPException(status_code=403, detail="این کلید فقط برای تسک‌های پروژهٔ خودش معتبر است")
+    elif request.query_params.get("watched_id") != scope:
+        raise HTTPException(status_code=403, detail="این کلید فقط برای پروژهٔ خودش معتبر است (watched_id)")
 
 
 def require_admin_token(

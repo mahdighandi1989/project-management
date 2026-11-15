@@ -36,7 +36,9 @@ def test_zero_or_negative_interval_is_clamped():
 
 def test_bulk_verify_claims_slot_before_spawning():
     src = inspect.getsource(R.start_bulk_verify)
-    assert src.index('_BULK_VERIFY_STATE["running"] = True') < src.index("_aio.create_task(")
+    # (updated with the per-project states) the slot is claimed before the background job is spawned
+    assert src.index('_st["running"] = True') < src.index("._spawn_bg(")
+    assert "_bulk_running_other(watched_id)" in src
 
 
 def test_evidence_ids_cannot_traverse(tmp_path: Path):

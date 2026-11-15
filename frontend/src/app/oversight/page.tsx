@@ -2043,8 +2043,13 @@ export default function OversightPage() {
             if (data?.items && !cancelled) {
               // merge: keep archived ones from previous state، فقط active ها update.
               setTasks(prev => {
-                const archivedKept = prev.filter(t => t.archived);
+                // (2026-11-15) a task archived since the last poll is no longer in the active list — keep it, marked
+                // archived (it used to vanish from both «تسک‌ها» and «آرشیو» until a full reload)
                 const activeNew: Task[] = data.items;
+                const activeIds = new Set(activeNew.map((t: any) => t.id));
+                const archivedKept = prev
+                  .filter(t => t.archived || !activeIds.has(t.id))
+                  .map(t => (t.archived ? t : { ...t, archived: true }));
                 return [...activeNew, ...archivedKept];
               });
             }
@@ -3910,7 +3915,9 @@ export default function OversightPage() {
               watched.map((w) => {
                 const wActiveTasks = tasks.filter(t => t.watched_id === w.id && !t.archived);
                 const wArchivedTasks = tasks.filter(t => t.watched_id === w.id && t.archived);
-                const wReportCount = reports.filter(r => r.watched_id === w.id).length;
+                // (2026-11-15) the server's per-project count; the local list only holds the last 300 of all projects
+                const wReportCount = (status as any)?.report_counts_by_watched?.[w.id]
+                  ?? reports.filter(r => r.watched_id === w.id).length;
                 return (
                 <WatchedCard
                   key={w.id}

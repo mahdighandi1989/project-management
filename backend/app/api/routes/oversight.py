@@ -2300,40 +2300,54 @@ async def verify_task_now(task_id: str, payload: Optional[RunTaskRequest] = None
 # این endpoint یک background job می‌سازد که همهٔ تسک‌های active
 # (یا فیلتر شده با priority/type) را با concurrency محدود verify می‌کند.
 # هر تسک که done شد → خودکار به archive منتقل می‌شود.
-_BULK_VERIFY_STATE: Dict[str, Any] = {
-    "running": False,
-    "started_at": None,
-    "finished_at": None,
-    "current_index": 0,
-    "total": 0,
-    "watched_id": None,
-    "summary": {
-        "verified_done": 0,
-        "verified_partial": 0,
-        "verified_not_done": 0,
-        "verified_error": 0,
-        "auto_archived": 0,
-    },
-    "error": None,
-    "task_results": [],  # تا 100 نتیجه آخر برای نمایش
-    # 🆕 (C3) Post-Verify Consolidation — جمع‌آوری در حین، اجرا در پایان
-    "consolidation_candidates": [],  # fingerprints جمع‌آوری‌شده در _verify_one
-    "live_preclusters": [],  # rolling mechanical preclusters
-    "consolidation": {
-        "enabled": False,
-        "ran": False,
-        "phase": "idle",  # idle|clustering|building|done
-        "candidates_count": 0,
-        "live_pre_cluster_count": 0,
-        "clusters_created": 0,
-        "super_tasks_created": [],
-        "tasks_archived": 0,
-        "ai_calls": 0,
-        "error": None,
+def _new_bulk_state() -> Dict[str, Any]:
+    return {
+        "running": False,
         "started_at": None,
         "finished_at": None,
-    },
-}
+        "current_index": 0,
+        "total": 0,
+        "watched_id": None,
+        "summary": {
+            "verified_done": 0,
+            "verified_partial": 0,
+            "verified_not_done": 0,
+            "verified_error": 0,
+            "auto_archived": 0,
+        },
+        "error": None,
+        "task_results": [],  # تا 100 نتیجه آخر برای نمایش
+        # 🆕 (C3) Post-Verify Consolidation — جمع‌آوری در حین، اجرا در پایان
+        "consolidation_candidates": [],  # fingerprints جمع‌آوری‌شده در _verify_one
+        "live_preclusters": [],  # rolling mechanical preclusters
+        "consolidation": {
+            "enabled": False,
+            "ran": False,
+            "phase": "idle",  # idle|clustering|building|done
+            "candidates_count": 0,
+            "live_pre_cluster_count": 0,
+            "clusters_created": 0,
+            "super_tasks_created": [],
+            "tasks_archived": 0,
+            "ai_calls": 0,
+            "error": None,
+            "started_at": None,
+            "finished_at": None,
+        },
+    }
+
+
+# (2026-11-15, owner: «موارد باز») one state PER PROJECT — it used to be a single global, so every project's card showed
+# the running project's progress and a second project was refused. At most one bulk verify runs at a time (memory /
+# Playwright on the 512 MB instance); the refusal now names the project that is running.
+_BULK_STATES: Dict[str, Dict[str, Any]] = {}
+
+
+def _bulk_running_other(watched_id: str) -> Optional[str]:
+    for wid, st in _BULK_STATES.items():
+        if st.get("running") and wid != watched_id:
+            return wid
+    return None
 
 
 async def _run_bulk_verify(
@@ -2358,15 +2372,17 @@ async def _run_bulk_verify(
     from ...services.oversight_service import get_oversight_service, now_iso
     from ...services.oversight_verifier import verify_task as _verify_task
 
-    _BULK_VERIFY_STATE["running"] = True
-    _BULK_VERIFY_STATE["started_at"] = _dt.utcnow().isoformat()
-    _BULK_VERIFY_STATE["finished_at"] = None
-    _BULK_VERIFY_STATE["watched_id"] = watched_id
-    _BULK_VERIFY_STATE["error"] = None
-    _BULK_VERIFY_STATE["current_index"] = 0
-    _BULK_VERIFY_STATE["mode"] = mode
-    _BULK_VERIFY_STATE["source_filter"] = source_filter
-    _BULK_VERIFY_STATE["summary"] = {
+    state = _BULK_STATES.get(watched_id or "") or _new_bulk_state()
+    _BULK_STATES[watched_id or ""] = state
+    state["running"] = True
+    state["started_at"] = _dt.utcnow().isoformat()
+    state["finished_at"] = None
+    state["watched_id"] = watched_id
+    state["error"] = None
+    state["current_index"] = 0
+    state["mode"] = mode
+    state["source_filter"] = source_filter
+    state["summary"] = {
         "verified_done": 0,
         "verified_partial": 0,
         "verified_not_done": 0,
@@ -2374,11 +2390,11 @@ async def _run_bulk_verify(
         "auto_archived": 0,
         "skipped_manual": 0,  # 🆕 شمارش تسک‌های دستی که skip شدند
     }
-    _BULK_VERIFY_STATE["task_results"] = []
+    state["task_results"] = []
     # 🆕 (C3) reset consolidation buffers
-    _BULK_VERIFY_STATE["consolidation_candidates"] = []
-    _BULK_VERIFY_STATE["live_preclusters"] = []
-    _BULK_VERIFY_STATE["consolidation"] = {
+    state["consolidation_candidates"] = []
+    state["live_preclusters"] = []
+    state["consolidation"] = {
         "enabled": bool(auto_consolidate),
         "ran": False,
         "phase": "idle",
@@ -2419,8 +2435,8 @@ async def _run_bulk_verify(
                     continue
             candidate_ids.append(t.id)
 
-        _BULK_VERIFY_STATE["summary"]["skipped_manual"] = skipped_manual
-        _BULK_VERIFY_STATE["total"] = len(candidate_ids)
+        state["summary"]["skipped_manual"] = skipped_manual
+        state["total"] = len(candidate_ids)
         if not candidate_ids:
             return
 
@@ -2445,7 +2461,7 @@ async def _run_bulk_verify(
                         _src = (getattr(task, "source", "user") or "user").lower()
                         if _src != source_filter.lower():
                             _result["status"] = "skipped_manual"
-                            _BULK_VERIFY_STATE["summary"]["skipped_manual"] += 1
+                            state["summary"]["skipped_manual"] += 1
                             return
                     _report = await _verify_task(_tid, include_runtime=_include_runtime)
                     # 🐛 (C2 fix) — verify_task یک Dict برمی‌گرداند نه object.
@@ -2458,7 +2474,7 @@ async def _run_bulk_verify(
                         _status = str(_task_dict.get("verification_status") or "").lower().strip()
                     _result["status"] = _status or "unknown"
 
-                    _summary = _BULK_VERIFY_STATE["summary"]
+                    _summary = state["summary"]
                     if _status == "done":
                         _summary["verified_done"] += 1
                         # auto-archive اگر فعال — verify_task خودش هم وقتی streak
@@ -2495,25 +2511,25 @@ async def _run_bulk_verify(
                                 _src_live = (getattr(_live, "source", "user") or "user").lower()
                                 if _src_live == "auto_scan":
                                     _fp = build_candidate_fingerprint(_live)
-                                    _BULK_VERIFY_STATE["consolidation_candidates"].append(_fp)
+                                    state["consolidation_candidates"].append(_fp)
                                     # rolling pre-cluster هر ۱۰ تسک یکبار
-                                    _cands_now = _BULK_VERIFY_STATE["consolidation_candidates"]
+                                    _cands_now = state["consolidation_candidates"]
                                     if len(_cands_now) > 0 and len(_cands_now) % 10 == 0:
                                         _pc = mechanical_precluster(_cands_now)
-                                        _BULK_VERIFY_STATE["live_preclusters"] = _pc
+                                        state["live_preclusters"] = _pc
                         except Exception as _ce:
                             logger.debug(f"consolidation sidecar failed: {_ce}")
                 except Exception as _ve:
                     _result["status"] = "error"
                     _result["error"] = str(_ve)[:200]
-                    _BULK_VERIFY_STATE["summary"]["verified_error"] += 1
+                    state["summary"]["verified_error"] += 1
                 finally:
-                    _BULK_VERIFY_STATE["current_index"] = _idx + 1
+                    state["current_index"] = _idx + 1
                     # نگهداری تا 100 نتیجه اخیر
-                    _BULK_VERIFY_STATE["task_results"].append(_result)
-                    if len(_BULK_VERIFY_STATE["task_results"]) > 100:
-                        _BULK_VERIFY_STATE["task_results"] = (
-                            _BULK_VERIFY_STATE["task_results"][-100:]
+                    state["task_results"].append(_result)
+                    if len(state["task_results"]) > 100:
+                        state["task_results"] = (
+                            state["task_results"][-100:]
                         )
 
         await _aio.gather(
@@ -2527,8 +2543,8 @@ async def _run_bulk_verify(
                 from app.services.task_consolidation_service import (
                     consolidate_remaining_tasks,
                 )
-                _cands = list(_BULK_VERIFY_STATE.get("consolidation_candidates") or [])
-                _pre = list(_BULK_VERIFY_STATE.get("live_preclusters") or [])
+                _cands = list(state.get("consolidation_candidates") or [])
+                _pre = list(state.get("live_preclusters") or [])
                 if _cands:
                     # یک رفرش mechanical نهایی روی همهٔ کاندیدها
                     try:
@@ -2536,7 +2552,7 @@ async def _run_bulk_verify(
                             mechanical_precluster as _mp_final,
                         )
                         _pre = _mp_final(_cands)
-                        _BULK_VERIFY_STATE["live_preclusters"] = _pre
+                        state["live_preclusters"] = _pre
                     except Exception:
                         pass
                     await consolidate_remaining_tasks(
@@ -2546,24 +2562,24 @@ async def _run_bulk_verify(
                         verify_model_id=None,  # → DEFAULT_EXTRACTION_MODEL_ID
                         live_preclusters=_pre,
                         service=service,
-                        state=_BULK_VERIFY_STATE["consolidation"],
+                        state=state["consolidation"],
                     )
             except Exception as _ce:
                 logger.warning(f"consolidation pipeline failed: {_ce}")
                 try:
-                    _BULK_VERIFY_STATE["consolidation"]["error"] = str(_ce)[:300]
+                    state["consolidation"]["error"] = str(_ce)[:300]
                 except Exception:
                     pass
     except Exception as e:
-        _BULK_VERIFY_STATE["error"] = str(e)[:500]
+        state["error"] = str(e)[:500]
     finally:
-        _BULK_VERIFY_STATE["finished_at"] = __import__("datetime").datetime.utcnow().isoformat()
-        _BULK_VERIFY_STATE["running"] = False
+        state["finished_at"] = __import__("datetime").datetime.utcnow().isoformat()
+        state["running"] = False
 
         # نوتیفیکیشن تلگرام
         try:
             from app.services.notification_service import notification_service
-            _s = _BULK_VERIFY_STATE["summary"]
+            _s = state["summary"]
             _msg = (
                 f"✅ *Bulk Verify کامل شد* (mode: {mode})\n\n"
                 f"📊 خلاصه:\n"
@@ -2573,10 +2589,10 @@ async def _run_bulk_verify(
                 f"• ⚠️ error: {_s['verified_error']}\n"
                 f"• 📦 خودکار archive شدند: {_s['auto_archived']}\n"
                 f"• 🛡 manual skip شد: {_s['skipped_manual']}\n"
-                f"• 📋 کل scan-generated processed: {_BULK_VERIFY_STATE['total']}"
+                f"• 📋 کل scan-generated processed: {state['total']}"
             )
             # 🆕 (C3) بخش consolidation
-            _c = _BULK_VERIFY_STATE.get("consolidation") or {}
+            _c = state.get("consolidation") or {}
             if _c.get("ran"):
                 _cands_n = _c.get("candidates_count", 0)
                 _cls_n = _c.get("clusters_created", 0)
@@ -2625,11 +2641,16 @@ async def start_bulk_verify(
     - concurrency: حداکثر تعداد verify موازی (پیش‌فرض ۳، حداکثر ۵)
     """
     import asyncio as _aio
-    if _BULK_VERIFY_STATE.get("running"):
+    _mine = _BULK_STATES.get(watched_id) or {}
+    if _mine.get("running"):
+        return {"started": False, "reason": "bulk verify ِ همین پروژه در حال اجراست", "state": _mine}
+    _other = _bulk_running_other(watched_id)
+    if _other:
+        _ow = get_oversight_service()._find_watched(_other)
         return {
             "started": False,
-            "reason": "bulk verify در حال اجراست",
-            "state": _BULK_VERIFY_STATE,
+            "reason": f"bulk verify ِ پروژهٔ «{getattr(_ow, 'repo_full_name', _other)}» در حال اجراست — یکی‌یکی (حافظهٔ سرور)",
+            "state": None,
         }
     # validate mode
     _mode = (mode or "deep").lower().strip()
@@ -2646,8 +2667,12 @@ async def start_bulk_verify(
         raise HTTPException(status_code=400, detail="source_filter باید 'auto_scan' یا 'user' باشد")
     # (2026-11-15) claim the slot synchronously — two quick clicks used to both pass the check above because the
     # flag was only set once the background task started; `_run_bulk_verify`'s finally always clears it.
-    _BULK_VERIFY_STATE["running"] = True
-    _aio.create_task(
+    _st = _new_bulk_state()
+    _st["running"] = True
+    _st["watched_id"] = watched_id
+    _BULK_STATES[watched_id] = _st
+    from ...services.oversight_service import get_oversight_service as _gos_bv
+    _gos_bv()._spawn_bg(
         _run_bulk_verify(
             watched_id=watched_id,
             priority_filter=priority,
@@ -2781,9 +2806,10 @@ async def get_bulk_verify_eligible_count(watched_id: str):
 @router.get("/watched/{watched_id}/bulk-verify/status")
 async def get_bulk_verify_status(watched_id: str):
     """وضعیت فعلی bulk verify."""
-    if _BULK_VERIFY_STATE.get("watched_id") != watched_id and not _BULK_VERIFY_STATE.get("running"):
+    st = _BULK_STATES.get(watched_id)
+    if not st:
         return {"running": False, "for_watched": watched_id, "state": None}
-    return {**_BULK_VERIFY_STATE}
+    return {**st}
 
 
 @router.post("/tasks/{task_id}/recover-after-claude-run")

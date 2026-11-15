@@ -2040,10 +2040,27 @@ def _enough_real_passes(runtime_passed, task) -> bool:
     """Passing runtime probes, without the synthetic «system_home», that cover ≥ half of the task's ACs (min 1)."""
     import math
 
-    real = {getattr(r, "ac_id", None) for r in runtime_passed if getattr(r, "ac_id", None) != "system_home"}
-    real.discard(None)
+    import re as _re
+
+    # (2026-11-15, owner: «موارد باز») the probe families name the same AC differently — «ac00_<hash>» (runtime
+    # runner), «code_ac0» (code-aware), «step_1» (task steps): one AC passing in two families counted twice, and
+    # steps counted as ACs. Normalise to the AC index; steps and unknown ids do not count.
+    def _ac_index(ac_id: str):
+        m = _re.match(r"^(?:code_)?ac0*(\d+)", ac_id or "")
+        return int(m.group(1)) if m else None
+
+    real = set()
+    for r in runtime_passed:
+        aid = getattr(r, "ac_id", None)
+        if not aid or aid == "system_home":
+            continue
+        idx = _ac_index(aid)
+        if idx is not None:
+            real.add(idx)
     n_acs = len(getattr(task, "acceptance_criteria", None) or [])
-    return len(real) >= max(1, math.ceil(n_acs / 2))
+    # no stored ACs (the generic fallback ACs are in use) ⇒ at least 2 distinct ACs, never one lucky pass
+    need = max(1, math.ceil(n_acs / 2)) if n_acs else 2
+    return len(real) >= need
 
 
 async def verify_task(
