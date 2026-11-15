@@ -56,6 +56,26 @@ export default function AssistantChat({ pathname, pageLabel }: { pathname: strin
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, conversationId]);
 
+  // «ادامه در دستیار» from «آرشیو» — load a saved conversation into the chat and open it
+  useEffect(() => {
+    const onLoad = async (e: Event) => {
+      const id = (e as CustomEvent).detail?.id;
+      if (!id) return;
+      try {
+        const res = await fetch(`${API_BASE}/api/assistant/conversations/${id}`);
+        if (!res.ok) return;
+        const c = await res.json();
+        setMessages((c.messages || []).map((m: any) => ({
+          role: m.role === 'user' ? 'user' : 'assistant', content: m.content || m.error || '', model_id: m.model_id, error: !!m.error,
+        })));
+        setConversationId(c.id);
+        setOpen(true);
+      } catch { /* network */ }
+    };
+    window.addEventListener('assistant:load', onLoad);
+    return () => window.removeEventListener('assistant:load', onLoad);
+  }, []);
+
   useEffect(() => {
     if (!open || models.length) return;
     fetch(`${API_BASE}/api/assistant/models`)

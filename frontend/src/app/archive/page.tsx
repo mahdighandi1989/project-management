@@ -1,7 +1,9 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, Suspense } from 'react';
 import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
+import { withToken } from '@/lib/auth';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -52,10 +54,37 @@ interface DebateDetail {
   created_at?: string;
 }
 
-type TabType = 'debates' | 'files' | 'projects';
+// 2026-11-15 (owner plan item 4): «مناظره» left the menu for «دستیار»; its conversations
+// are the archive's first tab, the old debates stay (last tab) and the page still opens.
+type TabType = 'assistant' | 'files' | 'projects' | 'debates';
+const TAB_IDS: TabType[] = ['assistant', 'files', 'projects', 'debates'];
+
+interface ConversationItem {
+  id: string;
+  title: string;
+  created_at?: string;
+  updated_at?: string;
+  messages_count?: number;
+}
+
+interface ConversationDetail extends ConversationItem {
+  messages: { role: string; content: string; model_id?: string; page?: string; at?: string; error?: string }[];
+}
 
 export default function ArchivePage() {
-  const [tab, setTab] = useState<TabType>('debates');
+  return (
+    <Suspense fallback={<p className="p-6 text-gray-500" dir="rtl">در حال بارگذاری...</p>}>
+      <ArchiveContent />
+    </Suspense>
+  );
+}
+
+function ArchiveContent() {
+  const params = useSearchParams();
+  const initialTab = (TAB_IDS as string[]).includes(params.get('tab') || '') ? (params.get('tab') as TabType) : 'assistant';
+  const [tab, setTab] = useState<TabType>(initialTab);
+  const [conversations, setConversations] = useState<ConversationItem[]>([]);
+  const [selectedConversation, setSelectedConversation] = useState<ConversationDetail | null>(null);
   const [debates, setDebates] = useState<DebateItem[]>([]);
   const [files, setFiles] = useState<FileItem[]>([]);
   const [projects, setProjects] = useState<ProjectItem[]>([]);
@@ -92,11 +121,17 @@ export default function ArchivePage() {
   const loadData = async () => {
     setLoading(true);
     try {
-      const [debatesRes, filesRes, projectsRes] = await Promise.allSettled([
+      const [debatesRes, filesRes, projectsRes, convRes] = await Promise.allSettled([
         fetch(`${API_BASE}/api/debate/`),
         fetch(`${API_BASE}/api/upload/files`),
         fetch(`${API_BASE}/api/simple/projects`),
+        fetch(`${API_BASE}/api/assistant/conversations`),
       ]);
+
+      if (convRes.status === 'fulfilled' && convRes.value.ok) {
+        const data = await convRes.value.json();
+        setConversations(Array.isArray(data) ? data : []);
+      }
 
       if (debatesRes.status === 'fulfilled' && debatesRes.value.ok) {
         const data = await debatesRes.value.json();
@@ -137,6 +172,47 @@ export default function ArchivePage() {
       setLoadingDetail(false);
     }
   };
+
+  const openConversation = async (id: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/assistant/conversations/${id}`);
+      if (res.ok) setSelectedConversation(await res.json());
+      else showError('بارگذاری گفت‌وگو ناموفق بود');
+    } catch (e) {
+      showError('خطا در ارتباط');
+    }
+  };
+
+  // «ادامه در دستیار» — the roaming chat (components/AssistantChat.tsx) listens for this
+  const continueInAssistant = (id: string) => {
+    window.dispatchEvent(new CustomEvent('assistant:load', { detail: { id } }));
+    setSelectedConversation(null);
+  };
+
+  const archiveConversation = async (id: string, title: string) => {
+    if (!confirm(`گفت‌وگوی «${title}» از فهرست برداشته شود؟ (فایلش روی سرور در پوشهٔ deleted می‌ماند)`)) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/assistant/conversations/${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        showSuccess('گفت‌وگو بایگانی شد');
+        setConversations((prev) => prev.filter((c) => c.id !== id));
+      } else showError('خطا در بایگانی');
+    } catch (e) {
+      showError('خطا در ارتباط');
+    }
+  };
+
+  const filteredConversations = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    let list = conversations.filter((c) => !q || (c.title || '').toLowerCase().includes(q));
+    list = [...list].sort((a, b) => {
+      if (sortBy === 'name') return (a.title || '').localeCompare(b.title || '', 'fa');
+      const da = a.updated_at || a.created_at || '';
+      const db = b.updated_at || b.created_at || '';
+      return sortBy === 'oldest' ? da.localeCompare(db) : db.localeCompare(da);
+    });
+    return list;
+  }, [conversations, search, sortBy]);
 
   const deleteFile = async (id: string, name: string) => {
     if (!confirm(`فایل «${name}» حذف شود؟`)) return;
@@ -318,7 +394,7 @@ export default function ArchivePage() {
               📚 آرشیو
             </h1>
             <p className="text-gray-500 dark:text-gray-400 text-sm">
-              تاریخچه مناظرات، فایل‌ها و پروژه‌ها
+              تاریخچهٔ گفت‌وگوهای دستیار، فایل‌ها، پروژه‌ها و مناظره‌های قدیمی
             </p>
           </div>
           <div className="flex gap-2">
@@ -338,7 +414,12 @@ export default function ArchivePage() {
         </div>
 
         {/* آمار */}
-        <div className="grid grid-cols-3 gap-3 mb-6">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-4 text-center">
+            <div className="text-2xl mb-1">💬</div>
+            <div className="text-2xl font-bold dark:text-white">{conversations.length}</div>
+            <div className="text-xs text-gray-500 dark:text-gray-400">گفت‌وگوی دستیار</div>
+          </div>
           <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-4 text-center">
             <div className="text-2xl mb-1">🥊</div>
             <div className="text-2xl font-bold dark:text-white">{debates.length}</div>
@@ -362,9 +443,10 @@ export default function ArchivePage() {
         <div className="flex gap-2 mb-4 flex-wrap">
           {(
             [
-              { id: 'debates', label: 'مناظرات', icon: '🥊', count: debates.length },
+              { id: 'assistant', label: 'گفت‌وگوهای دستیار', icon: '💬', count: conversations.length },
               { id: 'files', label: 'فایل‌ها', icon: '📁', count: files.length },
               { id: 'projects', label: 'پروژه‌ها', icon: '🛠️', count: projects.length },
+              { id: 'debates', label: 'مناظره‌های قدیمی', icon: '🥊', count: debates.length },
             ] as const
           ).map((t) => (
             <button
@@ -447,6 +529,28 @@ export default function ArchivePage() {
               <div className="inline-block w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mb-2"></div>
               <p className="text-gray-400">در حال بارگذاری...</p>
             </div>
+          ) : tab === 'assistant' ? (
+            filteredConversations.length === 0 ? (
+              <div className="text-center py-12 text-gray-400">
+                <div className="text-5xl mb-3">💬</div>
+                <p>{conversations.length === 0 ? 'هنوز گفت‌وگویی با دستیار نیست — دایرهٔ سبزِ 💬 پایینِ هر صفحه را بزنید.' : 'نتیجه‌ای پیدا نشد'}</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {filteredConversations.map((c) => (
+                  <div key={c.id} className="flex items-center gap-3 p-3 border dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700/50">
+                    <button onClick={() => openConversation(c.id)} className="flex-1 min-w-0 text-right">
+                      <div className="font-medium dark:text-white truncate">{c.title || '(بی‌عنوان)'}</div>
+                      <div className="text-xs text-gray-500 dark:text-gray-400">
+                        {c.messages_count || 0} پیام · {formatDate(c.updated_at || c.created_at)}
+                      </div>
+                    </button>
+                    <button onClick={() => continueInAssistant(c.id)} className="px-3 py-1 bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 rounded text-sm">ادامه در دستیار</button>
+                    <button onClick={() => archiveConversation(c.id, c.title)} className="px-3 py-1 bg-red-100 dark:bg-red-900/40 text-red-600 dark:text-red-300 rounded text-sm" title="برداشتن از فهرست (بایگانی)">🗑️</button>
+                  </div>
+                ))}
+              </div>
+            )
           ) : tab === 'debates' ? (
             filteredDebates.length === 0 ? (
               <div className="text-center py-12 text-gray-400">
@@ -457,7 +561,7 @@ export default function ArchivePage() {
                     href="/debate"
                     className="inline-block mt-3 text-blue-500 hover:underline"
                   >
-                    شروع مناظره جدید ←
+                    صفحهٔ مناظره (بایگانی‌شده؛ همچنان کار می‌کند) ←
                   </Link>
                 )}
               </div>
@@ -539,7 +643,7 @@ export default function ArchivePage() {
                     </div>
                     <div className="flex gap-1 flex-shrink-0">
                       <a
-                        href={`${API_BASE}/api/upload/file/${f.id}`}
+                        href={withToken(`${API_BASE}/api/upload/file/${f.id}`)}
                         download={f.original_name}
                         className="px-3 py-1 bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 rounded text-sm hover:bg-blue-200 dark:hover:bg-blue-900/60"
                       >
@@ -610,6 +714,31 @@ export default function ArchivePage() {
           )}
         </div>
       </div>
+
+      {/* مودال گفت‌وگوی دستیار */}
+      {selectedConversation && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => setSelectedConversation(null)}>
+          <div className="bg-white dark:bg-gray-800 rounded-xl max-w-3xl w-full max-h-[85vh] overflow-auto p-6" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4 gap-2">
+              <h2 className="font-bold dark:text-white truncate">💬 {selectedConversation.title}</h2>
+              <div className="flex gap-2">
+                <button onClick={() => continueInAssistant(selectedConversation.id)} className="px-3 py-1 bg-emerald-600 text-white rounded text-sm">ادامه در دستیار</button>
+                <button onClick={() => setSelectedConversation(null)} className="px-3 py-1 bg-gray-200 dark:bg-gray-700 dark:text-white rounded text-sm">بستن</button>
+              </div>
+            </div>
+            <div className="space-y-3">
+              {selectedConversation.messages.map((m, i) => (
+                <div key={i} className={`rounded-lg p-3 text-sm whitespace-pre-wrap ${m.role === 'user' ? 'bg-blue-50 dark:bg-blue-900/30 dark:text-blue-100' : m.error ? 'bg-red-50 text-red-700' : 'bg-gray-50 dark:bg-gray-700 dark:text-gray-100'}`}>
+                  <div className="text-xs text-gray-500 dark:text-gray-400 mb-1">
+                    {m.role === 'user' ? `👤 شما${m.page ? ` — در ${m.page}` : ''}` : `🤖 ${m.model_id || 'دستیار'}`} · {formatDate(m.at)}
+                  </div>
+                  {m.content || m.error}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* مودال جزئیات مناظره */}
       {selectedDebateId && (
