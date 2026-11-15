@@ -1427,6 +1427,9 @@ class OversightService:
                                 "html_url": r.get("html_url"),
                                 "pushed_at": r.get("pushed_at"),
                                 "updated_at": r.get("updated_at"),
+                                # 🩹 (2026-11-15) the auto-discover age filter needs it — without it every repo was
+                                # «too old» and auto-discover never added anything
+                                "created_at": r.get("created_at"),
                                 "stargazers_count": r.get("stargazers_count", 0),
                                 "forks_count": r.get("forks_count", 0),
                                 "open_issues_count": r.get("open_issues_count", 0),
@@ -2191,6 +2194,9 @@ class OversightService:
         now = datetime.now(timezone.utc)
         w.next_run_at = (now + timedelta(hours=1)).isoformat()
         w.next_scan_at = (now + timedelta(hours=1)).isoformat()
+        # 🩹 (2026-11-15) the scheduler decides by last_scan_at (None ⇒ «due now»), not next_scan_at, so a just-
+        # discovered repo was deep-scanned on the very next minute. Back-date last_scan_at so the first scan is in ~1 h.
+        w.last_scan_at = (now - timedelta(hours=max(float(w.scan_interval_hours or 168) - 1, 0))).isoformat()
 
         async with self._lock:
             self.watched.append(w)
@@ -2764,7 +2770,7 @@ class OversightService:
         from .claude_runner_bootstrap import set_workflow_permissions_write
         from .prompt_github_sync import _resolve_repo_and_branch
 
-        resolved = _resolve_repo_and_branch(watched)
+        resolved = _resolve_repo_and_branch(watched, explicit=True)  # 🩹 2026-11-15: result of an owner-started run/repair
         if not resolved:
             return {"success": False, "error": "repo_not_resolvable"}
         owner, repo, _branch = resolved
@@ -7630,12 +7636,16 @@ AC = «طراحی شیک‌تر باشد»:
             )
 
             # وضعیت نهایی
-            if status_val == "done":
-                final_status = "done"
-            elif status_val == "not_done":
+            # 🩹 (2026-11-15, owner decision) run_task is one AI READING of README + file list + commit messages — it
+            # changes no code. Its «done» used to mark the task done (and skip the verifier's streak and remaining-parts
+            # guards). Now only the independent verifier may say done; an AI «done» here means «ready for review».
+            if status_val == "not_done":
                 final_status = "pending"
             else:
                 final_status = "awaiting_review"
+            if status_val == "done":
+                report.next_actions = list(report.next_actions or []) + [
+                    "این فقط برآوردِ AI از روی README و فهرستِ فایل‌هاست — «تأیید» (verify) را بزنید تا تأییدکنندهٔ مستقل بسنجد."]
 
             async with self._lock:
                 task.status = final_status
@@ -7649,7 +7659,7 @@ AC = «طراحی شیک‌تر باشد»:
                 self._save_tasks()
 
             # ساخت GitHub issue در حالت auto یا allow_create_issue
-            if watched and final_status != "done":
+            if watched and status_val != "done":  # 🩹 an AI «done» opens no issue (as before)
                 try:
                     issue_result = await self._create_github_issue_for_action(watched, task, report)
                     if issue_result and issue_result.get("success"):
@@ -9497,6 +9507,11 @@ AC = «طراحی شیک‌تر باشد»:
                             f"ratio={_cleanup_ratio:.2f}) — archive + TODO"
                         )
                     elif (task.followup_round or 0) < max_rounds:
+                        # 🩹 (2026-11-15) the round counter was only raised by the Claude-runner chain
+                        # (external_prompts._verify_then_chain); for auto_via_* without the runner it stayed 0 and the
+                        # loop never reached max_rounds — an endless run/verify cycle. Count the round here then.
+                        if watched is None or not getattr(watched, "claude_runner_enabled", False):
+                            task.followup_round = (task.followup_round or 0) + 1
                         task.status = "pending"
                         # next_run_at به الان ست می‌شود تا در tick بعدی اجرا شود
                         task.next_run_at = now_iso()

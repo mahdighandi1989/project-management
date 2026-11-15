@@ -238,7 +238,7 @@ def format_prompt_markdown(task: Any) -> str:
     return "\n".join(body_parts).rstrip() + "\n"
 
 
-def _resolve_repo_and_branch(watched: Any) -> Optional[Tuple[str, str, str]]:
+def _resolve_repo_and_branch(watched: Any, explicit: bool = False) -> Optional[Tuple[str, str, str]]:
     """از watched project: (owner, repo, branch). None اگر فاقد config باشد.
 
     🐛 (gate-on-claude-runner) — قبلاً فقط `prompt_sync_enabled` چک
@@ -260,11 +260,15 @@ def _resolve_repo_and_branch(watched: Any) -> Optional[Tuple[str, str, str]]:
     """
     if watched is None:
         return None
-    if not getattr(watched, "prompt_sync_enabled", True):
-        return None
-    # 🐛 master gate: اگر «اجرای خودکار» خاموش است، اصلاً sync نکن.
-    if not getattr(watched, "claude_runner_enabled", False):
-        return None
+    # 🩹 (2026-11-15, owner decision) ``explicit=True`` = an action the owner started by hand (install the runner,
+    # «run with Claude now», repair, uninstall, the TO-DO of a run he started). His click IS the consent, so the
+    # «auto-run off ⇒ nothing changes on GitHub» gate below applies only to AUTOMATIC work (sync, scheduler, chain).
+    if not explicit:
+        if not getattr(watched, "prompt_sync_enabled", True):
+            return None
+        # 🐛 master gate: اگر «اجرای خودکار» خاموش است، اصلاً sync نکن.
+        if not getattr(watched, "claude_runner_enabled", False):
+            return None
     repo_full = getattr(watched, "repo_full_name", "") or ""
     if repo_full.strip().lower() in _excluded_repos():
         return None

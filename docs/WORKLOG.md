@@ -498,3 +498,18 @@
 - **[OWNER]** بند ۱۲ و با آن کلِ طرحِ ۱۲ بندی انجام و ارسال شد؛ کارهای بازِ نیازمندِ تصمیمِ مالک: [OVERSIGHT.md §۱۲](handbook/OVERSIGHT.md) و TODO های (۱۰) تا (۱۲).
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · check_frontend_api (۰ بی‌مسیر) + pytest + next build
+
+## 2026-11-15 (۱۴) — تصمیم‌های مالک برای ایرادهای بازِ «اتاق فرمان» (دستهٔ ۱)
+
+- **[OWNER]** «اون ۴ موردی که گفتی تصمیمِ منه نمی‌فهمم باید چی کار کنم — دقیق و خلاصه بگو یا خودت بهترین رو طبقِ خواسته‌های قبلی انجام بده؛
+  ایرادهای بازِ اتاق فرمان و سایرِ قسمت‌ها را هم انجام بده.»
+- **[DECISION]** (۱) دیسک: بایگانی در درایو سپس پاک‌سازی، بی‌پاک‌کردنِ دادهٔ بی‌بایگانی (قاعدهٔ ۳ و ۶) — دستهٔ بعد. (۲) فقط تأییدکنندهٔ مستقل «انجام‌شده»
+  می‌گوید. (۳) تأییدِ سخت‌گیرتر. (۴) کلیکِ صریحِ مالک = اجازه؛ قاعدهٔ «اجرای خودکار خاموش ⇒ هیچ تغییری در GitHub» فقط برای کارِ **خودکار** است.
+- **[CHANGE]** `prompt_github_sync._resolve_repo_and_branch(explicit=)`؛ `claude_runner_bootstrap` (نصب/حذف/تعمیر/dispatch صریح؛ dispatch با شاخهٔ مخزن؛ MASTER_PROMPT
+  به شاخهٔ checkout‌شده push می‌کند)؛ `external_prompts` (TO-DO صریح؛ failed/abandoned از `/next` بیرون)؛ `oversight_service` (`run_task` هرگز done نمی‌زند؛ شمارهٔ
+  دورِ auto-loop وقتی runner خاموش است؛ `created_at` در فهرستِ مخازن؛ اسکنِ اولِ مخزنِ تازه ~۱ ساعت بعد)؛ `oversight_verifier` (`_enough_real_passes`، شرطِ
+  پوششِ v6)؛ `api_probe` (فقط خواندن مگر `RUNTIME_VERIFY_ALLOW_WRITES=1`).
+- **[VERIFY]** `test_owner_decisions_2026_11_15.py` (۴)، آزمونِ پیش‌فرضِ «POST روی production رد» در `test_runtime_verify_real_servers.py`، تستِ نگهبانِ قدیمیِ شمارهٔ دور
+  دقیق‌تر شد (مسیرِ runner همچنان قفل)؛ pytest ۷۶۳ سبز. وضعیتِ هر بند: `docs/handbook/OVERSIGHT.md` «به‌روزرسانیِ ۲۰۲۶-۱۱-۱۵ (ب)».
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · pytest

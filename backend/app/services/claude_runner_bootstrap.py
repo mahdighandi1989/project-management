@@ -109,15 +109,16 @@ MASTER_PROMPT = (
     "\n"
     "هر AC را پیاده‌سازی کن. کد را با Edit/Write بنویس، تست کن.\n"
     "\n"
-    "## مرحله ۵ — commit و push مستقیم به main\n"
+    "## مرحله ۵ — commit و push مستقیم به شاخهٔ اصلیِ مخزن\n"
     "\n"
     "```bash\n"
     "git add -A\n"
     "git commit -m \"[<task_id>] <خلاصهٔ کوتاه>\" || echo 'no changes'\n"
-    "git push origin main || { git pull --rebase origin main && git push origin main; } || exit 1\n"
+    "B=$(git rev-parse --abbrev-ref HEAD)  # شاخهٔ اصلیِ همین مخزن (main یا master یا …)\n"
+    "git push origin \"$B\" || { git pull --rebase origin \"$B\" && git push origin \"$B\"; } || exit 1\n"
     "```\n"
     "\n"
-    "هرگز PR نزن. هرگز branch جدا نساز. مستقیم به main.\n"
+    "هرگز PR نزن. هرگز branch جدا نساز. مستقیم به همان شاخه‌ای که checkout شده.\n"
     "\n"
     "## مرحله ۶ — complete اعلام کن (حیاتی — اگر اینجا fail شود، تسک معلق می‌ماند)\n"
     "\n"
@@ -479,7 +480,7 @@ async def trigger_workflow_dispatch(
     watched: Any,
     *,
     gh_token: str,
-    ref: str = "main",
+    ref: Optional[str] = None,  # 🩹 2026-11-15: was "main" ⇒ always main; now the repo's own branch
     target_task_id: Optional[str] = None,
     force: bool = False,
     claude_model: Optional[str] = None,
@@ -534,7 +535,7 @@ async def trigger_workflow_dispatch(
     except Exception as _lock_e:
         logger.debug(f"verify-lock check failed (proceeding): {_lock_e}")
 
-    resolved = _resolve_repo_and_branch(watched)
+    resolved = _resolve_repo_and_branch(watched, explicit=True)  # 🩹 2026-11-15: owner-started actions
     if not resolved:
         return {"success": False, "error": "repo_not_resolvable"}
     owner, repo, branch = resolved
@@ -704,7 +705,7 @@ async def install_runner(
         "errors": [str, ...],  # اگر بخش‌هایی fail شده
       }
     """
-    resolved = _resolve_repo_and_branch(watched)
+    resolved = _resolve_repo_and_branch(watched, explicit=True)  # 🩹 2026-11-15: owner-started actions
     if not resolved:
         return {
             "success": False,
@@ -801,7 +802,7 @@ async def uninstall_runner(
 
     Returns: {"success": bool, "errors": [str, ...]}
     """
-    resolved = _resolve_repo_and_branch(watched)
+    resolved = _resolve_repo_and_branch(watched, explicit=True)  # 🩹 2026-11-15: owner-started actions
     if not resolved:
         return {"success": False, "errors": ["repo_not_resolvable"]}
     owner, repo, branch = resolved
@@ -878,7 +879,7 @@ async def list_workflow_runs(
         "total_count": int,
       }
     """
-    resolved = _resolve_repo_and_branch(watched)
+    resolved = _resolve_repo_and_branch(watched, explicit=True)  # 🩹 2026-11-15: owner-started actions
     if not resolved:
         return {"success": False, "error": "repo_not_resolvable"}
     if not gh_token:

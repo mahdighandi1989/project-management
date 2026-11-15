@@ -83,11 +83,20 @@ def test_apply_followup_does_not_increment_round_on_partial():
 
     # The increment line must NOT appear as executable code in the
     # partial branch. (Comments mentioning the move are fine.)
+    # 2026-11-15: ONE increment is allowed — inside the auto-loop branch and only when the Claude runner is OFF
+    # (then _verify_then_chain never runs, and without it the auto_via_* loop never reached max rounds). The runner
+    # path must still never be incremented here.
+    lines = body.splitlines()
     code_lines = [
-        ln for ln in body.splitlines()
+        ln for i, ln in enumerate(lines)
         if "task.followup_round = (task.followup_round or 0) + 1" in ln
         and not ln.lstrip().startswith("#")
+        and 'not getattr(watched, "claude_runner_enabled", False)' not in lines[i - 1]
     ]
+    guarded = [ln for i, ln in enumerate(lines)
+               if "task.followup_round = (task.followup_round or 0) + 1" in ln
+               and 'not getattr(watched, "claude_runner_enabled", False)' in lines[i - 1]]
+    assert len(guarded) == 1, "the runner-off increment must be guarded by claude_runner_enabled"
     assert code_lines == [], (
         f"apply_followup_after_verify must NOT increment followup_round "
         f"on partial — that responsibility was moved to _verify_then_chain. "

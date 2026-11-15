@@ -214,6 +214,10 @@ async def list_next_prompts(
             continue
         if ext == "done":
             continue
+        # 🩹 (2026-11-15) a task the runner reported as failed (or the loop abandoned) was picked again by the next
+        # dispatch — the same failing task burning the OAuth quota. It needs the owner (retry=true or a manual run).
+        if ext in ("failed", "abandoned"):
+            continue
         candidates.append(t)
     candidates.sort(
         key=lambda x: (
@@ -841,7 +845,7 @@ async def _write_todo_for_task(
         )
         from ...services.oversight_service import get_github_token
         from ...services.oversight_verifier import _ac_text_of
-        resolved = _resolve_repo_and_branch(watched)
+        resolved = _resolve_repo_and_branch(watched, explicit=True)  # 🩹 2026-11-15: result of an owner-started run/repair
         if not resolved:
             return
         owner, repo, branch = resolved
@@ -1207,7 +1211,7 @@ async def diagnose_task_sync(task_id: str):
     # resolve repo info
     repo_info = None
     if watched:
-        resolved = _resolve_repo_and_branch(watched)
+        resolved = _resolve_repo_and_branch(watched, explicit=True)  # 🩹 2026-11-15: result of an owner-started run/repair
         if resolved:
             owner, repo, branch = resolved
             repo_info = {

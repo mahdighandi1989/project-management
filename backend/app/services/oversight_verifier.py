@@ -2036,6 +2036,16 @@ async def _archive_auto_verify_inspector_session(session_id: int) -> None:
         pass
 
 
+def _enough_real_passes(runtime_passed, task) -> bool:
+    """Passing runtime probes, without the synthetic «system_home», that cover ≥ half of the task's ACs (min 1)."""
+    import math
+
+    real = {getattr(r, "ac_id", None) for r in runtime_passed if getattr(r, "ac_id", None) != "system_home"}
+    real.discard(None)
+    n_acs = len(getattr(task, "acceptance_criteria", None) or [])
+    return len(real) >= max(1, math.ceil(n_acs / 2))
+
+
 async def verify_task(
     task_id: str,
     *,
@@ -3573,11 +3583,15 @@ async def verify_task(
         # اگر **همهٔ** probe ها runtime pass شدند (با حداقل 1 probe non-skipped
         # و هیچ failed) و AI گفت not_done یا partial → به done ارتقا.
         # این طبق spec: «اگر runtime ✅ ولی AI گفت not_done → AI override کن به done»
+        # 🩹 (2026-11-15, owner decision — verification was too lenient): one passed probe used to turn even an AI
+        # «not_done» into done — including the synthetic «homepage loads» probe, while static/test probes are skipped on
+        # Render. Now: only «partial» can be lifted, the synthetic probe does not count, and real passing probes must
+        # cover at least half of the task's acceptance criteria.
         elif (
-            len(runtime_passed) >= 1
+            status_val == VERIFICATION_PARTIAL
             and not runtime_failed
             and not any(r.status == "error" for r in runtime_probe_results)
-            and status_val in (VERIFICATION_NOT_DONE, VERIFICATION_PARTIAL)
+            and _enough_real_passes(runtime_passed, task)
         ):
             logger.info(
                 f"verify {task.id}: AI گفت {status_val} ولی {len(runtime_passed)} probe "
@@ -3768,6 +3782,10 @@ async def verify_task(
                     and status_val in (VERIFICATION_NOT_DONE, VERIFICATION_PARTIAL)
                     and _v6_done_ratio >= 0.8
                     and _v6_avg_conf >= 0.85
+                    # 🩹 (2026-11-15, owner decision) one concrete AC verdict was enough to upgrade; now the concrete
+                    # verdicts must cover at least half of the ACs (min 2 when the task has ≥2 ACs)
+                    and _v6_total >= max(1, min(2, len(task.acceptance_criteria or [])),
+                                         -(-len(task.acceptance_criteria or []) // 2))
                 ):
                     status_val = VERIFICATION_DONE
                     report.status = VERIFICATION_DONE

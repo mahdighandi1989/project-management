@@ -115,7 +115,18 @@ class TestApiProbeRealServer:
         assert r.evidence["actual_status"] == 500
 
     @pytest.mark.asyncio
-    async def test_post_with_body(self, local_http_server):
+    async def test_post_is_skipped_by_default(self, local_http_server, monkeypatch):
+        monkeypatch.delenv("RUNTIME_VERIFY_ALLOW_WRITES", raising=False)
+        ctx = ProbeContext(task_id="t", run_id="r", backend_base_url=local_http_server)
+        ac = {"text": "POST /echo", "verify_method": "api_response",
+              "verify_plan": {"method": "POST", "path": "/echo", "json_body": {"name": "Ali"}}}
+        r = await run_api_probe(ac, ctx, "ac-w")
+        assert r.status == "skipped" and "production" in r.evidence["reason"]
+
+    @pytest.mark.asyncio
+    async def test_post_with_body(self, local_http_server, monkeypatch):
+        # 2026-11-15: write methods need the explicit opt-in (default: verification never writes to production)
+        monkeypatch.setenv("RUNTIME_VERIFY_ALLOW_WRITES", "1")
         ctx = ProbeContext(task_id="t", run_id="r", backend_base_url=local_http_server)
         ac = {"text": "POST /echo", "verify_method": "api_response",
               "verify_plan": {"method": "POST", "path": "/echo",

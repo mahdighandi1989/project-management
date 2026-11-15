@@ -108,6 +108,18 @@ async def run_api_probe(
         )
 
     method = str(plan.get("method") or "GET").upper()
+    # 🩹 (2026-11-15) verification must not change the watched app's PRODUCTION data: an AI-planned POST/PUT/PATCH/
+    # DELETE ran with the stored credentials. Only read methods run unless the server explicitly allows writes.
+    import os as _os
+    if method not in ("GET", "HEAD", "OPTIONS") and _os.environ.get("RUNTIME_VERIFY_ALLOW_WRITES", "") != "1":
+        return RuntimeProbeResult(
+            ac_id=ac_id,
+            ac_text=ac_text,
+            method="api_response",
+            status=PROBE_STATUS_SKIPPED,
+            evidence={"reason": f"{method} روی production اجرا نمی‌شود (فقط خواندن؛ RUNTIME_VERIFY_ALLOW_WRITES=1 برای اجازه)"},
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
     path = str(plan.get("path") or "/")
     if not path.startswith("/"):
         path = "/" + path
