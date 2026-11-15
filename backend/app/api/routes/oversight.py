@@ -3035,6 +3035,16 @@ async def run_all_pending(watched_id: str, payload: Optional[RunTaskRequest] = N
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/watched/{watched_id}/autorun-now")
+async def autorun_now(watched_id: str):
+    """(PM-INS-0008) «اجرای الان» on the card: one scheduler-style batch of auto-mode tasks now, in the background."""
+    service = get_oversight_service()
+    try:
+        return await service.autorun_now(watched_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
 class BulkApproveRequest(BaseModel):
     task_ids: List[str]
 

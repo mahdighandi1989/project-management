@@ -747,3 +747,23 @@
 - **[TODO]** اگر پیامِ 400 نسخهٔ لازم را نام نبرد و 2.1.0 هم کم باشد، `CLOUD_CODE_CLI_VERSION` را روی Render بگذارید (تا آن موقع fallback جواب می‌دهد).
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · pytest ۸۲۰ + next build
+
+## 2026-11-15 (۲۸) — فوری PM-INS-0008: «اجرای خودکار از خرداد اجرا نشده» در اتاق فرمان
+
+- **[OWNER]** برگهٔ فوریِ PM-INS-0008 (بند ۸ اتاق فرمان): کارتِ هر ۹ پروژه «▶️ اجرای خودکارِ تسک‌ها هر 96 ساعت · آخرین: ۱۴۰۵/۳/۹ · بعدی: ۱۴۰۵/۳/۱۷» نشان
+  می‌دهد با اینکه خودمختاری auto است و ۱۳۰۵ تسک باز است. خواسته: علت (زمان‌بند/worker/قفل) پیدا و رفع شود؛ «بعدی» ِ گذشته قرمز «عقب‌افتاده» با دکمهٔ «اجرای الان»؛
+  «هیچ مدلی انتخاب نشده» در مدل‌های نظارت ⇒ پیش‌فرضِ خودکار (cloud_code یا deepseek-chat). پذیرش: «آخرین» تاریخِ امروز و نتیجه در گزارش‌ها.
+- **[FINDING]** دادهٔ زندهٔ `/api/oversight/watched` (با توکنِ ناظر، فقط خواندن): هر ۹ پروژه `verify_only_mode=true`، `default_execution_mode=manual`، `next_run_at` همه
+  ۲۰۲۶-۰۶-۰۷ ۰۷:۰۵. زمان‌بند (حلقهٔ ۶۰ ثانیه‌ای، لاگِ «Oversight scheduler loop started» در Render) سالم است؛ در بندِ ۳ ِ `_scheduler_tick_inner` پروژهٔ «فقط verify»
+  عمداً `continue` می‌شود — پس اجرا نمی‌شود و `next_run_at` هم جلو نمی‌رود، ولی کارت همان خطِ «▶️ … بعدی» ِ کهنه را می‌نوشت. شبیه‌سازیِ محلیِ tick با پروژهٔ
+  بدونِ verify-only، `next_run_at` را درست جلو برد. ۸ پروژه `selected_models=[]` داشتند.
+- **[DECISION]** «فقط verify» تنظیمِ مالک است و خاموش‌کردنش یعنی اجرای خودکارِ تسک‌ها روی ۹ مخزن — **روی production عوض نشد**؛ تصمیمش با مالک (needs-owner).
+- **[CHANGE]** `oversight_service`: `autorun_state` (schedule_off / not_auto / verify_only / overdue / running / ok + شمارِ تسک‌های آمادهٔ auto از pending)،
+  `autorun_now` (یک دورِ اجرا در پس‌زمینه، «فقط verify» را رعایت می‌کند و دلیل را برمی‌گرداند؛ بدونِ تسکِ auto «آخرین» را جعل نمی‌کند)، `_default_watch_models`
+  (default_models ِ مالک، وگرنه deepseek-chat، وگرنه cloud_code) در `list_watched.effective_models` و اسکنِ زمان‌بندی‌شدهٔ بی‌مدل. route ِ
+  `POST /api/oversight/watched/{id}/autorun-now`. فرانت `oversight`: خطِ اجرای خودکار وضعیتِ واقعی را می‌گوید (کهربایی برای «فقط verify»، قرمز «⚠️ عقب‌افتاده»)،
+  دکمهٔ «▶️ اجرای الان» با پیامِ سرور؛ «✨ پیش‌فرضِ خودکار: …» به‌جای «هیچ مدلی انتخاب نشده»؛ انتخابِ مدل‌های نظارت بی‌انتخاب ⇒ deepseek-chat/cloud_code (فقط محلی).
+- **[VERIFY]** `tests/test_oversight_autorun_state_pm_ins_0008.py` (۳ تست)؛ pytest ۸۲۳ سبز؛ next build سبز. رندرِ زنده نشده.
+- **[TODO]** مالک: برای اجرای خودکار، «فقط verify» را در کارتِ پروژه خاموش و حالتِ اجرای تسک‌ها را auto_via_* کند؛ بعد «اجرای الان».
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · pytest ۸۲۳ + next build + خواندنِ دادهٔ زنده

@@ -50,6 +50,9 @@ interface Watched {
   verify_mode?: 'deep' | 'fast';
   default_execution_mode?: 'manual' | 'auto_via_projects_page' | 'auto_via_pr';
   verify_only_mode?: boolean;
+  // (2026-11-15, PM-INS-0008) server-computed: why auto-run does / does not run, and the model a project with none selected uses
+  autorun?: { state: 'schedule_off' | 'not_auto' | 'verify_only' | 'overdue' | 'running' | 'ok'; reason: string; eligible_count: number; pending_count: number; running: boolean };
+  effective_models?: string[];
   confirmation_streak_required?: number;
   max_apply_retries?: number;
   auto_create_pr_instead_of_commit?: boolean;
@@ -1930,7 +1933,20 @@ export default function OversightPage() {
         setStatus(await statusRes.value.json());
       if (modelsRes.status === 'fulfilled' && modelsRes.value.ok) {
         const data = await modelsRes.value.json();
-        setModels(Array.isArray(data) ? data : []);
+        const _list: ModelInfo[] = Array.isArray(data) ? data : [];
+        setModels(_list);
+        // (2026-11-15, PM-INS-0008) never «هیچ مدلی انتخاب نشده»: with no choice yet, pick a default —
+        // deepseek-chat, else cloud_code (whichever is available)
+        let _hasChoice = false;
+        try {
+          const _saved = JSON.parse(localStorage.getItem('oversight_models_multi') || '[]');
+          _hasChoice = (Array.isArray(_saved) && _saved.length > 0) || !!localStorage.getItem('oversight_model');
+        } catch {}
+        if (!_hasChoice) {
+          const _def = ['deepseek-chat', 'cloud_code'].find(id => _list.some(m => m.id === id));
+          // local only — the server's own default list (settings.default_models) is not overwritten from a fresh browser
+          if (_def) { setSelectedModelIds([_def]); try { localStorage.setItem('oversight_models_multi', JSON.stringify([_def])); } catch {} }
+        }
       }
       if (watchedRes.status === 'fulfilled' && watchedRes.value.ok) {
         const data = await watchedRes.value.json();
@@ -6887,6 +6903,27 @@ function WatchedCard({
   // 🩹 (2026-11-15) stop the bulk-verify poll when the card unmounts (it used to keep running forever)
   useEffect(() => () => { if (bvIntervalRef.current) clearInterval(bvIntervalRef.current); }, []);
 
+  // (2026-11-15, PM-INS-0008) «اجرای الان» — one auto-run batch now (respects «فقط verify»; the server says why not)
+  const [autorunBusy, setAutorunBusy] = useState(false);
+  const [autorunMsg, setAutorunMsg] = useState<string | null>(null);
+  const runAutorunNow = useCallback(async () => {
+    setAutorunBusy(true);
+    setAutorunMsg(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/oversight/watched/${w.id}/autorun-now`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      setAutorunMsg(res.ok ? (data.message || 'انجام شد') : `خطا: ${data.detail || res.status}`);
+      if (res.ok && data.ran_count > 0) {
+        onReplaced?.({ ...w, last_run_at: new Date().toISOString(),
+          autorun: w.autorun ? { ...w.autorun, state: 'running', running: true } : w.autorun });
+      }
+    } catch (e: any) {
+      setAutorunMsg(`خطا: ${e?.message || e}`);
+    } finally {
+      setAutorunBusy(false);
+    }
+  }, [w, onReplaced]);
+
   const openFeatureInventory = useCallback(async () => {
     setFiOpen(true);
     if (fiData) return;  // قبلاً fetch شده
@@ -7046,13 +7083,40 @@ function WatchedCard({
                 {w.last_scan_at && <> · آخرین شروع: {new Date(w.last_scan_at).toLocaleString('fa-IR')}</>}
               </div>
             )}
-            {w.schedule_enabled && w.autonomy_level === 'auto' && (
-              <div>
-                ▶️ اجرای خودکارِ تسک‌ها هر {w.interval_hours} ساعت
-                {w.last_run_at && <> · آخرین: {new Date(w.last_run_at).toLocaleString('fa-IR')}</>}
-                {w.next_run_at && <> · بعدی: {new Date(w.next_run_at).toLocaleString('fa-IR')}</>}
-              </div>
-            )}
+            {w.schedule_enabled && w.autonomy_level === 'auto' && (() => {
+              // (2026-11-15, PM-INS-0008) the line used to print a months-old «بعدی» while the scheduler skipped the
+              // project («فقط verify»). Now: the real state, red «عقب‌افتاده» when overdue, and «اجرای الان».
+              const ar = w.autorun;
+              const overdue = ar?.state === 'overdue';
+              const verifyOnly = ar?.state === 'verify_only' || (!ar && !!w.verify_only_mode);
+              return (
+                <div className={overdue ? 'text-red-600 dark:text-red-400' : verifyOnly ? 'text-amber-700 dark:text-amber-300' : ''}>
+                  {verifyOnly ? (
+                    <>⏸ اجرای خودکارِ تسک‌ها انجام نمی‌شود: «فقط verify» روشن است — زمان‌بند فقط verify می‌کند (برای اجرا، «فقط verify» را در تنظیماتِ همین کارت خاموش کنید)</>
+                  ) : (
+                    <>▶️ اجرای خودکارِ تسک‌ها هر {w.interval_hours} ساعت</>
+                  )}
+                  {w.last_run_at && <> · آخرین: {new Date(w.last_run_at).toLocaleString('fa-IR')}</>}
+                  {!verifyOnly && w.next_run_at && <> · بعدی: {new Date(w.next_run_at).toLocaleString('fa-IR')}</>}
+                  {overdue && <span className="font-bold"> · ⚠️ عقب‌افتاده</span>}
+                  {ar?.running && <span> · ⏳ در حالِ اجرا</span>}
+                  {ar && <> · {ar.eligible_count} تسکِ آمادهٔ اجرای خودکار از {ar.pending_count} pending</>}
+                  {ar && !verifyOnly && ar.eligible_count === 0 && ar.pending_count > 0 && (
+                    <span className="text-gray-500"> (حالتِ اجرای تسک‌ها manual است)</span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={runAutorunNow}
+                    disabled={autorunBusy || !!ar?.running}
+                    className={`ms-2 px-2 py-0.5 rounded text-white text-[11px] disabled:opacity-50 ${overdue ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'}`}
+                    title="یک دورِ اجرای خودکار همین حالا (در پس‌زمینه؛ نتیجه در «گزارش‌ها»)"
+                  >
+                    {autorunBusy ? '…' : '▶️ اجرای الان'}
+                  </button>
+                  {autorunMsg && <div className="text-gray-700 dark:text-gray-300 mt-0.5">{autorunMsg}</div>}
+                </div>
+              );
+            })()}
             {w.schedule_enabled && (
               <div>{(w.verify_interval_hours ?? 12) > 0 ? `✅ verify ِ دوره‌ای هر ${w.verify_interval_hours ?? 12} ساعت` : '✅ verify ِ دوره‌ای خاموش (بازه = ۰)'}</div>
             )}
@@ -7327,7 +7391,9 @@ function WatchedCard({
               ))}
             </select>
             <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-              {(w.selected_models || []).length === 0 && '⚠️ هیچ مدلی انتخاب نشده — backend default استفاده می‌شود'}
+              {(w.selected_models || []).length === 0 && ((w.effective_models || []).length > 0
+                ? `✨ پیش‌فرضِ خودکار: ${(w.effective_models || []).join('، ')} (تا وقتی مدلی انتخاب نکنید)`
+                : '⚠️ هیچ مدلِ قابل‌استفاده‌ای روشن نیست — از «مدل‌ها و تنظیمات» deepseek-chat یا cloud_code را روشن کنید')}
               {(w.selected_models || []).length === 1 && `✓ یک‌مدل (${w.selected_models![0]})`}
               {(w.selected_models || []).length > 1 && `🤝 consensus mode: ${w.selected_models!.length} مدل (هر pass × ${w.selected_models!.length} = هزینه/زمان بیشتر)`}
             </div>

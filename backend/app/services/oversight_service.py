@@ -2021,7 +2021,106 @@ class OversightService:
     # ====================================================================
 
     async def list_watched(self) -> List[Dict[str, Any]]:
-        return [w.to_dict() for w in self.watched]
+        out = []
+        for w in self.watched:
+            d = w.to_dict()
+            try:
+                d["autorun"] = self.autorun_state(w)
+                d["effective_models"] = list(getattr(w, "selected_models", []) or []) or self._default_watch_models()
+            except Exception as _e:  # never break the list for a diagnostic
+                logger.warning(f"list_watched: autorun state {w.id} failed: {_e}")
+            out.append(d)
+        return out
+
+    # ------------------------------------------------------------------
+    # (2026-11-15, PM-INS-0008) «اجرای خودکار از خرداد اجرا نشده» — the scheduler skips execution for a project in
+    # «فقط verify» mode (all 9 were), but the card kept printing a 5-month-old «بعدی». The card now reads this state,
+    # shows «عقب‌افتاده» in red, and has «اجرای الان».
+    # ------------------------------------------------------------------
+    def _autorun_eligible(self, watched_id: str) -> List["OversightTask"]:
+        return [
+            t for t in self.tasks
+            if t.watched_id == watched_id and t.status == "pending"
+            and not getattr(t, "archived", False)
+            and t.execution_mode in ("auto_via_projects_page", "auto_via_pr")
+        ]
+
+    def autorun_state(self, w: "WatchedProject") -> Dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        eligible = len(self._autorun_eligible(w.id))
+        pending_all = sum(1 for t in self.tasks if t.watched_id == w.id and t.status == "pending"
+                          and not getattr(t, "archived", False))
+        if not w.schedule_enabled:
+            state, reason = "schedule_off", "زمان‌بندی خاموش است"
+        elif w.autonomy_level != "auto":
+            state, reason = "not_auto", f"سطحِ خودمختاری «{w.autonomy_level}» است (اجرای خودکار فقط در auto)"
+        elif getattr(w, "verify_only_mode", False):
+            state, reason = "verify_only", "«فقط verify» روشن است — زمان‌بند تسک‌ها را اجرا نمی‌کند، فقط verify می‌کند"
+        else:
+            overdue = False
+            try:
+                overdue = bool(w.next_run_at) and datetime.fromisoformat(w.next_run_at) < now - timedelta(minutes=10)
+            except Exception:
+                overdue = False
+            if w.id in _RUNNING_RUNS:
+                state, reason = "running", "یک دورِ اجرا الان در جریان است"
+            elif overdue:
+                state, reason = "overdue", "زمانِ اجرای بعدی گذشته و اجرا نشده"
+            else:
+                state, reason = "ok", ""
+        return {
+            "state": state,
+            "reason": reason,
+            "eligible_count": eligible,
+            "pending_count": pending_all,
+            "running": w.id in _RUNNING_RUNS,
+        }
+
+    def _default_watch_models(self) -> List[str]:
+        """(PM-INS-0008) a project with no selected model uses this — never «هیچ مدلی انتخاب نشده».
+        Owner default list first, else deepseek-chat, else cloud_code (whichever is usable)."""
+        dm = [m for m in (self.settings.get("default_models") or []) if m]
+        if dm:
+            return dm
+        try:
+            from .ai_manager import get_ai_manager
+            avail = {m.id for m in get_ai_manager().get_available_models()}
+        except Exception:
+            avail = set()
+        for mid in ("deepseek-chat", "cloud_code"):
+            if mid in avail:
+                return [mid]
+        return []
+
+    async def autorun_now(self, watched_id: str) -> Dict[str, Any]:
+        """«اجرای الان»: one scheduler-style batch right now, in the background. Respects the owner's settings —
+        a «فقط verify» project is not executed (the reason is returned instead)."""
+        w = self._find_watched(watched_id)
+        if not w:
+            raise ValueError("پروژه یافت نشد")
+        st = self.autorun_state(w)
+        if st["state"] in ("schedule_off", "not_auto", "verify_only"):
+            return {"success": False, "ran_count": 0, "state": st["state"],
+                    "message": f"اجرا نشد: {st['reason']}. برای اجرای خودکار این تنظیم را در کارتِ پروژه عوض کنید."}
+        if w.id in _RUNNING_RUNS:
+            return {"success": False, "ran_count": 0, "state": "running", "message": "یک دورِ اجرا هنوز در جریان است"}
+        now = datetime.now(timezone.utc)
+        max_runs = int(self.settings.get("max_parallel_runs") or 2)
+        ids = [t.id for t in self._autorun_eligible(w.id)[:max_runs]]
+        w.next_run_at = (now + timedelta(hours=w.interval_hours)).isoformat()
+        if not ids:
+            async with self._lock:
+                self._save_watched()
+            return {"success": True, "ran_count": 0, "state": "no_eligible",
+                    "message": (f"تسکِ آماده‌ای برای اجرای خودکار نیست — {st['pending_count']} تسکِ pending هست ولی "
+                                "حالتِ اجرای آن‌ها manual است (فقط auto_via_projects_page / auto_via_pr خودکار اجرا می‌شوند).")}
+        _RUNNING_RUNS.add(w.id)
+        self._spawn_bg(self._scheduled_run(w.id, ids))
+        w.last_run_at = now.isoformat()
+        async with self._lock:
+            self._save_watched()
+        return {"success": True, "ran_count": len(ids), "task_ids": ids, "state": "running",
+                "message": f"{len(ids)} تسک در پس‌زمینه اجرا می‌شود؛ نتیجه در «گزارش‌ها» می‌آید."}
 
     async def add_watched(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         repo = payload.get("repo_full_name", "").strip()
@@ -10490,7 +10589,7 @@ AC = «طراحی شیک‌تر باشد»:
                             # booked at the start, and a failure retries in ~1 h instead of every minute.
                             from .oversight_deep_scan_service import run_deep_scan, _RUNNING_SCANS
                             if w.id not in _RUNNING_SCANS:
-                                model_ids = list(getattr(w, "selected_models", []) or [])
+                                model_ids = list(getattr(w, "selected_models", []) or []) or self._default_watch_models()
                                 w.last_scan_at = now.isoformat()
                                 w.next_scan_at = (now + timedelta(hours=w.scan_interval_hours)).isoformat()
                                 scanned.append(w.id)
