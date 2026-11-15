@@ -690,3 +690,17 @@
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · pytest + next build
 
+## 2026-11-15 (۲۵) — فوری PM-INS-0002: «بازرس ویژه» با تنها مدلِ روشن (cloud_code) و چیدمانِ ۱۳۶۰px
+
+- **[OWNER]** برگهٔ فوریِ PM-INS-0002 (بند ۱۲): (۱) «دستیار بازرس هوشمند» می‌گوید «مدلی انتخاب نشده» در حالی که تنها مدلِ روشن cloud_code است — باید خودکار
+  بهترین مدلِ روشن (رتبهٔ موفقیت) انتخاب و پیامِ روشن داده شود؛ (۲) در ۱۳۶۰px پنلِ چت زیرِ منوی کناری بریده می‌شود؛ (۳) پیش‌نمایشِ «دکمه پاور» را مالک بعداً گزارش می‌کند.
+- **[FINDING]** `/inspector/models` و `_smart_select_model` «در دسترس بودن» را فقط با `provider in ai_manager._services` می‌سنجیدند؛ cloud_code سرویسِ کلیددار ندارد
+  (dispatcher ِ OAuth است) ⇒ همیشه `enabled=false` و انتخابِ خودکار به `gemini-2.0-flash` ِ خاموش برمی‌گشت. مدل‌ها هم فقط با دکمهٔ پاور بار می‌شدند.
+- **[FINDING]** ردیفِ اسکرین/چت عرضِ ثابتِ ۸۴۰+۳۸۰px داشت (+ منوی کناری ⇒ سرریز در ۱۳۶۰px).
+- **[CHANGE]** `render_logs._oauth_model_ready` (dispatcher + توکن، همان قاعدهٔ `ai_manager.get_available_models`) در `/inspector/models` و `_smart_select_model`.
+  فرانت `projects/[id]`: بارگذاریِ مدل‌ها هنگامِ باز شدنِ صفحه؛ سرِ چت «✨ خودکار: <نامِ مدل>» / «⚠️ هیچ مدلِ روشنی نیست — …»؛ ردیف `flex-wrap` با `flex: 1 1 560px / 340px`.
+- **[VERIFY]** `tests/test_inspector_oauth_model_ready.py` (۳ تست)؛ pytest ۸۱۱ سبز؛ next build سبز. محلی با توکنِ ساختگی: `/inspector/models` فقط `cloud_code` را روشن و
+  `smart-select-model` آن را برگزید؛ Playwright در ۱۳۶۰ و ۱۶۰۰px: سرِ چت «✨ خودکار: Cloud Code (Claude OAuth)»، بی‌سرریزِ افقی (scrollWidth = clientWidth).
+- **[TODO]** بند ۳ (پیش‌نمایش/پاور) منتظرِ گزارشِ مالک.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · pytest ۸۱۱ + next build + Playwright محلی ۱۳۶۰/۱۶۰۰px

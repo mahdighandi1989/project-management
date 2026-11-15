@@ -3090,6 +3090,15 @@ export default function ProjectDetailPage() {
     }
   };
 
+  // (2026-11-15, PM-INS-0002) مدل‌ها را همان اول بار کن — قبلاً فقط با دکمهٔ پاور لود می‌شدند و تا آن موقع
+  // سرِ چت «مدلی انتخاب نشده» می‌گفت؛ حالا بهترین مدلِ روشن (رتبهٔ موفقیت) از ابتدا برگزیده است.
+  useEffect(() => {
+    if (projectId && inspectorModels.length === 0) {
+      void loadInspectorModels();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
+
   // 📋 ایجاد یا بارگذاری سشن بازرسی
   const initInspectorSession = async () => {
     try {
@@ -3319,6 +3328,26 @@ export default function ProjectDetailPage() {
     }
     lastSavedMsgCountRef.current = inspectorChatMessages.length;
   }, [inspectorChatMessages.length, inspectorSessionId]);
+
+  // (2026-11-15, PM-INS-0002) وضعیتِ مدل در سرِ چت — هرگز «مدلی انتخاب نشده» ِ گنگ:
+  // انتخابِ خودکار نامِ مدلِ برگزیده (بهترین مدلِ روشن طبقِ رتبهٔ موفقیت) را نشان می‌دهد،
+  // و اگر هیچ مدلِ روشنی نیست صریح می‌گوید کجا روشنش کنند.
+  const _inspectorEnabledModels = inspectorModels.filter(m => m.enabled);
+  const _inspectorModelName = (id?: string) => inspectorModels.find(m => m.id === id)?.name || id || '';
+  const inspectorModelStatusText = inspectorEngine === 'cloud_code'
+    ? 'موتور: Cloud Code'
+    : inspectorModels.length === 0
+      ? 'در حالِ بارگذاریِ مدل‌ها…'
+      : _inspectorEnabledModels.length === 0
+        ? '⚠️ هیچ مدلِ روشنی نیست — از «مدل‌ها و تنظیمات» یکی را روشن کنید'
+        : inspectorAutoSelect
+          ? `✨ خودکار: ${_inspectorModelName(inspectorSelectedModels[0] || _inspectorEnabledModels[0]?.id)}`
+          : inspectorSelectedModels.length > 0
+            ? (inspectorSelectedModels.length === 1
+                ? `مدل: ${_inspectorModelName(inspectorSelectedModels[0])}`
+                : `${inspectorSelectedModels.length} مدل انتخاب شده`)
+            : 'مدلی انتخاب نشده — انتخابِ خودکار را روشن کنید';
+  const inspectorModelStatusTitle = `${_inspectorEnabledModels.length} مدلِ روشن: ${_inspectorEnabledModels.map(m => m.name).join('، ') || '—'}`;
 
   // 🆕 لود مدل‌های موجود برای چت
   const loadInspectorModels = async () => {
@@ -13861,9 +13890,11 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
             </div>
 
             {/* محتوای اصلی - اسکرین و چت */}
-            <div className="flex flex-row-reverse gap-4" style={{ minHeight: '520px' }}>
+            {/* (2026-11-15, PM-INS-0002) واکنش‌گرا: قبلاً 840px + 380px ثابت بود و در ۱۳۶۰px کنارِ منوی کناری چت بریده می‌شد؛
+                حالا هر دو جمع می‌شوند و در عرضِ کم چت به زیرِ اسکرین می‌رود (flex-wrap). */}
+            <div className="flex flex-row-reverse flex-wrap gap-4" style={{ minHeight: '520px' }}>
               {/* اسکرین سمت چپ (در RTL) - ابعاد 5.1" x 2.8" (نسبت 1.82:1 - افقی/landscape) - 1.5x بزرگتر */}
-              <div className="flex-shrink-0 flex flex-col items-center" style={{ width: '840px' }}>
+              <div className="flex flex-col items-center" style={{ flex: '1 1 560px', maxWidth: '840px', minWidth: 0 }}>
                 <div className="bg-black rounded-2xl p-2 shadow-2xl w-full">
                   {/* فریم دستگاه - افقی */}
                   <div
@@ -14625,7 +14656,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
               </div>
 
               {/* چت باکس سمت راست (در RTL) - با قابلیت چت با AI */}
-              <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 flex flex-col overflow-hidden relative" style={{ width: '380px', flexShrink: 0 }}>
+              <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 flex flex-col overflow-hidden relative" style={{ flex: '1 1 340px', minWidth: 0 }}>
                 {/* هدر چت با انتخاب مدل */}
                 <div className="bg-gradient-to-r from-red-500 to-orange-500 text-white px-4 py-3">
                   <div className="flex items-center justify-between">
@@ -14633,10 +14664,8 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                       <span className="text-xl">🤖</span>
                       <div>
                         <h3 className="font-bold text-sm">دستیار بازرس هوشمند</h3>
-                        <p className="text-xs opacity-80">
-                          {inspectorSelectedModels.length > 0
-                            ? `${inspectorSelectedModels.length} مدل انتخاب شده`
-                            : 'مدلی انتخاب نشده'}
+                        <p className="text-xs opacity-80" title={inspectorModelStatusTitle}>
+                          {inspectorModelStatusText}
                         </p>
                       </div>
                     </div>

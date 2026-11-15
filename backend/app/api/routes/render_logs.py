@@ -3345,6 +3345,23 @@ async def inspector_chat_multi(
         }
 
 
+def _oauth_model_ready(model_id: str) -> bool:
+    """(2026-11-15, PM-INS-0002) OAuth-dispatched models (cloud_code) have no API-key service in
+    ai_manager._services, so the old «provider in services» test always said «unavailable» — with
+    cloud_code as the only enabled model the inspector showed «مدلی انتخاب نشده» and auto-select
+    fell back to a disabled Gemini. Same rule as ai_manager.get_available_models: dispatcher + token."""
+    try:
+        from ...services.oauth_model_registry import get_oauth_dispatcher
+        if get_oauth_dispatcher(model_id) is None:
+            return False
+        if model_id == "cloud_code":
+            from ...services.cloud_code_service import cloud_code_is_configured
+            return bool(cloud_code_is_configured())
+        return True
+    except Exception:
+        return False
+
+
 @router.get("/inspector/models")
 async def get_available_models_for_inspector(db: Session = Depends(get_db)):
     """
@@ -3381,6 +3398,8 @@ async def get_available_models_for_inspector(db: Session = Depends(get_db)):
             # (2026-11-15, review) same rule as /api/models/available: no DB row ⇒ the registry default
             is_enabled = bool(setting.enabled) if setting else bool(getattr(model, "enabled", True))
             provider_available = provider in [str(p.value) if hasattr(p, 'value') else str(p) for p in available_providers]
+            if not provider_available:
+                provider_available = _oauth_model_ready(model_id)
 
             model_info = {
                 "id": model_id,
@@ -14207,7 +14226,8 @@ async def _smart_select_model(db, project_id: str) -> str:
                     return bool(svc.api_key) and not svc.is_in_error_state()
             except Exception:
                 pass
-            return False
+            # OAuth-dispatched (cloud_code): no API-key service, but usable when configured
+            return _oauth_model_ready(model_id)
 
         # ─── مرحله ۲: آمار استفاده از مدل‌ها در آرشیو پروژه ───
         # سشن‌های آرشیو شده
