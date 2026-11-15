@@ -39,6 +39,12 @@ interface CapabilityResult {
   strengths: Array<{ category: string; score: number }>;
   weaknesses: Array<{ category: string; score: number }>;
   categories: Record<string, { avg_score: number; tests: any[] }>;
+  // (PM-INS-0005) a failed call is not «مبتدی»: the real errors and how many calls actually answered
+  errors?: string[];
+  calls_ok?: number;
+  calls_total?: number;
+  all_failed?: boolean;
+  error?: string;
 }
 
 interface ModelSettings {
@@ -283,7 +289,8 @@ export default function ModelsView() {
           [modelId]: data.results
         }));
         setSelectedModel(modelId);
-        setShowTestPanel(true);
+        setShowTestPanel(!data.results?.all_failed);
+        void loadData();
       }
     } catch (e) {
       console.error('Error testing model:', e);
@@ -495,9 +502,21 @@ export default function ModelsView() {
                   </span>
                 )}
                 {/* 🔴 وضعیت دسترسی به API */}
-                {model.is_available ? (
-                  <span className="px-2 py-0.5 rounded bg-cyan-100 dark:bg-cyan-900 text-cyan-600 dark:text-cyan-300">
+                {/* (PM-INS-0005) «API ✓» فقط پس از یک فراخوانیِ واقعیِ موفق؛ کلیدِ تنها = «آزموده نشده»؛ شکست = خطای واقعی */}
+                {model.is_available && model.last_call?.ok ? (
+                  <span className="px-2 py-0.5 rounded bg-cyan-100 dark:bg-cyan-900 text-cyan-600 dark:text-cyan-300"
+                        title={`آخرین فراخوانیِ موفق: ${model.last_call.at || ''}`}>
                     API ✓
+                  </span>
+                ) : model.is_available && model.last_call && !model.last_call.ok ? (
+                  <span className="px-2 py-0.5 rounded bg-red-100 dark:bg-red-900 text-red-600 dark:text-red-300"
+                        title={model.last_call.error || ''}>
+                    API ✕ فراخوانی شکست خورد
+                  </span>
+                ) : model.is_available ? (
+                  <span className="px-2 py-0.5 rounded bg-amber-100 dark:bg-amber-900 text-amber-700 dark:text-amber-300"
+                        title="کلید هست ولی هنوز هیچ فراخوانیِ واقعی سنجیده نشده — «تست توانایی» را بزنید">
+                    کلید ✓ · آزموده نشده
                   </span>
                 ) : (
                   <span className="px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-500">
@@ -506,8 +525,23 @@ export default function ModelsView() {
                 )}
               </div>
 
+              {/* (PM-INS-0005) علتِ واقعیِ شکست — به‌جای «۰ مبتدی» */}
+              {(() => {
+                const cr = capabilityResults[model.id];
+                const err = cr?.all_failed || cr?.error
+                  ? (cr.error || (cr.errors || [])[0])
+                  : (!cr && model.last_call && !model.last_call.ok ? model.last_call.error : null);
+                if (!err) return null;
+                return (
+                  <div className="mb-3 p-2 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-xs text-red-700 dark:text-red-300" dir="auto">
+                    <div className="font-bold mb-1">❌ فراخوانیِ مدل شکست خورد{cr?.calls_total ? ` (${cr.calls_ok ?? 0} از ${cr.calls_total} موفق)` : ''} — نمره معتبر نیست</div>
+                    <div className="font-mono break-words" dir="ltr">{err}</div>
+                  </div>
+                );
+              })()}
+
               {/* Capability Badges */}
-              {capabilityResults[model.id] && (
+              {capabilityResults[model.id] && !capabilityResults[model.id].all_failed && (
                 <div className="mb-3 pt-3 border-t dark:border-gray-700">
                   <div className="flex items-center gap-2 mb-2">
                     <span className="text-xs text-gray-500">نتیجه تست:</span>

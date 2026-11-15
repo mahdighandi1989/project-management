@@ -704,3 +704,21 @@
 - **[TODO]** بند ۳ (پیش‌نمایش/پاور) منتظرِ گزارشِ مالک.
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · pytest ۸۱۱ + next build + Playwright محلی ۱۳۶۰/۱۶۰۰px
+
+## 2026-11-15 (۲۶) — فوری PM-INS-0005: نمرهٔ «۰» ِ تستِ توانایی، «API ✓» ِ بی‌پشتوانه، خاموش‌شدنِ خودبه‌خود
+
+- **[OWNER]** برگهٔ فوریِ PM-INS-0005: همهٔ ۲۲ مدل خاموش دیده شدند؛ پس از روشن‌کردنِ ۷ مدل، gpt-4o-mini، claude-sonnet-4-6، claude-haiku-4-5 و sonar در «تست توانایی» «۰ مبتدی»
+  گرفتند با اینکه کارت «API ✓» بود. خواسته: (۱) علتِ واقعیِ هر ۰ در کارت؛ (۲) «API ✓» فقط پس از فراخوانیِ واقعیِ موفق؛ (۳) مدل‌های روشن خودبه‌خود خاموش نشوند؛
+  (۴) بازرس/اتاق فرمان/دستیار پیش‌فرض را از مدل‌های موفق بگیرند.
+- **[FINDING]** خطای هر تست در `categories[*].tests[*].error` بود ولی UI فقط نمرهٔ کلی (۰) و نشانِ «مبتدی» را نشان می‌داد. «API ✓» فقط «کلیدِ provider هست» بود.
+- **[FINDING]** پاک‌سازیِ فعال‌سازیِ موقت (`render_logs` سه جا) مدلی را که `temporary_enabled=1` دارد خاموش می‌کند — و روشن‌کردنِ دستیِ مالک آن پرچم را پاک نمی‌کرد ⇒ مدلِ
+  روشن‌شده توسطِ مالک بعداً خاموش می‌شد. toggle ِ مدلی که ردیفِ DB نداشت همیشه `enabled=0` می‌ساخت ⇒ «روشن کن» برای مدلی با پیش‌فرضِ خاموش، خاموش می‌ماند.
+- **[CHANGE]** `model_capability_tester`: `errors`، `calls_ok/calls_total`، `all_failed` + `record_last_call` (در `ModelSettings.advanced_settings["last_call"]`، بی‌مهاجرت).
+  `routes/models.py`: `last_call` در `/api/models`؛ پاک‌کردنِ `temporary_enabled` در PUT/toggle/batch-update؛ toggle ِ بی‌ردیف = برعکسِ پیش‌فرضِ رجیستری.
+  فرانت `ModelsView`: نشانِ سه‌حالته (API ✓ / کلید ✓ · آزموده نشده / API ✕ فراخوانی شکست خورد) و جعبهٔ خطای واقعی؛ پس از تست فهرست تازه می‌شود. `services/api.ts`: `last_call`.
+- **[VERIFY]** `tests/test_model_last_call_pm_ins_0005.py` (۴ تست)؛ pytest ۸۱۵ سبز؛ next build سبز؛ Playwright محلی `/settings?view=models` در ۱۳۶۰px: gpt-4o-mini با خطای ثبت‌شدهٔ ۴۰۱
+  جعبهٔ قرمز و «API ✕» نشان داد، deepseek-chat «API ✓»، بقیه «کلید ✓ · آزموده نشده».
+- **[TODO]** بند ۴: بازرس ویژه از رتبهٔ موفقیت می‌گیرد (`_smart_select_model`، و از PM-INS-0002 با cloud_code)؛ اتاق فرمان و دستیار هنوز سنجیده/هم‌سو نشده‌اند. علتِ
+  «همهٔ ۲۲ خاموش» در production و ناهمخوانیِ ✅ های فهرستِ «مدل پیش‌فرض استخراج» هم هنوز بررسی نشده — دورِ بعد.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · pytest ۸۱۵ + next build + Playwright محلی

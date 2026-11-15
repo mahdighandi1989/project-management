@@ -47,6 +47,8 @@ export interface Model {
   supports_video: boolean;
   is_image_generator: boolean;
   is_available: boolean;
+  /** (PM-INS-0005) last REAL call: «API ✓» only when ok; otherwise the real error. */
+  last_call?: { ok: boolean; at?: string; error?: string | null; source?: string } | null;
 }
 
 export interface ProviderStatus {

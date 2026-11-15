@@ -208,6 +208,31 @@ CAPABILITY_BADGES = {
 }
 
 
+def record_last_call(model_id: str, ok: bool, error: Optional[str] = None, source: str = "") -> None:
+    """(PM-INS-0005) Persist the last REAL call of a model in ModelSettings.advanced_settings["last_call"] so the models
+    page can show «API ✓» only after a real success and the real error otherwise. Never raises."""
+    try:
+        from ..core.database import SessionLocal
+        from ..models.ai_profile import ModelSettings
+        db = SessionLocal()
+        try:
+            setting = db.query(ModelSettings).filter(ModelSettings.model_id == model_id).first()
+            if setting is None:
+                from ..core.models_registry import MODEL_REGISTRY
+                reg = MODEL_REGISTRY.get(model_id)
+                setting = ModelSettings(model_id=model_id, enabled=1 if (reg is None or reg.enabled) else 0)
+                db.add(setting)
+            adv = dict(setting.advanced_settings or {})
+            adv["last_call"] = {"ok": bool(ok), "at": datetime.now().isoformat(timespec="seconds"),
+                                "error": (error or None) and str(error)[:300], "source": source}
+            setting.advanced_settings = adv  # reassign so SQLAlchemy sees the JSON change
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"record_last_call({model_id}) failed: {e}")
+
+
 class ModelCapabilityTester:
     """
     سرویس تست توانایی مدل‌ها
@@ -318,6 +343,22 @@ class ModelCapabilityTester:
 
         # محاسبه نمره کلی
         results["overall_score"] = weighted_score / total_weight if total_weight > 0 else 0
+
+        # (2026-11-15, PM-INS-0005) a 0 that is really a failed call must SAY so — the card showed «۰ مبتدی» while the key
+        # looked fine. Collect the distinct errors, flag «every call failed», and remember the last real call per model.
+        _all_tests = [t for c in results["categories"].values() for t in c["tests"]]
+        _errors = []
+        for t in _all_tests:
+            msg = (t.get("error") or "").strip()
+            if msg and msg[:300] not in _errors:
+                _errors.append(msg[:300])
+        _ok_calls = sum(1 for t in _all_tests if not t.get("error"))
+        results["errors"] = _errors
+        results["calls_ok"] = _ok_calls
+        results["calls_total"] = len(_all_tests)
+        results["all_failed"] = bool(_all_tests) and _ok_calls == 0
+        record_last_call(model_id, ok=_ok_calls > 0, error=(_errors[0] if _errors and _ok_calls == 0 else None),
+                         source="capability_test")
 
         # محاسبه میانگین هر دسته
         for category, data in results["categories"].items():

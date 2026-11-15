@@ -36,6 +36,9 @@ class ModelInfo(BaseModel):
     supports_video: bool
     is_image_generator: bool
     is_available: bool = False
+    # (2026-11-15, PM-INS-0005) the last REAL call (capability test): {"ok", "at", "error", "source"} — «API ✓» is green
+    # only when this says ok; a key alone is «آزموده نشده».
+    last_call: Optional[dict] = None
 
 
 class ProviderStatus(BaseModel):
@@ -158,6 +161,7 @@ async def list_models(
                     supports_video=model.supports_video,
                     is_image_generator=model.is_image_generator,
                     is_available=is_available,
+                    last_call=((db_setting.advanced_settings or {}).get("last_call") if db_setting else None),
                 ))
             except Exception as e:
                 logger.error(f"Error processing model {model.id}: {e}")
@@ -818,6 +822,7 @@ async def update_model_settings(
         # بروزرسانی فیلدها
         if request.enabled is not None:
             setting.enabled = 1 if request.enabled else 0
+            setting.temporary_enabled = 0  # (PM-INS-0005) owner's choice is permanent — temp cleanup must not undo it
 
         if request.allowed_tasks is not None:
             setting.allowed_tasks = request.allowed_tasks
@@ -883,11 +888,14 @@ async def toggle_model_enabled(model_id: str, db: Session = Depends(get_db)):
         setting = db.query(ModelSettings).filter(ModelSettings.model_id == model_id).first()
 
         if not setting:
-            # ایجاد تنظیمات جدید با وضعیت غیرفعال
-            setting = ModelSettings(model_id=model_id, enabled=0)
+            # (PM-INS-0005) no DB row ⇒ the card showed the REGISTRY default; toggling flips THAT. Before, a model whose
+            # registry default is off got a new row with enabled=0 — «turn on» left it off.
+            _reg_on = bool(getattr(MODEL_REGISTRY[model_id], "enabled", True))
+            setting = ModelSettings(model_id=model_id, enabled=0 if _reg_on else 1, temporary_enabled=0)
             db.add(setting)
         else:
             setting.enabled = 0 if setting.enabled else 1
+            setting.temporary_enabled = 0  # (PM-INS-0005) owner's choice is permanent
 
         db.commit()
 
@@ -993,6 +1001,7 @@ async def batch_update_model_settings(
 
             if "enabled" in update:
                 setting.enabled = 1 if update["enabled"] else 0
+                setting.temporary_enabled = 0  # (PM-INS-0005) owner's choice is permanent
             if "allowed_tasks" in update:
                 setting.allowed_tasks = update["allowed_tasks"]
             if "priority" in update:
