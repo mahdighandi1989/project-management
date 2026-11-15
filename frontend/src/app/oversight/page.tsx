@@ -718,7 +718,8 @@ function applyFiltersSortSearch(
     );
   }
   if (f.date_range?.to) {
-    const toT = new Date(f.date_range.to).getTime();
+    // 🩹 (2026-11-15) «to» is a DATE: include that whole day (it used to stop at its 00:00)
+    const toT = new Date(f.date_range.to).getTime() + (/^\d{4}-\d{2}-\d{2}$/.test(String(f.date_range.to)) ? 86_400_000 - 1 : 0);
     filtered = filtered.filter(
       (t) => t.created_at && new Date(t.created_at).getTime() <= toT
     );
@@ -733,6 +734,11 @@ function applyFiltersSortSearch(
   if (ct.was_merged) filtered = filtered.filter((t) => !!t.merged_into);
   if (ct.partial_only) filtered = filtered.filter((t) => t.verification_status === 'partial');
   if (ct.regressed_only) filtered = filtered.filter((t) => t.verification_status === 'regressed');
+  // 🩹 (2026-11-15) the «🤖 auto-loop eligible» toggle had no branch — it filtered nothing
+  if ((ct as any).auto_loop_eligible) {
+    filtered = filtered.filter((t) => (t.execution_mode === 'auto_via_projects_page' || t.execution_mode === 'auto_via_pr')
+      && !t.archived && t.status !== 'done' && t.status !== 'cancelled');
+  }
   if (ct.recently_verified) {
     filtered = filtered.filter((t) => {
       if (!t.last_verified_at) return false;
@@ -998,6 +1004,17 @@ export default function OversightPage() {
     onEvent: (eventName: string | null, dataObj: any) => void
   ): Promise<void> => {
     if (!res.body) throw new Error('پاسخ SSE خالی است');
+    // 🩹 (2026-11-15) apply-action answers some refusals («project not found», «no GitHub info», the review gate) as
+    // plain JSON with HTTP 200 — parsed as a stream it yielded no events and the UI said «PR ساخته نشد». Surface them.
+    if (!(res.headers.get('content-type') || '').includes('text/event-stream')) {
+      const j: any = await res.json().catch(() => null);
+      const msg = j && (j.message || j.error || j.detail || j.reason);
+      if (!res.ok || (j && (j.success === false || j.blocked || j.error))) {
+        throw new Error(String(msg || `HTTP ${res.status}`));
+      }
+      if (j) onEvent(j.event || 'json', j);
+      return;
+    }
     const reader = res.body.getReader();
     executeReaderRef.current = reader;
     const decoder = new TextDecoder();
@@ -1732,6 +1749,7 @@ export default function OversightPage() {
   };
 
   // 🔬 (Runtime Verify backfill) — اجرای AI enricher روی AC تسک‌های قدیمی
+  const backfillIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [backfillState, setBackfillState] = useState<{
     running: boolean;
     started_at: string | null;
@@ -1787,6 +1805,7 @@ export default function OversightPage() {
       }
       setBackfillState(data);
       // poll هر ۳ ثانیه تا تمام شود
+      if (backfillIntervalRef.current) clearInterval(backfillIntervalRef.current);
       const interval = setInterval(async () => {
         try {
           const sres = await fetch(
@@ -1813,6 +1832,7 @@ export default function OversightPage() {
           showError('خطا در دریافت وضعیت backfill');
         }
       }, 3000);
+      backfillIntervalRef.current = interval;
     } catch (e: any) {
       showError(`خطا در شروع backfill: ${e?.message || e}`);
     }
@@ -1822,6 +1842,7 @@ export default function OversightPage() {
     init();
     return () => {
       if (deepScanPollRef.current) clearInterval(deepScanPollRef.current);
+      if (backfillIntervalRef.current) clearInterval(backfillIntervalRef.current);  // 🩹 2026-11-15: was leaked
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -2873,6 +2894,10 @@ export default function OversightPage() {
           setSavePendingIds([]);
           setPreviewPrompt(null);
           setIdea('');
+          // 🩹 (2026-11-15) a merge ends this idea too: new draft id (else the next idea re-attached these files) and
+          // revert a vision model that was turned on just for it
+          resetTaskDraft();
+          revertTempActivatedIfAny();
           setTab('tasks');
         }
         reloadStatus();
@@ -3175,7 +3200,10 @@ export default function OversightPage() {
   };
 
   // ============================ Verifier / Manual external ============================
-  const verifyTaskNow = async (id: string, includeRuntime: boolean = true) => {
+  const verifyTaskNow = async (id: string, includeRuntimeArg?: boolean) => {
+    // 🩹 (2026-11-15) the project's «verify mode» (deep/fast) used to be ignored — the 🔍 button always ran the deep one
+    const _vw = watched.find((w) => w.id === tasks.find((t) => t.id === id)?.watched_id);
+    const includeRuntime = includeRuntimeArg ?? ((_vw?.verify_mode || 'deep') !== 'fast');
     setRunningTaskIds((p) => new Set(p).add(id));
     try {
       const res = await fetch(`${API_BASE}/api/oversight/tasks/${id}/verify-now`, {
@@ -3464,7 +3492,8 @@ export default function OversightPage() {
       if (reportStatusFilter !== 'all' && r.status !== reportStatusFilter) return false;
       if (reportWatchedFilter !== 'all' && r.watched_id !== reportWatchedFilter) return false;
       if (reportFlaggedOnly && !r.flagged) return false;
-      if (reportSinceFilter && r.run_at < reportSinceFilter) return false;
+      // 🩹 (2026-11-15) compare instants, not strings: the picker gives LOCAL time, run_at is UTC (Iran: 3.5 h off)
+      if (reportSinceFilter && new Date(r.run_at).getTime() < new Date(reportSinceFilter).getTime()) return false;
       return true;
     });
   }, [reports, reportStatusFilter, reportWatchedFilter, reportFlaggedOnly, reportSinceFilter]);
@@ -3477,10 +3506,16 @@ export default function OversightPage() {
     const q = normalizeForSearch(_reportsTabPrefs.search_query || '');
     if (q) {
       arr = arr.filter((r: any) => {
+        // 🩹 (2026-11-15) the real OversightReport fields — content/error/followup_prompt do not exist on a report,
+        // so the search only ever matched ids
         const hay = normalizeForSearch(
-          (r.content || '') + ' ' +
-          (r.error || '') + ' ' +
-          (r.followup_prompt || '') + ' ' +
+          (r.project_full_name || '') + ' ' +
+          (r.status || '') + ' ' +
+          (Array.isArray(r.done_parts) ? r.done_parts.join(' ') : '') + ' ' +
+          (Array.isArray(r.remaining_parts) ? r.remaining_parts.join(' ') : '') + ' ' +
+          (Array.isArray(r.next_actions) ? r.next_actions.join(' ') : '') + ' ' +
+          (r.raw_response || '').slice(0, 4000) + ' ' +
+          (r.model_id || '') + ' ' +
           (r.task_id || '') + ' ' +
           (r.id || '')
         );
@@ -3784,7 +3819,7 @@ export default function OversightPage() {
           </div>
           {selectedModelIds.length === 0 && models.length > 0 && (
             <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
-              هیچ مدلی انتخاب نشده — اولین مدل موجود به‌طور خودکار استفاده می‌شود.
+              هیچ مدلی انتخاب نشده — برای «اجرا با AI» حداقل یک مدل را انتخاب کنید (بعضی مسیرها مدلِ پیش‌فرضِ سرور را به کار می‌برند).
             </p>
           )}
           {selectedModelIds.length > 1 && (
@@ -3887,6 +3922,7 @@ export default function OversightPage() {
                     setTab('reports');
                   }}
                   onOpenCodex={() => openCodex(w.id)}
+                  onReplaced={(nw) => setWatched((prev) => prev.map((x) => (x.id === nw.id ? { ...x, ...nw } : x)))}
                 />
                 );
               })
@@ -6459,6 +6495,7 @@ function WatchedCard({
   availableModels,
   isScanning,
   scanProgress,
+  onReplaced,
   onChange,
   onRemove,
   onScan,
@@ -6490,6 +6527,8 @@ function WatchedCard({
   onViewArchive: () => void;
   onViewReports: () => void;
   onOpenCodex: () => void;
+  /** 🩹 (2026-11-15) the server's updated project (e.g. after enabling the Claude runner) — kept in the page's list */
+  onReplaced?: (nw: Watched) => void;
 }) {
   const [notes, setNotes] = useState(w.user_notes);
   const [tagInput, setTagInput] = useState('');
@@ -6586,6 +6625,7 @@ function WatchedCard({
         return;
       }
       setRunnerEnabled(!!data.watched?.claude_runner_enabled || (wantOn && !data.errors?.length));
+      if (data.watched && onReplaced) onReplaced(data.watched);  // switching tabs used to show the old state
       const errs: string[] = data.errors || [];
       if (errs.length > 0) {
         setRunnerError(errs.join('؛ '));
@@ -6617,6 +6657,7 @@ function WatchedCard({
   // 🆕 (Phase 6 — bug C1) — Bulk Verify state
   const [bvState, setBvState] = useState<any | null>(null);
   const [bvPolling, setBvPolling] = useState(false);
+  const bvIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // 🆕 (C2) — eligible-count برای نمایش تعداد دقیق scan-generated روی دکمه
   const [bvEligible, setBvEligible] = useState<{
     scan_generated_count: number;
@@ -6722,6 +6763,7 @@ function WatchedCard({
         return;
       }
       setBvPolling(true);
+      if (bvIntervalRef.current) clearInterval(bvIntervalRef.current);
       const _interval = setInterval(async () => {
         try {
           const sres = await fetch(
@@ -6731,6 +6773,7 @@ function WatchedCard({
           setBvState(sdata);
           if (!sdata.running) {
             clearInterval(_interval);
+            bvIntervalRef.current = null;
             setBvPolling(false);
             // 🆕 (C2) — refresh eligible-count بعد از پایان (چون چندتا done شدند)
             refreshBvEligible();
@@ -6739,10 +6782,13 @@ function WatchedCard({
           // ignore — keep polling
         }
       }, 5000);
+      bvIntervalRef.current = _interval;
     } catch (e: any) {
       alert(`خطا: ${String(e?.message || e)}`);
     }
   }, [w.id, bvEligible, refreshBvEligible]);
+  // 🩹 (2026-11-15) stop the bulk-verify poll when the card unmounts (it used to keep running forever)
+  useEffect(() => () => { if (bvIntervalRef.current) clearInterval(bvIntervalRef.current); }, []);
 
   const openFeatureInventory = useCallback(async () => {
     setFiOpen(true);
@@ -8598,7 +8644,7 @@ function WatchedCard({
         {/* 🔬 (verify-after-complete badge) — وقتی Claude تسکی را تمام کرده
             و backend در حال verify عمیق است (مرحلهٔ ping-pong)، یک نشانگر
             زنده نشان بده تا کاربر بداند چرا تسک هنوز archive نشده. polling
-            هوشمند هر ۶ ثانیه tasks/reports/watched را refresh می‌کند، پس
+            هوشمند هر ۱۰ ثانیه tasks/reports/watched را refresh می‌کند، پس
             وقتی verify تمام شد، گزارش خودکار در پنل ظاهر می‌شود. */}
         {w.claude_runner_verifying_task_id && (
           <span
@@ -9966,8 +10012,8 @@ function TasksPanel({
                                   </li>
                                 );
                               })}
-                              {probes.length > 6 && (
-                                <li className="text-gray-500">… و {probes.length - 6} probe دیگر</li>
+                              {probes.length > 8 && (
+                                <li className="text-gray-500">… و {probes.length - 8} probe دیگر</li>
                               )}
                             </ul>
                           );

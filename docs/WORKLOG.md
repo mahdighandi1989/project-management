@@ -562,3 +562,14 @@
   رفتارِ همهٔ مدل‌ها را عوض می‌کند — برچسبِ روشن روی همان تب هست. کوتاه‌کردنِ پرامپتِ ~۳۳ هزار نویسه‌ایِ چت برای مدل‌های کم‌ظرفیت و نقشهٔ کاملِ مخزن گامِ بعدِ کیفیتِ چت‌اند.
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · pytest (Chromium ِ واقعی) + next build
+
+## 2026-11-15 (۱۸) — ده ایرادِ کوچک‌ترِ صفحهٔ «اتاق فرمان» (بازبینیِ فرانت، موارد ۷ تا ۲۰)
+
+- **[CHANGE]** `oversight/page.tsx`: `consumeSSEStream` پاسخِ JSON (ردِ «پروژه یافت نشد»/«review gate» با ۲۰۰) را به‌صورتِ خطای واقعی نشان می‌دهد به‌جای «PR ساخته نشد»؛
+  جست‌وجوی گزارش‌ها روی `project_full_name`/`done_parts`/`remaining_parts`/`next_actions`/`raw_response`/`model_id`؛ «از تاریخ» با مقایسهٔ زمان (نه رشته) و «تا تاریخ»
+  شاملِ کلِ روز؛ کلیدِ «auto-loop eligible» شاخه گرفت؛ `verifyTaskNow` حالتِ `verify_mode` ِ پروژه را رعایت می‌کند؛ `onReplaced` وضعیتِ runner را در فهرستِ صفحه نگه
+  می‌دارد؛ interval های bulk-verify و backfill هنگامِ بسته شدن پاک می‌شوند؛ پس از ادغام، شناسهٔ پیش‌نویس تازه و مدلِ موقت برگردانده می‌شود؛ متن‌های ناهمخوان اصلاح.
+  `ExtractedFilesPanel.tsx`: وضعیتِ بارگذاری برای هر فایل (خطا / بی‌متن به‌جای «بارگذاری» ِ ابدی). `tailwind.config.js`: safelist ِ کلاس‌های پویای دکمه‌های تنظیمات.
+- **[VERIFY]** build سبز؛ Playwright محلی: هر ۵ تبِ اتاق فرمان و خانه بی‌خطای کنسول/شبکه؛ `GET /api/oversight/disk` پاسخ داد؛ pytest ۷۷۳ سبز.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · next build + Playwright محلی + pytest

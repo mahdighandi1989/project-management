@@ -88,6 +88,8 @@ export default function ExtractedFilesPanel({ taskId, apiBase, expectedCount }: 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
+  // 🩹 (2026-11-15) per-file load state: a failed fetch or a 0-segment file used to show «⏳ بارگذاری» forever
+  const [segState, setSegState] = useState<Record<string, 'loading' | 'ok' | 'error'>>({});
 
   // اگر parent counts را داده و 0 است — اصلاً render نمی‌کنیم.
   const hasNoAttachments = expectedCount === 0;
@@ -127,6 +129,7 @@ export default function ExtractedFilesPanel({ taskId, apiBase, expectedCount }: 
     } else {
       newOpen.add(extId);
       if (!segmentsByExt[extId]) {
+        setSegState((p) => ({ ...p, [extId]: 'loading' }));
         try {
           const r = await fetch(
             `${apiBase}/api/oversight/extractions/${encodeURIComponent(extId)}/segments`,
@@ -134,8 +137,13 @@ export default function ExtractedFilesPanel({ taskId, apiBase, expectedCount }: 
           if (r.ok) {
             const d = await r.json();
             setSegmentsByExt((prev) => ({ ...prev, [extId]: d.segments || [] }));
+            setSegState((p) => ({ ...p, [extId]: 'ok' }));
+          } else {
+            setSegState((p) => ({ ...p, [extId]: 'error' }));
           }
-        } catch {}
+        } catch {
+          setSegState((p) => ({ ...p, [extId]: 'error' }));
+        }
       }
     }
     setOpenIds(newOpen);
@@ -275,7 +283,11 @@ export default function ExtractedFilesPanel({ taskId, apiBase, expectedCount }: 
                   {openIds.has(e.id) && (
                     <div className="border-t dark:border-gray-700 px-2 py-2 space-y-2 max-h-96 overflow-y-auto">
                       {segs.length === 0 ? (
-                        <div className="text-gray-500 text-[10px]">⏳ بارگذاری segments...</div>
+                        <div className="text-gray-500 text-[10px]">
+                          {segState[e.id] === 'error' ? '⚠️ بارگذاریِ متنِ این فایل ناموفق بود — دوباره باز کنید'
+                            : segState[e.id] === 'ok' ? '— متنی از این فایل استخراج نشده —'
+                            : '⏳ بارگذاری segments...'}
+                        </div>
                       ) : (
                         segs
                           .sort((a, b) => a.segment_index - b.segment_index)
