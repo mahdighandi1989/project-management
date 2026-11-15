@@ -110,7 +110,7 @@ const EVENT_GROUPS: Array<{ title: string; icon: string; keys: string[] }> = [
   {
     title: 'مصرف AI (توکن و موجودی)',
     icon: '💰',
-    keys: ['ai_balance_low'],
+    keys: ['ai_balance_low', 'disk_alert'],
   },
   {
     title: 'گزارش',

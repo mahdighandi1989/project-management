@@ -1522,12 +1522,13 @@ def _find_existing_active_task(
         # finding._pass و _source هم بخشی از fingerprint اند
         finding_pass = str(finding.get("_pass") or "").lower()
 
+        # 🩹 (2026-11-15) a task the owner CANCELLED (or archived unfinished) counts as «already known»: it used to be
+        # excluded, so every scan re-suggested the same rejected finding. Done/verified tasks stay excluded — a
+        # finding that comes back after «done» may be a real regression.
         candidates = [
             t for t in service.tasks
             if t.watched_id == watched_id
-            and t.status not in ("done", "cancelled")
-            and not getattr(t, "archived", False)
-            # تسک‌هایی که verify done شده‌اند هم match نشوند (الان active match)
+            and t.status != "done"
             and t.verification_status not in ("done",)
         ]
         for task in candidates:
@@ -1554,7 +1555,9 @@ def _find_existing_active_task(
                 # اگر pass هم match کند، آستانه پایین‌تر کافی است
                 _pass_match = bool(finding_pass and task_pass and finding_pass == task_pass)
                 _thresh = 0.4 if _pass_match else 0.5
-                if _overlap >= _thresh:
+                # 🩹 (2026-11-15) same type + same file was enough ⇒ two DIFFERENT bugs in one file became one task.
+                # The titles must also be at least loosely alike.
+                if _overlap >= _thresh and _title_similarity(finding_title, task.title or "") >= 0.35:
                     return task
 
             # 🆕 (bug 28) — مرحلهٔ ۲: content fingerprint برای findings
@@ -1595,7 +1598,31 @@ def _find_existing_active_task(
 # Main deep scan function
 # =====================================================================
 
-async def run_deep_scan(
+_RUNNING_SCANS: set = set()
+SCAN_TIMEOUT_MIN = float(__import__("os").environ.get("DEEP_SCAN_TIMEOUT_MIN", "60"))
+
+
+class ScanAlreadyRunning(RuntimeError):
+    pass
+
+
+async def run_deep_scan(watched_id: str, **kwargs) -> Dict[str, Any]:
+    """🩹 (2026-11-15, «اتاق فرمان» audit) — one deep scan per project at a time (two used to write the same progress
+    file and race on the duplicate check) and an overall time limit (a hung model call left the scan in «phase3_…»
+    forever). Same signature as before for every caller."""
+    if watched_id in _RUNNING_SCANS:
+        raise ScanAlreadyRunning("اسکنِ دیگری برای همین پروژه در جریان است")
+    _RUNNING_SCANS.add(watched_id)
+    try:
+        return await asyncio.wait_for(_run_deep_scan_impl(watched_id, **kwargs), timeout=SCAN_TIMEOUT_MIN * 60)
+    except asyncio.TimeoutError:
+        write_progress(watched_id, status="error", message=f"اسکن از سقفِ {SCAN_TIMEOUT_MIN:.0f} دقیقه گذشت و متوقف شد")
+        raise
+    finally:
+        _RUNNING_SCANS.discard(watched_id)
+
+
+async def _run_deep_scan_impl(
     watched_id: str,
     *,
     model_id: Optional[str] = None,
@@ -2986,6 +3013,17 @@ async def run_deep_scan(
                         "execution_status": "pending",  # pending | applied_locally | committed | failed
                         "_pass": f.get("_pass", ""),
                     })
+                    continue
+
+                # 🩹 (2026-11-15) duplicate check BEFORE the AI checklist call below (it used to run after, so a
+                # known finding still cost one model call per scan)
+                _early = _find_existing_active_task(service, watched.id, f)
+                if _early is not None:
+                    async with service._lock:
+                        _early.scan_seen_count = (getattr(_early, "scan_seen_count", 1) or 1) + 1
+                        _early.last_seen_in_scan_at = now_iso()
+                        _early.updated_at = now_iso()
+                    duplicates_skipped.append(_early.id)
                     continue
 
                 # 🆕 (P1) ضبط metadata scan که این task را ساخته

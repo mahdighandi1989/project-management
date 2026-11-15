@@ -332,6 +332,14 @@ EVENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "icon": "✅",
     },
     # 🆕 (AI Balance Monitor — Tile 3)
+    # 💾 (2026-11-15) the 1 GB Render disk is filling up / a data write failed (services/disk_janitor.py)
+    "disk_alert": {
+        "label": "💾 هشدارِ دیسکِ سرور",
+        "help": "دیسکِ ۱ گیگیِ سرور در حالِ پر شدن است یا نوشتنِ دادهٔ اتاق فرمان شکست خورد (بایگانی به گوگل درایو)",
+        "default_enabled": True,
+        "default_sound": True,
+        "icon": "💾",
+    },
     "ai_balance_low": {
         "label": "💰 موجودی AI کم",
         "help": "موجودی DeepSeek (API) یا budget دستی پایین‌تر از آستانه",

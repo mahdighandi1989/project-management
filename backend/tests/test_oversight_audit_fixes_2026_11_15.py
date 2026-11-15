@@ -72,3 +72,54 @@ def test_repo_suffix_is_removed_not_stripped():
     for p in ("app/services/inspector_scan_bridge.py", "app/services/inspector_proposal_executor.py"):
         src = (Path(__file__).resolve().parents[1] / p).read_text(encoding="utf-8")
         assert '.rstrip(".git")' not in src, p
+
+
+def test_one_deep_scan_per_project_and_a_time_limit(monkeypatch):
+    from app.services import oversight_deep_scan_service as ds
+
+    started = asyncio.Event()
+
+    async def slow(watched_id, **kw):
+        started.set()
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(ds, "_run_deep_scan_impl", slow)
+    monkeypatch.setattr(ds, "SCAN_TIMEOUT_MIN", 0.5 / 60)  # 0.5 s
+    monkeypatch.setattr(ds, "write_progress", lambda *a, **k: None)
+
+    async def run():
+        first = asyncio.create_task(ds.run_deep_scan("w1"))
+        await started.wait()
+        try:
+            await ds.run_deep_scan("w1")
+            second = "ran"
+        except ds.ScanAlreadyRunning:
+            second = "refused"
+        try:
+            await first
+            outcome = "finished"
+        except asyncio.TimeoutError:
+            outcome = "timed out"
+        return second, outcome, set(ds._RUNNING_SCANS)
+
+    second, outcome, left = asyncio.run(run())
+    assert second == "refused" and outcome == "timed out" and "w1" not in left
+
+
+def test_scan_dedup_keeps_distinct_bugs_and_respects_rejections():
+    from types import SimpleNamespace as NS
+
+    from app.services.oversight_deep_scan_service import _find_existing_active_task
+
+    def task(tid, title, status="suggested", archived=False):
+        return NS(id=tid, watched_id="w", title=title, status=status, archived=archived, verification_status="pending",
+                  type="bug", target_files=["app/x.py"], created_by_scan_metadata={}, raw_idea="")
+
+    svc = NS(tasks=[task("a", "Login form loses the password field"),
+                    task("c", "Race condition in the payment webhook retry", status="cancelled", archived=True)])
+    other_bug = {"title": "Pagination of reports returns duplicates", "type": "bug", "target_files": ["app/x.py"]}
+    assert _find_existing_active_task(svc, "w", other_bug) is None          # same file, different bug ⇒ new task
+    same = {"title": "Login form loses the password field value", "type": "bug", "target_files": ["app/x.py"]}
+    assert _find_existing_active_task(svc, "w", same).id == "a"
+    rejected = {"title": "Race condition in the payment webhook retry", "type": "bug", "target_files": ["app/x.py"]}
+    assert _find_existing_active_task(svc, "w", rejected).id == "c"         # owner cancelled it ⇒ not re-suggested

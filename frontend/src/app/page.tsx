@@ -88,12 +88,14 @@ export default function HomePage() {
   const [oversight, setOversight] = useState<any>(null);
   const [inspection, setInspection] = useState<any>(null);
   const [recent, setRecent] = useState<Recent | null>(null);
+  const [disk, setDisk] = useState<any>(null);
 
   useEffect(() => {
     getJson<Provider[]>('/api/settings/providers').then((d) => setProviders(Array.isArray(d) ? d : []));
     getJson<any>('/api/oversight/status').then(setOversight);
     getJson<any>('/api/inspection?limit=1').then(setInspection);
     getJson<Recent>('/api/handbook/recent?limit=6').then(setRecent);
+    getJson<any>('/api/oversight/disk').then(setDisk);
   }, []);
 
   const activeProviders = (providers || []).filter((p) => p.available);
@@ -118,7 +120,12 @@ export default function HomePage() {
       </div>
 
       {/* وضعیتِ زنده */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-8" data-report-section="home-status" data-report-section-label="وضعیتِ زنده">
+      {disk?.alert && (
+        <div className="mb-4 rounded-xl border border-red-300 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 px-4 py-3 text-sm">
+          💾 {disk.alert}
+        </div>
+      )}
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-8" data-report-section="home-status" data-report-section-label="وضعیتِ زنده">
         <Stat href="/settings?view=models" label="مدل‌های فعال"
           value={providers === null ? '…' : activeProviders.length}
           hint={providers === null ? '' : activeProviders.length ? activeProviders.map((p) => p.name).join('، ') : 'کلیدی تنظیم نشده — مدل‌ها و تنظیمات'}
@@ -134,6 +141,10 @@ export default function HomePage() {
           value={insOpen === null ? '…' : insOpen}
           hint={inspection?.counts ? `باز ${inspection.counts.open} · پاسخ‌داده ${inspection.counts.answered}` : ''}
           tone={insOpen ? 'amber' : 'gray'} />
+        <Stat href="/handbook?doc=ACTIVITY" label="دیسکِ سرور (۱ گیگ)"
+          value={disk?.percent != null ? `${disk.percent}%` : '…'}
+          hint={disk ? (disk.last_run ? `آخرین پاک‌سازی: ${Math.round((disk.last_run.freed || 0) / 1048576)}MB آزاد${disk.last_run.drive ? '' : ' — درایو وصل نیست'}` : 'بایگانی به درایو هر ۶ ساعت') : ''}
+          tone={disk?.percent >= 80 ? 'red' : disk?.percent >= 60 ? 'amber' : 'green'} />
       </div>
 
       {/* صفحه‌ها — از رجیستری */}

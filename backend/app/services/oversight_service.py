@@ -644,15 +644,28 @@ def _read_json(path: Path, default: Any) -> Any:
         return default
 
 
+_LAST_WRITE_ERROR: Dict[str, Any] = {}
+
+
+def last_write_error() -> Optional[str]:
+    """The last failed JSON write (e.g. «disk full»), for the janitor's report and alert — cleared by a success."""
+    return _LAST_WRITE_ERROR.get("msg")
+
+
 def _write_json(path: Path, data: Any) -> None:
     try:
         tmp = path.with_suffix(path.suffix + ".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+            # 🩹 (2026-11-15) compact JSON: tasks.json is rewritten on every change (indent=2 made it ~30% bigger and slower)
+            json.dump(data, f, ensure_ascii=False, separators=(",", ":"), default=str)
         tmp.replace(path)
+        _LAST_WRITE_ERROR.clear()
     except Exception as e:
         # نباید هرگز کل اپ را به خاطر یک نوشتن disk به مشکل بیندازد
-        logger.warning(f"oversight: failed to write {path}: {e}")
+        # 🩹 (2026-11-15) …but it must not be SILENT either: a full disk used to lose every change at the next restart
+        # with only a warning line. Recorded for /api/oversight/disk and the janitor's Telegram alert.
+        logger.error(f"oversight: failed to write {path}: {e}")
+        _LAST_WRITE_ERROR.update(msg=f"{path.name}: {e}", at=now_iso() if "now_iso" in globals() else "")
 
 
 # ====================================================================
@@ -8607,6 +8620,18 @@ AC = «طراحی شیک‌تر باشد»:
                     acceptance_criteria=ac,
                     execution_mode=watched.default_execution_mode or "manual",
                 )
+                # 🩹 (2026-11-15) the quick scan had NO duplicate check — every run re-created the same suggestions.
+                # Same matcher as the deep scan (incl. cancelled = «already rejected»).
+                try:
+                    from .oversight_deep_scan_service import _find_existing_active_task
+                    _dup = _find_existing_active_task(self, watched.id, {
+                        "title": title, "description": n.get("description", ""), "type": n.get("type", "other"),
+                        "target_files": target_files})
+                except Exception:
+                    _dup = None
+                if _dup is not None:
+                    _dup.scan_seen_count = (getattr(_dup, "scan_seen_count", 1) or 1) + 1
+                    continue
                 async with self._lock:
                     self.tasks.append(t)
                 created_tasks.append(t.to_dict())
@@ -10114,6 +10139,41 @@ AC = «طراحی شیک‌تر باشد»:
             _run_backfill_ac_classification(None, force=force)
         )
 
+    def _spawn_bg(self, coro) -> None:
+        """Run a coroutine in the background and keep a reference (an unreferenced task can be garbage-collected)."""
+        tasks = getattr(self, "_bg_tasks", None)
+        if tasks is None:
+            tasks = self._bg_tasks = set()
+        t = asyncio.create_task(coro)
+        tasks.add(t)
+        t.add_done_callback(tasks.discard)
+
+    async def _scheduled_scan(self, w, model_ids: List[str]) -> None:
+        from .oversight_deep_scan_service import run_deep_scan
+        try:
+            await run_deep_scan(
+                w.id,
+                model_id=model_ids[0] if model_ids else None,
+                model_ids=model_ids if len(model_ids) > 1 else None,
+            )
+            # 🆕 (Smart Task Lifecycle) auto-regenerate — پس از scan، تسک‌های کم‌کیفیت (rate-limit 5)
+            if getattr(w, "auto_regenerate_old_prompts", False):
+                try:
+                    await self.regenerate_low_quality_prompts(w.id, max_count=5, reason="auto_quality_threshold")
+                except Exception as _re:
+                    logger.warning(f"auto-regen after scan {w.id} failed: {_re}")
+        except Exception as e:
+            logger.warning(f"auto-scan {w.id} failed: {e}")
+            now = datetime.now(timezone.utc)
+            # retry in ~1 h (not on every tick)
+            w.next_scan_at = (now + timedelta(hours=1)).isoformat()
+            w.last_scan_at = (now - timedelta(hours=max(float(w.scan_interval_hours or 0) - 1, 0))).isoformat()
+        finally:
+            try:
+                self._save_watched()
+            except Exception:
+                pass
+
     async def scheduler_tick(self) -> Dict[str, Any]:
         """یک نوبت اجرای scheduler. سه نوع کار: scan، run، verify.
 
@@ -10198,45 +10258,17 @@ AC = «طراحی شیک‌تر باشد»:
                         hours=w.scan_interval_hours
                     ):
                         if w.schedule_enabled:
-                            try:
-                                # 🆕 (P1) auto-scan از run_deep_scan استفاده می‌کند
-                                # نه scan_project ساده — تا تمام ۱۰+ pass + scan_depth
-                                # + scan_criteria_weights + selected_models اعمال شوند
-                                from .oversight_deep_scan_service import run_deep_scan
+                            # 🩹 (2026-11-15, «اتاق فرمان» audit) — the scan used to be AWAITED here: one deep scan (tens of
+                            # minutes) froze the whole tick — verifies, runs, reminders, the daily report. It now runs in
+                            # the background (one per project, with a time limit — run_deep_scan); the next slot is
+                            # booked at the start, and a failure retries in ~1 h instead of every minute.
+                            from .oversight_deep_scan_service import run_deep_scan, _RUNNING_SCANS
+                            if w.id not in _RUNNING_SCANS:
                                 model_ids = list(getattr(w, "selected_models", []) or [])
-                                primary_model = model_ids[0] if model_ids else None
-                                await run_deep_scan(
-                                    w.id,
-                                    model_id=primary_model,
-                                    model_ids=model_ids if len(model_ids) > 1 else None,
-                                )
                                 w.last_scan_at = now.isoformat()
-                                w.next_scan_at = (
-                                    now + timedelta(hours=w.scan_interval_hours)
-                                ).isoformat()
+                                w.next_scan_at = (now + timedelta(hours=w.scan_interval_hours)).isoformat()
                                 scanned.append(w.id)
-                                # 🆕 (Smart Task Lifecycle) auto-regenerate
-                                # پس از scan، اگر فلگ فعال است، تسک‌های با کیفیت
-                                # پایین این پروژه را بازتولید کن (rate-limit 5)
-                                if getattr(w, "auto_regenerate_old_prompts", False):
-                                    try:
-                                        await self.regenerate_low_quality_prompts(
-                                            w.id,
-                                            max_count=5,
-                                            reason="auto_quality_threshold",
-                                        )
-                                    except Exception as _re:
-                                        logger.warning(
-                                            f"auto-regen after scan {w.id} failed: {_re}"
-                                        )
-                            except Exception as e:
-                                logger.warning(f"auto-scan {w.id} failed: {e}")
-                                # 🩹 (2026-11-15) a failing scan (no token, renamed repo …) used to rerun on EVERY
-                                # 60-s tick with a «Deep Scan شروع شد» message each time — retry in 1 h instead.
-                                w.next_scan_at = (now + timedelta(hours=1)).isoformat()
-                                w.last_scan_at = (
-                                    now - timedelta(hours=max(float(w.scan_interval_hours or 0) - 1, 0))
-                                ).isoformat()
+                                self._spawn_bg(self._scheduled_scan(w, model_ids))
             except Exception as e:
                 logger.warning(f"scan check {w.id} failed: {e}")
 
@@ -10432,6 +10464,25 @@ AC = «طراحی شیک‌تر باشد»:
                 self._last_balance_check = now_ts
         except Exception as _be:
             logger.debug(f"AI balance check skipped: {_be}")
+
+        # ----- 7) 🆕 (2026-11-15, owner decision) disk janitor every 6 h — archive old artifacts to Drive, then free the
+        # 1 GB disk; alert (≤ once / 6 h) when it fills up or a write failed. See services/disk_janitor.py.
+        try:
+            now_ts = datetime.now(timezone.utc)
+            last_j = getattr(self, "_last_janitor_run", None)
+            if last_j is None or (now_ts - last_j) >= timedelta(hours=6):
+                self._last_janitor_run = now_ts
+                from . import disk_janitor
+                await disk_janitor.run_all()
+                _alert = disk_janitor.needs_alert(disk_janitor.report())
+                last_a = getattr(self, "_last_disk_alert", None)
+                if _alert and (last_a is None or (now_ts - last_a) >= timedelta(hours=6)):
+                    self._last_disk_alert = now_ts
+                    from .notification_service import notification_service
+                    await notification_service.notify_event(
+                        "disk_alert", f"💾 *هشدارِ دیسک*\n{_alert}", subject="Disk", priority="high")
+        except Exception as _je:
+            logger.warning(f"disk janitor skipped: {_je}")
 
         # 🔔 (Reminder feature) — یافتن یادآوری‌هایی که موعدشان رسیده و firing
         # اولین/بعدی آن‌ها. خارج از حلقهٔ watched است چون reminders می‌توانند

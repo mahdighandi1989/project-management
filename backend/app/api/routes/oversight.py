@@ -3127,6 +3127,10 @@ async def deep_scan_project(watched_id: str, payload: Optional[DeepScanRequest] 
 
     payload = payload or DeepScanRequest()
 
+    # 🩹 (2026-11-15) one scan per project: a second click used to reset the progress of the running scan
+    from ...services.oversight_deep_scan_service import _RUNNING_SCANS
+    if watched_id in _RUNNING_SCANS:
+        raise HTTPException(status_code=409, detail="اسکنِ دیگری برای همین پروژه در جریان است — پیشرفتش را ببینید")
     # ست کردن وضعیت اولیه
     write_progress(watched_id, status="queued", phase="queued", message="در انتظار شروع")
 
@@ -4540,3 +4544,21 @@ async def verify_project_task(project_id: str, task_id: str, payload: Optional[R
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# 💾 (2026-11-15, owner decision) disk report + janitor (services/disk_janitor.py)
+# ============================================================
+@router.get("/disk")
+async def disk_report():
+    from ...services import disk_janitor
+    rep = disk_janitor.report()
+    rep["alert"] = disk_janitor.needs_alert(rep)
+    return rep
+
+
+@router.post("/disk/janitor")
+async def disk_janitor_run():
+    from ...services import disk_janitor
+    return await disk_janitor.run_all()
+
