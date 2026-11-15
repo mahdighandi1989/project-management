@@ -1479,6 +1479,17 @@ export default function OversightPage() {
   const [extractionsCounts, setExtractionsCounts] = useState<Record<string, number>>({});
   const [taskFilterStatus, setTaskFilterStatus] = useState<string>('all');
   const [taskFilterWatched, setTaskFilterWatched] = useState<string>('all');
+  // 2026-11-15 (owner plan item 7): the Telegram bot's buttons open `/oversight?tab=tasks|reports|ideas|watched|repos`
+  // (and `&watched=<id>`, notification_service.py) — the page used to ignore the URL, so every button landed on
+  // the default tab. Read once on load; later clicks on the tabs work as before.
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search);
+    const t = q.get('tab');
+    if (t && ['watched', 'repos', 'ideas', 'tasks', 'reports'].includes(t)) setTab(t as typeof tab);
+    const w = q.get('watched');
+    if (w) setTaskFilterWatched(w);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // 🆕 (P3) فیلتر archived: 'active' | 'archived' | 'all' — default: active
   const [taskFilterArchived, setTaskFilterArchived] = useState<'active' | 'archived' | 'all'>('active');
   // 🆕 (P4) modal state برای regenerate prompt
