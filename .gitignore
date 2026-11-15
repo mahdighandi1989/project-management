@@ -81,3 +81,6 @@ backend/storage/oversight/inspector_context/
 backend/storage/oversight/knowledge_center.json
 backend/storage/oversight/uploads/
 backend/storage/oversight/watched_projects.json
+
+# «دستیار» conversations (runtime data on the Render disk)
+backend/storage/assistant/

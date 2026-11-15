@@ -282,3 +282,19 @@
   `/diagrams` ⇐ `/projects?view=diagrams`، بی‌خطای کنسول.
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · next build + Playwright محلی + inventory
+
+## 2026-11-15 (۴) — بند ۴: سیم‌کشیِ «آرشیو» پس از بندهای ۱ تا ۳
+
+- **[OWNER]** آرشیو پس از تغییرات درست سیم‌کشی شود؛ «مناظرات» که کنار می‌رود، چیزِ دیگری جایش را بگیرد و خودش جایی در پروژه پیدا کند.
+- **[FINDING]** همهٔ مسیرهای آرشیو بررسی شد: `/api/debate/`، `/api/debate/{id}`، `/api/upload/files`، `GET|DELETE /api/upload/file/{id}`،
+  `/api/simple/projects`، `DELETE /api/simple/projects/{id}` — همه در بک‌اند هستند. **ایراد:** پیوندِ «دانلود» ِ فایل‌ها `<a href>` ِ
+  خام بود و پشتِ دیوارِ ورود (بدونِ هدرِ Authorization) 401 می‌گرفت.
+- **[CHANGE]** `app/archive/page.tsx`: تبِ نخست «گفت‌وگوهای دستیار» (فهرست، جست‌وجو/مرتب‌سازی، نمایشِ کامل، «ادامه در دستیار»،
+  بایگانی بی‌حذف)، «مناظره‌های قدیمی» تبِ آخر با همهٔ امکاناتِ قبلی (جزئیات، خروجیِ JSON، پیوند به `/debate` ِ بایگانی‌شده)؛
+  `?tab=` (assistant|files|projects|debates)؛ کارتِ آمارِ چهارم؛ دانلود با `withToken()`.
+  `AssistantChat.tsx`: رویدادِ `assistant:load` گفت‌وگوی ذخیره‌شده را در چت باز می‌کند (کامیتِ `cab12af`).
+- **[CORRECTION]** کامیتِ `cab12af` بدونِ این ورودی و بدونِ خطِ `.gitignore` ارسال شد (یک `sed` شکست خورد و زنجیره قطع شد)؛
+  این ورودی و `backend/storage/assistant/` در `.gitignore` در کامیتِ بعدی اضافه شد. هیچ دادهٔ گفت‌وگویی کامیت نشده بود.
+- **[VERIFY]** build سبز؛ Playwright محلی با یک گفت‌وگوی نمونه: فهرست، مودالِ گفت‌وگو و «ادامه در دستیار» (چت با همان پیام‌ها باز شد).
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · next build + Playwright محلی
