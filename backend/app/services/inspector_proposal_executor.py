@@ -168,7 +168,7 @@ def _resolve_repo_for_session(session_id: int) -> Optional[str]:
         if proj.github_path:
             return proj.github_path.strip()
         if proj.github_url and "github.com/" in proj.github_url:
-            tail = proj.github_url.split("github.com/", 1)[1].rstrip("/").rstrip(".git")
+            tail = proj.github_url.split("github.com/", 1)[1].rstrip("/").removesuffix(".git")  # 🩹 2026-11-15: rstrip stripped letters ("me/budget" → "me/budge")
             if tail.count("/") >= 1:
                 return "/".join(tail.split("/")[:2])
         return None

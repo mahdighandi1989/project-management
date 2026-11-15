@@ -449,7 +449,7 @@ def _normalize_remaining(items: List[Any]) -> List[str]:
     return sorted(out)
 
 
-def _remaining_unchanged(current: List[Any], task: Any, service: Any = None) -> bool:
+def _remaining_unchanged(current: List[Any], task: Any, service: Any = None, exclude_report_id: Any = None) -> bool:
     """🚨 (no-progress guard) — آیا remaining_parts این بار با remaining_parts
     دور قبل تقریباً یکسان است؟ اگر بله، Claude در دور قبل نتوانست هیچ
     آیتمی را تمام کند و ادامهٔ retry بی‌ثمر است.
@@ -471,8 +471,13 @@ def _remaining_unchanged(current: List[Any], task: Any, service: Any = None) -> 
                 if getattr(r, "task_id", None) == getattr(task, "id", None)
             ]
             # آخرین گزارش (به ترتیب زمانی)
+            # 🩹 (2026-11-15) OversightReport has `run_at`, not `generated_at` — the sort was a no-op, and the
+            # «previous» report could be the one the verify that just ran wrote (Jaccard = 1 ⇒ «no progress» ⇒
+            # the task was abandoned on the first retry after any restart). Newest first, without that report.
+            task_reports = [r for r in task_reports
+                            if exclude_report_id is None or getattr(r, "id", None) != exclude_report_id]
             task_reports.sort(
-                key=lambda r: getattr(r, "generated_at", "") or "",
+                key=lambda r: getattr(r, "run_at", "") or getattr(r, "generated_at", "") or "",
                 reverse=True,
             )
             for r in task_reports[:5]:  # 5 گزارش اخیر را اسکن کن
@@ -497,7 +502,7 @@ def _remaining_unchanged(current: List[Any], task: Any, service: Any = None) -> 
     return jaccard >= 0.85
 
 
-async def _verify_then_chain(
+async def _verify_then_chain_body(
     *, task_id: str, watched_id: str, agent_id: str,
 ) -> None:
     """جریان کامل پس از تکمیل تسک توسط Claude Auto-Runner.
@@ -622,7 +627,8 @@ async def _verify_then_chain(
         )
         no_progress = (
             retries_done >= 1
-            and _remaining_unchanged(cur_remaining, task, service)
+            and _remaining_unchanged(cur_remaining, task, service,
+                                     exclude_report_id=(verify_result.get("report") or {}).get("id"))
         )
         if no_progress:
             logger.info(
@@ -798,6 +804,25 @@ async def _verify_then_chain(
             )
     except Exception as _disp_e:
         logger.warning(f"_verify_then_chain: dispatch failed: {_disp_e}")
+
+
+async def _verify_then_chain(
+    *, task_id: str, watched_id: str, agent_id: str,
+) -> None:
+    """🩹 (2026-11-15, owner plan item 8) — the body below released the per-project verify lock only on its
+    happy paths; any exception left it held for 15–30 min and stalled the runner chain. This wrapper releases
+    it on an exception (normal paths are unchanged)."""
+    try:
+        await _verify_then_chain_body(task_id=task_id, watched_id=watched_id, agent_id=agent_id)
+    except Exception as _e:  # noqa: BLE001
+        logger.exception(f"_verify_then_chain crashed for task={task_id}: {_e}")
+        try:
+            service = get_oversight_service()
+            async with service._lock:
+                service._release_verify_lock(watched_id)
+                service._save_watched()
+        except Exception as _e2:  # noqa: BLE001
+            logger.warning(f"_verify_then_chain: could not release verify lock: {_e2}")
 
 
 async def _write_todo_for_task(

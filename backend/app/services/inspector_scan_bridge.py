@@ -58,7 +58,7 @@ def resolve_watched_id_from_project_id(project_id: str) -> Optional[str]:
                 url = proj.github_url.strip()
                 if "github.com/" in url:
                     tail = url.split("github.com/", 1)[1]
-                    tail = tail.rstrip("/").rstrip(".git")
+                    tail = tail.rstrip("/").removesuffix(".git")  # 🩹 2026-11-15: rstrip stripped letters ("me/budget" → "me/budge")
                     if tail.count("/") >= 1:
                         repo_full_name = "/".join(tail.split("/")[:2])
             if not repo_full_name and proj.extra_data:

@@ -173,6 +173,28 @@ def read_progress(watched_id: str) -> Dict[str, Any]:
     return _read_json(_progress_path(watched_id), {}) or {}
 
 
+TERMINAL_STATUSES = ("completed", "error", "stopped", "interrupted")
+
+
+def mark_interrupted_scans() -> int:
+    """Called once when the scheduler starts (= right after a deploy/restart). A scan runs in this process only,
+    so any progress file not in a terminal state belongs to a scan the restart killed; without this the UI polled
+    «phase3_…» forever (2026-11-15, owner plan item 8). Returns how many were marked."""
+    n = 0
+    try:
+        files = list(PROGRESS_DIR.glob("*.json"))
+    except Exception:  # noqa: BLE001
+        return 0
+    for f in files:
+        cur = _read_json(f, {}) or {}
+        if cur and cur.get("status") not in TERMINAL_STATUSES:
+            cur.update(status="interrupted", message="اسکن با ری‌استارتِ سرور قطع شد — دوباره اجرا کنید",
+                       stop_requested=False, pause_requested=False, updated_at=now_iso())
+            _write_json(f, cur)
+            n += 1
+    return n
+
+
 # =====================================================================
 # GitHub helpers
 # =====================================================================
@@ -1683,15 +1705,27 @@ async def run_deep_scan(
         status="starting",
         phase="init",
         message="آغاز deep scan",
+        # 🩹 (2026-11-15) a Stop/Pause from an EARLIER scan stayed in the merged progress file, so every later
+        # scan (scheduled ones too) aborted at its first pass. A new scan starts clean.
+        stop_requested=False,
+        pause_requested=False,
+        error=None,
         files_total=0,
         files_analyzed=0,
-        passes_total=len(PASSES),
+        passes_total=len(enabled),  # 🩹 was len(PASSES) (12) even when 3 or 6 ran ⇒ «3/12»
         passes_done=0,
         critical_count=0,
         findings_count=0,
         started_at=now_iso(),
     )
 
+    token = get_github_token()
+    if not token:
+        write_progress(watched_id, status="error", message="توکن GitHub تنظیم نشده")
+        raise RuntimeError("توکن GitHub تنظیم نشده")
+
+    # 🩹 (2026-11-15) «شروع شد» only once the scan can actually start (was sent before the token check,
+    # so a missing token produced a start message every scheduler minute)
     # 🔔 notification (scan_started)
     try:
         from .notification_service import notification_service
@@ -1706,10 +1740,6 @@ async def run_deep_scan(
     except Exception as _e:
         logger.debug(f"scan_started notification skipped: {_e}")
 
-    token = get_github_token()
-    if not token:
-        write_progress(watched_id, status="error", message="توکن GitHub تنظیم نشده")
-        raise RuntimeError("توکن GitHub تنظیم نشده")
 
     headers = _gh_headers(token)
     repo = watched.repo_full_name

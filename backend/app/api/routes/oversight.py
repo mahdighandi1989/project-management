@@ -72,6 +72,31 @@ class WatchedUpdate(BaseModel):
     backend_base_url: Optional[str] = None
     runtime_auth: Optional[Dict[str, Any]] = None   # {type, value}
     runtime_repo_path: Optional[str] = None
+    # 🩹 (2026-11-15, owner plan item 8) — these were allowed by service.update_watched and sent by the
+    # «اتاق فرمان» card, but missing here, so pydantic dropped them: the toggles answered 200 and never saved.
+    # tests/test_oversight_watched_update_schema.py keeps the three lists (UI ↔ schema ↔ service) in step.
+    verify_mode: Optional[str] = None  # deep | fast
+    stale_detection_enabled: Optional[bool] = None
+    delta_analysis_enabled: Optional[bool] = None
+    runtime_discovery_enabled: Optional[bool] = None
+    outcome_data_enabled: Optional[bool] = None
+    logic_audit_enabled: Optional[bool] = None
+    notification_audit_enabled: Optional[bool] = None
+    inspector_session_enabled: Optional[bool] = None
+    auto_task_checklist_mode: Optional[str] = None
+    cleanup_tasks_enabled: Optional[bool] = None
+    auto_task_notify_sound: Optional[bool] = None
+    scan_notify_sound: Optional[bool] = None
+    confirmation_streak_required: Optional[int] = None
+    max_apply_retries: Optional[int] = None
+    auto_create_pr_instead_of_commit: Optional[bool] = None
+    notify_user_before_apply: Optional[bool] = None
+    runtime_auth_recipe: Optional[Dict[str, Any]] = None
+    runtime_connection_test: Optional[Dict[str, Any]] = None
+
+
+#: fields the owner may explicitly clear by sending null (everything else ignores null)
+WATCHED_NULLABLE = {"frontend_base_url", "backend_base_url", "runtime_auth", "runtime_repo_path", "runtime_auth_recipe"}
 
 
 class IdeaToPromptRequest(BaseModel):
@@ -333,7 +358,9 @@ async def add_watched(payload: WatchedCreate):
 @router.patch("/watched/{watched_id}")
 async def update_watched(watched_id: str, payload: WatchedUpdate):
     service = get_oversight_service()
-    updates = payload.model_dump(exclude_none=True)
+    # sent fields only; null is honoured for the clearable ones (a URL / auth the owner removed)
+    updates = {k: v for k, v in payload.model_dump(exclude_unset=True).items()
+               if v is not None or k in WATCHED_NULLABLE}
     result = await service.update_watched(watched_id, updates)
     if not result:
         raise HTTPException(status_code=404, detail="پروژه یافت نشد")
@@ -644,14 +671,9 @@ async def update_verify_v6_config(watched_id: str, payload: Dict[str, Any] = Bod
     # validation با clamping
     cfg = VerifyConfig.from_dict(payload if isinstance(payload, dict) else {})
     setattr(watched, "verify_v6_config", cfg.to_dict())
-    try:
-        service._persist_watched()  # type: ignore[attr-defined]
-    except Exception:
-        # تلاش با نام دیگر
-        try:
-            service._save_watched_to_disk()  # type: ignore[attr-defined]
-        except Exception:
-            pass
+    # 🩹 (2026-11-15) was `_persist_watched` / `_save_watched_to_disk` — neither exists, the AttributeError was
+    # swallowed and the config was lost on the next restart. `_save_watched` is the real writer.
+    service._save_watched()
     return {
         "watched_id": watched_id,
         "config": cfg.to_dict(),

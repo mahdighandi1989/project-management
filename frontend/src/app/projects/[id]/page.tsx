@@ -892,7 +892,8 @@ export default function ProjectDetailPage() {
     }
     try {
       const res = await fetch(
-        `${API_BASE}/api/oversight/watched/${encodeURIComponent(linkedWatched.watched_id)}/scan`,
+        // 🩹 (2026-11-15) was /oversight/watched/{id}/scan — no such route (always «خطا در آغاز scan»)
+        `${API_BASE}/api/oversight/scan/${encodeURIComponent(linkedWatched.watched_id)}`,
         { method: 'POST' },
       );
       if (res.ok) {

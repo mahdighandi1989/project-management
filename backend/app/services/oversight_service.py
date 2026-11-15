@@ -786,6 +786,24 @@ class OversightService:
         if isinstance(saved_settings, dict):
             self.settings.update(saved_settings)
 
+        # 🩹 (2026-11-15, owner plan item 8) — nothing is running right after a (re)start: a task still marked
+        # «running» was cut off by a deploy/restart mid-call and nothing ever freed it (the scheduler only picks
+        # «pending», the verifier skips «running»). Mark it «failed» with the reason, exactly like run_task's own
+        # error path, so the owner sees it and can re-run it.
+        _stuck = 0
+        for t in self.tasks:
+            if t.status == "running":
+                t.status = "failed"
+                t.last_summary = "اجرا با ری‌استارتِ سرور قطع شد — دوباره اجرا کنید"
+                t.updated_at = now_iso()
+                _stuck += 1
+        if _stuck:
+            logger.warning(f"oversight: {_stuck} task(s) left «running» by a restart were marked failed")
+            try:
+                self._save_tasks(skip_sync=True)  # at load time: no GitHub sync, no event loop yet
+            except Exception as _e:  # noqa: BLE001
+                logger.warning(f"oversight: could not save recovered tasks: {_e}")
+
     def _save_watched(self) -> None:
         _write_json(WATCHED_FILE, [w.to_dict() for w in self.watched])
 
@@ -2279,6 +2297,8 @@ class OversightService:
                         "runtime_repo_path",
                         "runtime_autodetected",
                         "runtime_connection_test",
+                        # 🩹 (2026-11-15) the card's Auth Recipe panel — a dataclass field that was never writable
+                        "runtime_auth_recipe",
                     }
                     for k, v in updates.items():
                         if k in allowed:
@@ -7851,9 +7871,13 @@ AC = «طراحی شیک‌تر باشد»:
             }
             _timeout = _ah.ClientTimeout(total=600)
             async with _ah.ClientSession(timeout=_timeout) as session:
+                # 🩹 (2026-11-15) the self-call crossed the login wall without a secret ⇒ 401 ⇒ silent fallback to
+                # run_task (which only evaluates). The machine secret (core/auth.machine_caller) lets it through.
+                _ext = (os.environ.get("EXTERNAL_TOOL_TOKEN") or os.environ.get("ADMIN_TOKEN") or "").strip()
                 async with session.post(
                     f"{backend_base}/api/render/inspector/smart-chat",
                     json=_payload,
+                    headers={"X-External-Token": _ext} if _ext else None,
                 ) as r:
                     if r.status != 200:
                         return {
@@ -9791,6 +9815,9 @@ AC = «طراحی شیک‌تر باشد»:
             "allow_auto_push_global",
             "max_parallel_runs",
             "scan_interval_hours",
+            # 🩹 (2026-11-15) accepted by SettingsUpdate and read by the runner, but never writable
+            "claude_runner_auto_enable_new",
+            "claude_runner_default_args",
         }
         async with self._lock:
             for k, v in updates.items():
@@ -10073,7 +10100,19 @@ AC = «طراحی شیک‌تر باشد»:
         )
 
     async def scheduler_tick(self) -> Dict[str, Any]:
-        """یک نوبت اجرای scheduler. سه نوع کار: scan، run، verify."""
+        """یک نوبت اجرای scheduler. سه نوع کار: scan، run، verify.
+
+        🩹 (2026-11-15) one tick at a time: `POST /scheduler/tick` and the 60-s loop used to run concurrently
+        (double reminders, double scans/verifies)."""
+        lock = getattr(self, "_tick_lock", None)
+        if lock is None:
+            lock = self._tick_lock = asyncio.Lock()
+        if lock.locked():
+            return {"skipped": True, "reason": "another scheduler tick is still running"}
+        async with lock:
+            return await self._scheduler_tick_inner()
+
+    async def _scheduler_tick_inner(self) -> Dict[str, Any]:
         now = datetime.now(timezone.utc)
         ran: List[str] = []
         scanned: List[str] = []
@@ -10177,6 +10216,12 @@ AC = «طراحی شیک‌تر باشد»:
                                         )
                             except Exception as e:
                                 logger.warning(f"auto-scan {w.id} failed: {e}")
+                                # 🩹 (2026-11-15) a failing scan (no token, renamed repo …) used to rerun on EVERY
+                                # 60-s tick with a «Deep Scan شروع شد» message each time — retry in 1 h instead.
+                                w.next_scan_at = (now + timedelta(hours=1)).isoformat()
+                                w.last_scan_at = (
+                                    now - timedelta(hours=max(float(w.scan_interval_hours or 0) - 1, 0))
+                                ).isoformat()
             except Exception as e:
                 logger.warning(f"scan check {w.id} failed: {e}")
 
@@ -10202,6 +10247,7 @@ AC = «طراحی شیک‌تر باشد»:
                                 "regressed",
                             )
                             and t.status not in ("done", "cancelled")
+                            and not getattr(t, "archived", False)  # 🩹 2026-11-15: archived = owner closed it
                         ]
                         # اولویت: applied_externally_pending_verify اول
                         candidates.sort(
@@ -10251,6 +10297,7 @@ AC = «طراحی شیک‌تر باشد»:
             pending = [
                 t for t in self.tasks
                 if t.watched_id == w.id and t.status == "pending"
+                and not getattr(t, "archived", False)  # 🩹 2026-11-15
                 and t.execution_mode in ("auto_via_projects_page", "auto_via_pr")
             ]
             if not pending:
@@ -10448,6 +10495,13 @@ def get_oversight_service() -> OversightService:
 async def oversight_scheduler_loop(stop_event: asyncio.Event, interval_seconds: int = 60) -> None:
     service = get_oversight_service()
     logger.info("Oversight scheduler loop started")
+    try:  # 🩹 (2026-11-15) scans cut off by the restart that started this loop
+        from .oversight_deep_scan_service import mark_interrupted_scans
+        n = mark_interrupted_scans()
+        if n:
+            logger.warning(f"oversight: marked {n} interrupted deep scan(s)")
+    except Exception as _e:  # noqa: BLE001
+        logger.warning(f"oversight: interrupted-scan recovery failed: {_e}")
     while not stop_event.is_set():
         try:
             await service.scheduler_tick()

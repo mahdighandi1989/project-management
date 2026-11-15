@@ -471,6 +471,7 @@ function useViewPrefs(watchedId: string | null | undefined) {
   const [prefs, setPrefsState] = useState<ViewPrefs>(DEFAULT_VIEW_PREFS);
   const [loaded, setLoaded] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingPrefsRef = useRef<any>(null);
 
   // initial fetch
   useEffect(() => {
@@ -506,12 +507,17 @@ function useViewPrefs(watchedId: string | null | undefined) {
       const next = deepMergePrefs(prev, patch);
       // schedule backend save (debounced)
       if (watchedId) {
+        // 🩹 (2026-11-15) accumulate every patch of the 500-ms window — only the LAST one used to be sent, so a
+        // filter change followed by the page-clamp patch was never saved
+        pendingPrefsRef.current = deepMergePrefs(pendingPrefsRef.current || ({} as any), patch);
         if (debounceRef.current) clearTimeout(debounceRef.current);
         debounceRef.current = setTimeout(() => {
+          const body = pendingPrefsRef.current;
+          pendingPrefsRef.current = null;
           fetch(`${API_BASE}/api/oversight/watched/${watchedId}/view-prefs`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(patch),
+            body: JSON.stringify(body),
           }).catch(() => {});
         }, 500);
       }
@@ -1025,7 +1031,15 @@ export default function OversightPage() {
 
   // 🆕 وقتی modal روی followup باز می‌شود، promptOverride را به جای task.prompt
   // به smart-chat می‌فرستیم. این state بدون ذخیرهٔ دائمی روی task است.
-  const [executePromptOverride, setExecutePromptOverride] = useState<string | null>(null);
+  const [executePromptOverride, setExecutePromptOverrideState] = useState<string | null>(null);
+  // 🩹 (2026-11-15, owner plan item 8) — the override was read from state inside callbacks started in the SAME
+  // render that set it, so «اجرای پرامپت بعدی با AI» and every auto-loop round resent the ORIGINAL prompt.
+  // The ref is set synchronously and read by startSmartChat.
+  const executePromptOverrideRef = useRef<string | null>(null);
+  const setExecutePromptOverride = (v: string | null) => {
+    executePromptOverrideRef.current = v;
+    setExecutePromptOverrideState(v);
+  };
   const [executeIsFollowup, setExecuteIsFollowup] = useState(false);
 
   // 🔁 Auto-loop state — اگر فعال باشد، پس از done در apply-action، خودکار
@@ -1044,7 +1058,8 @@ export default function OversightPage() {
   const startSmartChat = useCallback(async (task: any, projectId: string) => {
     if (!task || !projectId) return;
     setExecuteStage('planning');
-    const isFollowup = !!executePromptOverride;
+    const overrideNow = executePromptOverrideRef.current ?? executePromptOverride;
+    const isFollowup = !!overrideNow;
     setExecuteProgress(prev => [
       ...prev,
       isFollowup
@@ -1052,7 +1067,7 @@ export default function OversightPage() {
         : '🧠 ارسال پرامپت به مدل برای تولید action_plan...',
     ]);
     try {
-      const messageToSend = executePromptOverride || task.prompt || task.title || '';
+      const messageToSend = overrideNow || task.prompt || task.title || '';
       const res = await fetch(`${API_BASE}/api/render/inspector/smart-chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1340,7 +1355,9 @@ export default function OversightPage() {
             autoLoopCountdownTimerRef.current = null;
           }
           // ⚠️ trigger verify در next tick — درون setState callback نمی‌توانیم
-          setTimeout(() => runAutoLoopVerify(), 0);
+          // 🩹 (2026-11-15) via the ref — this callback is memoised with [] and used to hold the FIRST render's
+          // runAutoLoopVerify (executeModalTask = null ⇒ it returned at once; the countdown sat at 0 forever)
+          setTimeout(() => runAutoLoopVerifyRef.current?.(), 0);
           return 0;
         }
         return prev - 1;
@@ -1386,6 +1403,7 @@ export default function OversightPage() {
       const nextRound = autoLoopRound + 1;
       if (nextRound >= AUTO_LOOP_MAX_ROUNDS) {
         setExecuteProgress(prev => [...prev, `⚠️ به max ${AUTO_LOOP_MAX_ROUNDS} دور رسیدیم — دستی ادامه دهید`]);
+        setAutoLoopRound(nextRound);  // 🩹 2026-11-15: so the «max rounds» banner (needs round ≥ max) can show
         autoLoopActiveRef.current = false;
         setAutoLoopStatus('cancelled');
         // مدل را در حالت 'done' نگه می‌داریم تا کاربر دکمه‌های بعدی را ببیند
@@ -1433,6 +1451,9 @@ export default function OversightPage() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [executeModalTask, executeProjectInfo, autoLoopRound, startSmartChat]);
+
+  const runAutoLoopVerifyRef = useRef<typeof runAutoLoopVerify | null>(null);
+  runAutoLoopVerifyRef.current = runAutoLoopVerify;
 
   // skip countdown — verify الان
   const skipCountdownAndVerify = useCallback(() => {
@@ -1951,8 +1972,11 @@ export default function OversightPage() {
   //   - وقتی tab مخفی است (document.hidden) متوقف می‌شود (battery save)
   // نتیجه: کاربر گزارش verify عمیق ping-pong را به‌محض رسیدن می‌بیند، با
   // checklist + done_parts + remaining_parts + summary — مثل verify دستی.
-  useEffect(() => {
-    const hasActiveRunner = (
+  // 🩹 (2026-11-15) the effect used to depend on [watched, tasks]: every tick's setTasks restarted it and reset
+  // tickCount to 0, so the «every third tick» refresh of reports + watched never ran (a finished verify lock
+  // was never seen, so polling never stopped). Now: keyed on the boolean, counter in a ref.
+  const liveTickRef = useRef(0);
+  const hasActiveRunnerNow = (
       watched.some(w => !!w.claude_runner_verifying_task_id)
       || tasks.some(t =>
         t.status === 'running'
@@ -1963,13 +1987,14 @@ export default function OversightPage() {
         )
       )
     );
-    if (!hasActiveRunner) return;
+  useEffect(() => {
+    if (!hasActiveRunnerNow) return;
 
     let cancelled = false;
-    let tickCount = 0;
     const tick = async () => {
       if (cancelled || (typeof document !== 'undefined' && document.hidden)) return;
-      tickCount += 1;
+      liveTickRef.current += 1;
+      const tickCount = liveTickRef.current;
       try {
         // 🚨 (crash fix) — هر tick فقط تسک‌های فعال را می‌گیریم
         // (نه archived؛ payload ~نصف می‌شود). reports + watched هم
@@ -2006,7 +2031,8 @@ export default function OversightPage() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [watched, tasks]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasActiveRunnerNow]);
 
   // ============================ Repos ============================
 
@@ -2390,7 +2416,13 @@ export default function OversightPage() {
               if (!pr.ok) {
                 return { data: null, transient: true };
               }
-              return { data: await pr.json(), transient: false };
+              const body = await pr.json();
+              // 🩹 (2026-11-15) the backend answers 200 {found:false} (not 404) once a restart lost the job,
+              // so the spinner used to poll forever
+              if (body && body.found === false) {
+                return { data: null, transient: false, gone: true };
+              }
+              return { data: body, transient: false };
             } catch {
               return { data: null, transient: true };
             }
@@ -2975,7 +3007,9 @@ export default function OversightPage() {
           if (pr.ok) {
             const data = await pr.json();
             setDeepScanProgress(data);
-            if (data.status === 'completed' || data.status === 'error') {
+            // 🩹 (2026-11-15) also stop on «stopped» and «interrupted» (a restart killed the scan) — the
+            // modal used to poll a dead scan forever
+            if (['completed', 'error', 'stopped', 'interrupted'].includes(data.status)) {
               clearInterval(deepScanPollRef.current);
               deepScanPollRef.current = null;
               await reloadTasks();
@@ -2983,6 +3017,8 @@ export default function OversightPage() {
                 showSuccess(
                   `Deep scan تمام شد - ${data.tasks_created || 0} تسک ساخته شد`,
                 );
+              } else if (data.status === 'stopped') {
+                showSuccess('Deep scan متوقف شد');
               } else {
                 showError(`خطا در deep scan: ${data.message || ''}`);
               }
@@ -3221,8 +3257,12 @@ export default function OversightPage() {
       const res = await fetch(
         `${API_BASE}/api/oversight/tasks/${id}/verification-history`,
       );
+      // 🩹 (2026-11-15) a failed fetch used to leave «در حال بارگذاری...» forever
       if (res.ok) setVerifyHistoryData(await res.json());
-    } catch {}
+      else setVerifyHistoryData({ _error: `HTTP ${res.status}` });
+    } catch (e: any) {
+      setVerifyHistoryData({ _error: e?.message || 'خطای شبکه' });
+    }
   };
 
   const updateTask = async (id: string, updates: Partial<Task>) => {
@@ -9130,7 +9170,7 @@ function TasksPanel({
       if (map[t.status]) map[t.status].push(t);
     });
     return map;
-  }, [filteredTasks]);
+  }, [processedTasks]);  // 🩹 2026-11-15: was [filteredTasks] — Kanban ignored search/sort/toggles
 
   const renderTaskRow = (t: Task) => {
     const statusInfo = TASK_STATUSES.find((s) => s.id === t.status);
@@ -10495,8 +10535,8 @@ function DeepScanProgressView({ progress }: { progress: any }) {
       Math.round((passes_done / Math.max(passes_total, 1)) * 100),
     ),
   );
-  const isError = progress.status === 'error';
-  const isDone = progress.status === 'completed';
+  const isError = progress.status === 'error' || progress.status === 'interrupted';
+  const isDone = progress.status === 'completed' || progress.status === 'stopped';
   // 🆕 (P4) استخراج pass_id از phase (مثلاً phase3_logical_alignment → logical_alignment)
   const currentPassId = phase.startsWith('phase3_') ? phase.replace('phase3_', '') : '';
   const currentPassTooltip = currentPassId ? PASS_TOOLTIPS[currentPassId] : '';
@@ -11074,6 +11114,7 @@ function CodexView({
 
 function VerifyHistoryView({ data }: { data: any }) {
   if (!data) return <p className="text-center text-gray-400">در حال بارگذاری...</p>;
+  if (data._error) return <p className="text-center text-red-500">بارگذاریِ تاریخچه ناموفق بود: {data._error}</p>;
   const history = data.history || [];
   return (
     <div className="space-y-3">

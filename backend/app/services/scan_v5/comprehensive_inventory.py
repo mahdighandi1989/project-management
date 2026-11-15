@@ -399,7 +399,7 @@ def _extract_routes(file_contents: Dict[str, str]) -> Dict[str, List[str]]:
         # Pages router fallback
         m2 = re.match(r"frontend/src/pages/(.+?)\.(tsx|jsx|ts|js)$", path)
         if m2:
-            route = "/" + m2.group(1).rstrip("/index")
+            route = "/" + m2.group(1).removesuffix("/index").removesuffix("index").rstrip("/")  # 🩹 2026-11-15: rstrip stripped letters
             out["frontend"].append(route)
     # backend از layer 2 endpoints جدا
     out["frontend"] = sorted(set(out["frontend"]))[:_MAX_ITEMS_PER_LAYER]

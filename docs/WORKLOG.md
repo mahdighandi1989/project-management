@@ -343,3 +343,30 @@
   ناظرِ خودکار یا مالک می‌تواند از تبِ «نوتیفیکیشن» دکمهٔ «تست Telegram» را بزند.
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · pytest + next build + Playwright محلی
+
+## 2026-11-15 (۷) — بند ۸: بررسیِ کاملِ «اتاق فرمان» از روی کد، مستندات و تاریخچه — ۱۸ ایرادِ تأییدشده رفع شد
+
+- **[OWNER]** «مرکز نظارت» (اکنون «اتاق فرمان») کاملاً بررسی شود؛ همهٔ مستندات خوانده شود تا دقیق — نه از حدس — فهمیده شود چه
+  می‌کرد و چه می‌کند؛ ایده‌های مالک مدت‌ها رسیدگی نشده و خطاهایش باید گرفته شود.
+- **[FINDING]** کلون کم‌عمق بود (۹۵ کامیت)؛ با `git fetch --unshallow` همهٔ ۴٬۴۹۴ کامیت آمد. این بخش ۳۸۵ کامیت دارد: ساخت از ۹ مه تا ۲۸ ژوئن ۲۰۲۶،
+  سپس ۴٫۵ ماه بی‌تغییر. README/ARCHITECTURE/ROADMAP آن را نمی‌شناسند — مستندِ واقعی docstring ها، برچسب‌های ایده در کد و متنِ کامیت‌هاست.
+- **[DECISION]** پنج بازبینِ فقط‌خواندنیِ موازی (صفحه، هستهٔ سرویس، اسکنِ عمیق، اجرا/تأیید، مستندات+تاریخچه)؛ هر ایرادِ گزارش‌شده پیش از رفع
+  **خودم در کد تأیید کردم**؛ فقط ایرادهای روشن و کم‌خطر رفع شد؛ هر چه رفتار یا هزینه را عوض می‌کند به تصمیمِ مالک سپرده شد.
+- **[CHANGE]** سندِ کامل: `docs/handbook/OVERSIGHT.md` (هدف، تاریخچهٔ فاز به فاز با SHA، نقشهٔ صفحه، جریان‌ها، اسکن، اجرا، تأیید، زمان‌بند،
+  ذخیره‌سازی، وابستگی‌های ربات، ۱۸ رفع، ۱۳ ایرادِ باز).
+- **[CHANGE]** بک‌اند: `routes/oversight.py` (۱۸ فیلدِ جاافتادهٔ `WatchedUpdate` + پاک‌کردنِ نشانی‌ها با null؛ ذخیرهٔ واقعیِ `verify-v6-config`)،
+  `oversight_service.py` (قفلِ تک‌نوبتِ زمان‌بند، عقب‌نشینیِ ۱ساعته پس از اسکنِ ناموفق، نادیده‌گرفتنِ آرشیوشده‌ها، بازیابیِ `running` ⇐ `failed`
+  در بارگذاری، ۲ تنظیمِ runner، `runtime_auth_recipe`، کلیدِ ماشینیِ خودفراخوانی، علامت‌گذاریِ اسکن‌های قطع‌شده)، `oversight_deep_scan_service.py`
+  (صفرکردنِ stop/pause، پیامِ شروع پس از توکن، `passes_total` ِ واقعی، `mark_interrupted_scans`)، `external_prompts.py` (نگهبانِ بی‌پیشرفت با
+  `run_at` و بی‌گزارشِ جاری؛ آزادسازیِ قفلِ verify در خطا)، `removesuffix` در `inspector_scan_bridge.py`، `inspector_proposal_executor.py`،
+  `scan_v5/comprehensive_inventory.py`.
+- **[CHANGE]** فرانت: `oversight/page.tsx` (ref ِ پرامپتِ ادامه و تابعِ verify ِ auto-loop، بنرِ سقفِ دور، تازه‌سازیِ زنده، `found:false`، پایانِ
+  polling روی stopped/interrupted، ادغامِ ترجیحاتِ نما، وابستگیِ کانبان، خطای تاریخچهٔ verify)، `projects/[id]/page.tsx` (مسیرِ درستِ scan).
+- **[FINDING]** سه موردِ «بی‌مسیر» ِ `check_frontend_api.py` در `oversight/page.tsx` مثبتِ کاذب بودند (عبارتِ `${…}` در نشانی). پنج موردِ
+  `projects/[id]/page.tsx` واقعاً بی‌مسیرند (`/api/creator/projects/{id}/generate`، `/api/projects/{id}/deploy/render`، `/files`، `/files/{path}`،
+  `/health/validate`) — در بند ۱۲ (همان صفحه) رفع می‌شوند.
+- **[VERIFY]** pytest ۷۳۸ سبز (۸ تستِ تازه: `test_oversight_watched_update_schema.py`، `test_oversight_audit_fixes_2026_11_15.py`)؛ build سبز؛
+  محلی: PATCH ِ سه تنظیم و بازخوانی؛ در مرورگر کلیکِ «logic audit» ⇐ ری‌لود ⇐ ماندگار و روی سرور `True`؛ هر پنج تب بی‌خطای کنسول/شبکه.
+- **[TODO]** ۱۳ ایرادِ بازِ `OVERSIGHT.md` §۱۲ نیازمندِ تصمیمِ مالک (به‌ویژه رشدِ دیسک، done ِ بی‌تأیید، آسان‌گیریِ verify، runner ِ دستی).
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · pytest + next build + Playwright محلی + بازبینیِ پنج‌گانه با تأییدِ دستی
