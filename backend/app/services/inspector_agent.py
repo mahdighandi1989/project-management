@@ -22,6 +22,8 @@
 فراخوان (render_logs) این‌ها را با sse() خودش به کلاینت forward می‌کند.
 """
 
+import os
+from . import inspector_code_tools as _ct
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 import json as _json
@@ -83,8 +85,36 @@ def _build_tools() -> List[Dict[str, Any]]:
                     "path": {
                         "type": "string",
                         "description": "مسیر کامل فایل نسبت به ریشهٔ مخزن، مثلاً 'backend/app/main.py'",
-                    }
+                    },
+                    # 🆕 (2026-11-15) big files: read a numbered range instead of a silently cut head
+                    "start_line": {"type": "integer", "description": "اختیاری — خواندنِ بازهٔ خطوط (شماره‌دار) از این خط"},
+                    "end_line": {"type": "integer", "description": "اختیاری — تا این خط (حداکثر ۶۰۰ خط در هر بار)"},
                 },
+                "required": ["path"],
+            },
+        },
+        {
+            "name": "search_code",
+            "description": (
+                "جست‌وجوی یک عبارت (regex یا متنِ ساده) در کد و برگرداندنِ «مسیر:شماره‌خط: متن». برای پیدا کردنِ جای دقیقِ یک تابع، "
+                "متن، endpoint یا پیامِ خطا در فایل‌های بزرگ؛ سپس همان بازه را با read_file(start_line, end_line) بخوان. "
+                "path_filter فایل‌هایی را که مسیرشان شاملِ آن است می‌گردد (تا ۲۰ فایل)."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "عبارت یا regex"},
+                    "path_filter": {"type": "string", "description": "زیررشتهٔ مسیر، مثلاً 'routes/' یا 'page.tsx' (اختیاری)"},
+                },
+                "required": ["pattern"],
+            },
+        },
+        {
+            "name": "file_outline",
+            "description": "فهرستِ تعریف‌های یک فایل (تابع/کلاس/کامپوننت/endpoint) با شمارهٔ خط — نقشهٔ فایل‌های بزرگ.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
                 "required": ["path"],
             },
         },
@@ -553,6 +583,31 @@ def _build_tools() -> List[Dict[str, Any]]:
     ]
 
 
+async def _verify_finds(args, files_read, file_set, github_svc, owner, repo, branch, token) -> List[str]:
+    """Explanations for every modify_sections whose `find` is not in the real file (empty = all good)."""
+    msgs: List[str] = []
+    for f in (args.get("files") or []):
+        if not isinstance(f, dict) or f.get("operation") != "modify_sections":
+            continue
+        path = str(f.get("path") or "").strip().lstrip("/")
+        if path not in file_set:
+            continue
+        content = files_read.get(path)
+        if content is None:
+            try:
+                r = await github_svc.get_file_content(owner, repo, path, branch=branch, token=token)
+                content = (r.get("content") or "") if r.get("success") else None
+            except Exception:
+                content = None
+            if content is None:
+                continue
+            files_read[path] = content
+        misses = _ct.check_sections(content, f.get("sections") or [])
+        if misses:
+            msgs.append(_ct.explain_misses(path, misses))
+    return msgs
+
+
 async def run_inspector_agent(
     *,
     ai_manager,
@@ -601,6 +656,7 @@ async def run_inspector_agent(
     # token waste می‌کنه. تشخیص می‌دیم و در پاسخ tool به‌صراحت می‌گیم
     # «submit کن و خروج».
     _recent_tool_calls: List[str] = []  # signature های اخیر
+    _find_rejections = 0  # 🆕 (2026-11-15) submit_action_plan sent back for wrong find-texts (max 2)
 
     for _iter in range(1, max_iterations + 1):
         try:
@@ -697,11 +753,57 @@ async def run_inspector_agent(
                         continue
                     _content = res.get("content", "") or ""
                     files_read[path] = _content
-                _truncated = _content
-                if len(_truncated) > max_file_chars:
-                    _truncated = _truncated[:max_file_chars] + "\n... [بریده شد به دلیل اندازه]"
                 _nlines = _content.count("\n") + 1
-                tool_results.append(_tr(f"محتوای {path} ({_nlines} خط):\n```\n{_truncated}\n```"))
+                _s, _e = args.get("start_line"), args.get("end_line")
+                if _s or _e:
+                    # 🆕 (2026-11-15) a numbered range of a (big) file
+                    _txt, _a, _b, _tot = _ct.numbered(_content, int(_s or 1), int(_e) if _e else None)
+                    tool_results.append(_tr(f"{path} خطوطِ {_a}-{_b} از {_tot} (شماره‌ها فقط برای راهنمایی‌اند؛ در find نیاور):\n```\n{_txt}\n```"))
+                elif len(_content) > max_file_chars:
+                    # 🆕 (2026-11-15) was: the first 18 000 characters «… [بریده شد]» — the rest was invisible. Now: the
+                    # outline of the WHOLE file + its head, and how to read any other part.
+                    _ol = "\n".join(_ct.outline(path, _content)) or "(تعریفی پیدا نشد)"
+                    _head, _a, _b, _tot = _ct.numbered(_content, 1, _ct.HEAD_LINES)
+                    tool_results.append(_tr(
+                        f"{path} بزرگ است ({_nlines} خط). نقشهٔ کاملِ فایل (شماره‌خط: تعریف):\n{_ol[:9000]}\n\n"
+                        f"خطوطِ ۱-{_b}:\n```\n{_head}\n```\n"
+                        f"برای بقیه: read_file با start_line/end_line، یا search_code برای پیدا کردنِ جای دقیق."))
+                else:
+                    tool_results.append(_tr(f"محتوای {path} ({_nlines} خط):\n```\n{_content}\n```"))
+
+            elif name in ("search_code", "file_outline"):
+                # 🆕 (2026-11-15) search / outline — fetch what is needed (cached in files_read)
+                async def _get(pth: str) -> Optional[str]:
+                    if pth in files_read:
+                        return files_read[pth]
+                    try:
+                        _r = await github_svc.get_file_content(owner, repo, pth, branch=branch, token=token)
+                    except Exception:
+                        return None
+                    if not _r.get("success"):
+                        return None
+                    files_read[pth] = _r.get("content", "") or ""
+                    return files_read[pth]
+                if name == "file_outline":
+                    path = (args.get("path") or "").strip().lstrip("/")
+                    _c = await _get(path) if path in file_set else None
+                    if _c is None:
+                        tool_results.append(_tr(f"فایل '{path}' خوانده نشد/یافت نشد", is_error=True))
+                    else:
+                        _ol = "\n".join(_ct.outline(path, _c)) or "(تعریفی پیدا نشد)"
+                        tool_results.append(_tr(f"نقشهٔ {path} ({_c.count(chr(10)) + 1} خط):\n{_ol[:12000]}"))
+                    yield ("progress", {"step": "agent_outline", "message": f"🗺 {_tag} نقشهٔ {path}"})
+                else:
+                    _pat = str(args.get("pattern") or "")
+                    _pf = str(args.get("path_filter") or "").strip()
+                    _cands = [p for p in file_list if _pf and _pf in p][:20] if _pf else []
+                    for _p in _cands:
+                        await _get(_p)
+                    _pool = {p: c for p, c in files_read.items() if (not _pf or _pf in p)}
+                    _hits = _ct.search(_pool, _pat, max_hits=60) if _pat else []
+                    _note = "" if _pf else " (فقط در فایل‌های خوانده‌شده؛ برای فایل‌های دیگر path_filter بده)"
+                    tool_results.append(_tr(("\n".join(_hits) or "موردی یافت نشد") + _note))
+                    yield ("progress", {"step": "agent_search", "message": f"🔎 {_tag} جست‌وجوی «{_pat[:40]}» — {len(_hits)} مورد"})
 
             elif name == "list_files":
                 _filter = (args.get("filter") or "").strip()
@@ -712,6 +814,15 @@ async def run_inspector_agent(
                     _txt += f"\n... و {len(_matched) - len(_shown)} فایل دیگر"
                 tool_results.append(_tr(_txt or "موردی یافت نشد"))
                 yield ("progress", {"step": "agent_list", "message": f"📂 {_tag} فهرست فایل‌ها (فیلتر: '{_filter or 'همه'}') — {len(_matched)} مورد"})
+
+            elif name == "submit_action_plan" and _find_rejections < 2 and os.environ.get("INSPECTOR_VERIFY_FIND", "1") != "0" \
+                    and (_miss_msgs := await _verify_finds(args, files_read, file_set, github_svc, owner, repo, branch, token)):
+                # 🆕 (2026-11-15) every `find` must exist verbatim in the real file — weak models copy far better than
+                # they recall; the closest real snippets let them fix it now instead of the apply step guessing
+                _find_rejections += 1
+                tool_results.append(_tr("\n\n".join(_miss_msgs), is_error=True))
+                yield ("progress", {"step": "agent_find_check",
+                                    "message": f"🔁 {_tag} متنِ find با فایلِ واقعی نخواند — اصلاح ({_find_rejections}/2)"})
 
             elif name == "submit_action_plan":
                 final_analysis = (args.get("analysis") or final_analysis or "").strip()

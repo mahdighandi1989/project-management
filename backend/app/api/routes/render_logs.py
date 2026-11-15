@@ -12527,6 +12527,34 @@ def _try_repair_truncated_json(raw_json_str: str) -> dict | None:
     }
 
 
+def _lenient_json(block: str):
+    """json.loads, then: trailing commas removed, raw newlines/tabs inside strings escaped. Raises if still invalid."""
+    try:
+        return json.loads(block)
+    except json.JSONDecodeError:
+        pass
+    fixed = re.sub(r",\s*([}\]])", r"\1", block)
+    out, in_str, esc = [], False, False
+    for ch in fixed:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            elif ch == "\n":
+                out.append("\\n")
+                continue
+            elif ch == "\t":
+                out.append("\\t")
+                continue
+        elif ch == '"':
+            in_str = True
+        out.append(ch)
+    return json.loads("".join(out))
+
+
 def _extract_all_action_plans_from_response(content: str, is_truncated: bool = False) -> dict | None:
     """
     استخراج و ادغام action_plan از تمام بلوک‌های ```json در پاسخ مدل.
@@ -12541,11 +12569,14 @@ def _extract_all_action_plans_from_response(content: str, is_truncated: bool = F
     commit_message = ""
 
     # پیدا کردن تمام بلوک‌های ```json...``` کامل
-    json_blocks = re.findall(r'```json\s*\n(.*?)\n```', content, re.DOTALL)
+    # 🩹 (2026-11-15, owner plan item 12) — also fences without a newline before the closing ``` (weak models), and
+    # every block goes through a lenient parse (trailing commas, raw newlines inside strings) — strict json.loads used
+    # to drop whole plans for one stray comma; repair only ran on truncated output.
+    json_blocks = re.findall(r'```json\s*\n?(.*?)\n?```', content, re.DOTALL)
     # 🆕 short-circuit: اگر بلوکی شامل ask_user یا route_to معتبر بود، همان را برگردان
     for block in json_blocks:
         try:
-            parsed = json.loads(block)
+            parsed = _lenient_json(block)
             normalized = _normalize_action_plan_json(parsed)
             if normalized and (normalized.get("ask_user") or normalized.get("route_to")):
                 return normalized
@@ -12553,7 +12584,7 @@ def _extract_all_action_plans_from_response(content: str, is_truncated: bool = F
             pass
     for block in json_blocks:
         try:
-            parsed = json.loads(block)
+            parsed = _lenient_json(block)
             normalized = _normalize_action_plan_json(parsed)
             if normalized and normalized.get("files"):
                 all_files.extend(normalized["files"])
