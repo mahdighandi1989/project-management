@@ -712,6 +712,43 @@ def build_final_prompt(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def extract_keyframes_from_video(session, count: int = 10) -> int:
+    """frames/ is empty but video_chunks/ has the recording ⇒ join the chunks (one MediaRecorder stream: byte-concat is
+    a valid webm) and let ffmpeg take ``count`` evenly spaced JPEG frames into frames/. Returns how many were written."""
+    import shutil
+    import subprocess
+
+    frames_dir = Path(session.frames_dir)
+    video_dir = Path(session.video_dir)
+    if frames_dir.exists() and any(frames_dir.glob("frame_*")):
+        return 0
+    chunks = sorted(video_dir.glob("chunk_*.webm")) if video_dir.exists() else []
+    if not chunks or not shutil.which("ffmpeg"):
+        return 0
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    joined = video_dir / "_joined.webm"
+    with open(joined, "wb") as out:
+        for c in chunks:
+            out.write(c.read_bytes())
+    duration = 0.0
+    try:
+        probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(joined)],
+                               capture_output=True, text=True, timeout=60)
+        duration = float((probe.stdout or "0").strip() or 0)
+    except Exception:  # noqa: BLE001 — MediaRecorder webm often has no duration header
+        duration = 0.0
+    if duration <= 0:
+        duration = max(15.0, 15.0 * len(chunks))  # 15-s slices
+    fps = max(count / duration, 0.02)
+    try:
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(joined), "-vf", f"fps={fps:.4f},scale=1280:-2",
+                        "-frames:v", str(count), "-q:v", "5", str(frames_dir / "frame_%06d.jpg")],
+                       capture_output=True, timeout=180)
+    finally:
+        joined.unlink(missing_ok=True)
+    return len(list(frames_dir.glob("frame_*.jpg")))
+
+
 async def process_session(
     session,
     *,
@@ -754,6 +791,16 @@ async def process_session(
     # بصری انجام می‌دهد خودش کار صوتی هم انجام بدهد").
     # اگر multimodal model در دسترس نبود یا payload بزرگ بود، به legacy
     # pipeline (Whisper جدا + vision per frame) fallback می‌کنیم.
+    # 🩹 (2026-11-15, owner plan item 12) — mode A uploads VIDEO chunks (since 27b380fd), but every visual analysis
+    # reads only frames/ ⇒ the screen was never looked at, and long mode-B videos lost their visuals too. Pull
+    # keyframes out of the video with ffmpeg (already in the image) when frames/ is empty.
+    try:
+        n = await asyncio.to_thread(extract_keyframes_from_video, session)
+        if n:
+            await _emit("keyframes", 5, f"{n} قاب از ویدیو استخراج شد")
+    except Exception as _kf:  # noqa: BLE001 — never block the rest of the pipeline
+        logger.warning(f"keyframe extraction failed: {_kf}")
+
     await _emit("multimodal", 0, "تلاش برای آنالیز یکپارچه با Gemini...")
     multimodal_used = False
     try:

@@ -113,7 +113,9 @@ export default function InspectorBridge() {
           : null;
         if (el instanceof HTMLElement) el.click();
       } else if (msg.command === "navigate") {
-        if (msg.url) window.location.href = msg.url;
+        // 🩹 (2026-11-15) http(s) only — the bridge socket is not authenticated, so a `javascript:` URL here would
+        // run code in a signed-in page
+        if (msg.url && /^https?:\/\//i.test(String(msg.url))) window.location.href = msg.url;
       } else if (msg.command === "get-elements") {
         const elements: Array<{
           index: number;

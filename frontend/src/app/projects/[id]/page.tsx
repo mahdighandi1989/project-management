@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
 // ProjectHealthPanel در commit 3.3a حذف شد — همهٔ قابلیت‌ها در /oversight
 import PromptManager from '@/components/PromptManager';
+import { ensurePreviewTicket } from '@/lib/previewTicket';
 import ExecutingPromptsPanel from '@/components/ExecutingPromptsPanel';
 import InspectorRecordingPanel from '@/components/InspectorRecordingPanel';  // 🆕 🎬 ضبط بازرس ویژه دوحالته (A + B)
 import ReactFlow, {
@@ -2992,6 +2993,9 @@ export default function ProjectDetailPage() {
             }
             setInspectorFrontendUrl(data.frontend_url);
             setInspectorBaseUrl(data.frontend_url); // ذخیره URL پایه برای تبدیل proxy↔actual
+            // 🩹 (2026-11-15) the iframe's own requests need the project-scoped preview ticket (lib/previewTicket.ts) —
+            // without it the screen (and every recording/screenshot of it) showed the login wall's 401
+            await ensurePreviewTicket(projectId);
             // 🔀 src iframe — مسیر نسبی (same-origin از طریق Next.js rewrite)
             try {
               const _u = new URL(data.frontend_url);
@@ -6365,6 +6369,7 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
   // 📸 عکس‌برداری از صفحه پیش‌نمایش
 
   // 🔀 تبدیل URL پروکسی به URL واقعی (و بالعکس)
+  const inspectorIframeAuthRetryRef = useRef(false);  // one ticket renewal per failed load (self-healing)
   const _proxyPrefix = `/api/render/inspector/proxy/${projectId}`;
   const _getProxyUrl = (actualUrl: string | null): string => {
     if (!actualUrl) return '';
@@ -13883,6 +13888,29 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                               title="پیش‌نمایش فرانت‌اند"
                               sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
                               onLoad={() => {
+                                // 🩹 (2026-11-15) self-healing: onLoad also fires on an error PAGE (401 of the login wall, 5xx of
+                                // the proxy), so look at what actually loaded. An auth error ⇒ renew the ticket and reload once;
+                                // another error ⇒ show the red «not loaded» state instead of pretending it is fine.
+                                let failed: 'auth' | 'error' | null = null;
+                                try {
+                                  const doc = inspectorIframeRef.current?.contentDocument;
+                                  const body = (doc?.body?.innerText || '').trim().slice(0, 400);
+                                  if (body.startsWith('{') && body.includes('auth_required')) failed = 'auth';
+                                  else if (body.startsWith('{"detail"') || /^(Internal Server Error|Bad Gateway|Service Unavailable)/.test(body)) failed = 'error';
+                                } catch { /* cross-origin — cannot inspect, trust onLoad */ }
+                                if (failed === 'auth' && !inspectorIframeAuthRetryRef.current) {
+                                  inspectorIframeAuthRetryRef.current = true;
+                                  ensurePreviewTicket(projectId).then(() => {
+                                    try { inspectorIframeRef.current?.contentWindow?.location.reload(); } catch { /* ignore */ }
+                                  });
+                                  return;
+                                }
+                                if (failed) {
+                                  setInspectorIframeError(true);
+                                  setInspectorIframeLoaded(false);
+                                  return;
+                                }
+                                inspectorIframeAuthRetryRef.current = false;
                                 setInspectorIframeLoaded(true);
                                 setInspectorIframeError(false);
                                 // 🔀 same-origin (proxy) — خواندن URL واقعی بعد از هر navigation
@@ -13920,6 +13948,12 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                                 onComplete={(res) => {
                                   if (res?.task_id) {
                                     console.log('🎬 recording → task created:', res.task_id);
+                                  }
+                                  // 🩹 (2026-11-15) «… و پرامپت هم باهاش میفرسته»: the recording's prompt goes into the
+                                  // inspector chat box (the backend «send to chat» step was only a placeholder) — the owner
+                                  // sees it and sends it with one Enter; an unsent draft is never overwritten
+                                  if (res?.prompt) {
+                                    setInspectorChatInput((cur) => (cur && cur.trim() ? cur : res.prompt || ''));
                                   }
                                 }}
                               />

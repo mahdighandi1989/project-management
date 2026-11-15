@@ -207,6 +207,53 @@ def session_from(headers: dict, query: str, method: str) -> Optional[dict]:
         db.close()
 
 
+# ---------------------------------------------------------------------------
+# preview tickets — the «بازرس ویژه» screen (owner plan item 12, 2026-11-15)
+# ---------------------------------------------------------------------------
+# The screen beside the inspector chat is an <iframe> of /api/render/inspector/proxy/{project}/… . An iframe and the
+# page's own files cannot carry the bearer header, so since the wall went up (2026-10-08) the screen — and every
+# recording / screenshot of it — showed the 401 JSON. A signed-in owner asks for a SHORT-LIVED ticket bound to ONE
+# project (POST /api/auth/preview-ticket); the frontend stores it in a cookie whose path is that project's proxy
+# prefix, so only those GET requests carry it. The session token itself never enters a URL or a cookie.
+PREVIEW_PREFIX = "/api/render/inspector/proxy/"
+PREVIEW_COOKIE = "pm_preview"
+PREVIEW_TTL = int(os.environ.get("PREVIEW_TICKET_TTL", "1800"))
+
+
+def preview_ticket(project_id: str, ttl: int = PREVIEW_TTL) -> str:
+    exp = int(time.time()) + ttl
+    sig = hmac.new(signing_key().encode(), f"preview|{project_id}|{exp}".encode(), "sha256").hexdigest()[:40]
+    return f"{exp}.{sig}"
+
+
+def preview_ticket_ok(ticket: str, project_id: str) -> bool:
+    try:
+        exp_s, sig = (ticket or "").split(".", 1)
+        exp = int(exp_s)
+    except ValueError:
+        return False
+    if exp < time.time() or not project_id:
+        return False
+    good = hmac.new(signing_key().encode(), f"preview|{project_id}|{exp}".encode(), "sha256").hexdigest()[:40]
+    return hmac.compare_digest(sig, good)
+
+
+def preview_allowed(path: str, method: str, headers: dict) -> bool:
+    """A GET/HEAD under one project's proxy prefix carrying that project's valid ticket cookie."""
+    if method not in ("GET", "HEAD") or not path.startswith(PREVIEW_PREFIX):
+        return False
+    project_id = path[len(PREVIEW_PREFIX):].split("/", 1)[0]
+    from http.cookies import SimpleCookie
+
+    jar = SimpleCookie()
+    try:
+        jar.load(headers.get("cookie", ""))
+    except Exception:  # noqa: BLE001
+        return False
+    c = jar.get(PREVIEW_COOKIE)
+    return bool(c) and preview_ticket_ok(c.value, project_id)
+
+
 class AuthWall:
     """Pure ASGI middleware: HTTP only (WebSockets pass untouched)."""
 
@@ -227,7 +274,8 @@ class AuthWall:
             state["auth_email"] = claims.get("email", "")
         state["auth_role"] = role or ""
         if (not auth_enforced() or method == "OPTIONS" or path == "/" or role
-                or any(path == p or (p.endswith("/") and path.startswith(p)) for p in PUBLIC)):
+                or any(path == p or (p.endswith("/") and path.startswith(p)) for p in PUBLIC)
+                or preview_allowed(path, method, headers)):
             return await self.app(scope, receive, send)
         body = b'{"detail":"\\u0628\\u0631\\u0627\\u06cc \\u062f\\u06cc\\u062f\\u0646 \\u0628\\u0627\\u06cc\\u062f \\u0648\\u0627\\u0631\\u062f \\u0634\\u0648\\u06cc","auth_required":true}'
         await send({"type": "http.response.start", "status": 401,

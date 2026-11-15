@@ -122,3 +122,18 @@ def supervisor_session(request: Request):
         raise HTTPException(403, "فقط ناظر")
     return {"access_token": A.create_token(sub="0", email="supervisor@routine", role="supervisor"),
             "token_type": "bearer"}
+
+
+class PreviewTicketIn(BaseModel):
+    project_id: str = Field(..., min_length=1, max_length=200)
+
+
+@router.post("/preview-ticket")
+def preview_ticket(body: PreviewTicketIn, request: Request):
+    """A signed-in user's short-lived ticket for ONE project's inspector screen (see core/auth.preview_ticket).
+    Behind the wall like everything else; the frontend puts it in a cookie scoped to that project's proxy path."""
+    pid = body.project_id.strip()
+    if "/" in pid or ".." in pid:
+        raise HTTPException(400, "شناسهٔ پروژه نامعتبر است")
+    return {"ticket": A.preview_ticket(pid), "cookie": A.PREVIEW_COOKIE,
+            "path": f"{A.PREVIEW_PREFIX}{pid}", "expires_in": A.PREVIEW_TTL}

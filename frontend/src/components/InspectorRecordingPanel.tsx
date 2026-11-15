@@ -63,7 +63,7 @@ interface InspectorRecordingPanelProps {
   /** آیا feature فعال است (مثلاً اگر کاربر inspector را باز کرده) */
   enabled: boolean;
   /** صدا زده می‌شود وقتی recording completed/finalized — برای refresh state */
-  onComplete?: (result: { task_id?: string | null; chat_message_sent?: boolean }) => void;
+  onComplete?: (result: { task_id?: string | null; chat_message_sent?: boolean; prompt?: string; errors?: string[]; warnings?: string[] }) => void;
   /** کلیک روی icon این button — رنگ/سایز را با buttonClassName کنترل کن */
   buttonClassName?: string;
   /** ref به iframe بازرس برای دسترسی به URL و post message — اختیاری */
@@ -90,7 +90,14 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
     getBackendLogsSnapshot,
   } = props;
 
-  const [phase, setPhase] = useState<Phase>('idle');
+  const [phase, setPhaseState] = useState<Phase>('idle');
+  // 🩹 (2026-11-15, owner plan item 12) — the phase is also kept in a ref: «Stop sharing», the 60-min timer and
+  // the track's onended called a stopRecording captured while phase was still «idle», so auto-stop never fired.
+  const phaseRef = useRef<Phase>('idle');
+  const setPhase = (p: Phase) => { phaseRef.current = p; setPhaseState(p); };
+  const stopRecordingRef = useRef<() => Promise<void>>(async () => {});
+  // every chunk upload in flight — awaited before /stop so the LAST 10–15 s are never lost (they used to get 409)
+  const pendingUploadsRef = useRef<Promise<unknown>[]>([]);
   const [mode, setMode] = useState<RecordingMode>('A');
   const [audioConfig, setAudioConfig] = useState<AudioConfig>({
     mic: true,
@@ -176,6 +183,24 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
     [],
   );
 
+  // 🩹 (2026-11-15) a chunk upload: retried 3× with backoff and tracked, so stop can wait for it
+  const trackUpload = useCallback(async (path: string, blob: Blob, seq: number) => {
+    const p = (async () => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          await apiUploadBlob(path, blob, seq);
+          return true;
+        } catch (err) {
+          if (attempt === 2) { console.warn('chunk upload failed after 3 tries', path, seq, err); return false; }
+          await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+        }
+      }
+      return false;
+    })();
+    pendingUploadsRef.current.push(p);
+    return p;
+  }, [apiUploadBlob]);
+
   // ─────────────────────────────────────────────────────────────────────────
   // Open picker — enumerate microphones
   // ─────────────────────────────────────────────────────────────────────────
@@ -258,11 +283,7 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
         rec.ondataavailable = async (e) => {
           if (e.data && e.data.size > 0) {
             const seq = audioSeqRef.current++;
-            try {
-              await apiUploadBlob(`/${sid}/audio-chunk`, e.data, seq);
-            } catch (err) {
-              console.warn('audio chunk upload failed', err);
-            }
+            await trackUpload(`/${sid}/audio-chunk`, e.data, seq);
           }
         };
         rec.start(10_000); // هر 10 ثانیه chunk
@@ -302,16 +323,12 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
         vrec.ondataavailable = async (e) => {
           if (e.data && e.data.size > 0) {
             const seq = videoSeqRef.current++;
-            try {
-              await apiUploadBlob(`/${sid}/video-chunk`, e.data, seq);
-            } catch (err) {
-              console.warn('video chunk upload failed', err);
-            }
+            await trackUpload(`/${sid}/video-chunk`, e.data, seq);
           }
         };
         // اگر کاربر روی browser از سهم‌گذاری دست کشید (close button)
         displayStream.getVideoTracks()[0].onended = () => {
-          stopRecording().catch(() => {});
+          stopRecordingRef.current().catch(() => {});
         };
         vrec.start(15_000); // هر 15 ثانیه chunk
         videoRecorderRef.current = vrec;
@@ -372,7 +389,7 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
         // If the user stopped sharing from the browser bar, finish the recording.
         const vTrack = tabStream.getVideoTracks()[0];
         if (vTrack) {
-          vTrack.onended = () => { stopRecording().catch(() => {}); };
+          vTrack.onended = () => { stopRecordingRef.current().catch(() => {}); };
         }
 
         // Build an offscreen <video> element to read frames from the
@@ -456,11 +473,7 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
         vrec.ondataavailable = async (e) => {
           if (e.data && e.data.size > 0) {
             const seq = videoSeqRef.current++;
-            try {
-              await apiUploadBlob(`/${sid}/video-chunk`, e.data, seq);
-            } catch (err) {
-              console.warn('video chunk upload failed', err);
-            }
+            await trackUpload(`/${sid}/video-chunk`, e.data, seq);
           }
         };
         vrec.start(15_000); // hourly chunks like mode B
@@ -478,7 +491,7 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
         setDurationSec(sec);
         // 60min auto-stop
         if (sec >= 60 * 60) {
-          stopRecording().catch(() => {});
+          stopRecordingRef.current().catch(() => {});
         }
       }, 500);
 
@@ -490,7 +503,7 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
       // cleanup any partial state
       cleanupStreams();
     }
-  }, [apiPost, apiUploadBlob, projectId, projectFullName, mode, audioConfig]);
+  }, [apiPost, apiUploadBlob, trackUpload, projectId, projectFullName, mode, audioConfig]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // Audio stream (mic + optional system)
@@ -674,21 +687,30 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
   // ─────────────────────────────────────────────────────────────────────────
 
   const stopRecording = useCallback(async () => {
-    if (phase !== 'recording') return;
+    if (phaseRef.current !== 'recording') return;
     setPhase('stopping');
     if (timerRef.current) clearInterval(timerRef.current);
     stopScreenshotPolling();
     detachPostMessageBridge();
 
     // متوقف کردن recorders + جمع‌آوری آخرین chunk ها
-    if (audioRecorderRef.current && audioRecorderRef.current.state !== 'inactive') {
-      audioRecorderRef.current.stop();
+    // 🩹 (2026-11-15) wait for each recorder's real «stop» (its last dataavailable comes before it) and then for
+    // every upload still in flight — a fixed 1.5 s used to drop the last chunk on a slow line (409 after /stop)
+    const stopped: Promise<unknown>[] = [];
+    for (const rec of [audioRecorderRef.current, videoRecorderRef.current]) {
+      if (rec && rec.state !== 'inactive') {
+        stopped.push(new Promise((res) => rec.addEventListener('stop', res, { once: true })));
+        rec.stop();
+      }
     }
-    if (videoRecorderRef.current && videoRecorderRef.current.state !== 'inactive') {
-      videoRecorderRef.current.stop();
-    }
-    // کمی صبر کن تا ondataavailable کامل شود
-    await new Promise((r) => setTimeout(r, 1500));
+    setProcessingStage('در حال ارسالِ آخرین تکه‌ها...');
+    const allDone = (async () => {
+      await Promise.all(stopped);
+      await new Promise((r) => setTimeout(r, 50));
+      await Promise.allSettled(pendingUploadsRef.current);
+    })();
+    await Promise.race([allDone, new Promise((r) => setTimeout(r, 90_000))]);
+    pendingUploadsRef.current = [];
     cleanupStreams();
 
     const sid = sessionIdRef.current;
@@ -722,11 +744,19 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
       // یعنی processing تمام شده. preview را fetch کن.
       await fetchPreview(sid);
     } catch (e: any) {
+      // 🩹 (2026-11-15) a long processing can outlive the gateway's timeout while the server finishes fine —
+      // try the preview (it polls while the server is still busy) before showing an error
       console.error('stop failed', e);
-      setErrorMsg(e?.message || 'خطا در پایان ضبط');
-      setPhase('error');
+      try {
+        setProcessingStage('پاسخِ پایانِ ضبط نرسید — در حالِ پیگیریِ نتیجه از سرور...');
+        await fetchPreview(sid);
+      } catch {
+        setErrorMsg(e?.message || 'خطا در پایان ضبط');
+        setPhase('error');
+      }
     }
-  }, [phase, apiPost, userNote, getConsoleLogsSnapshot, getBackendLogsSnapshot]);
+  }, [apiPost, userNote, getConsoleLogsSnapshot, getBackendLogsSnapshot]);
+  stopRecordingRef.current = stopRecording;
 
   function cleanupStreams() {
     // Stop mode-A crop loop before releasing the source stream so the
@@ -871,20 +901,29 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
         send_to_oversight: sendToOversight,
         edited_transcript: editedTranscript,
       });
+      // 🩹 (2026-11-15) errors/warnings of the finalize (task not created, Telegram refused …) used to be hidden
+      const errs: string[] = Array.isArray(res?.errors) ? res.errors : [];
+      const warns: string[] = Array.isArray(res?.warnings) ? res.warnings : [];
       setPhase('completed');
+      if (errs.length || warns.length) {
+        setErrorMsg([...errs.map((x) => `❌ ${x}`), ...warns.map((x) => `⚠️ ${x}`)].join('\n'));
+      }
       if (onComplete) {
         onComplete({
           task_id: res?.task_id || null,
           chat_message_sent: res?.chat_message_sent || false,
+          prompt: preview?.prompt || '',
+          errors: errs,
+          warnings: warns,
         });
       }
-      // پس از ۳ ثانیه reset
-      setTimeout(() => resetAll(), 3000);
+      // پس از ۳ ثانیه reset (دیرتر اگر خطایی هست تا دیده شود)
+      setTimeout(() => resetAll(), errs.length || warns.length ? 15000 : 3000);
     } catch (e: any) {
       setErrorMsg(`finalize: ${e?.message}`);
       setPhase('error');
     }
-  }, [apiPost, userNote, sendToOversight, editedTranscript, onComplete]);
+  }, [apiPost, userNote, sendToOversight, editedTranscript, onComplete, preview]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // Cancel
@@ -1278,8 +1317,11 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
 
       {/* Completed toast */}
       {phase === 'completed' && (
-        <div className="fixed top-4 left-1/2 transform -translate-x-1/2 z-[9999] bg-green-600 text-white px-6 py-3 rounded-lg shadow-2xl">
-          ✓ ارسال موفق — ضبط در تلگرام و تسک ایجاد شد
+        <div className={`fixed top-4 left-1/2 transform -translate-x-1/2 z-[9999] text-white px-6 py-3 rounded-lg shadow-2xl max-w-xl ${errorMsg ? 'bg-amber-600' : 'bg-green-600'}`}>
+          {/* 🩹 (2026-11-15) the real outcome — this used to say «task created» even when finalize reported errors */}
+          {errorMsg ? (
+            <div className="text-sm whitespace-pre-wrap">ارسال انجام شد ولی با این موارد:{'\n'}{errorMsg}</div>
+          ) : '✓ ارسال موفق — پرامپت در کادرِ چتِ بازرس قرار گرفت'}
         </div>
       )}
 
