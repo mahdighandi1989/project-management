@@ -28,6 +28,7 @@ class ProcessingConfigUpdate(BaseModel):
     max_concurrent_requests: Optional[int] = None
     auto_retry: Optional[bool] = None
     retry_count: Optional[int] = None
+    default_temperature: Optional[float] = None
 
 
 class StorageConfigUpdate(BaseModel):

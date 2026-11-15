@@ -47,6 +47,8 @@ class ProcessingConfig:
     auto_retry: bool = True
     retry_count: int = 3
     retry_delay: float = 1.0
+    # 2026-11-15: the «پیکربندی» tab of «مدل‌ها و تنظیمات» has a temperature slider
+    default_temperature: float = 0.7
 
 
 @dataclass

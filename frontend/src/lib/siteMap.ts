@@ -44,14 +44,15 @@ export const SITE: SiteEntry[] = [
   { href: '/creator', label: 'موتور خالق', emoji: '🚀', desc: 'ساختِ پروژهٔ تازه از یک ایده با AI', group: 'tools', menu: true, home: true, icon: 'command' },
   { href: '/knowledge-center', label: 'مرکز دانش', emoji: '📚', desc: 'تجربه‌های قابلِ استفادهٔ مجدد از همهٔ پروژه‌ها', group: 'tools', menu: true, home: true, icon: 'book' },
   { href: '/archive', label: 'آرشیو', emoji: '📦', desc: 'تاریخچه: گفت‌وگوهای دستیار، فایل‌ها، پروژه‌ها و مناظره‌های قدیمی', group: 'tools', menu: true, home: true, icon: 'archive' },
-  { href: '/models', label: 'مدل‌ها', emoji: '🧠', desc: 'مدل‌های AI: فعال/غیرفعال، اولویت، تستِ توانایی', group: 'system', menu: true, home: true, icon: 'cpu' },
-  { href: '/settings', label: 'تنظیمات', emoji: '⚙️', desc: 'کلیدهای API، توکن‌ها، اعلان‌ها و تلگرام، محدودیت‌ها', group: 'system', menu: true, home: true, icon: 'cog' },
+  { href: '/settings', label: 'مدل‌ها و تنظیمات', emoji: '⚙️', desc: 'کلیدهای API و Deploy، پیکربندی، محدودیتِ AI، لاگِ Render، اعلان‌ها و تلگرام، مصرفِ AI؛ و مدل‌ها (فعال/غیرفعال، اولویت، تستِ توانایی، مدلِ پیش‌فرضِ استخراج)', group: 'system', menu: true, home: true, icon: 'cog',
+    tabs: { models: 'مدل‌ها' }, tabParam: 'view' },
   // reachable, not in the menu
   { href: '/analysis', label: 'تحلیل پروژه', emoji: '🔍', desc: 'بررسیِ سلامتِ پروژه و پروفایلِ AI (در حالِ مهاجرت به اتاق فرمان)', group: 'hidden', home: true },
   { href: '/model-profiles', label: 'پروفایلِ مدل‌ها', emoji: '🧪', desc: 'پروفایل و رتبه‌بندیِ توانایی‌های مدل‌ها', group: 'hidden' },
   { href: '/project/[id]', label: 'پروژهٔ موتور خالق', emoji: '🧩', desc: 'جزئیاتِ پروژه‌ای که موتور خالق ساخته', group: 'hidden' },
   { href: '/projects/[id]', label: 'یک پروژه', emoji: '🗂️', desc: 'تب‌های پروژه: فایل‌ها، لاگ‌ها، بازرس ویژه، حافظه و …', group: 'hidden' },
   { href: '/debate', label: 'مناظره (بایگانی)', emoji: '🥊', desc: 'صفحهٔ قدیمیِ مناظرهٔ چندمدلی — جایش را «دستیار» گرفت؛ از آرشیو در دسترس است', group: 'hidden' },
+  { href: '/models', label: 'مدل‌ها', emoji: '🧠', desc: 'نشانیِ قدیمی؛ اکنون تبِ «مدل‌ها» در «مدل‌ها و تنظیمات»', group: 'hidden', movedTo: '/settings?view=models' },
   { href: '/diagrams', label: 'نمودارها', emoji: '📊', desc: 'نشانیِ قدیمی؛ اکنون تبِ «نمودارها» در «پروژه‌ها و نمودارها»', group: 'hidden', movedTo: '/projects?view=diagrams' },
   { href: '/users', label: 'کاربران', emoji: '👥', desc: 'تأیید و مدیریتِ کاربرانِ واردشده با گوگل (فقط مالک)', group: 'hidden' },
 ];

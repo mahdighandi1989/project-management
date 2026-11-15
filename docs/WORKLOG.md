@@ -298,3 +298,28 @@
 - **[VERIFY]** build سبز؛ Playwright محلی با یک گفت‌وگوی نمونه: فهرست، مودالِ گفت‌وگو و «ادامه در دستیار» (چت با همان پیام‌ها باز شد).
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · next build + Playwright محلی
+
+## 2026-11-15 (۵) — بند ۶: «مدل‌ها» + «تنظیمات» ⇐ «مدل‌ها و تنظیمات»، با بررسیِ تک‌تکِ زیربخش‌ها
+
+- **[OWNER]** دو صفحهٔ `/models` و `/settings` ادغام شوند بی‌آنکه چیزی کم شود، و همهٔ زیرقسمت‌ها و جزئیاتشان از نظرِ عملکرد و
+  صحت بررسی و اصلاح شوند. (بند ۵ در فهرستِ مالک نبود؛ شماره‌ها همان شماره‌های مالک است.)
+- **[DECISION]** همان الگوی بند ۳ و یک کامپوننتِ مشترک: `components/ViewHub.tsx` (نما بارِ اول mount و سپس پنهان نگه داشته می‌شود؛
+  `?view=`). کدِ دو صفحه بی‌تغییر با `git mv` به `components/views/{SettingsView,ModelsView}.tsx` رفت. `/settings` پیش‌فرض
+  «کلیدها و تنظیمات» است تا همهٔ پیوندهای «به تنظیمات بروید» (موتور خالق، اتاق فرمان، بازرس ویژه، …) هنوز به کلیدها برسند؛
+  `/models` ⇐ `/settings?view=models`. `/projects/page.tsx` هم به `ViewHub` منتقل شد (رفتار همان).
+- **[CHANGE]** `SettingsView`: `?tab=api|deploy|config|limits|logs|notifications|usage` تبِ درونی را باز می‌کند.
+- **[FINDING]** ابزارِ تازهٔ `scripts/check_frontend_api.py` (مسیر + متد هر فراخوانی را با OpenAPI ِ بک‌اند تطبیق می‌دهد): ۶۴ فراخوانیِ
+  دو صفحه و کامپوننت‌هایشان (`RenderLogsPanel`، `NotificationSettingsPanel`، `AIUsagePanel`، `ExtractionDefaultPicker`،
+  `services/api.ts`) مسیر دارند. **دو ایرادِ واقعی در تبِ «پیکربندی»:** ذخیره `PUT /api/config` می‌فرستاد که وجود ندارد (405 —
+  ذخیره همیشه شکست می‌خورد)، و بارگذاری کلیدهای تختی (`data.max_tokens`) را می‌خواند که API هرگز نمی‌دهد (همیشه پیش‌فرض نشان می‌داد).
+- **[CHANGE]** بارگذاری از `config.processing` و ذخیره با `PUT /api/config/processing` (`max_tokens_per_model`، `request_timeout`،
+  `retry_count`، و فیلدِ تازهٔ `default_temperature` در `ProcessingConfig`/`ProcessingConfigUpdate`). یادداشتِ صادقانه روی تب:
+  بیشترِ سرویس‌های AI هنوز مقدارِ خودشان را می‌فرستند (`grep`: هیچ مصرف‌کننده‌ای از `max_tokens_per_model`/`retry_count` نمی‌خواند).
+- **[VERIFY]** `tests/test_config_processing_roundtrip.py` (ذخیره و بازخوانی؛ و اینکه `PUT /api/config` واقعاً 405 است)؛ build سبز؛
+  Playwright محلی روی هر ۷ تبِ تنظیمات + دو حالتِ مدل‌ها: صفر خطای کنسول و صفر پاسخِ ≥400 جز `POST /api/render/services/refresh`
+  (400 = کلیدِ Render محلی تنظیم نیست؛ رفتارِ درست)؛ «ذخیرهٔ تنظیمات» ⇐ «تنظیمات ذخیره شدند» و مقادیر برگشتند؛ toggle/ویرایش/
+  batch ِ مدل‌ها با curl رفت‌وبرگشت شد؛ `/models` ⇐ `/settings?view=models`.
+- **[TODO]** ۱۲ فراخوانیِ بی‌مسیر در `oversight/page.tsx` و `projects/[id]/page.tsx` (فهرستِ `check_frontend_api.py`) — در بندهای ۸ و ۱۲ بررسی می‌شوند.
+- **[TODO]** مصرفِ واقعیِ پیش‌فرض‌های «پیکربندی» در `ai_manager` تصمیمِ جداست (رفتارِ همهٔ مدل‌ها را عوض می‌کند).
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-15 · pytest + next build + check_frontend_api + Playwright محلی

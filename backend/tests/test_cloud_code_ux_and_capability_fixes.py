@@ -166,7 +166,7 @@ def test_frontend_defines_cloud_code_task_keys_set():
     cloud_code-specific keys so it can filter both columns consistently."""
     src_path = (
         Path(__file__).resolve().parents[2]
-        / "frontend/src/app/models/page.tsx"
+        / "frontend/src/components/views/ModelsView.tsx"  # moved 2026-11-15 (/models → /settings?view=models)
     )
     src = src_path.read_text(encoding="utf-8")
     assert "CLOUD_CODE_TASK_KEYS" in src, (
@@ -190,7 +190,7 @@ def test_frontend_filters_preferred_for_by_row_kind():
     Look for the isCloudCodeRow ? isCcKey : !isCcKey pattern in the file."""
     src_path = (
         Path(__file__).resolve().parents[2]
-        / "frontend/src/app/models/page.tsx"
+        / "frontend/src/components/views/ModelsView.tsx"  # moved 2026-11-15 (/models → /settings?view=models)
     )
     src = src_path.read_text(encoding="utf-8")
     assert "isCloudCodeRow ? isCcKey" in src, (
@@ -203,7 +203,7 @@ def test_frontend_filters_allowed_tasks_by_row_kind():
     otherwise the user can still tick legacy keys for cloud_code."""
     src_path = (
         Path(__file__).resolve().parents[2]
-        / "frontend/src/app/models/page.tsx"
+        / "frontend/src/components/views/ModelsView.tsx"  # moved 2026-11-15 (/models → /settings?view=models)
     )
     src = src_path.read_text(encoding="utf-8")
     # 'all' is kept for non-cloud_code rows. The pattern includes 'all' for

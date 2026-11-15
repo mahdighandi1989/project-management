@@ -4426,7 +4426,7 @@ export default function OversightPage() {
                     </div>
                   ) : (
                     <p className="text-xs text-amber-700 dark:text-amber-300 my-3">
-                      ⚠️ هیچ مدل multimodal در registry پیدا نشد. لطفاً از <a href="/models" className="underline">صفحهٔ مدل‌ها</a> یک مدل وارد کنید.
+                      ⚠️ هیچ مدل multimodal در registry پیدا نشد. لطفاً از <a href="/settings?view=models" className="underline">صفحهٔ مدل‌ها</a> یک مدل وارد کنید.
                     </p>
                   )}
                   <div className="flex gap-2 mt-3">

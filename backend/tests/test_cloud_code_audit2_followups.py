@@ -204,7 +204,7 @@ def _extract_frontend_cloud_code_keys() -> set:
     """Parse the JavaScript Set literal from models/page.tsx."""
     src = (
         Path(__file__).resolve().parents[2]
-        / "frontend/src/app/models/page.tsx"
+        / "frontend/src/components/views/ModelsView.tsx"  # moved 2026-11-15 (/models → /settings?view=models)
     ).read_text(encoding="utf-8")
     # Match: const CLOUD_CODE_TASK_KEYS = new Set([ ... ]);
     m = re.search(

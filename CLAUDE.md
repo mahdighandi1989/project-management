@@ -41,6 +41,8 @@ project-management (AI Creator Engine): FastAPI + Next.js روی Render. **`main
 | ناظرِ خودکار (روتین‌ها، پرامپت‌های نسخه‌دار، بایگانی، اسکریپت‌ها) | `docs/supervisor/`، `scripts/supervisor/` |
 | رجیستریِ واحدِ صفحه‌ها (منو، خانه، راهنما، دستیار — دروازهٔ مستندات صفحهٔ بی‌ثبت را رد می‌کند) | `frontend/src/lib/siteMap.ts` |
 | «دستیار» سیار (جایگزینِ مناظره در منو؛ بافتِ زنده از WORKLOG/کامیت‌های GitHub) | `backend/app/services/assistant.py`، `backend/app/services/repo_docs.py`، `backend/app/api/routes/assistant.py`، `frontend/src/components/AssistantChat.tsx` |
+| صفحه‌های ادغامی (پروژه‌ها+نمودارها، مدل‌ها+تنظیمات؛ نماهای بی‌تغییر با `?view=`) | `frontend/src/components/ViewHub.tsx`، `frontend/src/components/views/`، `frontend/src/app/projects/page.tsx`، `frontend/src/app/settings/page.tsx` |
+| بررسیِ تطبیقِ فراخوانی‌های API ِ فرانت با مسیرهای بک‌اند (مسیر + متد) | `scripts/check_frontend_api.py` |
 | تست‌ها | `backend/tests/` |
 | فرانت‌اند (Next.js) | `frontend/src/app/`، `frontend/src/components/Layout.tsx` |
 | درس‌ها | `experiences/` |
