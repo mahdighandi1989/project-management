@@ -50,6 +50,7 @@ project-management (AI Creator Engine): FastAPI + Next.js روی Render. **`main
 | «اتاق فرمان» (`/oversight`) — شناختِ کامل، تاریخچه، ایرادهای باز | `docs/handbook/OVERSIGHT.md`، `frontend/src/app/oversight/page.tsx`، `backend/app/services/oversight_service.py`، `backend/app/api/routes/oversight.py` |
 | خانه و دایرهٔ راهنما (خودکار از رجیستری + زنده: «این صفحه الان»، «تغییراتِ اخیر») | `frontend/src/app/page.tsx`، `frontend/src/components/help/`، `backend/app/api/routes/handbook.py` |
 | «جزوه و دفتر کار» (جزوه، دفتر پیشرفت، دفتر کار، تاریخچهٔ کامیت‌ها، فعالیتِ مدل‌ها؛ زنده از GitHub) | `docs/handbook/`، `frontend/src/app/handbook/page.tsx`، `backend/app/api/routes/handbook.py`، `backend/app/services/repo_docs.py` |
+| «بازرس ویژه»: ابزارهای کد برای مدل‌های ضعیف، عاملِ مرورگر، بلیتِ اسکرین | `backend/app/services/inspector_code_tools.py`، `backend/app/services/inspector_agent.py`، `backend/app/services/browser_agent.py`، `backend/app/api/routes/browser_agent.py`، `frontend/src/components/BrowserAgentPanel.tsx`، `frontend/src/lib/previewTicket.ts` |
 | تست‌ها | `backend/tests/` |
 | فرانت‌اند (Next.js) | `frontend/src/app/`، `frontend/src/components/Layout.tsx` |
 | درس‌ها | `experiences/` |

@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
 // ProjectHealthPanel در commit 3.3a حذف شد — همهٔ قابلیت‌ها در /oversight
 import PromptManager from '@/components/PromptManager';
+import BrowserAgentPanel from '@/components/BrowserAgentPanel';
 import { ensurePreviewTicket } from '@/lib/previewTicket';
 import ExecutingPromptsPanel from '@/components/ExecutingPromptsPanel';
 import InspectorRecordingPanel from '@/components/InspectorRecordingPanel';  // 🆕 🎬 ضبط بازرس ویژه دوحالته (A + B)
@@ -13937,6 +13938,12 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                                   <span className="bg-white text-purple-600 text-[9px] rounded-full px-1 font-bold">{visualDebugScreenshots.length}</span>
                                 )}
                               </button>
+                              {/* 🆕 (2026-11-15) 🖱 عاملِ مرورگر — کار روی سایت مثلِ کاربر، گام‌به‌گام و ثبت‌شده */}
+                              <BrowserAgentPanel
+                                projectId={projectId || ''}
+                                defaultUrl={inspectorFrontendUrl}
+                                onSendToChat={(text) => setInspectorChatInput((cur) => (cur && cur.trim() ? `${cur}\n\n${text}` : text))}
+                              />
                               {/* 🆕 🎬 دکمه ضبط ویدئو (دوحالته) — کنار دکمه screenshot */}
                               <InspectorRecordingPanel
                                 projectId={projectId || ''}

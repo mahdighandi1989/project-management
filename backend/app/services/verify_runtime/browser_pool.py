@@ -61,7 +61,14 @@ class BrowserPool:
                 try:
                     from playwright.async_api import async_playwright
                     self._pw = await async_playwright().start()
-                    self._browser = await self._pw.chromium.launch(headless=True)
+                    # 🆕 (2026-11-15) CHROMIUM_EXECUTABLE (optional) for machines whose browser is outside Playwright's
+                    # cache; --disable-dev-shm-usage keeps Chromium off the tiny /dev/shm of containers (512 MB plan)
+                    import os as _os
+                    _exe = (_os.environ.get("CHROMIUM_EXECUTABLE") or "").strip()
+                    self._browser = await self._pw.chromium.launch(
+                        headless=True, args=["--disable-dev-shm-usage"],
+                        **({"executable_path": _exe} if _exe else {}),
+                    )
                     logger.info("browser pool: launched headless chromium")
                 except Exception as e:
                     logger.warning(f"browser pool: chromium launch failed: {e}")
