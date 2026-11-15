@@ -27,7 +27,7 @@ import {
   ArrowRightOnRectangleIcon,
   DocumentTextIcon,
 } from '@heroicons/react/24/outline';
-import { MENU, entryFor } from '@/lib/siteMap';
+import { MENU, entryFor, APP_NAME, APP_NAME_FA } from '@/lib/siteMap';
 import AssistantChat from './AssistantChat';
 import { useAuth } from '@/lib/auth';
 import GlobalAnalysisProgress from './GlobalAnalysisProgress';
@@ -129,8 +129,8 @@ function Shell({ children, pathname, pageLabel }: LayoutProps & { pathname: stri
               <span className="text-white text-xl">🤖</span>
             </div>
             <div>
-              <h1 className="font-bold text-gray-900 dark:text-white">سیستم مناظره AI</h1>
-              <p className="text-xs text-gray-500 dark:text-gray-400">نسخه 2.0</p>
+              <h1 className="font-bold text-gray-900 dark:text-white" dir="ltr">{APP_NAME}</h1>
+              <p className="text-xs text-gray-500 dark:text-gray-400">{APP_NAME_FA}</p>
             </div>
           </Link>
         </div>
@@ -221,7 +221,7 @@ function Shell({ children, pathname, pageLabel }: LayoutProps & { pathname: stri
           <button onClick={() => setSidebarOpen(true)}>
             <Bars3Icon className="w-6 h-6" />
           </button>
-          <span className="font-bold">سیستم مناظره AI</span>
+          <span className="font-bold" dir="ltr">{APP_NAME}</span>
           <button onClick={toggleDarkMode}>
             {darkMode ? <SunIcon className="w-6 h-6" /> : <MoonIcon className="w-6 h-6" />}
           </button>

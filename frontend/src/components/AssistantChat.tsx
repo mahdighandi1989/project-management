@@ -72,8 +72,13 @@ export default function AssistantChat({ pathname, pageLabel }: { pathname: strin
         setOpen(true);
       } catch { /* network */ }
     };
+    const onOpen = () => setOpen(true);  // «از دستیار بپرس» on the home page
     window.addEventListener('assistant:load', onLoad);
-    return () => window.removeEventListener('assistant:load', onLoad);
+    window.addEventListener('assistant:open', onOpen);
+    return () => {
+      window.removeEventListener('assistant:load', onLoad);
+      window.removeEventListener('assistant:open', onOpen);
+    };
   }, []);
 
   useEffect(() => {

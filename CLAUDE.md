@@ -44,6 +44,7 @@ project-management (AI Creator Engine): FastAPI + Next.js روی Render. **`main
 | صفحه‌های ادغامی (پروژه‌ها+نمودارها، مدل‌ها+تنظیمات؛ نماهای بی‌تغییر با `?view=`) | `frontend/src/components/ViewHub.tsx`، `frontend/src/components/views/`، `frontend/src/app/projects/page.tsx`، `frontend/src/app/settings/page.tsx` |
 | بررسیِ تطبیقِ فراخوانی‌های API ِ فرانت با مسیرهای بک‌اند (مسیر + متد) | `scripts/check_frontend_api.py` |
 | «اتاق فرمان» (`/oversight`) — شناختِ کامل، تاریخچه، ایرادهای باز | `docs/handbook/OVERSIGHT.md`، `frontend/src/app/oversight/page.tsx`، `backend/app/services/oversight_service.py`، `backend/app/api/routes/oversight.py` |
+| خانه و دایرهٔ راهنما (خودکار از رجیستری + زنده: «این صفحه الان»، «تغییراتِ اخیر») | `frontend/src/app/page.tsx`، `frontend/src/components/help/`، `backend/app/api/routes/handbook.py` |
 | تست‌ها | `backend/tests/` |
 | فرانت‌اند (Next.js) | `frontend/src/app/`، `frontend/src/components/Layout.tsx` |
 | درس‌ها | `experiences/` |

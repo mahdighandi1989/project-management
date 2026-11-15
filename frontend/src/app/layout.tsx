@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import Script from 'next/script';
 import Layout from '@/components/Layout';
+import { APP_NAME, APP_NAME_FA, APP_TAGLINE } from '@/lib/siteMap';
 import { HelpProvider, HelpSystem } from '@/components/help';
 import '@/styles/globals.css';
 
@@ -8,8 +9,8 @@ import InspectorBridge from "./InspectorBridge";
 import { AuthGate } from '@/lib/auth';
 
 export const metadata: Metadata = {
-  title: 'سیستم مناظره و همکاری AI',
-  description: 'سیستم مناظره و همکاری هوش مصنوعی + مدیریت پروژه',
+  title: `${APP_NAME} — ${APP_NAME_FA}`,
+  description: APP_TAGLINE,
   icons: {
     icon: '/icon.svg',
   },

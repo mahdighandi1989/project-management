@@ -2,7 +2,63 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { usePathname } from 'next/navigation';
-import { getPageHelp, PageHelp, ElementHelp } from './helpData';
+import { resolvePageHelp, PageHelp, ElementHelp } from './helpData';
+import { entryFor, sourceFiles } from '@/lib/siteMap';
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
+// ============================================
+// 🆕 (2026-11-15, owner plan item 10) — the two parts of the help that are read live, so they never fall behind
+// ============================================
+interface LiveItem { kind: 'section' | 'tab' | 'button' | 'input'; text: string }
+
+/** Everything visible on the current screen right now (the help panel itself excluded). */
+function scanScreen(): LiveItem[] {
+  if (typeof document === 'undefined') return [];
+  const root = document.querySelector('[data-report-surface]') || document.body;
+  const out: LiveItem[] = [];
+  const seen = new Set<string>();
+  const push = (kind: LiveItem['kind'], raw: string | null | undefined) => {
+    const text = (raw || '').replace(/\s+/g, ' ').trim();
+    if (!text || text.length > 80) return;
+    const k = kind + '|' + text;
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push({ kind, text });
+  };
+  const visible = (el: Element) => !(el as HTMLElement).closest('[data-help-panel]') && (el as HTMLElement).offsetParent !== null;
+  root.querySelectorAll('[data-report-section-label]').forEach((el) => visible(el) && push('section', el.getAttribute('data-report-section-label')));
+  root.querySelectorAll('h1, h2, h3').forEach((el) => visible(el) && push('section', el.textContent));
+  root.querySelectorAll('[role="tab"]').forEach((el) => visible(el) && push('tab', el.textContent));
+  root.querySelectorAll('button, a[href]').forEach((el) => {
+    if (!visible(el) || el.getAttribute('role') === 'tab') return;
+    push('button', (el.textContent || '').trim() || el.getAttribute('title') || el.getAttribute('aria-label'));
+  });
+  root.querySelectorAll('input:not([type=hidden]), textarea, select').forEach((el) => {
+    if (!visible(el)) return;
+    const label = el.getAttribute('placeholder') || el.getAttribute('aria-label') || el.closest('label')?.textContent || el.getAttribute('name');
+    push('input', label);
+  });
+  return out.slice(0, 400);
+}
+
+interface Commit { sha: string; date: string; message: string; url: string; files: string[] }
+
+function useChanges(pathname: string, active: boolean) {
+  const [state, setState] = useState<{ loading: boolean; commits: Commit[]; error?: string }>({ loading: false, commits: [] });
+  useEffect(() => {
+    if (!active) return;
+    const e = entryFor(pathname);
+    if (!e) { setState({ loading: false, commits: [] }); return; }
+    setState({ loading: true, commits: [] });
+    const files = sourceFiles(e).join(',');
+    fetch(`${API_BASE}/api/handbook/changes?files=${encodeURIComponent(files)}&limit=15`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((d) => setState({ loading: false, commits: d.commits || [] }))
+      .catch((err) => setState({ loading: false, commits: [], error: String(err?.message || err) }));
+  }, [pathname, active]);
+  return state;
+}
 
 // ============================================
 // کامپوننت نمایش دیاگرام Mermaid
@@ -170,14 +226,19 @@ export default function HelpSystem() {
   const pathname = usePathname();
   const [isOpen, setIsOpen] = useState(false);
   const [pageHelp, setPageHelp] = useState<PageHelp | null>(null);
-  const [activeSection, setActiveSection] = useState<'overview' | 'elements' | 'diagram'>('overview');
+  const [activeSection, setActiveSection] = useState<'overview' | 'live' | 'elements' | 'changes' | 'diagram'>('overview');
   const [searchQuery, setSearchQuery] = useState('');
+  const [liveItems, setLiveItems] = useState<LiveItem[]>([]);
+  const changes = useChanges(pathname, isOpen && activeSection === 'changes');
 
-  // بارگذاری راهنمای صفحه فعلی
+  // بارگذاری راهنمای صفحه فعلی — resolved from the registry, and again when the panel opens (the query, e.g.
+  // ?view=models, may have changed without a pathname change)
   useEffect(() => {
-    const help = getPageHelp(pathname);
-    setPageHelp(help || null);
-  }, [pathname]);
+    setPageHelp(resolvePageHelp(pathname, typeof window !== 'undefined' ? window.location.search : '') || null);
+  }, [pathname, isOpen]);
+  useEffect(() => {
+    if (isOpen && activeSection === 'live') setLiveItems(scanScreen());
+  }, [isOpen, activeSection, pathname]);
 
   // فیلتر المان‌ها بر اساس جستجو
   const filteredElements = pageHelp?.elements.filter(el =>
@@ -228,7 +289,7 @@ export default function HelpSystem() {
           />
 
           {/* پنل اصلی */}
-          <div className="relative mr-auto w-full max-w-2xl h-full bg-white dark:bg-gray-900 shadow-2xl overflow-hidden flex flex-col animate-slide-in-right">
+          <div data-help-panel="1" className="relative mr-auto w-full max-w-2xl h-full bg-white dark:bg-gray-900 shadow-2xl overflow-hidden flex flex-col animate-slide-in-right">
             {/* هدر */}
             <div className="flex-shrink-0 p-4 border-b dark:border-gray-700 bg-gradient-to-r from-blue-500 to-purple-600 text-white">
               <div className="flex items-center justify-between">
@@ -261,13 +322,15 @@ export default function HelpSystem() {
             <div className="flex-shrink-0 flex border-b dark:border-gray-700 bg-gray-50 dark:bg-gray-800">
               {[
                 { id: 'overview', label: 'نمای کلی', icon: '📋' },
+                { id: 'live', label: 'این صفحه الان', icon: '📍' },
                 { id: 'elements', label: 'المان‌ها', icon: '🧩' },
+                { id: 'changes', label: 'تغییراتِ اخیر', icon: '🕒' },
                 { id: 'diagram', label: 'دیاگرام', icon: '📊' },
               ].map(tab => (
                 <button
                   key={tab.id}
                   onClick={() => setActiveSection(tab.id as any)}
-                  className={`flex-1 py-3 px-4 flex items-center justify-center gap-2 transition font-medium ${
+                  className={`flex-1 py-3 px-1 text-sm flex items-center justify-center gap-1 transition font-medium whitespace-nowrap ${
                     activeSection === tab.id
                       ? 'border-b-2 border-blue-500 text-blue-600 dark:text-blue-400 bg-white dark:bg-gray-900'
                       : 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'
@@ -389,6 +452,56 @@ export default function HelpSystem() {
                       <p className="mt-2">المانی یافت نشد</p>
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* 📍 این صفحه الان — خوانده‌شده از خودِ صفحه، همیشه به‌روز */}
+              {activeSection === 'live' && (
+                <div className="space-y-4">
+                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                    هر چه همین الان روی این صفحه دیده می‌شود — مستقیم از خودِ صفحه خوانده شده، پس با هر تغییر خودکار به‌روز است.
+                  </p>
+                  <button onClick={() => setLiveItems(scanScreen())} className="text-xs text-blue-600 hover:underline">🔄 خواندنِ دوباره</button>
+                  {(['section', 'tab', 'button', 'input'] as const).map((k) => {
+                    const items = liveItems.filter((i) => i.kind === k);
+                    if (!items.length) return null;
+                    const label = { section: '📦 بخش‌ها و عنوان‌ها', tab: '📑 تب‌ها', button: '🔘 دکمه‌ها و پیوندها', input: '📝 ورودی‌ها' }[k];
+                    return (
+                      <div key={k}>
+                        <h3 className="font-bold text-gray-700 dark:text-gray-300 mb-2">{label} ({items.length})</h3>
+                        <div className="flex flex-wrap gap-1.5">
+                          {items.map((i, n) => (
+                            <span key={n} className="text-xs px-2 py-1 rounded bg-gray-100 dark:bg-gray-800 dark:text-gray-200">{i.text}</span>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {liveItems.length === 0 && <p className="text-center text-gray-400">چیزی خوانده نشد</p>}
+                </div>
+              )}
+
+              {/* 🕒 تغییراتِ اخیر — کامیت‌های فایل‌های همین صفحه، زنده از GitHub */}
+              {activeSection === 'changes' && (
+                <div className="space-y-3">
+                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                    آخرین تغییراتِ کدِ همین صفحه روی GitHub (هر کس و هر مدلی که تغییر داده) — زنده خوانده می‌شود.
+                  </p>
+                  {changes.loading && <p className="text-gray-400">در حال خواندن از GitHub…</p>}
+                  {changes.error && <p className="text-red-500 text-sm">خوانده نشد: {changes.error}</p>}
+                  {!changes.loading && !changes.error && changes.commits.length === 0 && <p className="text-gray-400">تغییری یافت نشد</p>}
+                  <ul className="space-y-2">
+                    {changes.commits.map((c) => (
+                      <li key={c.sha} className="p-2 rounded-lg bg-gray-50 dark:bg-gray-800 text-sm">
+                        <div className="flex items-center gap-2">
+                          <a href={c.url} target="_blank" rel="noreferrer" className="font-mono text-xs text-blue-600" dir="ltr">{c.sha}</a>
+                          <span className="text-xs text-gray-400">{c.date ? new Date(c.date).toLocaleString('fa-IR') : ''}</span>
+                        </div>
+                        <div className="dark:text-gray-200 mt-1">{c.message}</div>
+                        <div className="text-[10px] text-gray-400 mt-1" dir="ltr">{c.files.join(' · ')}</div>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               )}
 

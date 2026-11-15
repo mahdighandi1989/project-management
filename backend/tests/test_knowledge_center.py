@@ -485,9 +485,12 @@ def test_sidebar_has_knowledge_center_entry():
 def test_dashboard_has_knowledge_center_card():
     """Req: 'و همینطور توی داشبورد اصلی' — the home page must surface
     a card linking to Knowledge Center."""
-    src = (_FRONTEND_ROOT / "app/page.tsx").read_text(encoding="utf-8")
-    assert "/knowledge-center" in src
-    assert "مرکز دانش" in src
+    # 2026-11-15: the home page builds its cards from the page registry (lib/siteMap.ts, entries with home: true)
+    home = (_FRONTEND_ROOT / "app/page.tsx").read_text(encoding="utf-8")
+    assert "SITE.filter" in home and "s.home" in home
+    site = (_FRONTEND_ROOT / "lib/siteMap.ts").read_text(encoding="utf-8")
+    line = next(l for l in site.splitlines() if "href: '/knowledge-center'" in l)
+    assert "مرکز دانش" in line and "home: true" in line
 
 
 def test_frontend_page_has_search_sort_filter_pagination():

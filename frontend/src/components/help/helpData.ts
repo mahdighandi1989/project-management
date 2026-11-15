@@ -1,3 +1,5 @@
+import { SITE, entryFor, type SiteEntry } from '@/lib/siteMap';
+
 /**
  * داده‌های راهنمای جامع برای تمام صفحات و المان‌ها
  * این داده‌ها بر اساس بررسی دقیق کد منبع استخراج شده‌اند
@@ -1361,4 +1363,79 @@ export function getElementHelp(pageId: string, elementId: string): ElementHelp |
   const page = allPagesHelp.find(p => p.id === pageId);
   if (!page) return undefined;
   return page.elements.find(e => e.id === elementId);
+}
+
+// ============================================
+// 🆕 (2026-11-15, owner plan item 10) — the help circle is always current
+// ============================================
+// The hand-written pages above stay (they are detailed), but what the circle shows is resolved here at the moment
+// it opens, from the single page registry (lib/siteMap.ts): the CURRENT name, purpose and tabs of every page —
+// including pages that have no hand-written help yet — and, for merged pages, the help of the view that is open
+// (`/settings?view=models` ⇒ «مدل‌ها»). The help panel adds two parts that can never fall behind because they are
+// read live: «این صفحه الان» (sections/buttons/inputs found on the screen right now) and «تغییراتِ اخیر» (commits
+// that touched this page's files, from GitHub).
+
+function autoDiagram(e: SiteEntry): string {
+  const tabs = e.tabs ? Object.values(e.tabs) : [];
+  const lines = ['graph TD', `  P["${e.emoji} ${e.label}"]`];
+  tabs.forEach((t, i) => lines.push(`  P --> T${i}["${t}"]`));
+  if (!tabs.length) lines.push('  P --> A["محتوای صفحه"]');
+  return lines.join('\n');
+}
+
+function autoHelp(e: SiteEntry, path: string): PageHelp {
+  const tabs = e.tabs ? Object.entries(e.tabs) : [];
+  const key = e.tabParam || 'tab';
+  return {
+    id: `auto:${e.href}`,
+    title: e.label,
+    description: e.desc,
+    path,
+    overview: e.desc + (e.movedTo ? ` — نشانیِ تازه: ${e.movedTo}` : ''),
+    features: tabs.length ? tabs.map(([id, label]) => `تبِ «${label}» (?${key}=${id})`) : [e.desc],
+    elements: tabs.map(([id, label]) => ({
+      id: `tab-${id}`, title: label, type: 'tab' as const,
+      description: `برای باز کردنِ مستقیم: ${e.href}?${key}=${id}`,
+    })),
+    diagram: autoDiagram(e),
+  };
+}
+
+/** The help for the screen the owner is on right now (path + query). */
+export function resolvePageHelp(pathname: string, search = ''): PageHelp | undefined {
+  const path = pathname.split('?')[0].replace(/\/$/, '') || '/';
+  const q = new URLSearchParams(search);
+  const entry = entryFor(path);
+
+  // merged pages: the open view decides
+  if (path === '/settings' && q.get('view') === 'models') return { ...modelsHelp, title: 'مدل‌ها (در «مدل‌ها و تنظیمات»)' };
+  if (path === '/projects' && q.get('view') === 'diagrams') {
+    const d = SITE.find((s) => s.href === '/diagrams');
+    if (d) return autoHelp({ ...d, label: 'نمودارها (در «پروژه‌ها و نمودارها»)', movedTo: undefined }, path);
+  }
+
+  const fixed = getPageHelp(path);
+  if (path === '/') {
+    // the home page lists what the registry lists — never a stale menu
+    return {
+      ...dashboardHelp,
+      elements: SITE.filter((s) => s.home || s.menu).map((s) => ({
+        id: `nav-${s.href}`, title: `${s.emoji} ${s.label}`, type: 'button' as const, description: s.desc,
+      })),
+    };
+  }
+  if (fixed && entry) {
+    // keep the detailed text, but the current name, and the registry's tabs as extra features
+    const extra = entry.tabs ? Object.values(entry.tabs).map((t) => `تبِ «${t}»`) : [];
+    return {
+      ...fixed,
+      title: entry.label,
+      overview: (entry.group === 'hidden' && entry.href === '/debate'
+        ? 'این صفحه بایگانی شده و جایش را «دستیار» (دایرهٔ 💬) گرفته؛ همچنان کار می‌کند. ' : '') + fixed.overview,
+      features: [...fixed.features, ...extra.filter((x) => !fixed.features.includes(x))],
+    };
+  }
+  if (fixed) return fixed;
+  if (entry) return autoHelp(entry, path);
+  return undefined;
 }
