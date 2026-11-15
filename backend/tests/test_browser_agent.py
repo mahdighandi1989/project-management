@@ -216,3 +216,23 @@ def test_api_end_to_end_through_the_shared_pool(site, tmp_path, monkeypatch):
         assert c.get("/api/inspector-agent/runs").json()[0]["id"] == rid
         assert c.post("/api/inspector-agent/runs", json={"task": "x y z", "start_url": "ftp://a.example.com/"}).status_code == 400
         assert c.get(f"/api/inspector-agent/runs/{rid}/shots/..%2F..%2Fetc").status_code == 404
+
+
+def test_snapshot_endpoint(site, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api.routes import browser_agent as routes
+    from app.services.verify_runtime import browser_pool
+
+    if Path("/opt/pw-browsers/chromium").exists():
+        monkeypatch.setenv("CHROMIUM_EXECUTABLE", "/opt/pw-browsers/chromium")
+    monkeypatch.setattr(browser_pool, "_pool", None, raising=False)
+    app = FastAPI()
+    app.include_router(routes.router, prefix="/api")
+    with TestClient(app) as c:
+        r = c.get("/api/inspector-agent/snapshot", params={"url": site})
+        if r.status_code == 503:
+            pytest.skip(r.text)
+        assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg" and r.content[:2] == b"\xff\xd8"
+        assert c.get("/api/inspector-agent/snapshot", params={"url": "file:///etc/passwd"}).status_code in (400, 422)

@@ -61,6 +61,7 @@ export default function BrowserAgentPanel({ projectId, defaultUrl, onSendToChat 
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelId, setModelId] = useState('');
   const [maxSteps, setMaxSteps] = useState(25);
+  const [useLogin, setUseLogin] = useState(true);
   const [run, setRun] = useState<Run | null>(null);
   const [answer, setAnswer] = useState('');
   const [err, setErr] = useState('');
@@ -95,11 +96,11 @@ export default function BrowserAgentPanel({ projectId, defaultUrl, onSendToChat 
     try {
       const r = await fetch(`${BASE}/runs`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task, start_url: url, allowed_hosts: hosts.split(/[\s,،]+/).filter(Boolean), model_id: modelId || null, project_id: projectId, max_steps: maxSteps }),
+        body: JSON.stringify({ task, start_url: url, allowed_hosts: hosts.split(/[\s,،]+/).filter(Boolean), model_id: modelId || null, project_id: projectId, max_steps: maxSteps, use_login: useLogin }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d?.detail || `HTTP ${r.status}`);
-      setRun({ id: d.run_id, task, start_url: url, status: 'starting', summary: '', model_id: d.model_id, allowed_hosts: d.allowed_hosts, steps: [] });
+      setRun({ id: d.run_id, task, start_url: url, status: 'starting', summary: d.login || '', model_id: d.model_id, allowed_hosts: d.allowed_hosts, steps: [] });
       setSelected(null);
       poll(d.run_id);
     } catch (e: any) { setErr(e?.message || String(e)); }
@@ -163,6 +164,10 @@ export default function BrowserAgentPanel({ projectId, defaultUrl, onSendToChat 
                 <label className="text-sm dark:text-gray-200">حداکثرِ گام
                   <input type="number" min={1} max={40} value={maxSteps} onChange={(e) => setMaxSteps(Math.max(1, Math.min(40, +e.target.value || 25)))}
                     className="mt-1 w-full rounded-lg border px-3 py-2 dark:bg-gray-800 dark:border-gray-700" />
+                </label>
+                <label className="md:col-span-2 text-xs flex items-center gap-2 dark:text-gray-300">
+                  <input type="checkbox" checked={useLogin} onChange={(e) => setUseLogin(e.target.checked)} />
+                  اول با «Auth Recipe» ِ همان پروژه (کارتِ اتاق فرمان) وارد شو — رمزها فقط از متغیرهای سرور، مدل هرگز نمی‌بیندشان
                 </label>
                 <div className="md:col-span-2 flex items-center gap-3">
                   <button onClick={start} disabled={task.trim().length < 3 || !/^https?:\/\//.test(url)}

@@ -149,6 +149,10 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
         body: JSON.stringify(body),
       });
       const j = await res.json().catch(() => ({}));
+      // 🩹 (2026-11-15) recording sessions live in the server's memory: a deploy/restart loses them — say so plainly
+      if (res.status === 404 && /session/i.test(String(j?.detail || ''))) {
+        throw new Error('جلسهٔ ضبط با به‌روزرسانی/ری‌استارتِ سرور از دست رفت — لطفاً دوباره ضبط کنید (تکه‌های قبلی روی سرور نیست).');
+      }
       if (!res.ok) throw new Error(j?.detail || `HTTP ${res.status}`);
       return j;
     },

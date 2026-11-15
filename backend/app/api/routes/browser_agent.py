@@ -28,6 +28,7 @@ class RunIn(BaseModel):
     model_id: Optional[str] = None
     project_id: Optional[str] = None
     max_steps: int = BA.MAX_STEPS_DEFAULT
+    use_login: bool = True  # sign in first with the project's Auth Recipe («اتاق فرمان» card), when it has one
 
 
 class Reply(BaseModel):
@@ -60,10 +61,14 @@ async def start(body: RunIn) -> Dict[str, Any]:
         model_id = ms[0]["id"]
     run = BA.new_run(body.task, body.start_url, body.allowed_hosts, model_id=model_id, project_id=body.project_id)
     model = await BA.default_model(model_id)
-    t = asyncio.create_task(BA.run_agent(run, model, vision=BA.model_supports_vision(model_id), max_steps=body.max_steps))
+    state, login_note = (await BA.login_state_for(body.start_url)) if body.use_login else (None, "")
+    if login_note:
+        run.summary = login_note
+    t = asyncio.create_task(BA.run_agent(run, model, vision=BA.model_supports_vision(model_id), max_steps=body.max_steps,
+                                         storage_state=state))
     _TASKS.add(t)
     t.add_done_callback(_TASKS.discard)
-    return {"run_id": run.id, "model_id": model_id, "allowed_hosts": run.allowed_hosts}
+    return {"run_id": run.id, "model_id": model_id, "allowed_hosts": run.allowed_hosts, "login": login_note}
 
 
 @router.get("/runs")
@@ -109,3 +114,40 @@ async def shot(run_id: str, name: str):
     if not p.is_file():
         raise HTTPException(404, "یافت نشد")
     return FileResponse(p, media_type="image/jpeg")
+
+
+# ------------------------------------------------------------------------------------------------------------------
+# «نمای سرور» — the inspector screen's self-healing fallback (2026-11-15): when the proxied iframe cannot show the
+# project's site (framing refused, dynamic chunks, an error page), the panel switches to periodic screenshots taken
+# by the shared server Chromium. Read-only: one GET of the URL, no clicks; only http(s); same one-at-a-time limit.
+# ------------------------------------------------------------------------------------------------------------------
+_SNAP_LOCK = asyncio.Lock()
+
+
+@router.get("/snapshot")
+async def snapshot(url: str = Query(..., min_length=8, max_length=2000), width: int = Query(1280, ge=320, le=1920)):
+    from fastapi.responses import Response
+
+    if not re.match(r"^https?://", url):
+        raise HTTPException(400, "فقط http/https")
+    if _SNAP_LOCK.locked() or BA.is_busy():
+        raise HTTPException(409, "مرورگرِ سرور مشغول است — چند ثانیهٔ دیگر")
+    async with _SNAP_LOCK:
+        from ...services.verify_runtime.browser_pool import get_browser_pool
+
+        browser = await get_browser_pool().get_browser()
+        if browser is None:
+            raise HTTPException(503, "Chromium ِ سرور در دسترس نیست")
+        ctx = await browser.new_context(viewport={"width": width, "height": int(width * 0.625)}, locale="fa-IR")
+        try:
+            page = await ctx.new_page()
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+                await page.wait_for_timeout(800)
+            except Exception as e:  # noqa: BLE001 — still screenshot whatever loaded
+                if page.url in ("about:blank", ""):
+                    raise HTTPException(502, f"باز نشد: {str(e).splitlines()[0][:150]}")
+            jpg = await page.screenshot(type="jpeg", quality=60)
+            return Response(jpg, media_type="image/jpeg", headers={"Cache-Control": "no-store", "X-Final-Url": page.url})
+        finally:
+            await ctx.close()

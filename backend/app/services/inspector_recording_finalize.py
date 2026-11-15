@@ -317,6 +317,37 @@ def _build_animated_webp_from_frames(
         return None
 
 
+def _archive_recording_to_drive(session, media_items) -> Optional[str]:
+    """Upload the final media (+ the prompt) to «project-management/ضبط‌های بازرس/<date>_<sid>/» when Google Drive is
+    connected. Returns the folder link, or None (not connected / failed — Telegram delivery is not affected)."""
+    try:
+        from datetime import datetime as _dt
+
+        from ..core.database import SessionLocal
+        from . import gdrive
+    except Exception:  # noqa: BLE001
+        return None
+    db = SessionLocal()
+    try:
+        if not gdrive.is_connected(db):
+            return None
+        folder = gdrive.ensure_folder(db, ["ضبط‌های بازرس", f"{_dt.utcnow():%Y-%m-%d}_{session.session_id[:8]}"])
+        mimes = {"video": "video/mp4", "audio": "audio/mp4", "animation": "image/gif"}
+        for data, name, kind in media_items:
+            gdrive.upload_bytes(db, data, name=name, mime=mimes.get(kind, "application/octet-stream"), parent=folder,
+                                description=f"inspector recording {session.session_id}")
+        prompt = getattr(session, "prompt", None) or getattr(session, "final_prompt", None) or ""
+        if prompt:
+            gdrive.upload_bytes(db, str(prompt).encode("utf-8"), name=f"prompt_{session.session_id[:8]}.md",
+                                mime="text/markdown", parent=folder)
+        return gdrive.folder_link(folder)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"recording → Drive failed: {e}")
+        return None
+    finally:
+        db.close()
+
+
 def _ffmpeg_ok() -> bool:
     import shutil
     return bool(shutil.which("ffmpeg"))
@@ -852,8 +883,16 @@ async def finalize_recording_session(
             )
             media_items.append((ch, name, "audio"))
 
+    # ------- Stage 2b: 🩹 (2026-11-15, CLAUDE.md rule 6) — a copy of the recording in the project's Google Drive,
+    # so it outlives Telegram and the temporary disk; the folder link goes into the caption and the result.
+    drive_link = await asyncio.to_thread(_archive_recording_to_drive, session, media_items)
+    if drive_link:
+        result["drive_folder"] = drive_link
+
     # ------- Stage 3: ارسال به Telegram
     base_caption = _build_telegram_caption(session, user_note, task_id=result.get("task_id"))
+    if drive_link:
+        base_caption += f"\n📁 درایو: {drive_link}"
     for idx, (data, filename, kind) in enumerate(media_items):
         # caption فقط روی اولین item — بقیه فقط شماره
         if idx == 0:

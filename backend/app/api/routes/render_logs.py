@@ -14231,6 +14231,13 @@ async def _smart_select_model(db, project_id: str) -> str:
             desc("total_uses")
         ).all()
 
+        # 🩹 (2026-11-15) ranked by SUCCESS rate (backend_verified), smoothed so a model with few uses is not over-trusted,
+        # not by raw use count — «most used» reinforced itself even when a model mostly failed.
+        model_stats = sorted(
+            model_stats,
+            key=lambda st: (((st[2] or 0) + 1) / ((st[1] or 0) + 2), st[1] or 0),
+            reverse=True,
+        )
         # از آرشیو: مدل‌هایی که زیاد استفاده شدن و موفق بودن
         for stat in model_stats:
             mid = stat[0]  # model_id

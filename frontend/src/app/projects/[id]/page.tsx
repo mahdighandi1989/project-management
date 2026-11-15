@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
 // ProjectHealthPanel در commit 3.3a حذف شد — همهٔ قابلیت‌ها در /oversight
 import PromptManager from '@/components/PromptManager';
+import ServerScreen from '@/components/ServerScreen';
 import BrowserAgentPanel from '@/components/BrowserAgentPanel';
 import { ensurePreviewTicket, getPreviewTicket } from '@/lib/previewTicket';
 import ExecutingPromptsPanel from '@/components/ExecutingPromptsPanel';
@@ -6379,6 +6380,16 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
 
   // 🔀 تبدیل URL پروکسی به URL واقعی (و بالعکس)
   const inspectorIframeAuthRetryRef = useRef(false);  // one ticket renewal per failed load (self-healing)
+  // retry the live iframe (button, and every minute from «نمای سرور») — renews the preview ticket first
+  const retryInspectorIframe = useCallback(() => {
+    ensurePreviewTicket(projectId).finally(() => {
+      inspectorIframeAuthRetryRef.current = false;
+      setInspectorIframeError(false);
+      setInspectorIframeLoaded(false);
+      setInspectorIframeSrc(_getProxyUrl(inspectorFrontendUrl));
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, inspectorFrontendUrl]);
   const _proxyPrefix = `/api/render/inspector/proxy/${projectId}`;
   const _getProxyUrl = (actualUrl: string | null): string => {
     if (!actualUrl) return '';
@@ -13935,6 +13946,17 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                                 inspectorIframeAuthRetryRef.current = false;
                                 setInspectorIframeLoaded(true);
                                 setInspectorIframeError(false);
+                                // a proxied page that stays BLANK (its dynamic chunks never arrived) is a failure too
+                                setTimeout(() => {
+                                  try {
+                                    const d = inspectorIframeRef.current?.contentDocument;
+                                    if (d && d.body && (d.body.innerText || '').trim().length < 3
+                                        && d.images.length === 0 && d.querySelectorAll('svg,canvas,video,input,button').length === 0) {
+                                      setInspectorIframeError(true);
+                                      setInspectorIframeLoaded(false);
+                                    }
+                                  } catch { /* cross-origin — cannot inspect */ }
+                                }, 5000);
                                 // 🔀 same-origin (proxy) — خواندن URL واقعی بعد از هر navigation
                                 const actual = _readIframeActualUrl();
                                 if (actual) setInspectorFrontendUrl(actual);
@@ -14079,26 +14101,24 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                                 </div>
                               </div>
                             )}
-                            {/* نمایش خطای بارگذاری iframe */}
-                            {inspectorIframeError && (
+                            {/* نمایش خطای بارگذاری iframe — 🩹 (2026-11-15) self-healing: the server's live view instead of a dead red box */}
+                            {inspectorIframeError && (inspectorFrontendUrl ? (
+                              <ServerScreen
+                                url={inspectorFrontendUrl}
+                                onRetryIframe={retryInspectorIframe}
+                              />
+                            ) : (
                               <div className="absolute inset-0 z-40 flex items-center justify-center bg-gray-900/80">
                                 <div className="text-center p-4">
                                   <div className="text-4xl mb-3">🔴</div>
                                   <p className="text-red-400 text-sm font-medium mb-2">صفحه پیش‌نمایش بارگذاری نشد</p>
-                                  <p className="text-gray-400 text-xs mb-3">سرویس ممکن است خاموش یا در حال راه‌اندازی باشد (503)</p>
-                                  <button
-                                    onClick={() => {
-                                      setInspectorIframeError(false);
-                                      setInspectorIframeLoaded(false);
-                                      setInspectorIframeSrc(_getProxyUrl(inspectorFrontendUrl));
-                                    }}
-                                    className="px-4 py-2 bg-blue-600 text-white text-xs rounded-lg hover:bg-blue-700 transition-colors"
-                                  >
+                                  <button onClick={retryInspectorIframe}
+                                    className="px-4 py-2 bg-blue-600 text-white text-xs rounded-lg hover:bg-blue-700 transition-colors">
                                     تلاش مجدد
                                   </button>
                                 </div>
                               </div>
-                            )}
+                            ))}
                             {/* نمایش وضعیت بارگذاری */}
                             {!inspectorIframeLoaded && !inspectorIframeError && (
                               <div className="absolute inset-0 z-40 flex items-center justify-center bg-gray-900/60 pointer-events-none">

@@ -460,7 +460,7 @@ def reply(run_id: str, value: Any) -> bool:
 
 
 async def run_agent(run: Run, model: ModelFn, vision: bool = False, max_steps: int = MAX_STEPS_DEFAULT,
-                    browser=None) -> Run:
+                    browser=None, storage_state: Optional[dict] = None) -> Run:
     """Drive one run to the end. `browser` is injectable for tests; default = the shared pool."""
     allowed = {h.lower().strip() for h in run.allowed_hosts if h.strip()}
     max_steps = max(1, min(max_steps, MAX_STEPS_LIMIT))
@@ -473,7 +473,9 @@ async def run_agent(run: Run, model: ModelFn, vision: bool = False, max_steps: i
                 browser = await get_browser_pool().get_browser()
             if browser is None:
                 raise RuntimeError("Chromium در دسترس نیست")
-            context = await browser.new_context(viewport={"width": 1280, "height": 800}, locale="fa-IR")
+            # storage_state = an already signed-in session of the project's own login recipe (auth_runner), if any
+            context = await browser.new_context(viewport={"width": 1280, "height": 800}, locale="fa-IR",
+                                                **({"storage_state": storage_state} if storage_state else {}))
 
             async def guard(route):
                 if host_allowed(route.request.url, allowed):
@@ -590,6 +592,26 @@ def new_run(task: str, start_url: str, allowed_hosts: list[str], model_id: str =
         for k in list(RUNS)[:-50]:
             RUNS.pop(k, None)
     return run
+
+
+async def login_state_for(url: str) -> tuple[Optional[dict], str]:
+    """The watched project whose frontend is ``url``'s site and has an Auth Recipe ⇒ its signed-in storage_state
+    (verify_runtime.auth_runner; secrets only from WATCHED_AUTH_* — never seen by the model). (state, note)."""
+    try:
+        from .oversight_service import get_oversight_service
+        from .verify_runtime.auth_runner import obtain_or_refresh_storage_state
+    except Exception:  # noqa: BLE001
+        return None, ""
+    host = host_of(url)
+    for w in get_oversight_service().watched:
+        fe = getattr(w, "frontend_base_url", None) or ""
+        if fe and host_of(fe) == host and getattr(w, "runtime_auth_recipe", None):
+            try:
+                st = await obtain_or_refresh_storage_state(w)
+            except Exception as e:  # noqa: BLE001
+                return None, f"ورودِ خودکار شکست خورد: {str(e)[:120]}"
+            return (st, f"با ورودِ خودکارِ «{w.repo_full_name}»") if st else (None, "ورودِ خودکار نتیجه نداد")
+    return None, ""
 
 
 def is_busy() -> bool:
