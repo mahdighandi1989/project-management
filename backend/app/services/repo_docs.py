@@ -115,6 +115,7 @@ def read_text(path: str) -> tuple[str, str]:
 def list_dir(path: str) -> list[dict[str, Any]]:
     """Entries ``{name, path, type}`` of a repo directory (GitHub, falling back to local)."""
     path = path.strip("/")
+    out: list[dict[str, Any]] = []
     if not _offline():
         try:
             data, _ = _cached(
@@ -122,16 +123,18 @@ def list_dir(path: str) -> list[dict[str, Any]]:
                 lambda: _get_json(f"https://api.github.com/repos/{repo()}/contents/{path}", {"ref": branch()}),
             )
             if isinstance(data, list):
-                return [{"name": d["name"], "path": d["path"], "type": d["type"]} for d in data]
+                out = [{"name": d["name"], "path": d["path"], "type": d["type"]} for d in data]
         except Exception:  # noqa: BLE001
             pass
+    # plus local files GitHub does not have yet (a dev checkout before push; on Render there is no local docs/)
     lp = local_path(path)
     if lp.is_dir():
-        return [
+        have = {d["name"] for d in out}
+        out += [
             {"name": p.name, "path": f"{path}/{p.name}", "type": "dir" if p.is_dir() else "file"}
-            for p in sorted(lp.iterdir())
+            for p in sorted(lp.iterdir()) if p.name not in have
         ]
-    return []
+    return out
 
 
 def recent_commits(n: int = 20, path: Optional[str] = None) -> list[dict[str, Any]]:
@@ -160,6 +163,25 @@ def recent_commits(n: int = 20, path: Optional[str] = None) -> list[dict[str, An
             "url": c.get("html_url", ""),
         })
     return out
+
+
+def commits_page(page: int = 1, per_page: int = 100) -> list[dict[str, Any]]:
+    """One page of the commit list on ``main`` (the handbook's CHANGELOG pages through these)."""
+    if _offline():
+        return []
+    params = {"sha": branch(), "per_page": max(1, min(per_page, 100)), "page": max(1, page)}
+    try:
+        data, _ = _cached(f"commits-page:{page}:{per_page}",
+                          lambda: _get_json(f"https://api.github.com/repos/{repo()}/commits", params), ttl=120)
+    except Exception:  # noqa: BLE001
+        return []
+    return [{
+        "sha": (c.get("sha") or "")[:7],
+        "date": ((c.get("commit") or {}).get("author") or {}).get("date", ""),
+        "message": ((c.get("commit") or {}).get("message") or "").split("\n")[0][:200],
+        "author": ((c.get("commit") or {}).get("author") or {}).get("name", ""),
+        "url": c.get("html_url", ""),
+    } for c in data or []]
 
 
 def clear_cache() -> None:

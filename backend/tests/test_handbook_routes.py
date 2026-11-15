@@ -37,3 +37,30 @@ def test_changes_merges_commits_per_file_and_rejects_unsafe_paths(monkeypatch):
     shared = next(c for c in d["commits"] if c["sha"] == "aaa")
     assert shared["files"] == ["frontend/a.tsx", "backend/b.py"]
     assert d["commits"][0]["sha"] == "aaa"  # newest first
+
+
+def test_catalogue_lists_handbook_worklog_lessons_and_generated_docs():
+    c = _client()
+    docs = c.get("/api/handbook/docs").json()
+    slugs = [d["slug"] for d in docs]
+    for s in ("HANDBOOK", "PROGRESS", "OVERSIGHT", "WORKLOG", "CHANGELOG", "ACTIVITY", "supervisor-README"):
+        assert s in slugs, s
+    assert slugs.index("HANDBOOK") < slugs.index("PROGRESS") < slugs.index("WORKLOG")
+    assert any(s.startswith("lesson-") for s in slugs) and "lesson-README" not in slugs
+    order = {d["slug"]: d["order"] for d in docs}
+    assert order["WORKLOG"] == "date" and order["HANDBOOK"] == "content"
+
+
+def test_doc_search_and_export():
+    c = _client()
+    d = c.get("/api/handbook/doc/HANDBOOK").json()
+    assert d["content"].startswith("# ") and d["order"] == "content"
+    assert c.get("/api/handbook/doc/..%2F..%2Fetc").status_code == 404
+    assert c.get("/api/handbook/doc/NOPE").status_code == 404
+    hits = c.get("/api/handbook/search?q=اتاق فرمان").json()["hits"]
+    assert hits and {"slug", "heading", "line"} <= set(hits[0])
+    r = c.get("/api/handbook/export?slugs=HANDBOOK,PROGRESS")
+    assert r.status_code == 200 and "attachment" in r.headers["content-disposition"]
+    assert "دفتر پیشرفت" in r.text and "جزوهٔ پروژه" in r.text
+    act = c.get("/api/handbook/doc/ACTIVITY").json()["content"]
+    assert "فعالیتِ مدل‌ها" in act

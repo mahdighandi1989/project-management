@@ -18,6 +18,10 @@ project-management (AI Creator Engine): FastAPI + Next.js روی Render. **`main
    فایل: FINDING/DECISION/CHANGE/VERIFY/REVERT/OWNER/TODO) با خطِ امضا. درخواست‌ها و تصمیم‌های مالک در گفت‌وگو هم با
    `[OWNER]` ثبت شوند. هیچ ورودیِ قبلی پاک نمی‌شود. درسِ قابلِ استفادهٔ مجدد ⇒ `experiences/` (قالب در README همان پوشه —
    merge، نه replace).
+   **جزوه همیشه زنده** (الگوی Detective-1): پس از هر کار یک سطر در [`docs/handbook/PROGRESS.md`](docs/handbook/PROGRESS.md)
+   (نمودارِ روند از همین جدول کشیده می‌شود) و به‌روزرسانیِ بخشِ مربوط در [`docs/handbook/HANDBOOK.md`](docs/handbook/HANDBOOK.md)؛
+   موضوعِ تازه ⇒ بخشِ تازه + سطرش در «فهرست». دروازهٔ مستندات ناهم‌خوانی را رد می‌کند. صفحهٔ «جزوه و دفتر کار» (`/handbook`)
+   همه را زنده از GitHub نشان می‌دهد + تاریخچهٔ خودکارِ همهٔ کامیت‌ها و فعالیتِ مدل‌ها.
 3. **هیچ قابلیتی حذف نمی‌شود** (endpoint، صفحه، دکمه، داده). قرنطینه کن و در WORKLOG ثبت کن؛ حذف فقط با اجازهٔ صریحِ مالک.
 4. **امنیت و ورود.** همهٔ برنامه پشتِ «ورود با گوگل» است (`backend/app/core/auth.py`). هر endpoint ِ تازه خودکار پشتِ
    دیوار است؛ اگر فراخوانندهٔ ماشینی دارد، باید با هدرِ رازِ خودش بیاید (`X-External-Token`، `X-Supervisor-Token`) —
@@ -45,6 +49,7 @@ project-management (AI Creator Engine): FastAPI + Next.js روی Render. **`main
 | بررسیِ تطبیقِ فراخوانی‌های API ِ فرانت با مسیرهای بک‌اند (مسیر + متد) | `scripts/check_frontend_api.py` |
 | «اتاق فرمان» (`/oversight`) — شناختِ کامل، تاریخچه، ایرادهای باز | `docs/handbook/OVERSIGHT.md`، `frontend/src/app/oversight/page.tsx`، `backend/app/services/oversight_service.py`، `backend/app/api/routes/oversight.py` |
 | خانه و دایرهٔ راهنما (خودکار از رجیستری + زنده: «این صفحه الان»، «تغییراتِ اخیر») | `frontend/src/app/page.tsx`، `frontend/src/components/help/`، `backend/app/api/routes/handbook.py` |
+| «جزوه و دفتر کار» (جزوه، دفتر پیشرفت، دفتر کار، تاریخچهٔ کامیت‌ها، فعالیتِ مدل‌ها؛ زنده از GitHub) | `docs/handbook/`، `frontend/src/app/handbook/page.tsx`، `backend/app/api/routes/handbook.py`، `backend/app/services/repo_docs.py` |
 | تست‌ها | `backend/tests/` |
 | فرانت‌اند (Next.js) | `frontend/src/app/`، `frontend/src/components/Layout.tsx` |
 | درس‌ها | `experiences/` |

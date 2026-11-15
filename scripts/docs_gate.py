@@ -12,7 +12,10 @@ Exits 1 (listing every problem) when:
   4. the NEWEST entry of docs/WORKLOG.md (bottom of the file) has no signature;
   5. a file in experiences/ lacks the frontmatter required by experiences/README.md;
   6. a page under frontend/src/app has no entry in the screen registry frontend/src/lib/siteMap.ts
-     (the menu, the home page, the help circle and «دستیار» all read that registry).
+     (the menu, the home page, the help circle and «دستیار» all read that registry);
+  7. «جزوه و دفتر کار» (docs/handbook/): a '## ' section of HANDBOOK.md missing from its «فهرست», an in-handbook
+     link whose #anchor matches no heading (GitHub slug rules — the in-app reader uses the same), or a PROGRESS.md
+     ledger whose newest row is older than the newest WORKLOG entry.
 """
 
 from __future__ import annotations
@@ -131,6 +134,46 @@ for page in sorted(app_dir.rglob("page.tsx")):
     href = "/" if rel == "." else "/" + rel
     if href not in known:
         fail(f"[site] page {href} has no entry in frontend/src/lib/siteMap.ts")
+
+# --- 7. handbook: index ↔ headings, anchors resolve, ledger keeps up ---------------------------------
+import unicodedata  # noqa: E402
+
+
+def gh_slug(text: str) -> str:
+    """GitHub's heading anchor: lower-case, keep letters/marks/numbers/_/-/space, spaces ⇒ '-'."""
+    text = re.sub(r"[*`]", "", text).strip().lower()
+    keep = "".join(ch for ch in text if ch in "_- " or unicodedata.category(ch)[0] in "LMN")
+    return keep.replace(" ", "-")
+
+
+HB = ROOT / "docs" / "handbook"
+if HB.is_dir():
+    heads: dict[str, set[str]] = {}
+    for f in HB.glob("*.md"):
+        body = re.sub(r"```.*?```", "", f.read_text(encoding="utf-8"), flags=re.S)
+        heads[f.name] = {gh_slug(h) for h in re.findall(r"^#{1,6}\s+(.+?)\s*$", body, re.M)}
+    for f in sorted(HB.glob("*.md")):
+        text = f.read_text(encoding="utf-8")
+        for target, anchor in re.findall(r"\]\(([A-Za-z0-9_\-]+\.md)?#([^)\s]+)\)", text):
+            tname = target or f.name
+            if tname in heads and anchor not in heads[tname]:
+                fail(f"[handbook] {f.name}: link #{anchor} matches no heading in {tname}")
+    hb = HB / "HANDBOOK.md"
+    if hb.is_file():
+        text = hb.read_text(encoding="utf-8")
+        toc = text.split("## فهرست", 1)[1].split("\n## ", 1)[0] if "## فهرست" in text else ""
+        linked = set(re.findall(r"\]\(#([^)]+)\)", toc))
+        for h in re.findall(r"^##\s+(.+?)\s*$", text, re.M):
+            if h.strip() != "فهرست" and gh_slug(h) not in linked:
+                fail(f"[handbook] HANDBOOK.md section '{h}' is not in its «فهرست»")
+    prog = HB / "PROGRESS.md"
+    wl_dates = re.findall(r"^#{2,3} (\d{4}-\d{2}-\d{2})", read("docs/WORKLOG.md") or "", re.M)
+    if prog.is_file() and wl_dates:
+        rows = re.findall(r"^\|\s*\d+\s*\|\s*(\d{4}-\d{2}-\d{2})\s*\|", prog.read_text(encoding="utf-8"), re.M)
+        if not rows:
+            fail("[handbook] PROGRESS.md has no ledger rows")
+        elif max(rows) < max(wl_dates):
+            fail(f"[handbook] PROGRESS.md newest row ({max(rows)}) is older than the newest WORKLOG entry ({max(wl_dates)}) — add a row")
 
 if problems:
     print(f"docs gate: {len(problems)} problem(s)")

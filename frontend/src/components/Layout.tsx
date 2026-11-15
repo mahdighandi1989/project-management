@@ -121,7 +121,7 @@ function Shell({ children, pathname, pageLabel }: LayoutProps & { pathname: stri
   return (
     <div className="min-h-screen flex">
       {/* Sidebar for desktop */}
-      <aside data-report-section="sidebar" data-report-section-label="منوی کناری" className="hidden md:flex md:flex-col md:w-64 bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700">
+      <aside data-report-section="sidebar" data-report-section-label="منوی کناری" className="print:hidden hidden md:flex md:flex-col md:w-64 bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700">
         {/* Logo */}
         <div className="p-6 border-b border-gray-200 dark:border-gray-700">
           <Link href="/" className="flex items-center gap-3">
@@ -217,7 +217,7 @@ function Shell({ children, pathname, pageLabel }: LayoutProps & { pathname: stri
       {/* Main content */}
       <main className="flex-1 flex flex-col min-h-screen">
         {/* Mobile header */}
-        <header data-report-section="mobile-header" data-report-section-label="سرصفحهٔ موبایل" className="md:hidden flex items-center justify-between p-4 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
+        <header data-report-section="mobile-header" data-report-section-label="سرصفحهٔ موبایل" className="print:hidden md:hidden flex items-center justify-between p-4 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
           <button onClick={() => setSidebarOpen(true)}>
             <Bars3Icon className="w-6 h-6" />
           </button>

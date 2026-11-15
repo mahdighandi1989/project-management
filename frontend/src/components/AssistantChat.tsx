@@ -138,7 +138,7 @@ export default function AssistantChat({ pathname, pageLabel }: { pathname: strin
         onClick={() => setOpen((o) => !o)}
         title="دستیار — هر پرسشی دربارهٔ برنامه و پروژه‌ها"
         data-report-section="assistant" data-report-section-label="دستیار سیار"
-        className={`fixed bottom-24 left-6 z-[60] w-14 h-14 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-lg hover:scale-105 transition flex items-center justify-center text-2xl`}
+        className={`print:hidden fixed bottom-24 left-6 z-[60] w-14 h-14 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-lg hover:scale-105 transition flex items-center justify-center text-2xl`}
       >
         {open ? '✕' : '💬'}
       </button>

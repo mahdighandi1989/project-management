@@ -34,6 +34,12 @@ production change.
 - **Log everything:** a new section at the bottom of `docs/WORKLOG.md` after every task (FINDING / DECISION /
   CHANGE / VERIFY / REVERT / CORRECTION / OWNER / TODO / BLOCKED), ending with the signature line (§4).
   Never delete or rewrite an earlier entry.
+- **Keep the handbook alive** (owner, 2026-11-15 — pattern of Detective-1): after every task also add a row to
+  [`docs/handbook/PROGRESS.md`](docs/handbook/PROGRESS.md) (the in-app trend chart is drawn from it; no point without a row)
+  and update the matching section of [`docs/handbook/HANDBOOK.md`](docs/handbook/HANDBOOK.md); a new topic gets a new
+  `## ` section **and** its line in the «فهرست». `scripts/docs_gate.py` refuses a stale ledger, an index that misses a
+  section, or a broken in-handbook anchor. The «جزوه و دفتر کار» page (`/handbook`) reads all of it live from GitHub,
+  plus an automatic changelog of every commit and the app's model activity.
 - Reply to the owner **in Persian**, plainly and briefly. UI text is Persian with `dir="rtl"`.
 - `prompt/` belongs to the owner's external tooling — do not touch.
 

@@ -270,7 +270,7 @@ export default function HelpSystem() {
       {/* دکمه شناور راهنما */}
       <button
         onClick={() => setIsOpen(true)}
-        className="fixed bottom-6 left-6 z-40 w-14 h-14 bg-gradient-to-br from-blue-500 to-purple-600 text-white rounded-full shadow-lg hover:shadow-xl transform hover:scale-105 transition-all flex items-center justify-center group"
+        className="print:hidden fixed bottom-6 left-6 z-40 w-14 h-14 bg-gradient-to-br from-blue-500 to-purple-600 text-white rounded-full shadow-lg hover:shadow-xl transform hover:scale-105 transition-all flex items-center justify-center group"
         title="راهنمای صفحه"
       >
         <span className="text-2xl">❓</span>
