@@ -978,3 +978,22 @@
   برچسب این‌جا دورِ بعد خودش درست می‌شود. اولین سینکِ کاملِ ۹ مخزن پس از دیپلوی چند دقیقه طول می‌کشد (حدود ۲٬۰۰۰ فایل، یک‌بار).
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-16 · pytest + next build + سنجشِ فقط‌خواندنیِ production
+
+## 2026-11-16 (۴۰) — فوری PM-INS-0015 (امنیت): پیش‌نمایشِ «بازرس ویژه» دیگر هم‌origin ِ AI Creator نیست
+
+- **[OWNER]** برگهٔ فوریِ PM-INS-0015: پیش‌نمایش از `/api/render/inspector/proxy/<id>/` روی همان origin ِ `ai-creator-frontend` اجرا می‌شود؛ در localStorage کلیدهای
+  quran.* کنارِ `pm.auth.token` ⇒ هر JS ِ پروژهٔ پیش‌نمایش توکنِ مالک را می‌خواند. خواسته: origin ِ جدا (یا sandbox بی‌allow-same-origin)، توکن به کوکیِ HttpOnly، پاک‌کردنِ
+  فقط quran.*. پذیرش: localStorage ِ AI Creator فقط کلیدهای خودش؛ از داخلِ iframe `window.parent.localStorage` در دسترس نباشد.
+- **[FINDING]** درست است: Next همهٔ `/api/*` را به بک‌اند rewrite می‌کند، پس سندِ پروکسی هم‌origin ِ برنامه بود و iframe `sandbox="… allow-same-origin …"` داشت.
+  آزمایشِ Chromium (سرورِ کوچکِ محلی): با CSP `sandbox` بی‌allow-same-origin، `window.parent.localStorage` ⇒ SecurityError ✓، ولی localStorage ِ خودِ سند هم
+  SecurityError می‌دهد و فایل‌های JS ِ سند کوکیِ Strict/Lax را **نمی‌فرستند** (فقط `SameSite=None; Secure`) — پس بلیتِ پیش‌نمایش باید None شود و storage shim لازم است.
+- **[CHANGE]** `routes/render_logs.py`: `PROXY_SANDBOX_CSP` روی همهٔ پاسخ‌های پروکسی (HTML، فایل‌ها، صفحهٔ خطا)؛ `_inject_storage_shim` اولین چیزِ `<head>`.
+  `routes/auth.py` preview-ticket ⇒ `samesite: none`؛ `lib/previewTicket.ts` کوکی `samesite=none; secure` روی https. iframe در `projects/[id]/page.tsx` بی‌allow-same-origin
+  (+ modals/downloads). `lib/auth.tsx`: `purgeForeignPreviewKeys` فقط `quran.*`. خواندن‌های مستقیمِ iframe (`contentDocument`) همه در try/catch بودند و نشانیِ صفحه با
+  postMessage ِ اسکریپتِ پروکسی می‌آید — آن‌ها کار می‌کنند؛ تشخیصِ «صفحهٔ سفید» و عکسِ DOM ِ iframe دیگر ممکن نیست (عکس از مسیرِ سرور می‌رود).
+- **[VERIFY]** `tests/test_preview_sandbox_pm_ins_0015.py` (۴ تست: CSP بی‌allow-same-origin روی HTML و فایل، shim پیش از اسکریپتِ صفحه، iframe/کوکی/پاک‌سازی)؛ آزمایشِ
+  Chromium ِ محلی برای parent-LS=SecurityError، shim=ok و رسیدنِ کوکیِ None. pytest سبز، next build سبز.
+- **[TODO]** انتقالِ `pm.auth.token` به کوکیِ HttpOnly انجام **نشد**: فرانت API را مستقیم روی origin ِ بک‌اند (`NEXT_PUBLIC_API_URL`) صدا می‌زند؛ کوکی آن‌جا شخصِ ثالث است و
+  Chrome/Safari مسدودش می‌کنند. شرط: همهٔ فراخوانی‌ها از مسیرِ نسبیِ `/api` (rewrite ِ Next) بروند، بعد کوکیِ HttpOnly + محافظتِ CSRF. با sandbox، مسیرِ حمله‌ای که برگه گفت بسته است.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-16 · pytest + next build + آزمایشِ Chromium

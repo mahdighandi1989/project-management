@@ -136,4 +136,7 @@ def preview_ticket(body: PreviewTicketIn, request: Request):
     if "/" in pid or ".." in pid:
         raise HTTPException(400, "شناسهٔ پروژه نامعتبر است")
     return {"ticket": A.preview_ticket(pid), "cookie": A.PREVIEW_COOKIE,
-            "path": f"{A.PREVIEW_PREFIX}{pid}", "expires_in": A.PREVIEW_TTL}
+            "path": f"{A.PREVIEW_PREFIX}{pid}", "expires_in": A.PREVIEW_TTL,
+            # (PM-INS-0015) the preview is sandboxed into an opaque origin; its scripts/CSS only carry a
+            # SameSite=None cookie. Still path-scoped to ONE project, GET-only, short-lived.
+            "samesite": "none"}

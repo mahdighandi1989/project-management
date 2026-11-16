@@ -77,6 +77,13 @@ deepseek-chat ⇐ cloud_code ⇐ **اولین مدلِ روشن** است.
   می‌شود. ذخیره: `GET/POST /api/diagrams/saved` در `DATABASE_DIR/diagrams_saved.json` (همان کد دوباره ذخیره نمی‌شود، سقفِ ۲۰۰ در هر پروژه، بی‌حذفِ خاموش).
   فهرستِ «پروژه» مخزنِ تحت نظارتی را که پروژهٔ محلیِ وصل به همان مخزن دارد دوباره نشان نمی‌دهد.
   کلیدِ ذخیره برای هر مخزن یکی است (`github:owner/repo`، چه از «تحت نظارت»، چه پروژهٔ محلیِ وصل، چه صفحهٔ `gh_…`)؛ پروژه‌های فهرستِ «پروژه‌ها» (`project_service`) هم رسم می‌شوند.
+- **پیش‌نمایشِ «بازرس ویژه» در origin ِ جدا (۲۰۲۶-۱۱-۱۶، PM-INS-0015، امنیت):** هر پاسخِ `/api/render/inspector/proxy/…` هدرِ
+  `Content-Security-Policy: sandbox allow-scripts allow-forms allow-popups allow-modals allow-downloads` (**بدونِ** allow-same-origin) دارد و iframe هم همان
+  sandbox را؛ سند origin ِ مبهم (opaque) می‌گیرد ⇒ `window.parent.localStorage` و `pm.auth.token` ِ AI Creator دست‌نیافتنی‌اند، حتی اگر نشانی بیرون از iframe باز شود.
+  یک shim ِ حافظه‌ای (`_PROXY_STORAGE_SHIM`) پیش از اسکریپت‌های خودِ صفحه `localStorage`/`sessionStorage` را می‌سازد تا برنامهٔ پیش‌نمایش کار کند (در هر بار
+  بارگذاری تازه؛ پروژه‌ها داده‌شان را با هم شریک نمی‌شوند). کوکیِ بلیتِ پیش‌نمایش `SameSite=None; Secure` شد (هنوز فقط مسیرِ همان پروژه، فقط GET، کوتاه‌عمر) چون
+  فایل‌های سندِ sandbox‌شده کوکیِ Strict/Lax نمی‌فرستند. `lib/auth.tsx` کلیدهای `quran.*` ِ جامانده را یک‌بار پاک می‌کند (فقط همین، نه `pm.*`). ماند: انتقالِ
+  توکن به کوکیِ HttpOnly (فرانت API را روی origin ِ دیگری صدا می‌زند ⇒ کوکیِ شخصِ ثالث؛ تغییرِ معماریِ ورود است).
 - **سینکِ خودکارِ پروژه‌های GitHub (۲۰۲۶-۱۱-۱۶، PM-INS-0014):** `services/github_autosync.py` هر ۳ دقیقه (`GITHUB_AUTOSYNC_INTERVAL_SEC`؛
   `GITHUB_AUTOSYNC_ENABLED=0` خاموش) برای همهٔ پروژه‌های `github_import` آخرین کامیتِ شاخهٔ پیش‌فرض و برچسبِ خصوصی/عمومی را از خودِ GitHub می‌خواند؛ کامیتِ تازه ⇒
   سینکِ افزایشی (فقط فایل‌های با sha ِ تازه دانلود می‌شوند؛ فایلِ حذف‌شده در GitHub این‌جا هم حذف می‌شود — فقط وقتی درختِ کامل و بی‌برش رسیده). سقفِ ثابتِ ۱۰۰ فایل

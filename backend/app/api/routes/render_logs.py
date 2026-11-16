@@ -19154,6 +19154,36 @@ _PROXY_MONITOR_SCRIPT_TEMPLATE = """<script data-inspector-proxy="true">
 </script>"""
 
 
+# (PM-INS-0015, security) the proxied project runs on AI Creator's own host. Before this its scripts shared the
+# origin of the owner's app: they could read `pm.auth.token` from localStorage and wrote their own keys
+# (quran.*) next to it. Every proxy response now carries a CSP `sandbox` WITHOUT allow-same-origin, so the
+# document gets an OPAQUE origin — window.parent.localStorage / document.cookie of AI Creator are unreachable,
+# even if the URL is opened outside the iframe. The page's own storage becomes an in-memory shim (per load) so
+# previewed apps that use localStorage still run; projects no longer share or leak storage into each other.
+PROXY_SANDBOX_CSP = "sandbox allow-scripts allow-forms allow-popups allow-modals allow-downloads"
+_PROXY_STORAGE_SHIM = (
+    '<script data-inspector-storage-shim="true">(function(){function M(){var d=Object.create(null);return{'
+    'getItem:function(k){k=String(k);return k in d?d[k]:null},setItem:function(k,v){d[String(k)]=String(v)},'
+    'removeItem:function(k){delete d[String(k)]},clear:function(){d=Object.create(null)},'
+    'key:function(i){var ks=Object.keys(d);return i<ks.length?ks[i]:null},'
+    'get length(){return Object.keys(d).length}}}'
+    '["localStorage","sessionStorage"].forEach(function(n){var ok=false;try{ok=!!window[n]}catch(e){}'
+    'if(!ok){try{Object.defineProperty(window,n,{value:M(),configurable:true})}catch(e){}}})})();</script>'
+)
+
+
+def _inject_storage_shim(html: str) -> str:
+    """The shim must run before ANY of the page's own scripts ⇒ first thing inside <head>."""
+    import re as _re
+    m = _re.search(r"<head[^>]*>", html, _re.I)
+    if m:
+        return html[:m.end()] + _PROXY_STORAGE_SHIM + html[m.end():]
+    m = _re.search(r"<html[^>]*>", html, _re.I)
+    if m:
+        return html[:m.end()] + "<head>" + _PROXY_STORAGE_SHIM + "</head>" + html[m.end():]
+    return _PROXY_STORAGE_SHIM + html
+
+
 @router.get("/inspector/proxy/{project_id}/{path:path}")
 @router.get("/inspector/proxy/{project_id}")
 async def inspector_page_proxy(
@@ -19201,6 +19231,7 @@ async def inspector_page_proxy(
             content="<html><body><h3>فرانت‌اند یافت نشد</h3></body></html>",
             status_code=404,
             media_type="text/html",
+            headers={"Content-Security-Policy": PROXY_SANDBOX_CSP},
         )
 
     # 2. ساخت URL هدف
@@ -19224,6 +19255,7 @@ async def inspector_page_proxy(
             content=f"<html><body><h3>خطا در اتصال به {frontend_url}</h3><p>{str(exc)[:200]}</p></body></html>",
             status_code=502,
             media_type="text/html",
+            headers={"Content-Security-Policy": PROXY_SANDBOX_CSP},
         )
 
     ct = resp.headers.get("content-type", "")
@@ -19260,6 +19292,7 @@ async def inspector_page_proxy(
             html = html.replace("<html", f"<html>\n<head>{monitor_script}</head>", 1)
         else:
             html = f"<head>{monitor_script}</head>\n" + html
+        html = _inject_storage_shim(html)
 
         # حذف هدرهایی که iframe را بلاک میکنند
         return FastAPIResponse(
@@ -19269,14 +19302,16 @@ async def inspector_page_proxy(
             headers={
                 "X-Frame-Options": "ALLOWALL",
                 "Cache-Control": "no-cache",
+                "Content-Security-Policy": PROXY_SANDBOX_CSP,
             },
         )
 
-    # 5. سایر انواع (JS, CSS, تصاویر) — عبور بدون تغییر
+    # 5. سایر انواع (JS, CSS, تصاویر) — عبور بدون تغییر (CSP sandbox هم، تا هیچ سندی از این مسیر same-origin نشود)
     return FastAPIResponse(
         content=resp.content,
         status_code=resp.status_code,
         media_type=ct or "application/octet-stream",
+        headers={"Content-Security-Policy": PROXY_SANDBOX_CSP},
     )
 
 

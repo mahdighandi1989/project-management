@@ -28,8 +28,11 @@ export async function ensurePreviewTicket(projectId: string): Promise<boolean> {
     if (!r.ok) return false;
     const t = await r.json();
     tickets[projectId] = t.ticket;
-    const secure = window.location.protocol === 'https:' ? '; secure' : '';
-    document.cookie = `${t.cookie}=${t.ticket}; path=${t.path}; max-age=${t.expires_in}; samesite=strict${secure}`;
+    const https = window.location.protocol === 'https:';
+    // (PM-INS-0015) the preview iframe is sandboxed (opaque origin) — its own scripts/CSS carry only a
+    // SameSite=None; Secure cookie. Still scoped to this one project's proxy path, GET-only, short-lived.
+    const same = https && t.samesite === 'none' ? 'samesite=none; secure' : `samesite=strict${https ? '; secure' : ''}`;
+    document.cookie = `${t.cookie}=${t.ticket}; path=${t.path}; max-age=${t.expires_in}; ${same}`;
     clearTimeout(timers[projectId]);
     // renew at ~2/3 of the lifetime
     timers[projectId] = setTimeout(() => { ensurePreviewTicket(projectId); }, Math.max(60, t.expires_in * 0.66) * 1000);

@@ -14070,7 +14070,9 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                               style={{ paddingTop: '24px' }}
                               className="w-full h-full border-0 bg-white"
                               title="پیش‌نمایش فرانت‌اند"
-                              sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                              // (PM-INS-0015) no allow-same-origin: the previewed project must never reach AI Creator's
+                              // localStorage (pm.auth.token) — the proxy also sends CSP `sandbox` for the same reason
+                              sandbox="allow-scripts allow-forms allow-popups allow-modals allow-downloads"
                               onLoad={() => {
                                 // 🩹 (2026-11-15) self-healing: onLoad also fires on an error PAGE (401 of the login wall, 5xx of
                                 // the proxy), so look at what actually loaded. An auth error ⇒ renew the ticket and reload once;

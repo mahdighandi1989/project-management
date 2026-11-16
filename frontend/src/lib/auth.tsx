@@ -12,6 +12,19 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
 
 const TOKEN_KEY = 'pm.auth.token'
+/** prefixes that previewed projects wrote into this origin before PM-INS-0015 — removed once per load */
+export const FOREIGN_PREVIEW_KEY_PREFIXES = ['quran.']
+
+export function purgeForeignPreviewKeys(): string[] {
+  const removed: string[] = []
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i) || ''
+      if (FOREIGN_PREVIEW_KEY_PREFIXES.some((p) => k.startsWith(p))) { localStorage.removeItem(k); removed.push(k) }
+    }
+  } catch { /* storage unavailable */ }
+  return removed
+}
 
 export type AuthUser = { id: number; email: string; name: string; picture: string; role: string; status: string }
 type Ctx = { user: AuthUser | null; role: string; enforced: boolean; logout: () => void }
@@ -185,6 +198,10 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   }, [])
 
   useEffect(() => { void check() }, [check])
+  // (PM-INS-0015) the «بازرس ویژه» preview used to run on THIS origin and left the previewed apps' own keys
+  // (quran.sessions.v1, quran.hifz.*, …) beside the session token. The preview is sandboxed now; remove exactly
+  // those leftovers — only keys of previewed projects, never this app's own pm.* keys.
+  useEffect(() => { purgeForeignPreviewKeys() }, [])
   useEffect(() => {
     const on = () => {
       try { localStorage.removeItem(TOKEN_KEY) } catch { /* ignore */ }
