@@ -1518,6 +1518,9 @@ export default function OversightPage() {
   const [watched, setWatched] = useState<Watched[]>([]);
 
   const [tasks, setTasks] = useState<Task[]>([]);
+  // (PM-INS-0003) «تسک‌ها (0)» while 1305 are active: 0 must never stand for «not loaded / failed»
+  const [statusFailed, setStatusFailed] = useState(false);
+  const [tasksLoad, setTasksLoad] = useState<'loading' | 'ok' | 'failed'>('loading');
   // 🚨 (crash fix) — counts of file-extractions per task. parent یک بار
   // fetch می‌کند تا 684 پنل فرزند هر کدام جدا API نزنند (که قبلاً باعث
   // OOM crash backend می‌شد). تسک‌هایی که 0 پیوست دارند پنل را render
@@ -1930,21 +1933,34 @@ export default function OversightPage() {
           fetch(`${API_BASE}/api/oversight/reports?limit=300`),
         ]);
 
-      if (statusRes.status === 'fulfilled' && statusRes.value.ok)
+      if (statusRes.status === 'fulfilled' && statusRes.value.ok) {
         setStatus(await statusRes.value.json());
+        setStatusFailed(false);
+      } else {
+        setStatusFailed(true);  // (PM-INS-0003) say «خوانده نشد», not a false «توکن ندارد»
+      }
       if (modelsRes.status === 'fulfilled' && modelsRes.value.ok) {
         const data = await modelsRes.value.json();
         const _list: ModelInfo[] = Array.isArray(data) ? data : [];
         setModels(_list);
         // (2026-11-15, PM-INS-0008) never «هیچ مدلی انتخاب نشده»: with no choice yet, pick a default —
         // deepseek-chat, else cloud_code (whichever is available)
+        // (PM-INS-0003) a saved choice counts only if one of its models is still on; otherwise the default is
+        // deepseek-chat, else cloud_code, else the FIRST model that is on (owner: «۱ مدل روشن است»)
         let _hasChoice = false;
         try {
           const _saved = JSON.parse(localStorage.getItem('oversight_models_multi') || '[]');
-          _hasChoice = (Array.isArray(_saved) && _saved.length > 0) || !!localStorage.getItem('oversight_model');
+          const _single = localStorage.getItem('oversight_model');
+          const _ids: string[] = Array.isArray(_saved) && _saved.length ? _saved : (_single ? [_single] : []);
+          const _live = _ids.filter(id => _list.some(m => m.id === id));
+          _hasChoice = _live.length > 0;
+          if (_hasChoice && _live.length !== _ids.length) {
+            setSelectedModelIds(_live);
+            localStorage.setItem('oversight_models_multi', JSON.stringify(_live));
+          }
         } catch {}
         if (!_hasChoice) {
-          const _def = ['deepseek-chat', 'cloud_code'].find(id => _list.some(m => m.id === id));
+          const _def = ['deepseek-chat', 'cloud_code'].find(id => _list.some(m => m.id === id)) || _list[0]?.id;
           // local only — the server's own default list (settings.default_models) is not overwritten from a fresh browser
           if (_def) { setSelectedModelIds([_def]); try { localStorage.setItem('oversight_models_multi', JSON.stringify([_def])); } catch {} }
         }
@@ -1954,8 +1970,13 @@ export default function OversightPage() {
         setWatched(data.items || []);
       }
       if (tasksRes.status === 'fulfilled' && tasksRes.value.ok) {
-        const data = await tasksRes.value.json();
-        setTasks(data.items || []);
+        try {
+          const data = await tasksRes.value.json();
+          setTasks(data.items || []);
+          setTasksLoad('ok');
+        } catch { setTasksLoad('failed'); }
+      } else {
+        setTasksLoad('failed');
       }
       if (reportsRes.status === 'fulfilled' && reportsRes.value.ok) {
         const data = await reportsRes.value.json();
@@ -3793,9 +3814,10 @@ export default function OversightPage() {
 
         {/* وضعیت */}
         <div className="grid sm:grid-cols-2 lg:grid-cols-5 gap-3 mb-6">
-          <StatusCard label="GitHub" ok={status?.github_token} okLabel="متصل" failLabel="توکن ندارد" />
-          <StatusCard label="Render" ok={status?.render_token} okLabel="متصل" failLabel="توکن ندارد" />
-          <StatusCard label="پروژه‌های تحت نظارت" ok okLabel={`${status?.watched_count ?? 0} پروژه`} isCount />
+          {/* (PM-INS-0003) until /status answers: «در حال بارگذاری…», never a false «توکن ندارد · ۰ پروژه» */}
+          <StatusCard label="GitHub" ok={status?.github_token} okLabel="متصل" failLabel="توکن ندارد" loading={!status} loadingText={statusFailed ? 'خوانده نشد — 🔄 بروزرسانی' : undefined} />
+          <StatusCard label="Render" ok={status?.render_token} okLabel="متصل" failLabel="توکن ندارد" loading={!status} loadingText={statusFailed ? 'خوانده نشد — 🔄 بروزرسانی' : undefined} />
+          <StatusCard label="پروژه‌های تحت نظارت" ok okLabel={`${status?.watched_count ?? 0} پروژه`} isCount loading={!status} loadingText={statusFailed ? 'خوانده نشد — 🔄 بروزرسانی' : undefined} />
           {/* 🆕 (active vs archived) — عدد بزرگ = تسک‌های فعال (غیر آرشیوی).
               زیرش مجموع و تعداد آرشیوشده نمایش داده می‌شود تا کاربر تصویر
               کامل را داشته باشد. اگر backend هنوز فیلدهای جدید را برنگرداند
@@ -3804,6 +3826,8 @@ export default function OversightPage() {
             label="تسک‌های فعال"
             ok
             isCount
+            loading={!status}
+            loadingText={statusFailed ? 'خوانده نشد — 🔄 بروزرسانی' : undefined}
             okLabel={`${status?.tasks_active_count ?? status?.tasks_count ?? 0} تسک`}
             subtext={
               status?.tasks_total_count !== undefined
@@ -3811,10 +3835,10 @@ export default function OversightPage() {
                 : undefined
             }
           />
-          <StatusCard label="گزارش‌ها" ok okLabel={`${status?.reports_count ?? 0} گزارش`} isCount />
+          <StatusCard label="گزارش‌ها" ok okLabel={`${status?.reports_count ?? 0} گزارش`} isCount loading={!status} loadingText={statusFailed ? 'خوانده نشد — 🔄 بروزرسانی' : undefined} />
         </div>
 
-        {!status?.github_token && (
+        {status && !status.github_token && (
           <div className="mb-6 p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg flex items-center justify-between flex-wrap gap-2">
             <span className="text-yellow-800 dark:text-yellow-200 text-sm">
               ⚠️ توکن گیت‌هاب تنظیم نشده — بدون آن نمی‌توانید مخازن خود را ببینید.
@@ -3889,7 +3913,11 @@ export default function OversightPage() {
               { id: 'watched', label: 'تحت نظارت', icon: '👁️', count: watched.length },
               { id: 'repos', label: 'مخازن GitHub', icon: '📦', count: repos.length },
               { id: 'ideas', label: 'ایده/مشکل', icon: '💡', count: 0 },
-              { id: 'tasks', label: `تسک‌ها (${tasks.length})`, icon: '📋', count: tasks.length },
+              // (PM-INS-0003) the same number as the «تسک‌های فعال» card — active tasks of ALL projects
+              { id: 'tasks', label: tasksLoad === 'loading' ? 'تسک‌ها (در حال بارگذاری…)'
+                  : tasksLoad === 'failed' ? `تسک‌ها (${status?.tasks_active_count ?? '؟'} فعال — فهرست بار نشد)`
+                  : `تسک‌ها (${tasks.filter(t => !t.archived).length} فعال از ${tasks.length})`,
+                icon: '📋', count: 0 },
               { id: 'reports', label: 'گزارش‌ها', icon: '📊', count: reports.length },
             ] as const
           ).map((t) => (
@@ -6105,7 +6133,11 @@ function StatusCard({
   failLabel,
   isCount,
   subtext,
+  loading,
+  loadingText,
 }: {
+  loading?: boolean;
+  loadingText?: string;
   label: string;
   ok?: boolean;
   okLabel: string;
@@ -6115,6 +6147,14 @@ function StatusCard({
   // می‌خواهیم هم تعداد فعال و هم مجموع را نمایش دهیم استفاده می‌شود.
   subtext?: string;
 }) {
+  if (loading) {
+    return (
+      <div className="bg-white dark:bg-gray-800 rounded-xl p-3 shadow border border-gray-200 dark:border-gray-700">
+        <p className="text-xs text-gray-500 dark:text-gray-400">{label}</p>
+        <p className={`font-bold mt-1 text-gray-400 ${loadingText ? '' : 'animate-pulse'}`}>{loadingText || 'در حال بارگذاری…'}</p>
+      </div>
+    );
+  }
   const ng = !isCount && !ok;
   return (
     <div
