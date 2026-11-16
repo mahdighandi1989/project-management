@@ -16,6 +16,7 @@ function ProjectsContent() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [activeTab, setActiveTab] = useState<'all' | 'github'>('all');
+  const [showArchived, setShowArchived] = useState(false);  // (PM-INS-0013) نمایشِ «آزمایشی/قدیمی»
 
   // پروژه انتخابی
   const [selected, setSelected] = useState<any>(null);
@@ -337,7 +338,21 @@ function ProjectsContent() {
   };
 
   // ترکیب پروژه‌ها بر اساس تب
-  const displayProjects = activeTab === 'github' ? githubProjects : [...projects, ...githubProjects];
+  const allForTab = activeTab === 'github' ? githubProjects : [...projects, ...githubProjects];
+  // (PM-INS-0013) «آزمایشی/قدیمی»: پروژه‌های محلیِ «تست» (۰٪) و تکمیل‌شده‌های قدیمی جدا می‌شوند تا فهرست تمیز بماند.
+  // هیچ چیز حذف نمی‌شود — فقط برچسب می‌خورد و پشتِ دکمهٔ «نمایش» می‌رود.
+  const archiveTag = (p: any): '' | 'آزمایشی' | 'قدیمی' => {
+    const isGh = p.project_type === 'github_import' || p.metadata?.source === 'github';
+    if (isGh) return '';
+    const name = String(p.name || '').trim();
+    if (/(^|[\s_-])(test|تست|آزمایش)/i.test(name) && !(Number(p.progress) > 0)) return 'آزمایشی';
+    if (p.status === 'archived') return 'قدیمی';
+    const when = Date.parse(p.updated_at || p.created_at || '');
+    if (p.status === 'completed' && Number.isFinite(when) && Date.now() - when > 90 * 86400000) return 'قدیمی';
+    return '';
+  };
+  const archivedCount = allForTab.filter((p) => archiveTag(p)).length;
+  const displayProjects = showArchived ? allForTab : allForTab.filter((p) => !archiveTag(p));
 
   return (
     <div className="min-h-screen bg-gray-100 dark:bg-gray-900" dir="rtl">
@@ -571,6 +586,15 @@ function ProjectsContent() {
 
               <div className="flex items-center justify-between mb-4">
                 <h2 className="font-bold">لیست</h2>
+                {archivedCount > 0 && (
+                  <button
+                    onClick={() => setShowArchived((v) => !v)}
+                    className="text-xs px-2 py-0.5 rounded bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200"
+                    title="پروژه‌های محلیِ «تست» با پیشرفتِ ۰٪ و تکمیل‌شده‌های قدیمی‌تر از ۹۰ روز — حذف نمی‌شوند"
+                  >
+                    {showArchived ? 'پنهان کردنِ' : 'نمایشِ'} آزمایشی/قدیمی ({archivedCount})
+                  </button>
+                )}
                 <button
                   onClick={() => { loadProjects(); loadGitHubProjects(); }}
                   className="text-blue-500 text-sm"
@@ -627,6 +651,9 @@ function ProjectsContent() {
                           )}
                           {p.progress !== undefined && (
                             <span className="text-xs text-gray-500">{p.progress}%</span>
+                          )}
+                          {archiveTag(p) && (
+                            <span className="text-xs px-2 py-0.5 rounded bg-gray-200 text-gray-600">🗄️ {archiveTag(p)}</span>
                           )}
                         </div>
                       </div>

@@ -4,6 +4,7 @@ import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import TaskFilePicker, { type UploadSessionState } from '@/components/TaskFilePicker';
 import ExtractedFilesPanel from '@/components/ExtractedFilesPanel';
+import ProjectsEventFeed from '@/components/ProjectsEventFeed';  // (PM-INS-0013) فیدِ رویدادِ همهٔ پروژه‌ها
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -3783,6 +3784,11 @@ export default function OversightPage() {
               🏠 خانه
             </Link>
           </div>
+        </div>
+
+        {/* (PM-INS-0013) هر کامیت و هر فایلِ افزوده/تغییر/حذف‌شده در همهٔ مخزن‌های تحتِ نظارت — زنده از GitHub */}
+        <div className="mb-6" id="events-feed">
+          <ProjectsEventFeed limit={80} />
         </div>
 
         {/* وضعیت */}

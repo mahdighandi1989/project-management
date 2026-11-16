@@ -16,6 +16,7 @@ from .api.routes import debate, models, chat, settings as settings_routes
 from .api.routes import projects, diagrams, creator, upload, orchestrator
 from .api.routes import config, external, runtime, external_projects, unified_api
 from .api.routes import simple_projects  # 🆕 API ساده
+from .api.routes import project_supervision as project_supervision_routes  # 🆕 (PM-INS-0013)
 from .api.routes import github_import  # 🆕 GitHub Import
 from .api.routes import project_memory  # 🆕 Project Memory (باکس حافظه)
 from .api.routes import project_structure  # 🆕 Project Structure Diagram
@@ -819,6 +820,7 @@ app.include_router(inspection.router, prefix="/api")  # 🆕 «نظارت و س�
 app.include_router(assistant_routes.router, prefix="/api")  # 🆕 «دستیار» — /api/assistant
 app.include_router(handbook_routes.router, prefix="/api")  # 🆕 «جزوه و دفتر کار» — /api/handbook
 app.include_router(browser_agent_routes.router, prefix="/api")  # 🆕 «عاملِ مرورگر» — /api/inspector-agent
+app.include_router(project_supervision_routes.router, prefix="/api")  # 🆕 (PM-INS-0013) نظارتِ هر پروژه + فیدِ رویدادها
 if OVERSIGHT_AVAILABLE and oversight is not None:
     app.include_router(oversight.router, prefix="/api")  # 🆕 Oversight (اتاق فرمان GitHub)
     # bridge endpoints under /api/projects/{project_id}/{apply-oversight-task,verify-task,oversight-summary}

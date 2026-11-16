@@ -11,6 +11,7 @@ import { ensurePreviewTicket, getPreviewTicket } from '@/lib/previewTicket';
 import ExecutingPromptsPanel from '@/components/ExecutingPromptsPanel';
 import InspectorRecordingPanel from '@/components/InspectorRecordingPanel';  // 🆕 🎬 ضبط بازرس ویژه دوحالته (A + B)
 import ProjectDiagramsPanel from '@/components/ProjectDiagramsPanel';  // (PM-INS-0004) نمودارهای همین پروژه
+import ProjectSupervisionPanel from '@/components/ProjectSupervisionPanel';  // (PM-INS-0013) نظارت و سرکشیِ همین پروژه
 import ReactFlow, {
   Node,
   Edge,
@@ -278,7 +279,7 @@ export default function ProjectDetailPage() {
   const [deploying, setDeploying] = useState(false);
 
   // تب فعال
-  const [activeTab, setActiveTab] = useState<'files' | 'memory' | 'structure' | 'journal' | 'diagrams' | 'inspector' | 'external'>('files');
+  const [activeTab, setActiveTab] = useState<'files' | 'memory' | 'structure' | 'journal' | 'diagrams' | 'supervision' | 'inspector' | 'external'>('files');
 
   // 🔗 External Projects state — اتصال به GitHub/Render خارجی
   const [externalConnected, setExternalConnected] = useState(false);
@@ -1217,6 +1218,7 @@ export default function ProjectDetailPage() {
     const tab = searchParams.get('tab');
     if (tab === 'inspector' || searchParams.get('load_task')) setActiveTab('inspector');
     else if (tab === 'diagrams') setActiveTab('diagrams');  // (PM-INS-0004)
+    else if (tab === 'supervision') setActiveTab('supervision');  // (PM-INS-0013)
     const sid = Number(searchParams.get('session') || '');
     if (sid && !deepLinkSessionDone.current) {
       deepLinkSessionDone.current = true;
@@ -10097,6 +10099,17 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
           >
             📈 نمودارها
           </button>
+          {/* (PM-INS-0013) نظارت و سرکشیِ همین پروژه — فقط‌خواندنی، زنده */}
+          <button
+            onClick={() => setActiveTab('supervision')}
+            className={`px-6 py-3 font-medium ${
+              activeTab === 'supervision'
+                ? 'border-b-2 border-amber-500 text-amber-600'
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            🛡️ نظارت و سرکشی
+          </button>
           {/* تب «تحلیل سلامت» قبلاً اینجا بود — حذف شد در commit 3.3a.
               قابلیت‌هایش به /oversight (تب «🏥 سلامت پروژه») منتقل شدند.
               تب Inspector بدون تغییر است. */}
@@ -13866,6 +13879,16 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
           return _m
             ? <ProjectDiagramsPanel source="github" id={`${_m[1]}/${_m[2].replace(/\.git$/, '')}`} projectName={project?.name} />
             : <ProjectDiagramsPanel source="local" id={projectId} projectName={project?.name} />;
+        })()}
+
+        {activeTab === 'supervision' && projectId && (() => {
+          // the repo of this project: a gh_ import's source url, or a local project's linked repo
+          const _p: any = project || {};
+          const _src: string = _p?.metadata?.source_url || _p?.github_url || _p?.github_repo_url || '';
+          const _m = _src.match(/github\.com\/([^/]+)\/([^/#?]+)/);
+          const _repo = _m ? `${_m[1]}/${_m[2].replace(/\.git$/, '')}`
+            : (_p?.github_owner && _p?.github_repo ? `${_p.github_owner}/${_p.github_repo}` : '');
+          return <ProjectSupervisionPanel repo={_repo || undefined} />;
         })()}
 
         {activeTab === 'inspector' && (
