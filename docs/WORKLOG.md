@@ -1010,3 +1010,14 @@
 - **[VERIFY]** تستِ `test_list_reports_real_file_count`؛ pytest و next build سبز.
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-16 · pytest + next build + سنجشِ زندهٔ production
+
+## 2026-11-16 (۴۲) — PM-INS-0016 (ادامه): rate limit ِ GitHub در اولین سینکِ کامل؛ فایلِ دانلودنشده دیگر گم نمی‌شود
+
+- **[FINDING]** اولین دورِ سینکِ کامل حدود ۴٬۵۰۰ فایل را یک‌جا گرفت و سقفِ ۵٬۰۰۰ درخواست در ساعتِ توکنِ GitHub پر شد (۱۶:۰۰ UTC: همه «دسترسی ممنوع - Rate limit»).
+  quran، Detective-1 و Lifemanager پس از بازشدنِ سقف (کمتر از یک ساعت) سینک می‌شوند. ایرادِ واقعیِ پنهان: فایلی که دانلودش شکست می‌خورد sha ِ تازه را در درخت
+  می‌گرفت و کامیت «سینک‌شده» ثبت می‌شد ⇒ آن فایل **هرگز** دوباره گرفته نمی‌شد.
+- **[CHANGE]** `services/github_import.py`: `failed_paths`؛ sha ِ آن‌ها در درخت `None`؛ با هر دانلودِ شکست‌خورده `last_synced_sha` جلو نمی‌رود، `behind=true` و خطای
+  «N فایل دانلود نشد — دورِ بعد دوباره» (نشانِ قرمز). دورِ بعد فقط همان‌ها گرفته می‌شوند.
+- **[VERIFY]** `test_failed_downloads_are_retried_next_round` (۵۱ شکست ⇒ دورِ بعد دقیقاً ۵۱ دانلود ⇒ ۱۵۱ فایل، کامیت ثبت)؛ pytest و next build سبز.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-16 · pytest + next build + سنجشِ زندهٔ production

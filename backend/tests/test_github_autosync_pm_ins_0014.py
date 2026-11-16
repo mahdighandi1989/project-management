@@ -160,3 +160,41 @@ def test_list_reports_real_file_count(env):
     app.dependency_overrides[get_db] = _db
     r = TestClient(app).get("/api/github/imported").json()
     assert [p["file_count"] for p in r["projects"]] == [3]
+
+
+def test_failed_downloads_are_retried_next_round(env):
+    """PM-INS-0016 — a rate-limited download must not be marked synced (or it is never fetched again)."""
+    from app.models.project import Project, ProjectFile
+    from app.services import github_import as gi
+    from app.services.github_autosync import sync_project
+
+    Session, gh = env
+    db = Session()
+    db.add(Project(id="gh_o_r", name="r", project_type="github_import",
+                   extra_data=json.dumps({"source": "github", "owner": "o", "repo": "r"})))
+    db.commit(); db.close()
+    svc = gi._github_import_service
+    ok_get = svc.get_file_content
+    calls = {"n": 0}
+
+    async def flaky(owner, repo, path, branch=None, token=None):
+        calls["n"] += 1
+        if calls["n"] > 100:
+            return {"success": False, "error": "403"}
+        return await ok_get(owner, repo, path, branch, token)
+    svc.get_file_content = flaky
+    r = _run(sync_project("gh_o_r"))
+    assert r["success"]
+    db = Session()
+    meta = json.loads(db.query(Project).get("gh_o_r").extra_data)
+    db.close()
+    assert meta["github_sync"]["last_synced_sha"] is None and meta["github_sync"]["incomplete"] == 51
+    svc.get_file_content = ok_get
+    gh.downloads.clear()
+    r = _run(sync_project("gh_o_r"))
+    assert not r["skipped"] and len(gh.downloads) == 51, "only the failed ones are fetched again"
+    db = Session()
+    assert db.query(ProjectFile).filter_by(project_id="gh_o_r").count() == 151
+    meta = json.loads(db.query(Project).get("gh_o_r").extra_data)
+    db.close()
+    assert meta["github_sync"]["last_synced_sha"] == "c1" and not meta["github_sync"]["error"]

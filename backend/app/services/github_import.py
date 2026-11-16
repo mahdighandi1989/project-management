@@ -396,6 +396,7 @@ class GitHubImportService:
             },
             "files": [],
             "unchanged_paths": [],
+            "failed_paths": [],
             "file_tree": [],
             "imported_at": datetime.now().isoformat(),
         }
@@ -492,6 +493,7 @@ class GitHubImportService:
                         })
                     else:
                         report["failed"] += 1
+                        result["failed_paths"].append(path)
                     # کمی تاخیر برای جلوگیری از rate limit
                     await asyncio.sleep(self.request_delay)
 
@@ -522,8 +524,11 @@ class GitHubImportService:
 
                 # آماده‌سازی داده‌ها
                 technologies = list(import_result.get("languages", {}).keys())
+                # (PM-INS-0016) فایلی که دانلودش شکست خورد (مثلاً rate limit) sha ندارد ⇒ دورِ بعد دوباره گرفته می‌شود
+                _failed = set(import_result.get("failed_paths") or [])
                 structure = {
-                    "file_tree": import_result.get("file_tree", []),
+                    "file_tree": [({**t, "sha": None} if t.get("path") in _failed else t)
+                                  for t in import_result.get("file_tree", [])],
                     "branch": import_result.get("branch"),
                 }
                 metadata = {
@@ -635,14 +640,17 @@ class GitHubImportService:
                     **prev_sync,
                     "last_sync_at": now,
                     "last_checked_at": now,
-                    "last_synced_sha": import_result.get("head_sha") or prev_sync.get("last_synced_sha"),
+                    # ناقص (دانلودِ شکست‌خورده) ⇒ کامیت «سینک‌شده» حساب نمی‌شود تا دورِ بعد بقیه را بگیرد
+                    "last_synced_sha": (prev_sync.get("last_synced_sha") if _failed
+                                        else import_result.get("head_sha") or prev_sync.get("last_synced_sha")),
+                    "incomplete": len(_failed),
                     "head_sha": import_result.get("head_sha") or prev_sync.get("head_sha"),
-                    "behind": False,
+                    "behind": bool(_failed),
                     "trigger": import_result.get("sync_trigger") or "manual",
                     "report": report,
                     "stored_files": stored,
                     "repo_files": report.get("tree_total"),
-                    "error": None,
+                    "error": (f"{len(_failed)} فایل دانلود نشد (rate limit؟) — دورِ بعد دوباره" if _failed else None),
                     "history": history[-30:],
                 }
                 metadata["last_sync_at"] = now
