@@ -195,9 +195,19 @@ async def list_imported_projects(db: Session = Depends(get_db)):
         ).order_by(Project.created_at.desc()).all()
 
         slog.info("Listed imported projects", count=len(projects))
+        # (PM-INS-0016) file_count از جدولِ فایل‌ها — قبلاً برای همه ۰ برمی‌گشت
+        from sqlalchemy import func
+        counts = dict(db.query(ProjectFile.project_id, func.count(ProjectFile.id))
+                      .filter(ProjectFile.project_id.in_([p.id for p in projects]))
+                      .group_by(ProjectFile.project_id).all()) if projects else {}
+        out = []
+        for p in projects:
+            d = p.to_dict()
+            d["file_count"] = int(counts.get(p.id, 0))
+            out.append(d)
         return {
             "success": True,
-            "projects": [p.to_dict() for p in projects],
+            "projects": out,
             "count": len(projects)
         }
     except Exception as e:

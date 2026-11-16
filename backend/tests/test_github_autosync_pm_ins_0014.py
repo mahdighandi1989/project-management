@@ -133,3 +133,30 @@ def test_cap_is_reported_not_silent(env, monkeypatch):
     rep = res["sync_report"]
     assert len(res["files"]) == 40 and rep["capped"] == 111 and rep["kept"] == 40
     assert res["files"][0]["path"] == "README.md"  # important files first
+
+
+def test_list_reports_real_file_count(env):
+    """PM-INS-0016 — /api/github/imported returned file_count 0 for every project."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api.routes import github_import as R
+    from app.core.database import get_db
+    from app.models.project import Project, ProjectFile
+
+    Session, _ = env
+    db = Session()
+    db.add(Project(id="gh_o_a", name="a", project_type="github_import"))
+    db.add_all([ProjectFile(project_id="gh_o_a", file_path=f"f{i}") for i in range(3)])
+    db.commit(); db.close()
+    app = FastAPI(); app.include_router(R.router, prefix="/api")
+
+    def _db():
+        d = Session()
+        try:
+            yield d
+        finally:
+            d.close()
+    app.dependency_overrides[get_db] = _db
+    r = TestClient(app).get("/api/github/imported").json()
+    assert [p["file_count"] for p in r["projects"]] == [3]

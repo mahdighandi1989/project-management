@@ -49,7 +49,10 @@ export default function GithubSyncBadge({ sync, compact = false }: { sync?: Gith
       </span>
     );
   }
-  const stale = !!sync.behind || !!sync.error;
+  // (PM-INS-0016) قرمز اگر عقب/خطا، یا اگر بیش از ۱ روز است که حتی بررسی نشده (حلقهٔ خودکار هر ۳ دقیقه بررسی می‌کند)
+  const checked = Date.parse(sync.last_checked_at || sync.last_sync_at || '');
+  const unchecked = Number.isNaN(checked) || Date.now() - checked > 24 * 3600 * 1000;
+  const stale = !!sync.behind || !!sync.error || unchecked;
   const reasons = skippedReasons(sync.report);
   const count = sync.repo_files != null ? `${sync.stored_files ?? '?'} از ${sync.repo_files} فایل` : `${sync.stored_files ?? '?'} فایل`;
   const tone = stale
@@ -65,7 +68,7 @@ export default function GithubSyncBadge({ sync, compact = false }: { sync?: Gith
   ].filter(Boolean).join('\n');
   return (
     <span className={`text-xs px-2 py-0.5 rounded ${tone}`} title={title} data-testid="github-sync-badge">
-      {stale ? '⚠️ عقب‌افتاده' : '🔄'} آخرین سینک: {ago(sync.last_sync_at)}
+      {stale ? (unchecked && !sync.behind && !sync.error ? '⚠️ بیش از ۱ روز بی‌بررسی' : '⚠️ عقب‌افتاده') : '🔄'} آخرین سینک: {ago(sync.last_sync_at)}
       {!compact && <> · {count}{reasons.length ? ` (نیامده: ${reasons.join('، ')})` : ''}</>}
       {!compact && sync.error ? ` · خطا: ${sync.error}` : ''}
     </span>

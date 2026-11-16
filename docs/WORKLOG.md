@@ -997,3 +997,16 @@
   Chrome/Safari مسدودش می‌کنند. شرط: همهٔ فراخوانی‌ها از مسیرِ نسبیِ `/api` (rewrite ِ Next) بروند، بعد کوکیِ HttpOnly + محافظتِ CSRF. با sandbox، مسیرِ حمله‌ای که برگه گفت بسته است.
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-16 · pytest + next build + آزمایشِ Chromium
+
+## 2026-11-16 (۴۱) — فوری PM-INS-0016 (تکمیلِ ۱۴ با شاهد): file_count ِ ۰ و هشدارِ «بیش از ۱ روز»
+
+- **[OWNER]** برگهٔ PM-INS-0016: «آخرین سینکِ» ۸ مخزن ۵ تا ۹ ماه پیش بود؛ `files/file_count` در `/api/github/imported` برای همه ۰؛ سینکِ خودکار برای هر ۹ مخزن + «آخرین سینک»
+  روی کارت + هشدارِ قرمز اگر بیش از ۱ روز عقب است. مالک عمداً سینکِ دستی نزد تا کارِ خودکار سنجیده شود.
+- **[FINDING]** سینکِ خودکار همان کارِ (۳۹) است و روی production کار می‌کند — بی‌هیچ کلیکی پس از دیپلوی: project_management ۸۳۵ از ۸۴۶، allin1 ۱۱۲۱ از ۱۱۴۸،
+  trading_system ۱۱۰۳ از ۱۲۰۹، language ۴۸۵ از ۵۰۶، detective ۷۱۳ از ۷۴۳، video_processor ۲۶۹ از ۲۹۰ (سه مخزنِ دیگر در همان دورِ اول). `file_count` ِ فهرست از
+  `Project.to_dict()` می‌آمد که فایل‌ها را نمی‌شمارد.
+- **[CHANGE]** `routes/github_import.py` `GET /imported`: `file_count` با یک group-by روی `project_files`. `GithubSyncBadge.tsx`: قرمز «⚠️ بیش از ۱ روز بی‌بررسی» اگر
+  `last_checked_at` کهنه‌تر از ۲۴ ساعت است (حلقه هر ۳ دقیقه بررسی می‌کند؛ کهنه‌بودن یعنی حلقه یا GitHub از کار افتاده).
+- **[VERIFY]** تستِ `test_list_reports_real_file_count`؛ pytest و next build سبز.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-16 · pytest + next build + سنجشِ زندهٔ production
