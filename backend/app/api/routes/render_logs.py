@@ -5565,7 +5565,9 @@ INSPECTOR_BRIDGE_SCRIPT = '''
 
   // گرفتن اطلاعات المنت
   function getElementInfo(el) {
-    if (!el) return 'عنصر ناشناخته';
+    if (!el || !el.getAttribute) return '';
+    // (PM-INS-0009) climb from an SVG icon to its button/link
+    el = (el.closest && el.closest('button,a,[role="button"],[role="menuitem"],[role="tab"],[role="switch"],input,select,textarea,summary,label')) || el;
 
     // متن المنت
     let text = (el.innerText || el.value || '').trim().slice(0, 50);
@@ -5605,6 +5607,23 @@ INSPECTOR_BRIDGE_SCRIPT = '''
     if (text) {
       return typeLabel + ' "' + text + '"';
     }
+    var __name = (function (n) {
+        // (PM-INS-0009) icon-only controls: aria-label / title / alt / placeholder / name / labelledby / inner <title>|alt / test id
+        if (!n || !n.getAttribute) return "";
+        var v = n.getAttribute("aria-label") || n.getAttribute("title") || n.getAttribute("alt") ||
+                n.getAttribute("placeholder") || n.getAttribute("name") || "";
+        if (!v && n.getAttribute("aria-labelledby")) {
+          var lb = document.getElementById(n.getAttribute("aria-labelledby"));
+          v = lb ? (lb.textContent || "") : "";
+        }
+        if (!v && n.querySelector) {
+          var inner = n.querySelector("[aria-label],[title],img[alt],svg title");
+          if (inner) v = inner.getAttribute("aria-label") || inner.getAttribute("title") || inner.getAttribute("alt") || inner.textContent || "";
+        }
+        if (!v) v = n.getAttribute("data-testid") || n.getAttribute("data-test") || "";
+        return String(v).trim().slice(0, 50);
+      })(el);
+    if (__name) return typeLabel + ' «' + __name + '»';
     return typeLabel + (identifier ? ' ' + identifier : '');
   }
 
@@ -5946,7 +5965,8 @@ if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
   };
 
   const getElementInfo = (el) => {
-    if (!el) return '';
+    if (!el || !el.getAttribute) return '';
+    el = (el.closest && el.closest('button,a,[role="button"],[role="menuitem"],[role="tab"],[role="switch"],input,select,textarea,summary,label')) || el;  // (PM-INS-0009)
     const text = (el.innerText || el.value || '').trim().slice(0, 50);
     const tag = el.tagName?.toLowerCase() || '';
     const id = el.id ? '#' + el.id : '';
@@ -5959,6 +5979,23 @@ if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
     };
     const typeLabel = tagLabels[tag] || tag;
     if (text) return typeLabel + ' "' + text + '"';
+    const __name = (function (n) {
+        // (PM-INS-0009) icon-only controls: aria-label / title / alt / placeholder / name / labelledby / inner <title>|alt / test id
+        if (!n || !n.getAttribute) return "";
+        var v = n.getAttribute("aria-label") || n.getAttribute("title") || n.getAttribute("alt") ||
+                n.getAttribute("placeholder") || n.getAttribute("name") || "";
+        if (!v && n.getAttribute("aria-labelledby")) {
+          var lb = document.getElementById(n.getAttribute("aria-labelledby"));
+          v = lb ? (lb.textContent || "") : "";
+        }
+        if (!v && n.querySelector) {
+          var inner = n.querySelector("[aria-label],[title],img[alt],svg title");
+          if (inner) v = inner.getAttribute("aria-label") || inner.getAttribute("title") || inner.getAttribute("alt") || inner.textContent || "";
+        }
+        if (!v) v = n.getAttribute("data-testid") || n.getAttribute("data-test") || "";
+        return String(v).trim().slice(0, 50);
+      })(el);
+    if (__name) return typeLabel + ' «' + __name + '»';
     return typeLabel + (id || cls || '');
   };
 
@@ -6305,7 +6342,8 @@ export default function InspectorBridge() {
     };
 
     const getElementInfo = (el) => {
-      if (!el) return "";
+      if (!el || !el.getAttribute) return "";
+      el = (el.closest && el.closest("button,a,[role='button'],[role='menuitem'],[role='tab'],[role='switch'],input,select,textarea,summary,label")) || el;  // (PM-INS-0009)
       const text = (el.innerText || el.value || "").trim().slice(0, 50);
       const tag = el.tagName?.toLowerCase() || "";
       const id = el.id ? "#" + el.id : "";
@@ -6318,6 +6356,23 @@ export default function InspectorBridge() {
       };
       const typeLabel = tagLabels[tag] || tag;
       if (text) return `${typeLabel} "${text}"`;
+      const __name = (function (n) {
+        // (PM-INS-0009) icon-only controls: aria-label / title / alt / placeholder / name / labelledby / inner <title>|alt / test id
+        if (!n || !n.getAttribute) return "";
+        var v = n.getAttribute("aria-label") || n.getAttribute("title") || n.getAttribute("alt") ||
+                n.getAttribute("placeholder") || n.getAttribute("name") || "";
+        if (!v && n.getAttribute("aria-labelledby")) {
+          var lb = document.getElementById(n.getAttribute("aria-labelledby"));
+          v = lb ? (lb.textContent || "") : "";
+        }
+        if (!v && n.querySelector) {
+          var inner = n.querySelector("[aria-label],[title],img[alt],svg title");
+          if (inner) v = inner.getAttribute("aria-label") || inner.getAttribute("title") || inner.getAttribute("alt") || inner.textContent || "";
+        }
+        if (!v) v = n.getAttribute("data-testid") || n.getAttribute("data-test") || "";
+        return String(v).trim().slice(0, 50);
+      })(el);
+      if (__name) return `${typeLabel} «${__name}»`;
       return typeLabel + (id || cls || "");
     };
 

@@ -189,7 +189,7 @@ function Shell({ children, pathname, pageLabel }: LayoutProps & { pathname: stri
           <aside className="fixed top-0 right-0 bottom-0 w-64 bg-white dark:bg-gray-800 shadow-xl">
             <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
               <span className="font-bold text-gray-900 dark:text-white">منو</span>
-              <button onClick={() => setSidebarOpen(false)}>
+              <button onClick={() => setSidebarOpen(false)} aria-label="بستنِ منو" title="بستنِ منو">
                 <XMarkIcon className="w-6 h-6" />
               </button>
             </div>
@@ -218,7 +218,7 @@ function Shell({ children, pathname, pageLabel }: LayoutProps & { pathname: stri
       <main className="flex-1 min-w-0 flex flex-col min-h-screen">
         {/* Mobile header */}
         <header data-report-section="mobile-header" data-report-section-label="سرصفحهٔ موبایل" className="print:hidden md:hidden flex items-center justify-between p-4 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
-          <button onClick={() => setSidebarOpen(true)}>
+          <button onClick={() => setSidebarOpen(true)} aria-label="بازکردنِ منو" title="بازکردنِ منو">
             <Bars3Icon className="w-6 h-6" />
           </button>
           <span className="font-bold" dir="ltr">{APP_NAME}</span>

@@ -172,9 +172,10 @@ export default function InspectorBridge() {
     };
 
     const getElementInfo = (el: EventTarget | null): string => {
-      if (!el || !(el instanceof HTMLElement)) return "";
-      const htmlEl = el as HTMLElement & { value?: string };
-      const text = (htmlEl.innerText || htmlEl.value || "").trim().slice(0, 50);
+      // (PM-INS-0009) an SVG icon inside a button is not an HTMLElement — it used to give "" («کلیک کردی روی  (pointerdown)»).
+      if (!el || !(el instanceof Element)) return "";
+      const htmlEl = (el.closest('button,a,[role="button"],[role="menuitem"],[role="tab"],[role="switch"],input,select,textarea,summary,label') || el) as HTMLElement & { value?: string };
+      const text = ((htmlEl.innerText as string | undefined) || htmlEl.value || "").trim().slice(0, 50);
       const tag = htmlEl.tagName?.toLowerCase() || "";
       const id = htmlEl.id ? "#" + htmlEl.id : "";
       const cls =
@@ -201,9 +202,28 @@ export default function InspectorBridge() {
         li: "\u0622\u06CC\u062A\u0645 \u0644\u06CC\u0633\u062A",
         table: "\u062C\u062F\u0648\u0644",
         video: "\u0648\u06CC\u062F\u06CC\u0648",
+        svg: "\u0622\u06CC\u06A9\u0648\u0646",
+        path: "\u0622\u06CC\u06A9\u0648\u0646",
       };
       const typeLabel = tagLabels[tag] || tag;
       if (text) return `${typeLabel} "${text}"`;
+      const name: string = (function (n: any): string {
+        // (PM-INS-0009) icon-only controls: aria-label / title / alt / placeholder / name / labelledby / inner <title>|alt / test id
+        if (!n || !n.getAttribute) return "";
+        var v = n.getAttribute("aria-label") || n.getAttribute("title") || n.getAttribute("alt") ||
+                n.getAttribute("placeholder") || n.getAttribute("name") || "";
+        if (!v && n.getAttribute("aria-labelledby")) {
+          var lb = document.getElementById(n.getAttribute("aria-labelledby"));
+          v = lb ? (lb.textContent || "") : "";
+        }
+        if (!v && n.querySelector) {
+          var inner = n.querySelector("[aria-label],[title],img[alt],svg title");
+          if (inner) v = inner.getAttribute("aria-label") || inner.getAttribute("title") || inner.getAttribute("alt") || inner.textContent || "";
+        }
+        if (!v) v = n.getAttribute("data-testid") || n.getAttribute("data-test") || "";
+        return String(v).trim().slice(0, 50);
+      })(htmlEl);
+      if (name) return `${typeLabel} «${name}»`;
       return typeLabel + (id || cls || "");
     };
 
@@ -229,7 +249,7 @@ export default function InspectorBridge() {
     };
     const handleFocus = (e: FocusEvent) => {
       if (!shouldSend()) return;
-      if (e.target && e.target !== document && e.target !== document.body) {
+      if (e.target && e.target !== document && e.target !== document.body && e.target instanceof Element) {
         sendToInspector("focus", { elementInfo: getElementInfo(e.target) });
       }
     };

@@ -836,3 +836,20 @@
 - **[VERIFY]** `tests/test_pm_ins_0004_project_diagrams.py` ۵ تست؛ pytest و next build سبز؛ پس از دیپلوی عکس از `/projects/gh_mahdighandi1989_detective_1?tab=diagrams`.
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-16 · pytest + next build
+
+## 2026-11-16 (۳۳) — فوری PM-INS-0009: نام‌گذاریِ کلیک/فوکوس در اسکرینِ بازرس
+
+- **[OWNER]** برگهٔ فوریِ PM-INS-0009 (وارسی ۲۳:۳۶ دبی): پاور، Reload، تشخیصِ scan، سشن‌های آرشیو و ثبتِ کلیک ✓. ایرادها: (۱) کلیک روی منوی همبرگری داخلِ اسکرین
+  «کلیک کردی روی  (pointerdown)» با متنِ خالی — دکمه‌های آیکونی از aria-label/title/selector نام بگیرند؛ (۲) بازشدنِ منوی کشویی «🔴 لایه خطا» شد (false positive)؛
+  (۳) فوکوس‌ها «عنصر ناشناخته».
+- **[FINDING]** (۱) `InspectorBridge.tsx`: `if (!(el instanceof HTMLElement)) return ""` — هدفِ کلیک روی آیکون یک `<svg>`/`<path>` است (Element، نه HTMLElement) ⇒ رشتهٔ خالی؛
+  سه نسخهٔ JS در `render_logs` هم بی‌متن فقط تگ/کلاس می‌دادند. (۳) رویدادِ focus روی خودِ window (نه عنصر) ⇒ "" ⇒ «عنصر ناشناخته» در چت.
+  (۲) پیش‌تر در 4c59a18 (۲۱:۳۷Z، دو ساعت پس از این برگه) رفع شده بود: «لایه خطا» فقط برای overlay ِ خطای واقعی یا متنِ خطا.
+- **[CHANGE]** هر چهار پل: صعود با `closest(button,a,[role=button|menuitem|tab|switch],input,select,textarea,summary,label)` و نامِ دسترس‌پذیر
+  (aria-label، title، alt، placeholder، name، aria-labelledby، `<title>`/alt/aria-label ِ درونی، data-testid) ⇒ «دکمه «باز کردن منو»»؛ فوکوس فقط برای Element.
+  `Layout.tsx`: دکمه‌های باز/بستنِ منو `aria-label` و `title` گرفتند.
+- **[VERIFY]** `tests/test_pm_ins_0009_bridge_names.py` (۳ تست)؛ `node --check` روی دو نسخهٔ JS و transpile ِ دو نسخهٔ TSX بی‌خطا؛ اجرای واقعیِ `getElementInfo` در Chromium:
+  `path`/`svg`/`button` ⇒ «دکمه «باز کردن منو»»، title ⇒ «دکمه «بستن»»، window ⇒ "". pytest و next build سبز.
+- **[TODO]** پلِ تزریق‌شده در مخزن‌های دیگر با «به‌روزرسانیِ پل» تازه می‌شود (خودکار نیست).
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-16 · pytest + next build + Chromium
