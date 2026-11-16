@@ -507,13 +507,18 @@ class AIManager:
                 _prompt, max_tokens=max_tokens, temperature=temperature,
             )
             _elapsed_ms = int((__import__("time").time() - _started_ts) * 1000)
-            return AIResponse(
+            _oauth_resp = AIResponse(
                 model_id=model_id,
                 content=content_str or "",
                 tokens_used=0,  # OAuth subscription — no token accounting
                 finish_reason="stop",
                 latency_ms=_elapsed_ms,
             )
+            # (PM-INS-0011) OAuth calls (cloud_code) were never counted in «مصرف AI»
+            self._schedule_usage_log(provider_str="cloud_code", model_id=model_id, messages=messages,
+                                     response=_oauth_resp, project_id=kwargs.get("_log_project_id"),
+                                     debate_id=kwargs.get("_log_debate_id"))
+            return _oauth_resp
 
         model = get_model(model_id)
         if not model:
@@ -602,6 +607,10 @@ class AIManager:
                     fallback_used=True,
                     original_model_id=original_model_id,
                 )
+                self._schedule_usage_log(provider_str="cloud_code", model_id=model_id, messages=messages,
+                                         response=response, original_model_id=original_model_id,
+                                         project_id=kwargs.get("_log_project_id"),
+                                         debate_id=kwargs.get("_log_debate_id"))
                 return response
 
         service = self._services.get(provider)
@@ -648,7 +657,18 @@ class AIManager:
         # اگر caller عدد کوچک فرستاده → به حداکثر ایمن ارتقا بده
         max_tokens = _smart_max_tokens
 
-        response = await service.generate(model_id, messages, max_tokens, temperature, **kwargs)
+        try:
+            response = await service.generate(model_id, messages, max_tokens, temperature, **kwargs)
+        except Exception as _gen_err:
+            # (PM-INS-0011) a failed call (invalid key, timeout, 429…) is usage too — it was never recorded
+            self._schedule_usage_log(
+                provider_str=(provider.value if hasattr(provider, "value") else str(provider)),
+                model_id=model_id, messages=messages,
+                response=AIResponse(model_id=model_id, content="", tokens_used=0, finish_reason="error",
+                                    error=str(_gen_err)[:500]),
+                original_model_id=original_model_id if used_fallback else None,
+                project_id=kwargs.get("_log_project_id"), debate_id=kwargs.get("_log_debate_id"))
+            raise
 
         # 🆕 اضافه کردن اطلاعات fallback به response
         if used_fallback:
@@ -667,21 +687,29 @@ class AIManager:
 
         # 🆕 (Token Tracking — Tile 1) ثبت مصرف در ai_logs
         # Fire-and-forget — هیچ exception نباید AI flow را block کند.
-        try:
-            import asyncio as _asyncio
-            _asyncio.create_task(self._log_ai_usage_async(
-                provider_str=(provider.value if hasattr(provider, "value") else str(provider)),
-                model_id=model_id,
-                messages=messages,
-                response=response,
-                original_model_id=original_model_id if used_fallback else None,
-                project_id=kwargs.get("_log_project_id"),
-                debate_id=kwargs.get("_log_debate_id"),
-            ))
-        except Exception as _le:
-            slog.warning(f"failed to schedule AI usage log: {_le}")
+        self._schedule_usage_log(
+            provider_str=(provider.value if hasattr(provider, "value") else str(provider)),
+            model_id=model_id,
+            messages=messages,
+            response=response,
+            original_model_id=original_model_id if used_fallback else None,
+            project_id=kwargs.get("_log_project_id"),
+            debate_id=kwargs.get("_log_debate_id"),
+        )
 
         return response
+
+    def _schedule_usage_log(self, **kw) -> None:
+        """(PM-INS-0011) fire-and-forget usage log that KEEPS a reference to its task — a bare create_task() may be
+        garbage-collected before it runs (asyncio docs), silently dropping rows from «مصرف AI». Never raises."""
+        try:
+            import asyncio as _asyncio
+            tasks = self.__dict__.setdefault("_usage_log_tasks", set())
+            t = _asyncio.create_task(self._log_ai_usage_async(**kw))
+            tasks.add(t)
+            t.add_done_callback(tasks.discard)
+        except Exception as _le:
+            slog.warning(f"failed to schedule AI usage log: {_le}")
 
     async def _log_ai_usage_async(
         self,

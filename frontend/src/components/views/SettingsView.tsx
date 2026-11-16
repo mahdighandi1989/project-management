@@ -5,6 +5,7 @@ import Link from 'next/link';
 import RenderLogsPanel from '@/components/RenderLogsPanel';
 import NotificationSettingsPanel from '@/components/NotificationSettingsPanel';
 import AIUsagePanel from '@/components/AIUsagePanel';
+import { providerKeyStates, KEY_STATE_LABEL, type ProviderKey } from '@/lib/liveStats';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -35,6 +36,7 @@ export default function SettingsView() {
   // کلیدهای API
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
   const [keysStatus, setKeysStatus] = useState<Record<string, boolean>>({});
+  const [keyStates, setKeyStates] = useState<Record<string, ProviderKey> | null>(null);
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
 
   // کلیدهای Deploy
@@ -84,6 +86,14 @@ export default function SettingsView() {
       if (statusRes.ok) {
         const data = await statusRes.json();
         setKeysStatus(data || {});
+        // (PM-INS-0011) «✓ فعال» only meant «a key is set» — even for a key the capability test rejected. The badge now
+        // comes from the newest REAL call of that provider's models (same three states as «مدل‌ها»)
+        fetch(`${API_BASE}/api/models`).then((r) => (r.ok ? r.json() : [])).then((models) => {
+          const list = PROVIDERS.map((p) => ({ name: p.id, available: !!(data || {})[p.id] }));
+          const map: Record<string, ProviderKey> = {};
+          providerKeyStates(list, Array.isArray(models) ? models : []).forEach((k) => { map[k.name] = k; });
+          setKeyStates(map);
+        }).catch(() => setKeyStates({}));
       }
 
       // تنظیمات
@@ -367,15 +377,20 @@ export default function SettingsView() {
                       <span className="text-xl">{provider.icon}</span>
                       <span className="font-medium">{provider.name}</span>
                     </div>
-                    <span
-                      className={`text-xs px-2 py-1 rounded ${
-                        keysStatus[provider.id]
-                          ? 'bg-green-100 text-green-700'
-                          : 'bg-gray-200 text-gray-500'
-                      }`}
-                    >
-                      {keysStatus[provider.id] ? '✓ فعال' : 'غیرفعال'}
-                    </span>
+                    {(() => {
+                      const ks = keyStates?.[provider.id];
+                      if (!keysStatus[provider.id]) {
+                        return <span className="text-xs px-2 py-1 rounded bg-gray-200 text-gray-500">بی‌کلید</span>;
+                      }
+                      if (!ks) return <span className="text-xs px-2 py-1 rounded bg-gray-100 text-gray-500">کلید ✓ · …</span>;
+                      const l = KEY_STATE_LABEL[ks.state];
+                      return (
+                        <span className={`text-xs px-2 py-1 rounded ${l.cls}`} data-testid={`key-state-${provider.id}`}
+                          title={`${ks.error ? `خطای آخرین فراخوانیِ واقعی: ${ks.error}` : l.text}${ks.at ? ` (${ks.at})` : ''}`}>
+                          {l.text}
+                        </span>
+                      );
+                    })()}
                   </div>
                   <div className="relative">
                     <input

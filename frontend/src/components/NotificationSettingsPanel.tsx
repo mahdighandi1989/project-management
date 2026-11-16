@@ -362,7 +362,7 @@ export default function NotificationSettingsPanel() {
       {/* وضعیت کانال‌ها */}
       <div className="grid md:grid-cols-2 gap-3">
         {/* Telegram */}
-        <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-5">
+        <div className={`bg-white dark:bg-gray-800 rounded-xl shadow p-5 ${tg.enabled_pref && !tg.configured_via_env ? 'ring-2 ring-red-400' : ''}`}>
           <div className="flex items-center justify-between mb-3">
             <h3 className="font-bold text-lg flex items-center gap-2 dark:text-white">
               <span>📨</span> Telegram
@@ -385,6 +385,11 @@ export default function NotificationSettingsPanel() {
             ) : (
               <span className="text-amber-600 dark:text-amber-400">⚠️ TELEGRAM_BOT_TOKEN/CHAT_ID نیست</span>
             )}
+            {tg.enabled_pref && !tg.configured_via_env && (
+              <div className="mt-2 p-2 rounded bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 font-medium" data-testid="channel-misconfigured-telegram">
+                ⛔ روشن است ولی هیچ پیامی فرستاده نمی‌شود — TELEGRAM_BOT_TOKEN و TELEGRAM_CHAT_ID را در Render بگذارید یا این کانال را خاموش کنید.
+              </div>
+            )}
           </div>
           <button
             onClick={() => test('telegram')}
@@ -395,8 +400,9 @@ export default function NotificationSettingsPanel() {
           </button>
         </div>
 
-        {/* Email */}
-        <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-5">
+        {/* Email — (PM-INS-0011) «فعال» + incomplete SMTP was only an amber line; now a red, explicit «sends nothing».
+            The owner's switch is NOT flipped automatically (it is their saved choice) — it starts working once SMTP is set. */}
+        <div className={`bg-white dark:bg-gray-800 rounded-xl shadow p-5 ${em.enabled_pref && !em.configured_via_env ? 'ring-2 ring-red-400' : ''}`}>
           <div className="flex items-center justify-between mb-3">
             <h3 className="font-bold text-lg flex items-center gap-2 dark:text-white">
               <span>📧</span> Email
@@ -418,6 +424,11 @@ export default function NotificationSettingsPanel() {
               <span className="text-green-600 dark:text-green-400">✅ SMTP پیکربندی‌شده</span>
             ) : (
               <span className="text-amber-600 dark:text-amber-400">⚠️ SMTP credentials کامل نیست</span>
+            )}
+            {em.enabled_pref && !em.configured_via_env && (
+              <div className="mt-2 p-2 rounded bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 font-medium" data-testid="channel-misconfigured-email">
+                ⛔ روشن است ولی هیچ ایمیلی فرستاده نمی‌شود — SMTP_HOST، SMTP_USER، SMTP_PASSWORD، NOTIFICATION_EMAIL_FROM و NOTIFICATION_EMAIL_TO را در Render بگذارید یا این کانال را خاموش کنید.
+              </div>
             )}
           </div>
           <button

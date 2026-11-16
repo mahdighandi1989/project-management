@@ -31,6 +31,7 @@ interface SummaryResponse {
   last_7d: { count: number; tokens: number; cost_usd: number };
   last_30d: { count: number; tokens: number; cost_usd: number };
   last_request_at: string | null;
+  first_request_at?: string | null;
   distinct_providers_30d: number;
 }
 
@@ -108,7 +109,8 @@ function formatCost(c: number): string {
 function formatRelative(iso: string | null): string {
   if (!iso) return '—';
   try {
-    const date = new Date(iso);
+    // (PM-INS-0011) the server stores naive UTC — a timestamp without a zone is UTC, not the viewer's local time
+    const date = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? iso : `${iso}Z`);
     const diff = Date.now() - date.getTime();
     if (diff < 60_000) return 'همین الان';
     if (diff < 3_600_000) return Math.floor(diff / 60_000) + ' دقیقه پیش';
@@ -293,6 +295,13 @@ export default function AIUsagePanel() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="p-3 bg-gray-50 dark:bg-gray-700/50 rounded text-sm dark:text-gray-200">
               🕒 آخرین درخواست: <span className="font-medium">{formatRelative(summary.last_request_at)}</span>
+              {summary.first_request_at && (
+                <div className="text-xs text-gray-500 mt-1" data-testid="usage-first-request">
+                  📅 قدیمی‌ترین ثبت: {formatRelative(summary.first_request_at)}
+                  {summary.last_7d.count === summary.today.count && summary.last_30d.count === summary.today.count && summary.today.count > 0
+                    ? ' — پیش از آن چیزی ثبت نشده، برای همین «امروز»، «۷ روز» و «۳۰ روز» یکی‌اند' : ''}
+                </div>
+              )}
             </div>
             <div className="p-3 bg-gray-50 dark:bg-gray-700/50 rounded text-sm dark:text-gray-200">
               🌐 Provider های فعال: <span className="font-medium">{summary.distinct_providers_30d}</span>

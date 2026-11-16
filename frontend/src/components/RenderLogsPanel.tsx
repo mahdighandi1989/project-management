@@ -162,6 +162,8 @@ export default function RenderLogsPanel() {
   const [loading, setLoading] = useState(true);
   const [fetching, setFetching] = useState(false);
   const [error, setError] = useState('');
+  // (PM-INS-0011) why no logs came — kept on screen (not a 4-second toast): token missing, no service, Render timeout…
+  const [fetchProblem, setFetchProblem] = useState('');
   const [success, setSuccess] = useState('');
   const [activeTab, setActiveTab] = useState<'live' | 'settings' | 'stats' | 'archive'>('live');
   const [isPolling, setIsPolling] = useState(false);
@@ -225,23 +227,26 @@ export default function RenderLogsPanel() {
     setTimeout(() => setSuccess(''), 4000);
   };
 
+  // (PM-INS-0011) the panel used to wait for the Render API (services refresh + a fetch from every service, no timeout)
+  // before showing anything, so it sat on «در حال بارگذاری...» indefinitely. Now: the logs already stored in the DB show
+  // at once (each request capped at 15 s), the fetch from Render runs in the background, and its failure is explained.
   const loadInitialData = async () => {
     setLoading(true);
     try {
-      await Promise.all([
-        loadServices(),
-        loadSettings(),
-        loadStats(),
-        loadTransferStatus(),
+      await Promise.race([
+        Promise.all([loadSettings(), loadStats(), loadTransferStatus(), loadLogs()]),
+        new Promise((resolve) => setTimeout(resolve, 15000)),
       ]);
-      await fetchNewLogs();
-      await loadLogs();
     } catch (e) {
       console.error('Error loading data:', e);
     } finally {
       setLoading(false);
       isInitializedRef.current = true; // 🆕 علامت‌گذاری که بارگذاری اولیه انجام شد
     }
+    void (async () => {
+      await loadServices();
+      await fetchNewLogs();
+    })();
   };
 
   const loadServices = async () => {
@@ -273,9 +278,14 @@ export default function RenderLogsPanel() {
         if (data.services && data.services.length > 0) {
           setServices(data.services);
         }
+      } else {
+        const err = await res.json().catch(() => ({} as any));
+        // e.g. «کلید API رندر یافت نشد» — say it instead of an empty panel (PM-INS-0011)
+        setFetchProblem(`فهرستِ سرویس‌های Render خوانده نشد: ${err.detail || `HTTP ${res.status}`}`);
       }
     } catch (e) {
       console.error('Error refreshing services:', e);
+      setFetchProblem('فهرستِ سرویس‌های Render خوانده نشد: سرور پاسخ نداد');
     }
   };
 
@@ -463,15 +473,24 @@ export default function RenderLogsPanel() {
         body: JSON.stringify(params),
       });
 
-      if (res.ok) {
-        const data = await res.json();
-        if (data.saved > 0) {
-          showSuccess(`${data.saved} لاگ جدید ذخیره شد`);
+      const data = await res.json().catch(() => ({} as any));
+      if (res.ok && data.success !== false) {
+        // the route returns `total_saved` (the old check read a `saved` field that never existed)
+        const saved = data.total_saved ?? data.saved ?? 0;
+        if (saved > 0) {
+          showSuccess(`${saved} لاگ جدید ذخیره شد`);
         }
+        const errs: { service_name?: string; error?: string }[] = data.errors || [];
+        setFetchProblem(errs.length
+          ? `از ${errs.length} سرویس لاگ نیامد: ${errs.slice(0, 3).map((e) => `${e.service_name || '?'} — ${e.error || 'خطای نامعلوم'}`).join('؛ ')}`
+          : (data.services_processed === 0 ? 'هیچ سرویسِ Render ثبت نشده — «بروزرسانی سرویس‌ها» را بزنید' : ''));
         await loadLogs();
+      } else {
+        setFetchProblem(`لاگ از Render خوانده نشد: ${data.error || data.detail || `HTTP ${res.status}`}`);
       }
     } catch (e) {
       console.error('Error fetching new logs:', e);
+      setFetchProblem('لاگ از Render خوانده نشد: سرور پاسخ نداد (شبکه یا timeout)');
     } finally {
       setFetching(false);
     }
@@ -809,6 +828,17 @@ export default function RenderLogsPanel() {
       )}
       {success && (
         <div className="bg-green-100 text-green-700 p-3 rounded-lg">{success}</div>
+      )}
+      {fetching && !fetchProblem && (
+        <div className="bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-300 p-2 rounded-lg text-sm" data-testid="render-logs-fetching">
+          🔄 در حالِ گرفتنِ لاگِ تازه از Render… (لاگ‌های ذخیره‌شده پایین نشان داده می‌شوند)
+        </div>
+      )}
+      {fetchProblem && (
+        <div className="bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-300 border border-red-200 dark:border-red-800 p-3 rounded-lg text-sm flex items-start justify-between gap-2" data-testid="render-logs-problem" dir="auto">
+          <span>⚠️ {fetchProblem}</span>
+          <button onClick={() => { setFetchProblem(''); void fetchNewLogs(); }} className="shrink-0 text-xs underline">دوباره</button>
+        </div>
       )}
 
       {/* تب‌های داخلی */}

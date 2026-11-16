@@ -325,7 +325,12 @@ async def get_summary(db: Session = Depends(get_db)) -> Dict[str, Any]:
 
     # آخرین فعالیت
     latest = db.query(AILog).order_by(desc(AILog.created_at)).first()
-    last_request_at = latest.created_at.isoformat() if latest and latest.created_at else None
+    # (PM-INS-0011) created_at is naive UTC; without «Z» the browser read it as local time (Dubai = +4 h ⇒ «۴ ساعت پیش»)
+    last_request_at = (latest.created_at.isoformat() + "Z") if latest and latest.created_at else None
+
+    # (PM-INS-0011) since when there are rows at all — «امروز = ۷ روز = ۳۰ روز» means nothing older is recorded
+    first = db.query(AILog).order_by(AILog.created_at).first()
+    first_request_at = (first.created_at.isoformat() + "Z") if first and first.created_at else None
 
     # تعداد providerهای فعال
     distinct_providers = db.query(AILog.provider).filter(
@@ -337,6 +342,7 @@ async def get_summary(db: Session = Depends(get_db)) -> Dict[str, Any]:
         "last_7d": last_7d_stats,
         "last_30d": last_30d_stats,
         "last_request_at": last_request_at,
+        "first_request_at": first_request_at,
         "distinct_providers_30d": distinct_providers,
     }
 

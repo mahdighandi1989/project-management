@@ -1451,15 +1451,24 @@ async def fetch_new_logs(
                     "error": result.get("error", "هیچ سرویسی یافت نشد. ابتدا لیست سرویس‌ها را بروزرسانی کنید.")
                 }
 
-        # دریافت لاگ برای هر سرویس
-        for service in services:
-            try:
-                result = await render.get_logs(
-                    service_id=service.id,
-                    limit=limit,
-                    direction="backward"
-                )
+        # دریافت لاگ برای هر سرویس — (PM-INS-0011) all services in parallel, each capped at 25 s, so one slow or
+        # unreachable service cannot keep the panel loading for minutes; a timeout is reported as that service's error
+        import asyncio as _asyncio_mod
+        _sem = _asyncio_mod.Semaphore(6)  # gentle on Render's rate limit
 
+        async def _one(svc):
+            try:
+                async with _sem:
+                    return await _asyncio_mod.wait_for(
+                        render.get_logs(service_id=svc.id, limit=limit, direction="backward"), timeout=25)
+            except _asyncio_mod.TimeoutError:
+                return {"success": False, "error": "Render API در ۲۵ ثانیه پاسخ نداد (timeout)"}
+            except Exception as e:  # noqa: BLE001
+                return {"success": False, "error": str(e)}
+
+        fetched = await _asyncio_mod.gather(*(_one(svc) for svc in services))
+        for service, result in zip(services, fetched):
+            try:
                 if result["success"]:
                     total_fetched += len(result["logs"])
 

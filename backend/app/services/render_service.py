@@ -37,7 +37,9 @@ class RenderAPIService:
     async def _get_session(self) -> aiohttp.ClientSession:
         """دریافت session HTTP"""
         if self._session is None or self._session.closed:
+            # (PM-INS-0011) a bounded timeout — aiohttp's default is 300 s, which kept «📋 لاگ رندر» on «در حال بارگذاری…»
             self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=20, connect=8),
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "Accept": "application/json"
