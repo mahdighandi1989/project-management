@@ -267,6 +267,25 @@ function _looksLikeDeployBuildError(rawMessage: string, backendLogs?: any[]): bo
 }
 
 
+// PM-INS-0017: خلاصهٔ یک‌خطیِ توضیحِ پروژه برای سربرگ — علامت‌های markdown حذف، تیترهای
+// «یادداشت برای مدل/پرامپت» رد می‌شوند، اولین جملهٔ معنادار تا ۱۶۰ نویسه.
+function summarizeDescription(raw: string, max = 160): string {
+  const text = (raw || '').trim();
+  if (!text) return '';
+  if (!text.includes('\n') && text.length <= max && !/[#*`]/.test(text)) return text;
+  const clean = (l: string) => l
+    .replace(/^\s{0,3}(#{1,6}|>|[-*+]|\d+[.)])\s+/, '')
+    .replace(/[*_`~]+/g, '')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const lines = text.split(/\r?\n/);
+  const isNoise = (l: string) => /^(```|---|===|\|)/.test(l.trim()) || /(یادداشت|پرامپت|prompt|instruction|دستور).{0,30}(مدل|model|اجرا)/i.test(l);
+  const paragraph = lines.find((l) => l.trim() && !/^\s{0,3}#/.test(l) && !isNoise(l));
+  const pick = clean(paragraph || lines.find((l) => l.trim()) || text);
+  return pick.length > max ? pick.slice(0, max - 1).trimEnd() + '…' : pick;
+}
+
 export default function ProjectDetailPage() {
   const params = useParams();
   const projectId = params.id as string;
@@ -1140,6 +1159,10 @@ export default function ProjectDetailPage() {
 
   // Render Service Selector State
   const [showServiceSelector, setShowServiceSelector] = useState(false);
+  // 🧪 تشخیصِ فقط‌خواندنیِ Render (PM-INS-0017) — نتیجه در پنجره نشان داده می‌شود
+  const [deployDiag, setDeployDiag] = useState<any>(null);
+  const [deployDiagOpen, setDeployDiagOpen] = useState(false);
+  const [deployDiagLoading, setDeployDiagLoading] = useState(false);
   const [availableRenderServices, setAvailableRenderServices] = useState<{id: string; name: string; type: string}[]>([]);
   const [selectedRenderServices, setSelectedRenderServices] = useState<string[]>([]);
   const [savedRenderServices, setSavedRenderServices] = useState<{id: string; name: string}[]>([]);
@@ -6058,6 +6081,8 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
             project_id: projectId,
             model_ids: modelIds,
             message: userMessage,
+            // PM-INS-0017: متنِ خام تا سرور سؤالِ ساده را با وجودِ ساختارمندسازی تشخیص دهد
+            original_message: wasEnhanced ? rawMessage : undefined,
             chat_history: chatHistory,
             backend_logs: inspectorBackendLogs,
             frontend_url: inspectorFrontendUrl,
@@ -9521,6 +9546,27 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
     }
   };
 
+  // 🧪 تست اتصالِ Render — فقط‌خواندنی؛ سرویس‌های پروژه + آخرین دیپلوی + خطا در پنجره
+  const runDeployDiagnosis = async () => {
+    setDeployDiagOpen(true);
+    setDeployDiagLoading(true);
+    setDeployDiag(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}/deploy/diagnose`);
+      let data: any = null;
+      try { data = await res.json(); } catch { data = null; }
+      if (!res.ok || !data) {
+        setDeployDiag({ success: false, services: [], errors: [`HTTP ${res.status}: ${data?.detail || 'پاسخِ نامعتبر از سرور'}`] });
+      } else {
+        setDeployDiag(data);
+      }
+    } catch (e: any) {
+      setDeployDiag({ success: false, services: [], errors: [`خطا در ارتباط: ${e?.message || e}`] });
+    } finally {
+      setDeployDiagLoading(false);
+    }
+  };
+
   // تست Deploy به Render (برای دیباگ)
   const testRenderDeploy = async () => {
     setDeploying(true);
@@ -9928,8 +9974,8 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
 
       <div className="max-w-7xl mx-auto p-6">
         {/* هدر */}
-        <div className="flex items-center justify-between mb-6">
-          <div>
+        <div className="flex flex-wrap items-start justify-between gap-3 mb-6">
+          <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2 text-sm text-gray-500 mb-1">
               <Link href="/projects" className="hover:text-blue-500">پروژه‌ها</Link>
               <span>/</span>
@@ -9972,11 +10018,26 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                 </a>
               )}
             </div>
-            {project.description && (
-              <p className="text-gray-500 mt-1">{project.description}</p>
-            )}
+            {project.description && (() => {
+              // PM-INS-0017: توضیحِ بلند (گاهی یک پرامپتِ markdown) سربرگ را له می‌کرد —
+              // یک خطِ خلاصه نشان بده، متنِ کامل در «بیشتر».
+              const full = String(project.description);
+              const summary = summarizeDescription(full);
+              const hasMore = summary !== full.trim();
+              return (
+                <div className="mt-1 text-gray-500 max-w-3xl" data-testid="project-description">
+                  <p className="truncate" title={summary}>{summary}</p>
+                  {hasMore && (
+                    <details className="text-sm">
+                      <summary className="cursor-pointer text-blue-500 select-none">بیشتر</summary>
+                      <pre className="mt-2 p-3 whitespace-pre-wrap break-words bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg max-h-80 overflow-auto font-sans text-gray-700 dark:text-gray-300">{full}</pre>
+                    </details>
+                  )}
+                </div>
+              );
+            })()}
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2 shrink-0 max-w-full">
             {project.project_type === 'github_import' && project.metadata?.source_url && (
               <a
                 href={project.metadata.source_url}
@@ -10032,8 +10093,8 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                   </span>
                 )}
                 <button
-                  onClick={testRenderDeploy}
-                  disabled={deploying}
+                  onClick={runDeployDiagnosis}
+                  disabled={deploying || deployDiagLoading}
                   className="px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 disabled:opacity-50"
                   title="تست اتصال به Render و دیباگ مشکلات Deploy"
                 >
@@ -18273,6 +18334,86 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                     لغو
                   </button>
                 </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 🧪 پنجرهٔ نتیجهٔ تست اتصالِ Render (PM-INS-0017) */}
+        {deployDiagOpen && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-4" onClick={() => setDeployDiagOpen(false)}>
+            <div
+              data-testid="deploy-diag-modal"
+              className="bg-white dark:bg-gray-800 rounded-xl shadow-xl max-w-2xl w-full max-h-[85vh] overflow-auto"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="p-4 border-b dark:border-gray-700 flex items-center justify-between sticky top-0 bg-white dark:bg-gray-800">
+                <h3 className="font-bold">🧪 نتیجهٔ تست اتصالِ Render</h3>
+                <button onClick={() => setDeployDiagOpen(false)} className="text-gray-500 hover:text-gray-700 text-xl" aria-label="بستن">✕</button>
+              </div>
+              <div className="p-4 space-y-3 text-sm">
+                {deployDiagLoading && <p className="text-gray-500">⏳ در حال پرسیدن از Render…</p>}
+                {!deployDiagLoading && deployDiag && (
+                  <>
+                    <div className="flex flex-wrap gap-2">
+                      <span className={`px-2 py-1 rounded ${deployDiag.render_api_key_configured ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                        کلید API: {deployDiag.render_api_key_configured ? 'تنظیم شده' : 'تنظیم نشده'}
+                      </span>
+                      {deployDiag.match_method && (
+                        <span className="px-2 py-1 rounded bg-gray-100 dark:bg-gray-700">
+                          یافتنِ سرویس: {deployDiag.match_method === 'saved' ? 'سرویس‌های ذخیره‌شده' : deployDiag.match_method === 'name' ? 'بر اساسِ نام/مخزن' : 'پیدا نشد'}
+                        </span>
+                      )}
+                    </div>
+                    {(deployDiag.errors || []).map((er: string, i: number) => (
+                      <div key={i} className="p-2 rounded bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300">❌ {er}</div>
+                    ))}
+                    {(deployDiag.services || []).length > 0 && (
+                      <div className="space-y-2">
+                        <p className="font-medium">سرویس‌های این پروژه ({deployDiag.services.length}):</p>
+                        {deployDiag.services.map((sv: any) => {
+                          const d = sv.last_deploy;
+                          const st = d?.status || '';
+                          const color = st === 'live' ? 'text-green-600' : /fail|cancel/.test(st) ? 'text-red-600' : 'text-amber-600';
+                          return (
+                            <div key={sv.id} className="p-3 rounded border dark:border-gray-700">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <span className="font-medium">{sv.name || sv.id}</span>
+                                <span className="text-xs text-gray-500" dir="ltr">{sv.type || ''} · {sv.id}</span>
+                              </div>
+                              {sv.suspended === 'suspended' && <p className="text-amber-600">⏸ سرویس معلق است</p>}
+                              {d ? (
+                                <p className="mt-1">
+                                  آخرین دیپلوی: <b className={color} dir="ltr">{st || '—'}</b>
+                                  {d.commit_id && <> · کامیت <code dir="ltr">{d.commit_id}</code></>}
+                                  {d.finishedAt || d.createdAt ? <> · <span dir="ltr">{new Date(d.finishedAt || d.createdAt).toLocaleString('fa-IR')}</span></> : null}
+                                  {d.commit_message && <span className="block text-xs text-gray-500 truncate">{d.commit_message}</span>}
+                                </p>
+                              ) : (
+                                <p className="mt-1 text-gray-500">آخرین دیپلوی: {sv.error ? <span className="text-red-600">خطا — {sv.error}</span> : 'هنوز دیپلویی نیست'}</p>
+                              )}
+                              {sv.url && <a href={sv.url} target="_blank" rel="noopener noreferrer" className="text-blue-500 text-xs" dir="ltr">{sv.url}</a>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {(deployDiag.available_services || []).length > 0 && (
+                      <p className="text-gray-500">سرویس‌های موجود در حساب: {deployDiag.available_services.map((s: any) => s.name).join('، ')}</p>
+                    )}
+                    <div className="flex flex-wrap gap-2 pt-2 border-t dark:border-gray-700">
+                      <button onClick={runDeployDiagnosis} className="px-3 py-1.5 bg-gray-200 dark:bg-gray-700 rounded-lg">🔄 دوباره</button>
+                      <button
+                        onClick={() => { setDeployDiagOpen(false); testRenderDeploy(); }}
+                        disabled={deploying}
+                        className="px-3 py-1.5 bg-orange-500 text-white rounded-lg hover:bg-orange-600 disabled:opacity-50"
+                        title="این دکمه واقعاً روی Render دیپلوی راه می‌اندازد"
+                      >
+                        🚀 اجرای Deploy واقعی
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
           </div>

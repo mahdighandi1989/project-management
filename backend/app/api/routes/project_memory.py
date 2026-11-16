@@ -4620,6 +4620,122 @@ async def test_render_deploy(
         }
 
 
+@router.get("/{project_id}/deploy/diagnose")
+async def diagnose_render_deploy(
+    project_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    تشخیصِ فقط‌خواندنیِ اتصالِ Render برای «🧪 تست Deploy» (PM-INS-0017).
+    هیچ deployی راه نمی‌اندازد: کلید را می‌سنجد، سرویس‌های این پروژه (ذخیره‌شده یا هم‌نام)
+    را پیدا می‌کند و وضعیتِ آخرین دیپلوی و خطای هر کدام را برمی‌گرداند.
+    """
+    from ...models.setting import Setting
+    from ...services.deploy_service import RenderDeployService
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="پروژه یافت نشد")
+
+    try:
+        extra = json.loads(project.extra_data) if project.extra_data else {}
+    except Exception:
+        extra = {}
+
+    render_api_key = os.getenv("RENDER_API_KEY", "")
+    if not render_api_key:
+        try:
+            render_api_key = Setting.get_value(db, "api_key_render") or ""
+        except Exception:
+            render_api_key = ""
+
+    report = {
+        "success": True,
+        "project": project.name,
+        "repo": extra.get("repo"),
+        "render_api_key_configured": bool(render_api_key),
+        "match_method": None,
+        "services": [],
+        "available_services": [],
+        "errors": [],
+    }
+    if not render_api_key:
+        report["success"] = False
+        report["errors"].append("کلید API رندر تنظیم نشده (Settings → Deploy Keys)")
+        return report
+
+    svc = RenderDeployService(api_key=render_api_key)
+    try:
+        listed = await svc.list_services()
+        if not listed:
+            report["errors"].append("فهرستِ سرویس‌های Render خوانده نشد (کلید نامعتبر یا Render در دسترس نیست)")
+        all_services = []
+        for item in (listed or []):
+            d = item.get("service", item) if isinstance(item, dict) else {}
+            if not d.get("id"):
+                continue
+            all_services.append({
+                "id": d.get("id"),
+                "name": d.get("name"),
+                "type": d.get("type"),
+                "suspended": d.get("suspended"),
+                "url": (d.get("serviceDetails") or {}).get("url"),
+                "repo": d.get("repo"),
+                "branch": d.get("branch"),
+            })
+        by_id = {s["id"]: s for s in all_services}
+
+        saved_ids = list(extra.get("render_service_ids") or [])
+        if extra.get("render_service_id") and extra["render_service_id"] not in saved_ids:
+            saved_ids.append(extra["render_service_id"])
+
+        targets = []
+        if saved_ids:
+            report["match_method"] = "saved"
+            for sid in saved_ids:
+                targets.append(by_id.get(sid) or {"id": sid, "name": None})
+        else:
+            search = (extra.get("repo") or project.name or "").lower().replace("_", "-").replace(" ", "-")
+            repo_full = f"{extra.get('owner', '')}/{extra.get('repo', '')}".lower()
+            for s in all_services:
+                name = (s.get("name") or "").lower()
+                repo_url = (s.get("repo") or "").lower()
+                if (search and (search in name or (name and name in search))) or (
+                    extra.get("repo") and repo_url.endswith(repo_full)
+                ):
+                    targets.append(s)
+            report["match_method"] = "name" if targets else "none"
+            if not targets:
+                report["available_services"] = [
+                    {"id": s["id"], "name": s["name"], "type": s["type"]} for s in all_services
+                ]
+                if all_services:
+                    report["errors"].append("هیچ سرویسِ Render به این پروژه نسبت داده نشده و هم‌نامی هم پیدا نشد")
+
+        for t in targets:
+            entry = dict(t)
+            deploys = await svc.get_deploys(t["id"], limit=1)
+            if deploys.get("success"):
+                last = (deploys.get("deploys") or [None])[0]
+                entry["last_deploy"] = last
+            else:
+                entry["last_deploy"] = None
+                entry["error"] = deploys.get("error")
+            report["services"].append(entry)
+    except Exception as e:  # pragma: no cover - شبکه
+        report["success"] = False
+        report["errors"].append(str(e)[:300])
+    finally:
+        try:
+            await svc.close()
+        except Exception:
+            pass
+
+    if report["errors"] and not report["services"]:
+        report["success"] = False
+    return report
+
+
 @router.get("/{project_id}/deploy/status")
 async def get_deploy_status(
     project_id: str,

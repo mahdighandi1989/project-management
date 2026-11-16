@@ -11771,6 +11771,26 @@ class SmartChatRequest(BaseModel):
     #   - system prompt را قوی‌تر می‌کند که حتماً action_plan تولید شود
     #   - در retry≥2 خودکار به fallback model سوئیچ می‌کند
     retry_attempt: Optional[int] = None
+    # (PM-INS-0017) متنِ خامِ کاربر پیش از «ساختارمندسازیِ پرامپت». وقتی هست،
+    # پیش‌طبقه‌بندیِ سؤالِ ساده روی همین انجام می‌شود (متنِ بازنویسی‌شده بلند و چندخطی است).
+    original_message: Optional[str] = None
+
+
+def _apply_quick_question_override(request: "SmartChatRequest") -> bool:
+    """(PM-INS-0017) اگر متنِ خامِ کاربر یک سؤالِ سادهٔ فقط‌خواندنی است، پرامپتِ
+    بازنویسی‌شده را کنار بگذار و همان متنِ خام را بفرست — طبقه‌بندی QUESTION می‌شود و
+    دیگر ده‌ها هزار توکن برای جوابِ یک‌خطی خرج نمی‌شود. True ⇒ جایگزین شد."""
+    raw = (request.original_message or "").strip()
+    if not raw or request.reply_to or raw == (request.message or "").strip():
+        return False
+    try:
+        from ...services.inspector_quick_classify import is_simple_info_question
+    except Exception:
+        return False
+    if is_simple_info_question(raw):
+        request.message = raw
+        return True
+    return False
 
 
 class ApplyActionRequest(BaseModel):
@@ -14760,6 +14780,8 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
     from fastapi.responses import StreamingResponse
     from ...models.project import Project
     from ...services.github_import import get_github_import_service
+    if _apply_quick_question_override(request):
+        slog.info("[smart-chat] simple question — enhanced prompt dropped, raw message used (PM-INS-0017)")
     from ...services.ai_manager import get_ai_manager
     from ...services.ai_base import Message
 
