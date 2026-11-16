@@ -4416,7 +4416,9 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
   const debugBridgeStatus = async () => {
     setBridgeDebugInfo({ loading: true });
     try {
-      const res = await fetch(`${API_BASE}/api/render/inspector/debug-bridge/${projectId}`);
+      // PM-INS-0018: نشانیِ واقعیِ همان پیش‌نمایش را بفرست تا تشخیص از همان‌جا بخواند
+      const _pv = inspectorBaseUrl || inspectorFrontendUrl || '';
+      const res = await fetch(`${API_BASE}/api/render/inspector/debug-bridge/${projectId}${_pv ? `?preview_url=${encodeURIComponent(_pv)}` : ''}`);
       const data = await res.json();
       setBridgeDebugInfo({ loading: false, data });
       console.log('🔍 Bridge Debug Info:', data);
@@ -15230,9 +15232,13 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                           </ul>
                         </div>
                       </div>
+                    </>
+                  )}
 
-                      {/* دکمه‌های سریع */}
-                      <div className="flex flex-wrap gap-1 px-2">
+                  {/* دکمه‌های سریع — PM-INS-0018: همیشه در دسترس، نه فقط در سشنِ خالی */}
+                  {(
+                    <>
+                      <div className="flex flex-wrap gap-1 px-2 sticky top-0 z-10 py-1 bg-gray-50/95 dark:bg-gray-900/95" data-testid="inspector-quick-actions">
                         <button
                           onClick={() => { setInspectorChatInput('لاگ‌های خطا را تحلیل کن'); }}
                           className="text-xs bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 px-2 py-1 rounded-full hover:bg-red-200 transition"

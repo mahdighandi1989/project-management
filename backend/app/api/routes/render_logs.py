@@ -7797,9 +7797,33 @@ async def set_project_github_path(
         return {"success": False, "error": str(e)}
 
 
+def _resolve_bridge_preview_url(project, explicit: Optional[str] = None) -> Optional[str]:
+    """(PM-INS-0018) نشانیِ سایتِ دیپلوی‌شده برای تشخیصِ Bridge: نشانیِ صریحِ فرانت (http/https)،
+    وگرنه deploy_url/preview_url ِ پروژه، وگرنه کلیدهای نشانی در extra_data."""
+    def _ok(u):
+        return isinstance(u, str) and u.strip().lower().startswith(("http://", "https://"))
+    if _ok(explicit):
+        return explicit.strip()
+    for attr in ("deploy_url", "preview_url"):
+        v = getattr(project, attr, None)
+        if _ok(v):
+            return v
+    raw = getattr(project, "extra_data", None)
+    try:
+        extra = json.loads(raw) if isinstance(raw, str) else (raw or {})
+    except Exception:
+        extra = {}
+    if isinstance(extra, dict):
+        for key in ("frontend_url", "deploy_url", "preview_url", "render_url", "url"):
+            if _ok(extra.get(key)):
+                return extra[key]
+    return None
+
+
 @router.get("/inspector/debug-bridge/{project_id}")
 async def debug_bridge_injection(
     project_id: str,
+    preview_url: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     """
@@ -7927,7 +7951,8 @@ async def debug_bridge_injection(
                 result["message"] = f"Bridge Script در {len(files_with_bridge)} فایل یافت شد"
 
             # 🔍 بررسی سایت دیپلوی شده
-            preview_url = getattr(project, 'deploy_url', None) or getattr(project, 'preview_url', None)
+            # PM-INS-0018: نشانیِ واقعیِ پیش‌نمایش (همان که اسکرین نشان می‌دهد) اول؛ بعد فیلدهای پروژه.
+            preview_url = _resolve_bridge_preview_url(project, preview_url)
             if preview_url:
                 result["preview_url"] = preview_url
                 try:
