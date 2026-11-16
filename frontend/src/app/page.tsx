@@ -13,10 +13,10 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { SITE, GROUP_LABELS, APP_NAME, APP_NAME_FA, APP_TAGLINE, type SiteEntry } from '@/lib/siteMap';
+import { useLiveStats, KEY_STATE_LABEL, type ProviderKey } from '@/lib/liveStats';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
-interface Provider { name: string; available: boolean }
 interface Recent {
   worklog: { title: string; signed: string; tags: string[] }[];
   commits: { sha: string; date: string; message: string; url: string }[];
@@ -40,7 +40,24 @@ function faDate(iso?: string) {
   }
 }
 
-function Stat({ href, label, value, hint, tone = 'gray' }: { href: string; label: string; value: React.ReactNode; hint?: string; tone?: 'gray' | 'green' | 'amber' | 'red' | 'blue' }) {
+/** (PM-INS-0010) the same three-state key badge as «مدل‌ها و تنظیمات» — not a bare «کلیدِ …» list */
+function KeyChips({ keys }: { keys: ProviderKey[] }) {
+  return (
+    <div className="mt-1 flex flex-wrap gap-1" data-testid="home-key-states">
+      {keys.map((k) => {
+        const l = KEY_STATE_LABEL[k.state];
+        return (
+          <span key={k.name} className={`text-[10px] px-1.5 py-0.5 rounded ${l.cls}`} dir="ltr"
+            title={`${k.name}: ${l.text}${k.error ? ` — ${k.error}` : ''}${k.at ? ` (${k.at})` : ''}`}>
+            {k.name} {l.icon}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+function Stat({ href, label, value, hint, extra, tone = 'gray' }: { href: string; label: string; value: React.ReactNode; hint?: string; extra?: React.ReactNode; tone?: 'gray' | 'green' | 'amber' | 'red' | 'blue' }) {
   const tones: Record<string, string> = {
     gray: 'border-gray-200 dark:border-gray-700',
     green: 'border-green-300 dark:border-green-700',
@@ -53,6 +70,7 @@ function Stat({ href, label, value, hint, tone = 'gray' }: { href: string; label
       <div className="text-xs text-gray-500 dark:text-gray-400">{label}</div>
       <div className="text-2xl font-bold dark:text-white mt-1">{value}</div>
       {hint && <div className="text-xs text-gray-400 mt-1 truncate">{hint}</div>}
+      {extra}
     </Link>
   );
 }
@@ -84,30 +102,22 @@ function PageCard({ e }: { e: SiteEntry }) {
 }
 
 export default function HomePage() {
-  const [providers, setProviders] = useState<Provider[] | null>(null);
-  const [oversight, setOversight] = useState<any>(null);
-  const [inspection, setInspection] = useState<any>(null);
+  // (PM-INS-0010) the status numbers come from lib/liveStats — the help circle's «آمار» reads the same source
+  const { providers, keys, oversight, inspection, disk, enabledModels, insOpen } = useLiveStats();
   const [recent, setRecent] = useState<Recent | null>(null);
-  const [disk, setDisk] = useState<any>(null);
-  const [enabledModels, setEnabledModels] = useState<any[] | null>(null);
 
   useEffect(() => {
-    getJson<Provider[]>('/api/settings/providers').then((d) => setProviders(Array.isArray(d) ? d : []));
-    getJson<any>('/api/oversight/status').then(setOversight);
-    getJson<any>('/api/inspection?limit=1').then(setInspection);
     getJson<Recent>('/api/handbook/recent?limit=6').then(setRecent);
-    getJson<any>('/api/oversight/disk').then(setDisk);
-    getJson<any[]>('/api/models/available').then((m) => { if (Array.isArray(m)) setEnabledModels(m); });
   }, []);
 
   const activeProviders = (providers || []).filter((p) => p.available);
+  const failedKeys = (keys || []).filter((k) => k.state === 'failed');
   // (2026-11-15, review) «مدل‌های فعال» = models switched ON (with a key), not providers with a key — it used to say
   // «3» while every model was switched off in «مدل‌ها و تنظیمات»
   const groups = (['main', 'tools', 'system'] as const).map((g) => ({
     id: g, label: GROUP_LABELS[g], items: SITE.filter((s) => s.group === g && s.home),
   }));
   const extra = SITE.filter((s) => s.group === 'hidden' && s.home);
-  const insOpen = inspection?.counts ? (inspection.counts.open || 0) + (inspection.counts.answered || 0) : null;
 
   return (
     <div className="max-w-6xl mx-auto" dir="rtl">
@@ -133,9 +143,10 @@ export default function HomePage() {
         <Stat href="/settings?view=models" label="مدل‌های روشن"
           value={enabledModels === null ? '…' : enabledModels.length}
           hint={enabledModels === null ? '' : enabledModels.length
-            ? `کلیدِ ${activeProviders.map((p) => p.name).join('، ') || '—'}`
+            ? (failedKeys.length ? `کلیدِ ${failedKeys.map((k) => k.name).join('، ')} در تستِ واقعی شکست خورد` : (keys ? 'وضعیتِ کلیدها:' : ''))
             : (activeProviders.length ? 'همهٔ مدل‌ها خاموش‌اند — در «مدل‌ها و تنظیمات» روشن کنید' : 'کلیدی تنظیم نشده — مدل‌ها و تنظیمات')}
-          tone={enabledModels !== null && enabledModels.length === 0 ? 'amber' : 'green'} />
+          extra={keys && keys.length > 0 ? <KeyChips keys={keys} /> : undefined}
+          tone={enabledModels !== null && enabledModels.length === 0 ? 'amber' : failedKeys.length ? 'red' : 'green'} />
         <Stat href="/oversight?tab=watched" label="مخازنِ تحتِ پایش (اتاق فرمان)"
           value={oversight ? oversight.watched_count : '…'}
           hint={oversight ? `GitHub ${oversight.github_token ? 'متصل' : 'بی‌توکن'} · Render ${oversight.render_token ? 'متصل' : 'بی‌توکن'}` : ''}

@@ -72,6 +72,8 @@ async def changes(files: str = Query(..., description="comma-separated repo path
 #   ACTIVITY  — what the app's own models did: AI calls per day × model, «اتاق فرمان» runs/verifies, assistant chats
 # `order`: "date" (newest matters most — TOC newest first) or "content" (document order).
 
+from typing import Optional  # noqa: E402
+
 from fastapi import HTTPException  # noqa: E402
 from fastapi.responses import PlainTextResponse  # noqa: E402
 
@@ -101,7 +103,80 @@ def _title_of(text: str, fallback: str) -> str:
     return fallback
 
 
-def _catalogue() -> list[dict[str, Any]]:
+# (PM-INS-0010) «این برنامه هابِ همهٔ پروژه‌هاست» — the reader also opens the handbook / work log of every repo
+# «اتاق فرمان» watches (`?repo=owner/name`). Another repo's layout is not ours, so its documents are discovered more
+# broadly: root *.md (README, CLAUDE, AGENTS…), docs/*.md, every docs/<folder>/*.md (e.g. Detective-1's docs/HANDBOOK),
+# experiences/*.md; plus the generated CHANGELOG of THAT repo's commits. ACTIVITY stays this app's own (not per repo).
+# Read-only, GitHub only (no local fallback), restricted to the watched list so the endpoint is not a generic proxy.
+FOREIGN_MAX_DOCS = 80
+FOREIGN_GROUPS = {"WORKLOG": "دفتر کار", "HANDBOOK": "جزوه", "PROGRESS": "جزوه"}
+
+
+def _resolve_repo(repo: Optional[str]) -> Optional[str]:
+    """None = this repo. Anything else must be one of the watched repos (case-insensitive) — else 404."""
+    if not repo or not repo.strip():
+        return None
+    from ...services import project_supervision as ps
+
+    name = repo.strip()
+    if not ps.valid_repo(name):
+        raise HTTPException(400, "نامِ مخزن نامعتبر است (owner/name)")
+    if ps.is_self(name):
+        return None
+    for w in ps.watched_repos():
+        if w.lower() == name.lower():
+            return w
+    raise HTTPException(404, "این مخزن تحتِ پایشِ «اتاق فرمان» نیست")
+
+
+def _blob_url(d: dict[str, Any], target: Optional[str]) -> Optional[str]:
+    if not d.get("path"):
+        return None
+    if target:
+        return f"https://github.com/{target}/blob/HEAD/{d['path']}"
+    return f"https://github.com/{repo_docs.repo()}/blob/{repo_docs.branch()}/{d['path']}"
+
+
+def _foreign_catalogue(target: str) -> list[dict[str, Any]]:
+    docs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(item: dict[str, Any], group: str, prefix: str) -> None:
+        name = item["name"]
+        if item["type"] != "file" or not name.lower().endswith(".md") or len(docs) >= FOREIGN_MAX_DOCS:
+            return
+        stem = re.sub(r"[^A-Za-z0-9_\-]", "-", name[:-3])[:60] or "doc"
+        slug = (prefix + stem) if stem.upper() not in FOREIGN_GROUPS else stem.upper()
+        base, n = slug, 2
+        while slug in seen or slug in GENERATED:
+            slug, n = f"{base}-{n}", n + 1
+        seen.add(slug)
+        docs.append({"slug": slug, "path": item["path"], "group": FOREIGN_GROUPS.get(stem.upper(), group)})
+
+    root = repo_docs.list_dir("", target)
+    docs_dir = repo_docs.list_dir("docs", target) if any(i["name"] == "docs" and i["type"] == "dir" for i in root) else []
+    for item in docs_dir:
+        add(item, "مستندات (docs)", "docs-")
+    for sub in [i for i in docs_dir if i["type"] == "dir"][:12]:
+        label = "ناظرِ خودکار" if sub["name"].lower() == "supervisor" else f"docs/{sub['name']}"
+        prefix = re.sub(r"[^A-Za-z0-9_\-]", "-", sub["name"])[:20] + "-"
+        for item in repo_docs.list_dir(sub["path"], target):
+            add(item, label, prefix)
+    for item in root:
+        add(item, "ریشهٔ مخزن", "root-")
+    if any(i["name"] == "experiences" and i["type"] == "dir" for i in root):
+        for item in repo_docs.list_dir("experiences", target):
+            if item["name"].lower() != "readme.md":
+                add(item, "درس‌ها", "lesson-")
+    docs.append({"slug": "CHANGELOG", "path": None, "group": "دفتر کار", "generated": True})
+    for d in docs:
+        d["order"] = "date" if d["slug"] in DATE_ORDERED else "content"
+    return docs
+
+
+def _catalogue(target: Optional[str] = None) -> list[dict[str, Any]]:
+    if target:
+        return _foreign_catalogue(target)
     docs: list[dict[str, Any]] = []
     for folder, group, prefix in SOURCES:
         for item in repo_docs.list_dir(folder):
@@ -121,25 +196,25 @@ def _catalogue() -> list[dict[str, Any]]:
     return docs
 
 
-def _find(slug: str) -> dict[str, Any]:
+def _find(slug: str, target: Optional[str] = None) -> dict[str, Any]:
     if not _SLUG_RE.match(slug or ""):
         raise HTTPException(404, "سند یافت نشد")
-    for d in _catalogue():
+    for d in _catalogue(target):
         if d["slug"] == slug:
             return d
     raise HTTPException(404, "سند یافت نشد")
 
 
-def _changelog_md(pages: int = 3) -> str:
+def _changelog_md(pages: int = 3, target: Optional[str] = None) -> str:
     commits: list[dict[str, Any]] = []
     for page in range(1, pages + 1):
-        batch = repo_docs.commits_page(page, 100)
+        batch = repo_docs.commits_page(page, 100, target)
         commits += batch
         if len(batch) < 100:
             break
     out = ["# 🔀 تاریخچهٔ تغییرات — همهٔ کامیت‌های main",
            "",
-           f"خودکار و زنده از GitHub (`{repo_docs.repo()}`)؛ هر تغییری — از هر سشن، مدل، روتین یا انسان — اینجا هست، "
+           f"خودکار و زنده از GitHub (`{target or repo_docs.repo()}`)؛ هر تغییری — از هر سشن، مدل، روتین یا انسان — اینجا هست، "
            "حتی اگر در دفتر کار ثبت نشده باشد. کامیت‌های پشت‌سرهمِ `chore(prompt): sync` در یک سطر جمع شده‌اند.",
            ""]
     day = ""
@@ -216,55 +291,72 @@ def _activity_md() -> str:
     return "\n".join(out)
 
 
-def _content(d: dict[str, Any]) -> tuple[str, str]:
+def _content(d: dict[str, Any], target: Optional[str] = None) -> tuple[str, str]:
     if d["slug"] == "CHANGELOG":
-        return _changelog_md(), "github"
+        return _changelog_md(target=target), "github"
     if d["slug"] == "ACTIVITY":
         return _activity_md(), "app"
-    return repo_docs.read_text(d["path"])
+    return repo_docs.read_text(d["path"], target)
+
+
+_REPO_Q = Query(None, description="(PM-INS-0010) owner/name of a watched repo; empty = this project")
+
+
+@router.get("/repos")
+async def handbook_repos() -> dict[str, Any]:
+    """(PM-INS-0010) The projects whose handbook / work log the reader can open: this one + every watched repo."""
+    from ...services import project_supervision as ps
+
+    names = await asyncio.to_thread(ps.watched_repos)
+    me = repo_docs.repo()
+    ordered = [me] + [n for n in names if n.lower() != me.lower()]
+    return {"repos": [{"repo": n, "self": n == me} for n in ordered]}
 
 
 @router.get("/docs")
-async def list_docs() -> list[dict[str, Any]]:
-    docs = await asyncio.to_thread(_catalogue)
+async def list_docs(repo: Optional[str] = _REPO_Q) -> list[dict[str, Any]]:
+    target = _resolve_repo(repo)
+    docs = await asyncio.to_thread(_catalogue, target)
     out = []
     for d in docs:
         title = GENERATED.get(d["slug"], (None,))[0]
         if not title:
             try:
-                text, _ = await asyncio.to_thread(repo_docs.read_text, d["path"])
+                text, _ = await asyncio.to_thread(repo_docs.read_text, d["path"], target)
                 title = _title_of(text, d["slug"])
             except FileNotFoundError:
                 continue
-        out.append({**d, "title": title,
-                    "github_url": f"https://github.com/{repo_docs.repo()}/blob/{repo_docs.branch()}/{d['path']}" if d["path"] else None})
+        out.append({**d, "title": title, "repo": target or repo_docs.repo(), "github_url": _blob_url(d, target)})
     groups = ["جزوه", "دفتر کار", "ناظرِ خودکار", "درس‌ها"]
     return sorted(out, key=lambda d: (groups.index(d["group"]) if d["group"] in groups else 9,
                                       FIRST.get(d["slug"], 50), d["title"]))
 
 
 @router.get("/doc/{slug}")
-async def get_doc(slug: str) -> dict[str, Any]:
-    d = await asyncio.to_thread(_find, slug)
+async def get_doc(slug: str, repo: Optional[str] = _REPO_Q) -> dict[str, Any]:
+    target = _resolve_repo(repo)
+    d = await asyncio.to_thread(_find, slug, target)
     try:
-        text, source = await asyncio.to_thread(_content, d)
+        text, source = await asyncio.to_thread(_content, d, target)
     except FileNotFoundError:
         raise HTTPException(404, "سند یافت نشد")
     return {"slug": slug, "title": GENERATED.get(slug, (None,))[0] or _title_of(text, slug), "content": text,
             "order": d["order"], "group": d["group"], "source": source, "path": d["path"],
-            "github_url": f"https://github.com/{repo_docs.repo()}/blob/{repo_docs.branch()}/{d['path']}" if d["path"] else None}
+            "repo": target or repo_docs.repo(), "github_url": _blob_url(d, target)}
 
 
 @router.get("/search")
-async def search(q: str = Query(..., min_length=2), limit: int = Query(40, ge=1, le=200)) -> dict[str, Any]:
+async def search(q: str = Query(..., min_length=2), limit: int = Query(40, ge=1, le=200),
+                 repo: Optional[str] = _REPO_Q) -> dict[str, Any]:
     """Every line that contains the query, in every document (generated ones excluded — they are views of GitHub/app data)."""
+    target = _resolve_repo(repo)
     needle = q.strip().lower()
     hits: list[dict[str, Any]] = []
-    for d in await asyncio.to_thread(_catalogue):
+    for d in await asyncio.to_thread(_catalogue, target):
         if d.get("generated"):
             continue
         try:
-            text, _ = await asyncio.to_thread(repo_docs.read_text, d["path"])
+            text, _ = await asyncio.to_thread(repo_docs.read_text, d["path"], target)
         except FileNotFoundError:
             continue
         heading = ""
@@ -279,18 +371,20 @@ async def search(q: str = Query(..., min_length=2), limit: int = Query(40, ge=1,
 
 
 @router.get("/export", response_class=PlainTextResponse)
-async def export(slugs: str = Query("", description="comma-separated; empty = every document")) -> PlainTextResponse:
+async def export(slugs: str = Query("", description="comma-separated; empty = every document"),
+                 repo: Optional[str] = _REPO_Q) -> PlainTextResponse:
     """One Markdown file of the chosen documents (or all of them) — «خروجی گرفتن»."""
+    target = _resolve_repo(repo)
     wanted = [s for s in slugs.split(",") if s.strip()] if slugs else None
-    parts = [f"# جزوه و دفتر کار — {repo_docs.repo()}", ""]
-    for d in await list_docs():
+    parts = [f"# جزوه و دفتر کار — {target or repo_docs.repo()}", ""]
+    for d in await list_docs(repo=target):
         if wanted and d["slug"] not in wanted:
             continue
         try:
-            text, _ = await asyncio.to_thread(_content, d)
+            text, _ = await asyncio.to_thread(_content, d, target)
         except FileNotFoundError:
             continue
         parts += ["", "---", "", f"<!-- {d['slug']} — {d['path'] or 'generated'} -->", "", text]
-    name = "handbook-all.md" if not wanted else f"handbook-{'-'.join(wanted)[:60]}.md"
+    name = ("handbook-all.md" if not target else f"handbook-{target.split('/')[-1]}-all.md") if not wanted else f"handbook-{'-'.join(wanted)[:60]}.md"
     return PlainTextResponse("\n".join(parts), media_type="text/markdown; charset=utf-8",
                              headers={"Content-Disposition": f'attachment; filename="{name}"'})

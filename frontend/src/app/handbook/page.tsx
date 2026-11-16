@@ -11,6 +11,9 @@
  * Index: date-ordered documents (WORKLOG, PROGRESS, CHANGELOG, …) list newest first; content documents keep their
  * order. Heading anchors use GitHub's slug rule — the same one scripts/docs_gate.py checks the handbook's links with.
  * Export: this document (.md), all documents (.md), print / save as PDF.
+ *
+ * (PM-INS-0010) «این برنامه هابِ همهٔ پروژه‌هاست» — a project picker (`?repo=owner/name`) opens the handbook / work log
+ * of any repo «اتاق فرمان» watches (e.g. Detective-1's docs/HANDBOOK); empty = this project.
  */
 
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
@@ -139,7 +142,10 @@ function download(name: string, text: string) {
 function HandbookInner() {
   const params = useSearchParams();
   const router = useRouter();
-  const slug = params.get('doc') || 'HANDBOOK';
+  const repo = params.get('repo') || '';
+  const docParam = params.get('doc');
+  const [repos, setRepos] = useState<{ repo: string; self: boolean }[]>([]);
+  const [docsLoaded, setDocsLoaded] = useState(false);
   const [docs, setDocs] = useState<DocMeta[]>([]);
   const [doc, setDoc] = useState<Doc | null>(null);
   const [error, setError] = useState('');
@@ -149,18 +155,34 @@ function HandbookInner() {
   const [q, setQ] = useState('');
   const [hits, setHits] = useState<Hit[] | null>(null);
 
+  const rq = repo ? `repo=${encodeURIComponent(repo)}` : '';
   useEffect(() => {
-    fetch(`${API_BASE}/api/handbook/docs`).then((r) => (r.ok ? r.json() : [])).then(setDocs).catch(() => setDocs([]));
+    fetch(`${API_BASE}/api/handbook/repos`).then((r) => (r.ok ? r.json() : { repos: [] })).then((d) => setRepos(d.repos || [])).catch(() => setRepos([]));
   }, []);
-
   useEffect(() => {
+    setDocsLoaded(false); setHits(null);
+    fetch(`${API_BASE}/api/handbook/docs?${rq}`)
+      .then(async (r) => { if (!r.ok) throw new Error((await r.json().catch(() => ({})))?.detail || `HTTP ${r.status}`); return r.json(); })
+      .then((d) => { setDocs(d); setError(''); })
+      .catch((e) => { setDocs([]); if (repo) setError(String(e.message || e)); })
+      .finally(() => setDocsLoaded(true));
+  }, [rq, repo]);
+
+  // another project may have no HANDBOOK — open its first document instead of a 404
+  const slug = docParam
+    || (!repo || docs.some((d) => d.slug === 'HANDBOOK') ? 'HANDBOOK' : (docs[0]?.slug || ''));
+
+  const ready = !repo || !!docParam || docsLoaded;
+  useEffect(() => {
+    if (!ready) return;
+    if (!slug) { setDoc(null); return; }
     setLoading(true); setError('');
-    fetch(`${API_BASE}/api/handbook/doc/${encodeURIComponent(slug)}`)
+    fetch(`${API_BASE}/api/handbook/doc/${encodeURIComponent(slug)}${rq ? `?${rq}` : ''}`)
       .then(async (r) => { if (!r.ok) throw new Error((await r.json().catch(() => ({})))?.detail || `HTTP ${r.status}`); return r.json(); })
       .then((d: Doc) => setDoc(d))
       .catch((e) => { setDoc(null); setError(String(e.message || e)); })
       .finally(() => setLoading(false));
-  }, [slug]);
+  }, [slug, rq, ready]);
 
   // deep links into sections (?doc=X#heading)
   useEffect(() => {
@@ -183,17 +205,18 @@ function HandbookInner() {
     return Object.entries(g);
   }, [docs]);
 
-  const open = useCallback((s: string, hash = '') => router.push(`/handbook?doc=${s}${hash}`), [router]);
+  const open = useCallback((s: string, hash = '') => router.push(`/handbook?${rq ? `${rq}&` : ''}doc=${s}${hash}`), [router, rq]);
+  const pickRepo = (r: string) => router.push(r ? `/handbook?repo=${encodeURIComponent(r)}` : '/handbook');
 
   const runSearch = async () => {
     if (q.trim().length < 2) { setHits(null); return; }
-    const r = await fetch(`${API_BASE}/api/handbook/search?q=${encodeURIComponent(q.trim())}`).catch(() => null);
+    const r = await fetch(`${API_BASE}/api/handbook/search?q=${encodeURIComponent(q.trim())}${rq ? `&${rq}` : ''}`).catch(() => null);
     setHits(r && r.ok ? (await r.json()).hits : []);
   };
 
   const exportAll = async () => {
-    const r = await fetch(`${API_BASE}/api/handbook/export`).catch(() => null);
-    if (r && r.ok) download('handbook-all.md', await r.text());
+    const r = await fetch(`${API_BASE}/api/handbook/export?${rq}`).catch(() => null);
+    if (r && r.ok) download(repo ? `handbook-${repo.split('/').pop()}-all.md` : 'handbook-all.md', await r.text());
   };
 
   const H = (level: 1 | 2 | 3 | 4) => function Heading({ children }: { children?: React.ReactNode }) {
@@ -208,6 +231,16 @@ function HandbookInner() {
         <div>
           <h1 className="text-2xl font-bold dark:text-white">📘 جزوه و دفتر کار</h1>
           <p className="text-sm text-gray-500 dark:text-gray-400">جزوهٔ دانشِ پروژه، دفتر پیشرفت با نمودار، دفترِ ثبتِ جزئیِ همهٔ کارها، تاریخچهٔ همهٔ تغییرات و فعالیتِ مدل‌ها — زنده از GitHub</p>
+          <label className="mt-2 flex items-center gap-2 text-sm" data-testid="handbook-repo-picker">
+            <span className="text-gray-600 dark:text-gray-300">📁 پروژه:</span>
+            <select value={repo} onChange={(e) => pickRepo(e.target.value)} aria-label="انتخابِ پروژه"
+              className="rounded-lg border px-2 py-1 text-sm dark:bg-gray-800 dark:text-white dark:border-gray-700" dir="ltr">
+              <option value="">{(repos.find((r) => r.self)?.repo || 'project-management')} (همین برنامه)</option>
+              {repos.filter((r) => !r.self).map((r) => <option key={r.repo} value={r.repo}>{r.repo}</option>)}
+              {repo && !repos.some((r) => r.repo === repo) && <option value={repo}>{repo}</option>}
+            </select>
+            {repo && <span className="text-xs text-gray-400">فقط‌خواندنی، زنده از GitHub ِ همان مخزن</span>}
+          </label>
         </div>
         <div className="flex gap-2 flex-wrap">
           {doc && <button onClick={() => download(`${slug}.md`, doc.content)} className="px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-gray-800 border dark:border-gray-700 dark:text-white">⬇️ این سند (.md)</button>}
@@ -271,7 +304,7 @@ function HandbookInner() {
                       onClick={(e) => {
                         e.preventDefault();
                         document.getElementById(t.id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                        history.replaceState(null, '', `?doc=${slug}#${t.id}`);
+                        history.replaceState(null, '', `?${rq ? `${rq}&` : ''}doc=${slug}#${t.id}`);
                       }}>{t.text}</a>
                   </li>
                 ))}
@@ -290,6 +323,7 @@ function HandbookInner() {
           )}
           {error && <p className="text-red-600">خطا: {error}</p>}
           {loading && !doc && <p className="text-gray-400">در حال خواندن از GitHub…</p>}
+          {repo && docsLoaded && docs.length === 0 && !error && <p className="text-gray-500">در این مخزن سندِ Markdown ای (ریشه، docs/، experiences/) پیدا نشد.</p>}
           {doc && (
             <div className="leading-8 text-gray-800 dark:text-gray-200 [&_a]:text-blue-600 [&_a]:underline [&_ul]:list-disc [&_ul]:pr-6 [&_ol]:list-decimal [&_ol]:pr-6 [&_p]:my-2 [&_blockquote]:border-r-4 [&_blockquote]:border-blue-300 [&_blockquote]:pr-3 [&_blockquote]:text-gray-600 dark:[&_blockquote]:text-gray-400 [&_table]:my-3 [&_table]:w-full [&_table]:text-sm [&_th]:bg-gray-100 dark:[&_th]:bg-gray-700 [&_th]:p-2 [&_td]:p-2 [&_td]:border-t [&_td]:border-gray-200 dark:[&_td]:border-gray-700 [&_td]:align-top [&_code]:text-[0.85em] [&_code]:bg-gray-100 dark:[&_code]:bg-gray-900 [&_code]:px-1 [&_code]:rounded">
               {slug === 'PROGRESS' && <ProgressChart md={doc.content} />}
@@ -306,7 +340,7 @@ function HandbookInner() {
                       if (href.startsWith('#')) return <a href={href}>{children}</a>;
                       const target = slugForLink(href, meta, docs);
                       if (target) {
-                        return <a href={`/handbook?doc=${target.slug}${target.hash}`} onClick={(e) => { e.preventDefault(); open(target.slug, target.hash); }}>{children}</a>;
+                        return <a href={`/handbook?${rq ? `${rq}&` : ''}doc=${target.slug}${target.hash}`} onClick={(e) => { e.preventDefault(); open(target.slug, target.hash); }}>{children}</a>;
                       }
                       if (href.startsWith('/') && !href.startsWith('//')) return <a href={href}>{children}</a>;
                       if (!/^https?:/.test(href) && meta?.path) {

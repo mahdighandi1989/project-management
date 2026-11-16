@@ -85,15 +85,35 @@ def local_path(path: str) -> Path:
     return _REPO_ROOT / path
 
 
-def read_text(path: str) -> tuple[str, str]:
-    """``(content, source)`` for a repo-relative path; raises FileNotFoundError."""
+def _target(repo_name: Optional[str]) -> tuple[str, Optional[str], bool]:
+    """(PM-INS-0010) ``(owner/name, ref, is_self)`` — another watched repo is read on its default branch (ref None)
+    and never falls back to this checkout's local files."""
+    if not repo_name or repo_name.strip().lower() == repo().lower():
+        return repo(), branch(), True
+    return repo_name.strip(), None, False
+
+
+def _ref_params(ref: Optional[str], extra: Optional[dict] = None) -> dict:
+    p = dict(extra or {})
+    if ref:
+        p["ref"] = ref
+    return p
+
+
+def read_text(path: str, repo_name: Optional[str] = None) -> tuple[str, str]:
+    """``(content, source)`` for a repo-relative path; raises FileNotFoundError.
+
+    ``repo_name`` (PM-INS-0010): another watched repo (``owner/name``) — read from GitHub only."""
     path = path.lstrip("/")
     if ".." in Path(path).parts:
+        raise FileNotFoundError(path)
+    full, ref, me = _target(repo_name)
+    if not me and _offline():
         raise FileNotFoundError(path)
     if not _offline():
         try:
             def fetch():
-                data = _get_json(f"https://api.github.com/repos/{repo()}/contents/{path}", {"ref": branch()})
+                data = _get_json(f"https://api.github.com/repos/{full}/contents/{path}", _ref_params(ref))
                 if isinstance(data, dict) and data.get("encoding") == "base64":
                     return base64.b64decode(data["content"]).decode("utf-8", "replace")
                 if isinstance(data, dict) and data.get("download_url"):
@@ -102,30 +122,34 @@ def read_text(path: str) -> tuple[str, str]:
                         r.raise_for_status()
                         return r.text
                 raise FileNotFoundError(path)
-            text, src = _cached(f"file:{path}", fetch)
+            text, src = _cached(f"file:{'' if me else full + ':'}{path}", fetch)
             return text, src
         except Exception:  # noqa: BLE001
-            pass
+            if not me:
+                raise FileNotFoundError(path)
     lp = local_path(path)
     if lp.is_file():
         return lp.read_text(encoding="utf-8"), "local"
     raise FileNotFoundError(path)
 
 
-def list_dir(path: str) -> list[dict[str, Any]]:
-    """Entries ``{name, path, type}`` of a repo directory (GitHub, falling back to local)."""
+def list_dir(path: str, repo_name: Optional[str] = None) -> list[dict[str, Any]]:
+    """Entries ``{name, path, type}`` of a repo directory (GitHub, falling back to local for this repo only)."""
     path = path.strip("/")
+    full, ref, me = _target(repo_name)
     out: list[dict[str, Any]] = []
     if not _offline():
         try:
             data, _ = _cached(
-                f"dir:{path}",
-                lambda: _get_json(f"https://api.github.com/repos/{repo()}/contents/{path}", {"ref": branch()}),
+                f"dir:{'' if me else full + ':'}{path}",
+                lambda: _get_json(f"https://api.github.com/repos/{full}/contents/{path}", _ref_params(ref)),
             )
             if isinstance(data, list):
                 out = [{"name": d["name"], "path": d["path"], "type": d["type"]} for d in data]
         except Exception:  # noqa: BLE001
             pass
+    if not me:
+        return out
     # plus local files GitHub does not have yet (a dev checkout before push; on Render there is no local docs/)
     lp = local_path(path)
     if lp.is_dir():
@@ -165,14 +189,17 @@ def recent_commits(n: int = 20, path: Optional[str] = None) -> list[dict[str, An
     return out
 
 
-def commits_page(page: int = 1, per_page: int = 100) -> list[dict[str, Any]]:
+def commits_page(page: int = 1, per_page: int = 100, repo_name: Optional[str] = None) -> list[dict[str, Any]]:
     """One page of the commit list on ``main`` (the handbook's CHANGELOG pages through these)."""
     if _offline():
         return []
-    params = {"sha": branch(), "per_page": max(1, min(per_page, 100)), "page": max(1, page)}
+    full, ref, me = _target(repo_name)
+    params: dict[str, Any] = {"per_page": max(1, min(per_page, 100)), "page": max(1, page)}
+    if ref:
+        params["sha"] = ref
     try:
-        data, _ = _cached(f"commits-page:{page}:{per_page}",
-                          lambda: _get_json(f"https://api.github.com/repos/{repo()}/commits", params), ttl=120)
+        data, _ = _cached(f"commits-page:{'' if me else full + ':'}{page}:{per_page}",
+                          lambda: _get_json(f"https://api.github.com/repos/{full}/commits", params), ttl=120)
     except Exception:  # noqa: BLE001
         return []
     return [{

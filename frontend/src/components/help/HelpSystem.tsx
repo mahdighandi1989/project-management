@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { usePathname } from 'next/navigation';
 import { resolvePageHelp, PageHelp, ElementHelp } from './helpData';
 import { entryFor, sourceFiles } from '@/lib/siteMap';
+import { useLiveStats, KEY_STATE_LABEL } from '@/lib/liveStats';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -230,6 +231,7 @@ export default function HelpSystem() {
   const [searchQuery, setSearchQuery] = useState('');
   const [liveItems, setLiveItems] = useState<LiveItem[]>([]);
   const changes = useChanges(pathname, isOpen && activeSection === 'changes');
+  const live = useLiveStats(isOpen && activeSection === 'overview');
 
   // بارگذاری راهنمای صفحه فعلی — resolved from the registry, and again when the panel opens (the query, e.g.
   // ?view=models, may have changed without a pathname change)
@@ -375,25 +377,58 @@ export default function HelpSystem() {
                     </ul>
                   </div>
 
-                  <div>
+                  {/* (PM-INS-0010) «آمار» used to be three unlabeled numbers (10، 4، 0) — counts of this help text — that did not
+                      match the home page. Now: the app's LIVE numbers from the same source as the home page (lib/liveStats),
+                      then the help-text counts with explicit labels. */}
+                  <div data-testid="help-live-stats">
                     <h3 className="text-lg font-bold mb-2 flex items-center gap-2">
                       <span>📊</span>
-                      <span>آمار</span>
+                      <span>آمارِ زندهٔ برنامه</span>
+                      <span className="text-xs font-normal text-gray-400">(همان دادهٔ خانه)</span>
                     </h3>
-                    <div className="grid grid-cols-3 gap-4">
-                      <div className="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg text-center">
-                        <div className="text-2xl font-bold text-blue-600">{pageHelp.elements.length}</div>
-                        <div className="text-xs text-gray-500">المان</div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      {[
+                        { label: 'مخزنِ تحتِ پایش', value: live.oversight?.watched_count, href: '/oversight?tab=watched', cls: 'bg-blue-50 dark:bg-blue-900/20 text-blue-600' },
+                        { label: 'مدلِ روشن', value: live.enabledModels?.length, href: '/settings?view=models', cls: 'bg-green-50 dark:bg-green-900/20 text-green-600' },
+                        { label: 'تسکِ فعال', value: live.oversight ? (live.oversight.tasks_active_count ?? live.oversight.tasks_count) : undefined, href: '/oversight?tab=tasks', cls: 'bg-purple-50 dark:bg-purple-900/20 text-purple-600' },
+                        { label: 'برگهٔ بازِ نظارت', value: live.insOpen ?? undefined, href: '/inspection', cls: 'bg-amber-50 dark:bg-amber-900/20 text-amber-600' },
+                      ].map((x) => (
+                        <a key={x.label} href={x.href} className={`p-3 rounded-lg text-center hover:shadow ${x.cls}`}>
+                          <div className="text-2xl font-bold">{x.value ?? '…'}</div>
+                          <div className="text-xs text-gray-500">{x.label}</div>
+                        </a>
+                      ))}
+                    </div>
+                    {live.keys && live.keys.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-1 items-center text-xs">
+                        <span className="text-gray-500">کلیدها:</span>
+                        {live.keys.map((k) => (
+                          <span key={k.name} dir="ltr" className={`px-1.5 py-0.5 rounded ${KEY_STATE_LABEL[k.state].cls}`}
+                            title={`${KEY_STATE_LABEL[k.state].text}${k.error ? ` — ${k.error}` : ''}`}>{k.name} {KEY_STATE_LABEL[k.state].icon}</span>
+                        ))}
                       </div>
-                      <div className="p-3 bg-purple-50 dark:bg-purple-900/20 rounded-lg text-center">
-                        <div className="text-2xl font-bold text-purple-600">{pageHelp.features.length}</div>
-                        <div className="text-xs text-gray-500">قابلیت</div>
+                    )}
+                  </div>
+
+                  <div>
+                    <h3 className="text-sm font-bold mb-2 flex items-center gap-2 text-gray-600 dark:text-gray-300">
+                      <span>📖</span>
+                      <span>آمارِ همین راهنما</span>
+                    </h3>
+                    <div className="grid grid-cols-3 gap-3">
+                      <div className="p-2 bg-gray-50 dark:bg-gray-800 rounded-lg text-center">
+                        <div className="text-lg font-bold text-gray-700 dark:text-gray-200">{pageHelp.elements.length}</div>
+                        <div className="text-[11px] text-gray-500">بخشِ معرفی‌شده در تبِ «المان‌ها»</div>
                       </div>
-                      <div className="p-3 bg-green-50 dark:bg-green-900/20 rounded-lg text-center">
-                        <div className="text-2xl font-bold text-green-600">
+                      <div className="p-2 bg-gray-50 dark:bg-gray-800 rounded-lg text-center">
+                        <div className="text-lg font-bold text-gray-700 dark:text-gray-200">{pageHelp.features.length}</div>
+                        <div className="text-[11px] text-gray-500">قابلیتِ فهرست‌شده در بالا</div>
+                      </div>
+                      <div className="p-2 bg-gray-50 dark:bg-gray-800 rounded-lg text-center">
+                        <div className="text-lg font-bold text-gray-700 dark:text-gray-200">
                           {pageHelp.elements.filter(e => e.tips && e.tips.length > 0).length}
                         </div>
-                        <div className="text-xs text-gray-500">نکته</div>
+                        <div className="text-[11px] text-gray-500">بخشِ دارای نکته</div>
                       </div>
                     </div>
                   </div>
