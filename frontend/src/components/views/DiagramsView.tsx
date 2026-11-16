@@ -106,7 +106,7 @@ interface ProjectSource {
   url?: string;
 }
 
-const AUTO_DIAGRAM_TYPES = [
+export const AUTO_DIAGRAM_TYPES = [
   { id: 'tree', label: '🌲 ساختار فایل‌ها', desc: 'بدون AI - سریع' },
   { id: 'class', label: '🏗️ کلاس‌ها', desc: 'با AI' },
   { id: 'architecture', label: '🏛️ معماری', desc: 'با AI' },
@@ -198,7 +198,14 @@ export default function DiagramsView() {
           else if (autoDiagramType === 'class') setSelectedType('class');
           else if (autoDiagramType === 'sequence') setSelectedType('sequence');
           saveHistory(autoDiagramType, data.mermaid);
-          showSuccess(`نمودار ${data.project_name || ''} تولید شد`);
+          // (PM-INS-0004) also kept with the project, so it shows under that project's own page (tab «📊 نمودارها»)
+          fetch(`${API_BASE}/api/diagrams/saved`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source, id, mermaid: data.mermaid, diagram_type: autoDiagramType,
+              title: AUTO_DIAGRAM_TYPES.find((t) => t.id === autoDiagramType)?.label || autoDiagramType }),
+          }).catch(() => {});
+          showSuccess(`نمودار ${data.project_name || ''} تولید شد و ذیلِ همان پروژه هم ذخیره شد`);
         } else {
           showError('کد Mermaid برگردانده نشد');
         }

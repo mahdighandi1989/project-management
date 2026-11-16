@@ -10,6 +10,7 @@ import BrowserAgentPanel from '@/components/BrowserAgentPanel';
 import { ensurePreviewTicket, getPreviewTicket } from '@/lib/previewTicket';
 import ExecutingPromptsPanel from '@/components/ExecutingPromptsPanel';
 import InspectorRecordingPanel from '@/components/InspectorRecordingPanel';  // 🆕 🎬 ضبط بازرس ویژه دوحالته (A + B)
+import ProjectDiagramsPanel from '@/components/ProjectDiagramsPanel';  // (PM-INS-0004) نمودارهای همین پروژه
 import ReactFlow, {
   Node,
   Edge,
@@ -277,7 +278,7 @@ export default function ProjectDetailPage() {
   const [deploying, setDeploying] = useState(false);
 
   // تب فعال
-  const [activeTab, setActiveTab] = useState<'files' | 'memory' | 'structure' | 'journal' | 'inspector' | 'external'>('files');
+  const [activeTab, setActiveTab] = useState<'files' | 'memory' | 'structure' | 'journal' | 'diagrams' | 'inspector' | 'external'>('files');
 
   // 🔗 External Projects state — اتصال به GitHub/Render خارجی
   const [externalConnected, setExternalConnected] = useState(false);
@@ -1215,6 +1216,7 @@ export default function ProjectDetailPage() {
     if (!searchParams) return;
     const tab = searchParams.get('tab');
     if (tab === 'inspector' || searchParams.get('load_task')) setActiveTab('inspector');
+    else if (tab === 'diagrams') setActiveTab('diagrams');  // (PM-INS-0004)
     const sid = Number(searchParams.get('session') || '');
     if (sid && !deepLinkSessionDone.current) {
       deepLinkSessionDone.current = true;
@@ -10084,6 +10086,17 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
           >
             📊 ژورنال و گزارشات
           </button>
+          {/* (PM-INS-0004) نمودارهای همین پروژه — تبِ «📊 نمودارها» در /projects?view=diagrams هم سرِ جایش است */}
+          <button
+            onClick={() => setActiveTab('diagrams')}
+            className={`px-6 py-3 font-medium ${
+              activeTab === 'diagrams'
+                ? 'border-b-2 border-purple-500 text-purple-600'
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            📈 نمودارها
+          </button>
           {/* تب «تحلیل سلامت» قبلاً اینجا بود — حذف شد در commit 3.3a.
               قابلیت‌هایش به /oversight (تب «🏥 سلامت پروژه») منتقل شدند.
               تب Inspector بدون تغییر است. */}
@@ -13846,6 +13859,10 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
           *     استفاده می‌شود (bridge با apply-action)
           *   • WebSocket bridge → live monitoring + dedup map
           * ==================================================================== */}
+        {activeTab === 'diagrams' && projectId && (
+          <ProjectDiagramsPanel source="local" id={projectId} projectName={project?.name} />
+        )}
+
         {activeTab === 'inspector' && (
           <div className="space-y-4">
             {/* 🆕 (C7v2 Section 6) — Toast notification پس از load */}

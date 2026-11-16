@@ -266,16 +266,127 @@ async def get_diagram_example(diagram_type: str):
 # اتصال خودکار به پروژه‌ها
 # =====================================
 
+def _local_repo_full_name(project: Any) -> str:
+    """«owner/repo» of the GitHub repo a local project is linked to ('' if none)."""
+    owner = (getattr(project, "github_owner", None) or "").strip()
+    repo = (getattr(project, "github_repo", None) or "").strip()
+    if owner and repo:
+        return f"{owner}/{repo}"
+    url = (getattr(project, "github_repo_url", None) or "").strip().rstrip("/")
+    if "github.com/" in url:
+        tail = url.split("github.com/", 1)[1].removesuffix(".git")
+        parts = [x for x in tail.split("/") if x]
+        if len(parts) >= 2:
+            return f"{parts[0]}/{parts[1]}"
+    return ""
+
+
+# =====================================
+# (PM-INS-0004) نمودارهای ذخیره‌شدهٔ هر پروژه — تا ذیلِ صفحهٔ خودِ پروژه هم دیده شوند.
+# متنِ Mermaid کوچک است؛ یک فایلِ JSON کنارِ پایگاه‌داده (DATABASE_DIR) کافی است.
+# =====================================
+
+_SAVED_MAX_PER_PROJECT = 200  # never trimmed silently — a full project refuses new saves
+_SAVED_MAX_CHARS = 60_000
+
+
+def _saved_path() -> str:
+    import os
+    from ...core.database import DATABASE_DIR
+    os.makedirs(DATABASE_DIR, exist_ok=True)
+    return os.path.join(DATABASE_DIR, "diagrams_saved.json")
+
+
+def _saved_load() -> Dict[str, List[Dict[str, Any]]]:
+    import json, os
+    path = _saved_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _saved_write(data: Dict[str, List[Dict[str, Any]]]) -> None:
+    import json, os
+    path = _saved_path()
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def _project_key(source: str, id_: str) -> str:
+    source = (source or "").strip().lower()
+    id_ = (id_ or "").strip()
+    if source not in ("local", "github") or not id_:
+        raise HTTPException(status_code=400, detail="پروژه نامعتبر است (source باید local یا github باشد)")
+    return f"{source}:{id_}"
+
+
+class SaveDiagramRequest(BaseModel):
+    source: str
+    id: str
+    mermaid: str
+    diagram_type: str = "flowchart"
+    title: str = ""
+
+
+@router.get("/saved")
+async def list_saved_diagrams(source: str, id: str):
+    """نمودارهای ذخیره‌شدهٔ یک پروژه، تازه‌ترین اول."""
+    key = _project_key(source, id)
+    items = _saved_load().get(key, [])
+    return {"success": True, "items": list(reversed(items)), "count": len(items)}
+
+
+@router.post("/saved")
+async def save_diagram(request: SaveDiagramRequest):
+    """ذخیرهٔ یک نمودار برای یک پروژه (همان نمودار دوباره ذخیره نمی‌شود)."""
+    import time, uuid
+    key = _project_key(request.source, request.id)
+    code = (request.mermaid or "").strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="کد Mermaid خالی است")
+    if len(code) > _SAVED_MAX_CHARS:
+        raise HTTPException(status_code=413, detail="نمودار بیش از حد بزرگ است")
+    data = _saved_load()
+    items = data.get(key, [])
+    existing = next((it for it in items if it.get("mermaid") == code), None)
+    if existing:
+        return {"success": True, "item": existing, "duplicate": True}
+    item = {
+        "id": uuid.uuid4().hex[:12],
+        "title": (request.title or "").strip()[:120] or request.diagram_type,
+        "diagram_type": (request.diagram_type or "flowchart")[:40],
+        "mermaid": code,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    if len(items) >= _SAVED_MAX_PER_PROJECT:
+        raise HTTPException(status_code=409, detail=f"این پروژه {_SAVED_MAX_PER_PROJECT} نمودارِ ذخیره‌شده دارد")
+    items.append(item)
+    data[key] = items
+    _saved_write(data)
+    return {"success": True, "item": item, "duplicate": False}
+
+
 @router.get("/projects")
 async def list_diagram_projects():
     """لیست پروژه‌های قابل دسترس برای رسم خودکار نمودار."""
     items = []
 
     # پروژه‌های محلی (simple_creator)
+    local_repos = set()  # (PM-INS-0004) «owner/repo» ِ پروژه‌های محلی — همان مخزن در «تحت نظارت» تکراری است
     try:
         from ...services.simple_creator import get_simple_creator
         creator = get_simple_creator()
         for p in creator.list_projects():
+            repo_full = _local_repo_full_name(p)
+            if repo_full:
+                local_repos.add(repo_full.lower())
             items.append({
                 "source": "local",
                 "id": p.id,
@@ -283,6 +394,7 @@ async def list_diagram_projects():
                 "description": p.description or "",
                 "language": p.project_type or "",
                 "files_count": len(p.files) if hasattr(p, "files") and p.files else 0,
+                "repo": repo_full or "",
             })
     except Exception:
         pass
@@ -292,6 +404,8 @@ async def list_diagram_projects():
         from ...services.oversight_service import get_oversight_service
         ov = get_oversight_service()
         for w in ov.watched:
+            if (w.repo_full_name or "").lower() in local_repos:
+                continue  # (PM-INS-0004) already listed once, as the local project linked to this repo
             items.append({
                 "source": "github",
                 "id": w.id,

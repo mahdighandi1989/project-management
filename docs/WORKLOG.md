@@ -809,3 +809,19 @@
 - **[TODO]** مالک پس از دیپلوی: در بازرس «آخرین commit چیست؟» بپرسد (باید «سؤال» باشد، با هش و نامِ مدل)؛ آرشیو را تازه کند.
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-16 · pytest ۸۳۱ + next build
+
+## 2026-11-16 (۳۱) — فوری PM-INS-0004: نمودارها — تکرار در فهرست + نمودار ذیلِ هر پروژه
+
+- **[OWNER]** برگهٔ فوریِ PM-INS-0004 (بند ۳ و «نمودار ذیل هر پروژه»): (۱) در `/projects?view=diagrams` فهرستِ «پروژه» «Detective-1 · fullstack» را دوبار
+  (اول و آخر) نشان می‌دهد — تکراری حذف شود؛ (۲) نمودارها ذیلِ هر پروژه هم دیده شوند — در صفحهٔ هر پروژه نمودارهای ذخیره‌شدهٔ همان پروژه و «رسم خودکار»،
+  بدونِ حذفِ تبِ فعلی.
+- **[FINDING]** دادهٔ زنده (`/api/diagrams/projects`): `local proj_fa454439 Detective-1 fullstack` و `github … mahdighandi1989/Detective-1 fullstack` —
+  پروژهٔ محلی با `github_owner/github_repo` به همان مخزنِ تحت نظارت وصل است. نمودارها هیچ ذخیره‌گاهِ سمتِ سرور نداشتند (فقط `localStorage`).
+- **[CHANGE]** `routes/diagrams.py`: `_local_repo_full_name` و ردکردنِ مخزنِ تحت نظارتی که پروژهٔ محلیِ وصل دارد (فیلدِ `repo` روی موردِ محلی)؛
+  `GET/POST /api/diagrams/saved` (کلید `local:<id>`/`github:<id>`، فایلِ `DATABASE_DIR/diagrams_saved.json`، تکراری ذخیره نمی‌شود، سقفِ ۲۰۰ با ۴۰۹ — بی‌حذف).
+  فرانت: `components/ProjectDiagramsPanel.tsx` (فهرستِ تاشوی نمودارهای ذخیره‌شده با رندرِ Mermaid، انتخابِ نوع، «🪄 رسم خودکار» ⇐ ذخیره)، تبِ تازهٔ
+  «📈 نمودارها» در `/projects/[id]` (+ `?tab=diagrams`)؛ `DiagramsView` رسمِ خودکار را ذیلِ همان پروژه هم ذخیره می‌کند؛ `siteMap` به‌روز. هیچ تبی حذف نشد.
+- **[VERIFY]** `tests/test_pm_ins_0004_project_diagrams.py` (۳ تست)؛ pytest ۸۳۴ سبز؛ next build سبز؛ پس از دیپلوی عکسِ فهرستِ پروژه و تبِ تازه از production.
+- **[TODO]** —
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-16 · pytest ۸۳۴ + next build
