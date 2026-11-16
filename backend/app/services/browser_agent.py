@@ -40,6 +40,10 @@ MAX_STEPS_DEFAULT = 25
 MAX_STEPS_LIMIT = 40
 RUN_WALL_SECONDS = 8 * 60
 ACTION_TIMEOUT_MS = 20_000
+#: (2026-11-16, PM-INS-0012) after an action, wait until the page's own requests are quiet before observing — a
+#: client-side route (e.g. /archive) fires its fetches AFTER domcontentloaded, so the model read «0» placeholders.
+SETTLE_BUDGET_MS = int(os.environ.get("BROWSER_AGENT_SETTLE_MS", "6000"))
+SETTLE_QUIET_MS = 500
 MAX_ELEMENTS = 80
 MAX_TEXT = 2500
 CONFIRM_WAIT_SECONDS = 10 * 60
@@ -393,6 +397,38 @@ async def _shot(page, run: Run, n: int) -> Optional[str]:
         return None
 
 
+class _NetWatch:
+    """Counts the page's in-flight requests (blocked ones end as requestfailed), so `settle` can wait for quiet.
+    `wait_for_load_state("networkidle")` does not help here: it resolves at once after a client-side navigation."""
+
+    def __init__(self, page) -> None:
+        self.inflight = 0
+        page.on("request", self._up)
+        page.on("requestfinished", self._down)
+        page.on("requestfailed", self._down)
+
+    def _up(self, _r) -> None:
+        self.inflight += 1
+
+    def _down(self, _r) -> None:
+        self.inflight = max(0, self.inflight - 1)
+
+    async def settle(self, budget_ms: int = SETTLE_BUDGET_MS, quiet_ms: int = SETTLE_QUIET_MS) -> bool:
+        """True when the network was quiet for `quiet_ms`; False when the budget ran out (polling, streams)."""
+        t0 = time.monotonic()
+        await asyncio.sleep(0.15)  # let the action's own fetches start
+        quiet_since: Optional[float] = None
+        while (time.monotonic() - t0) * 1000 < budget_ms:
+            if self.inflight == 0:
+                quiet_since = quiet_since or time.monotonic()
+                if (time.monotonic() - quiet_since) * 1000 >= quiet_ms:
+                    return True
+            else:
+                quiet_since = None
+            await asyncio.sleep(0.1)
+        return False
+
+
 async def _act(page, a: dict[str, Any], allowed: set[str]) -> str:
     t = a["type"]
     loc = page.locator(f'[data-agent-id="{a["id"]}"]') if "id" in a else None
@@ -484,8 +520,10 @@ async def run_agent(run: Run, model: ModelFn, vision: bool = False, max_steps: i
                     await route.abort()
             await context.route("**/*", guard)
             page = await context.new_page()
+            net = _NetWatch(page)
             run.status = "running"
             await page.goto(run.start_url, wait_until="domcontentloaded", timeout=ACTION_TIMEOUT_MS)
+            await net.settle()
 
             last_sig = None
             repeats = 0
@@ -564,6 +602,8 @@ async def run_agent(run: Run, model: ModelFn, vision: bool = False, max_steps: i
                     step.ok, step.result = False, str(e)
                 except Exception as e:  # noqa: BLE001 — timeouts, detached elements: the model sees the error next step
                     step.ok, step.result = False, f"خطا: {str(e).splitlines()[0][:200]}"
+                if action["type"] != "wait":
+                    await net.settle()
                 step.shot = await _shot(page, run, n)
                 run.steps.append(step)
                 _persist(run)

@@ -434,24 +434,24 @@ function ArchiveContent() {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
           <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-4 text-center">
             <div className="text-2xl mb-1">💬</div>
-            <div className="text-2xl font-bold dark:text-white">{conversations.length}</div>
+            <div className="text-2xl font-bold dark:text-white">{loading ? '…' : conversations.length}</div>
             <div className="text-xs text-gray-500 dark:text-gray-400">گفت‌وگوی دستیار</div>
           </div>
           <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-4 text-center">
             <div className="text-2xl mb-1">🥊</div>
-            <div className="text-2xl font-bold dark:text-white">{debates.length}</div>
+            <div className="text-2xl font-bold dark:text-white">{loading ? '…' : debates.length}</div>
             <div className="text-xs text-gray-500 dark:text-gray-400">مناظره</div>
           </div>
           <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-4 text-center">
             <div className="text-2xl mb-1">📁</div>
-            <div className="text-2xl font-bold dark:text-white">{files.length}</div>
+            <div className="text-2xl font-bold dark:text-white">{loading ? '…' : files.length}</div>
             <div className="text-xs text-gray-500 dark:text-gray-400">
               فایل ({formatSize(totalFileSize)})
             </div>
           </div>
           <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-4 text-center">
             <div className="text-2xl mb-1">🛠️</div>
-            <div className="text-2xl font-bold dark:text-white">{projects.length}</div>
+            <div className="text-2xl font-bold dark:text-white">{loading ? '…' : projects.length}</div>
             <div className="text-xs text-gray-500 dark:text-gray-400">پروژه</div>
           </div>
         </div>
