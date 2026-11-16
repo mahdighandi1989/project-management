@@ -825,3 +825,14 @@
 - **[TODO]** —
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-16 · pytest ۸۳۴ + next build
+
+## 2026-11-16 (۳۲) — PM-INS-0004 تکمیل: تبِ نمودارها روی صفحه‌های واقعیِ پروژه
+
+- **[FINDING]** عکسِ production پس از d564727: `/projects/proj_fa454439` «پروژه پیدا نشد» — صفحهٔ `/projects/[id]` پروژه‌های `gh_…` (ورودِ GitHub) و `proj_…` ِ
+  `project_service` را باز می‌کند، نه پروژه‌های `simple_creator` که فهرستِ نمودارها می‌شناسد. پس تبِ تازه با `source=local` برای این صفحه‌ها کلیدِ غلط داشت.
+- **[CHANGE]** `diagrams._project_key`: هر مخزن یک کلید (`github:owner/repo`، کوچک‌حرف) — شناسهٔ «تحت نظارت»، `owner/repo` و پروژهٔ محلیِ وصل به مخزن همه به آن می‌رسند؛
+  `_get_project_payload("local")` اگر در `simple_creator` نبود از `project_service` می‌خواند. صفحهٔ پروژه: `gh_…` ⇒ `source=github` با `owner/repo` از
+  `metadata.source_url`، بقیه ⇒ `source=local` با شناسهٔ خودش.
+- **[VERIFY]** `tests/test_pm_ins_0004_project_diagrams.py` ۵ تست؛ pytest و next build سبز؛ پس از دیپلوی عکس از `/projects/gh_mahdighandi1989_detective_1?tab=diagrams`.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-16 · pytest + next build

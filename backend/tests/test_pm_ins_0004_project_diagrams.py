@@ -44,3 +44,31 @@ def test_saved_diagrams_per_project(tmp_path, monkeypatch):
         asyncio.run(D.list_saved_diagrams("ftp", "x"))
     with pytest.raises(HTTPException):
         asyncio.run(D.save_diagram(D.SaveDiagramRequest(source="local", id="p", mermaid="  ")))
+
+
+def test_one_key_per_repo_whichever_way_it_was_picked(monkeypatch):
+    import app.services.simple_creator as SC
+    import app.services.oversight_service as OS
+    local = SimpleNamespace(id="proj_1", github_owner="O", github_repo="Detective-1", github_repo_url=None)
+    monkeypatch.setattr(SC, "get_simple_creator",
+                        lambda: SimpleNamespace(get_project=lambda i: local if i == "proj_1" else None))
+    monkeypatch.setattr(OS, "get_oversight_service", lambda: SimpleNamespace(
+        watched=[SimpleNamespace(id="w1", repo_full_name="O/Detective-1")]))
+    want = "github:o/detective-1"
+    assert D._project_key("github", "w1") == want            # diagrams tab, watched repo
+    assert D._project_key("local", "proj_1") == want         # diagrams tab, linked local project
+    assert D._project_key("github", "O/Detective-1") == want  # the gh_… project page
+    assert D._project_key("local", "proj_x") == "local:proj_x"
+
+
+def test_project_page_projects_can_be_drawn(monkeypatch):
+    import app.services.simple_creator as SC
+    import app.services.project_service as PS
+    monkeypatch.setattr(SC, "get_simple_creator", lambda: SimpleNamespace(get_project=lambda i: None))
+    monkeypatch.setattr(PS, "get_project_service", lambda: SimpleNamespace(get_project=lambda i: {
+        "success": True, "project": {"name": "نکسوس", "description": "توضیح", "project_type": "web", "files": []}}))
+    payload = asyncio.run(D._get_project_payload("local", "proj_07"))
+    assert payload["name"] == "نکسوس" and payload["description"] == "توضیح"
+    monkeypatch.setattr(PS, "get_project_service", lambda: SimpleNamespace(get_project=lambda i: {"success": False}))
+    with pytest.raises(HTTPException):
+        asyncio.run(D._get_project_payload("local", "nope"))

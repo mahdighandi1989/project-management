@@ -320,10 +320,32 @@ def _saved_write(data: Dict[str, List[Dict[str, Any]]]) -> None:
 
 
 def _project_key(source: str, id_: str) -> str:
+    """One key per real project: a repo is «github:owner/repo» whether it was picked as a watched repo
+    (uuid), as «owner/repo», or as a local project linked to it — so the diagrams tab and the project's
+    own page see the same saved diagrams."""
     source = (source or "").strip().lower()
     id_ = (id_ or "").strip()
     if source not in ("local", "github") or not id_:
         raise HTTPException(status_code=400, detail="پروژه نامعتبر است (source باید local یا github باشد)")
+    if source == "github" and "/" not in id_:
+        try:
+            from ...services.oversight_service import get_oversight_service
+            w = next((w for w in get_oversight_service().watched if w.id == id_), None)
+            if w and w.repo_full_name:
+                id_ = w.repo_full_name
+        except Exception:
+            pass
+    elif source == "local":
+        try:
+            from ...services.simple_creator import get_simple_creator
+            p = get_simple_creator().get_project(id_)
+            repo = _local_repo_full_name(p) if p else ""
+            if repo:
+                source, id_ = "github", repo
+        except Exception:
+            pass
+    if source == "github":
+        id_ = id_.lower()
     return f"{source}:{id_}"
 
 
@@ -470,7 +492,22 @@ async def _get_project_payload(source: str, id_: str) -> Dict[str, Any]:
         creator = get_simple_creator()
         project = creator.get_project(id_)
         if not project:
-            raise HTTPException(status_code=404, detail="پروژه محلی یافت نشد")
+            # (PM-INS-0004) the per-project page also opens projects of the «پروژه‌ها» list (project_service) — draw from those too
+            try:
+                from ...services.project_service import get_project_service
+                res = get_project_service().get_project(id_)
+            except Exception:
+                res = {}
+            pr = (res or {}).get("project") if (res or {}).get("success") else None
+            if not pr:
+                raise HTTPException(status_code=404, detail="پروژه محلی یافت نشد")
+            payload["name"] = pr.get("name") or id_
+            payload["description"] = pr.get("description") or ""
+            payload["language"] = pr.get("project_type") or pr.get("language") or ""
+            payload["files"] = [f.get("path") if isinstance(f, dict) else str(f) for f in (pr.get("files") or [])][:300]
+            payload["files"] = [f for f in payload["files"] if f]
+            payload["readme"] = (pr.get("readme") or "")[:6000]
+            return payload
 
         payload["name"] = project.name
         payload["description"] = project.description or ""

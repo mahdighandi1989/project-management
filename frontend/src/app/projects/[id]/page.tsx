@@ -13859,9 +13859,14 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
           *     استفاده می‌شود (bridge با apply-action)
           *   • WebSocket bridge → live monitoring + dedup map
           * ==================================================================== */}
-        {activeTab === 'diagrams' && projectId && (
-          <ProjectDiagramsPanel source="local" id={projectId} projectName={project?.name} />
-        )}
+        {activeTab === 'diagrams' && projectId && (() => {
+          // a GitHub import (gh_…) is drawn from its repo, live; every other project by its own id
+          const _src: string = (project as any)?.metadata?.source_url || (project as any)?.github_url || '';
+          const _m = projectId.startsWith('gh_') ? _src.match(/github\.com\/([^/]+)\/([^/#?]+)/) : null;
+          return _m
+            ? <ProjectDiagramsPanel source="github" id={`${_m[1]}/${_m[2].replace(/\.git$/, '')}`} projectName={project?.name} />
+            : <ProjectDiagramsPanel source="local" id={projectId} projectName={project?.name} />;
+        })()}
 
         {activeTab === 'inspector' && (
           <div className="space-y-4">
