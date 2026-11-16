@@ -3,6 +3,7 @@
 import { useState, useEffect, Suspense } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
+import GithubSyncBadge from '@/components/GithubSyncBadge';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -649,6 +650,7 @@ function ProjectsContent() {
                               🔒 Private
                             </span>
                           )}
+                          {isGithubProject && <GithubSyncBadge sync={p.metadata?.github_sync} compact />}
                           {p.progress !== undefined && (
                             <span className="text-xs text-gray-500">{p.progress}%</span>
                           )}

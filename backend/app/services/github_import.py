@@ -15,6 +15,23 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
+IMPORTANT_FILES = {
+    "readme.md", "package.json", "requirements.txt", "cargo.toml", "go.mod", "pom.xml",
+    "build.gradle", "dockerfile", "docker-compose.yml", "docker-compose.yaml", ".env.example",
+    "config.json", "config.yaml", "makefile", "cmakelists.txt", "tsconfig.json",
+    "next.config.js", "next.config.ts", "tailwind.config.js", "tailwind.config.ts",
+    "vite.config.ts", "vite.config.js", "render.yaml",
+}
+CODE_EXTS = (".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java", ".c", ".cpp", ".h",
+             ".css", ".scss", ".html", ".gs")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
 
 class GitHubImportService:
     """سرویس import پروژه از GitHub"""
@@ -24,6 +41,7 @@ class GitHubImportService:
     def __init__(self):
         self.default_token = os.environ.get("GITHUB_TOKEN", "")
         self._session: Optional[aiohttp.ClientSession] = None
+        self.request_delay = 0.1
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """دریافت یا ایجاد session"""
@@ -217,6 +235,21 @@ class GitHubImportService:
         except aiohttp.ClientError as e:
             return {"success": False, "error": str(e)}
 
+    async def get_branch_head(
+        self, owner: str, repo: str, branch: str, token: str = None
+    ) -> Optional[str]:
+        """(PM-INS-0014) شناسهٔ آخرین کامیتِ شاخه — یک درخواستِ سبک برای «عقب افتاده‌ام؟»"""
+        session = await self._get_session()
+        try:
+            url = f"{self.GITHUB_API}/repos/{owner}/{repo}/branches/{branch}"
+            async with session.get(url, headers=self._get_headers(token), timeout=30) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return (data.get("commit") or {}).get("sha")
+        except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+            logger.warning(f"branch head {owner}/{repo}@{branch}: {e}")
+        return None
+
     async def get_file_content(
         self, owner: str, repo: str, path: str, branch: str = None, token: str = None
     ) -> Dict[str, Any]:
@@ -276,6 +309,9 @@ class GitHubImportService:
         max_file_size: int = 500000,  # 500KB
         excluded_dirs: List[str] = None,
         excluded_extensions: List[str] = None,
+        max_files: Optional[int] = None,
+        max_bytes: Optional[int] = None,
+        known_shas: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """
         Import کامل یک repository
@@ -307,6 +343,11 @@ class GitHubImportService:
                 ".pdf", ".doc", ".docx", ".xls", ".xlsx",
                 ".lock", ".log"
             ]
+
+        if max_files is None:
+            max_files = _env_int("GITHUB_IMPORT_MAX_FILES", 1500)
+        if max_bytes is None:
+            max_bytes = _env_int("GITHUB_IMPORT_MAX_BYTES", 40_000_000)
 
         # پارس URL
         parsed = self.parse_github_url(url_or_path)
@@ -354,45 +395,53 @@ class GitHubImportService:
                 "pushed": repo_info.get("pushed_at"),
             },
             "files": [],
+            "unchanged_paths": [],
             "file_tree": [],
             "imported_at": datetime.now().isoformat(),
         }
 
+        result["head_sha"] = await self.get_branch_head(owner, repo, branch, token)
+
         # دریافت ساختار فایل‌ها
         if include_files:
-            tree_result = await self.get_repo_tree(owner, repo, branch, token)
+            tree_result = await self.get_repo_tree(owner, repo, result["head_sha"] or branch, token)
 
             if tree_result.get("success"):
                 all_files = tree_result.get("tree", [])
 
-                # فیلتر فایل‌ها
+                # فیلتر فایل‌ها — (PM-INS-0014) هر ردشده با دلیلش شمرده می‌شود تا «N از M» صریح باشد
+                report = {
+                    "tree_total": 0, "kept": 0, "skipped_dir": 0, "skipped_ext": 0,
+                    "skipped_size": 0, "capped": 0, "budget": 0, "downloaded": 0,
+                    "unchanged": 0, "failed": 0,
+                    "truncated": bool(tree_result.get("truncated")),
+                    "tree_sha": tree_result.get("sha"),
+                    "max_files": max_files, "max_bytes": max_bytes,
+                }
+                all_paths: List[str] = []
                 filtered_files = []
                 for item in all_files:
                     if item.get("type") != "blob":
                         continue
 
                     path = item.get("path", "")
+                    report["tree_total"] += 1
+                    all_paths.append(path)
 
                     # چک excluded directories
-                    skip = False
-                    for excluded in excluded_dirs:
-                        if path.startswith(f"{excluded}/") or f"/{excluded}/" in path:
-                            skip = True
-                            break
-                    if skip:
+                    if any(path.startswith(f"{ex}/") or f"/{ex}/" in path for ex in excluded_dirs):
+                        report["skipped_dir"] += 1
                         continue
 
                     # چک excluded extensions
-                    for ext in excluded_extensions:
-                        if path.lower().endswith(ext):
-                            skip = True
-                            break
-                    if skip:
+                    if any(path.lower().endswith(ext) for ext in excluded_extensions):
+                        report["skipped_ext"] += 1
                         continue
 
                     # چک سایز
-                    size = item.get("size", 0)
+                    size = item.get("size", 0) or 0
                     if size > max_file_size:
+                        report["skipped_size"] += 1
                         continue
 
                     filtered_files.append({
@@ -402,106 +451,54 @@ class GitHubImportService:
                     })
 
                 result["file_tree"] = filtered_files
+                result["all_paths"] = all_paths
                 result["stats"]["file_count"] = len(filtered_files)
+                result["stats"]["tree_total"] = report["tree_total"]
 
-                # دانلود محتوای فایل‌های مهم (محدود)
-                important_files = [
-                    "README.md", "readme.md", "README.MD",
-                    "package.json", "requirements.txt", "Cargo.toml",
-                    "go.mod", "pom.xml", "build.gradle",
-                    "Dockerfile", "docker-compose.yml", "docker-compose.yaml",
-                    ".env.example", "config.json", "config.yaml",
-                    "Makefile", "CMakeLists.txt",
-                    # 🆕 فایل‌های مهم فرانت‌اند
-                    "tsconfig.json", "next.config.js", "next.config.ts",
-                    "tailwind.config.js", "tailwind.config.ts",
-                    "vite.config.ts", "vite.config.js",
-                ]
-
-                # 🆕 اولویت‌بندی فایل‌ها - فرانت‌اند و بک‌اند جدا
-                frontend_files = []
-                backend_files = []
-                other_files = []
-
-                for file_info in filtered_files:
-                    path = file_info["path"].lower()
-                    # تشخیص فایل‌های فرانت‌اند
-                    is_frontend = any(x in path for x in [
-                        "frontend/", "src/components", "src/pages", "src/app",
-                        "components/", "pages/", ".tsx", ".jsx", "/hooks/",
-                        "/contexts/", "/store/", "/styles/", "/ui/"
-                    ]) or path.endswith((".tsx", ".jsx", ".css", ".scss"))
-
-                    # تشخیص فایل‌های بک‌اند
-                    is_backend = any(x in path for x in [
-                        "backend/", "api/", "routes/", "services/", "models/",
-                        "controllers/", "middleware/"
-                    ]) or path.endswith(".py")
-
-                    if is_frontend:
-                        frontend_files.append(file_info)
-                    elif is_backend:
-                        backend_files.append(file_info)
-                    else:
-                        other_files.append(file_info)
-
-                # 🆕 ترکیب با اولویت: backend + frontend + other
-                # حداکثر 100 فایل با توزیع متعادل
-                max_files = 100
-                max_per_category = max_files // 3
-
-                prioritized_files = (
-                    backend_files[:max_per_category] +
-                    frontend_files[:max_per_category] +
-                    other_files[:max_per_category]
-                )
-
-                # اگر یک دسته کمتر از حد داشت، از بقیه بگیر
-                if len(prioritized_files) < max_files:
-                    remaining = max_files - len(prioritized_files)
-                    all_remaining = (
-                        backend_files[max_per_category:] +
-                        frontend_files[max_per_category:] +
-                        other_files[max_per_category:]
-                    )
-                    prioritized_files.extend(all_remaining[:remaining])
-
-                logger.info(f"📁 File distribution: {len(backend_files)} backend, {len(frontend_files)} frontend, {len(other_files)} other")
-                logger.info(f"📁 Downloading content for {len(prioritized_files)} prioritized files")
-
-                for file_info in prioritized_files:
+                # (PM-INS-0014) سقفِ ثابتِ ۱۰۰ فایل برداشته شد: همهٔ فایل‌های فیلترشده تا سقفِ
+                # قابل‌تنظیم (پیش‌فرض ۱۵۰۰ فایل / ۴۰ مگ متن) — کدِ مهم‌تر اول، تا اگر سقف خورد، صریح گزارش شود.
+                def _rank(fi: Dict[str, Any]) -> int:
+                    pth = fi["path"].lower()
+                    if pth.split("/")[-1] in IMPORTANT_FILES:
+                        return 0
+                    if pth.endswith(CODE_EXTS):
+                        return 1
+                    return 2
+                prioritized = sorted(filtered_files, key=_rank)
+                known = known_shas or {}
+                used_bytes = 0
+                for idx, file_info in enumerate(prioritized):
                     path = file_info["path"]
-                    filename = path.split("/")[-1]
+                    if idx >= max_files:
+                        report["capped"] += 1
+                        continue
+                    if used_bytes + (file_info["size"] or 0) > max_bytes:
+                        report["budget"] += 1
+                        continue
+                    used_bytes += file_info["size"] or 0
+                    report["kept"] += 1
+                    if file_info.get("sha") and known.get(path) == file_info["sha"]:
+                        # بی‌تغییر از سینکِ قبلی — دوباره دانلود نمی‌شود
+                        report["unchanged"] += 1
+                        result["unchanged_paths"].append(path)
+                        continue
+                    content_result = await self.get_file_content(owner, repo, path, branch, token)
+                    if content_result.get("success"):
+                        report["downloaded"] += 1
+                        result["files"].append({
+                            "path": path,
+                            "content": content_result.get("content", ""),
+                            "size": content_result.get("size", 0),
+                        })
+                    else:
+                        report["failed"] += 1
+                    # کمی تاخیر برای جلوگیری از rate limit
+                    await asyncio.sleep(self.request_delay)
 
-                    # 🆕 همیشه فایل‌های frontend را دانلود کن
-                    is_frontend = (
-                        "frontend/" in path or
-                        "/components/" in path or
-                        "/src/app/" in path or
-                        path.endswith((".tsx", ".jsx"))
-                    )
-
-                    # فقط فایل‌های مهم و کد رو دانلود کن
-                    should_download = (
-                        is_frontend or  # 🆕 فایل‌های frontend همیشه
-                        filename in important_files or
-                        path.endswith((".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java", ".c", ".cpp", ".h", ".css", ".scss")) or
-                        file_info["size"] < 50000  # فایل‌های کوچک
-                    )
-
-                    if should_download:
-                        content_result = await self.get_file_content(
-                            owner, repo, path, branch, token
-                        )
-                        if content_result.get("success"):
-                            result["files"].append({
-                                "path": path,
-                                "content": content_result.get("content", ""),
-                                "size": content_result.get("size", 0),
-                            })
-
-                        # کمی تاخیر برای جلوگیری از rate limit
-                        await asyncio.sleep(0.1)
+                result["sync_report"] = report
+                logger.info(f"📁 {owner}/{repo}: {report}")
+            else:
+                result["tree_error"] = tree_result.get("error")
 
         return result
 
@@ -541,6 +538,15 @@ class GitHubImportService:
                     "topics": import_result.get("topics"),
                     "primary_language": import_result.get("primary_language"),
                 }
+                # (PM-INS-0014) extra_data دیگر بازنویسیِ کامل نمی‌شود — تنظیماتِ سینک، cached_structure و
+                # بقیهٔ کلیدهای ثبت‌شده می‌مانند؛ فقط کلیدهای GitHub تازه می‌شوند.
+                if existing and existing.extra_data:
+                    try:
+                        old_meta = json.loads(existing.extra_data) or {}
+                        if isinstance(old_meta, dict):
+                            metadata = {**old_meta, **metadata}
+                    except (ValueError, TypeError):
+                        pass
 
                 # ساخت github_path از owner و repo
                 github_path = None
@@ -575,6 +581,8 @@ class GitHubImportService:
                     db.add(project)
 
                 # ذخیره فایل‌ها
+                added: List[str] = []
+                changed: List[str] = []
                 for file_data in import_result.get("files", []):
                     existing_file = db.query(ProjectFile).filter(
                         ProjectFile.project_id == project_id,
@@ -582,9 +590,12 @@ class GitHubImportService:
                     ).first()
 
                     if existing_file:
+                        if (existing_file.content or "") != (file_data.get("content", "") or ""):
+                            changed.append(file_data["path"])
                         existing_file.content = file_data.get("content", "")
                         existing_file.size = file_data.get("size", 0)
                     else:
+                        added.append(file_data["path"])
                         file_ext = file_data["path"].split(".")[-1] if "." in file_data["path"] else ""
                         project_file = ProjectFile(
                             project_id=project_id,
@@ -596,6 +607,50 @@ class GitHubImportService:
                         )
                         db.add(project_file)
 
+                # (PM-INS-0014) حذف در GitHub ⇒ حذف از نسخهٔ AI Creator — فقط وقتی درختِ کامل و
+                # بی‌برش رسیده (truncated/خطا ⇒ هیچ چیز پاک نمی‌شود) و هر مسیرِ حذف‌شده ثبت می‌شود.
+                removed: List[str] = []
+                report = import_result.get("sync_report") or {}
+                all_paths = import_result.get("all_paths")
+                if all_paths is not None and report and not report.get("truncated"):
+                    keep = set(all_paths)
+                    for row in db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all():
+                        if row.file_path not in keep:
+                            removed.append(row.file_path)
+                            db.delete(row)
+
+                stored = len(set(f["path"] for f in import_result.get("files", []))
+                             | set(import_result.get("unchanged_paths", [])))
+                now = datetime.utcnow().isoformat() + "Z"
+                prev_sync = metadata.get("github_sync") if isinstance(metadata.get("github_sync"), dict) else {}
+                history = list(prev_sync.get("history") or [])
+                if added or changed or removed or not history:
+                    history.append({
+                        "at": now, "commit": import_result.get("head_sha"),
+                        "added": added[:50], "changed": changed[:50], "removed": removed[:50],
+                        "counts": {"added": len(added), "changed": len(changed), "removed": len(removed)},
+                        "trigger": import_result.get("sync_trigger") or "manual",
+                    })
+                metadata["github_sync"] = {
+                    **prev_sync,
+                    "last_sync_at": now,
+                    "last_checked_at": now,
+                    "last_synced_sha": import_result.get("head_sha") or prev_sync.get("last_synced_sha"),
+                    "head_sha": import_result.get("head_sha") or prev_sync.get("head_sha"),
+                    "behind": False,
+                    "trigger": import_result.get("sync_trigger") or "manual",
+                    "report": report,
+                    "stored_files": stored,
+                    "repo_files": report.get("tree_total"),
+                    "error": None,
+                    "history": history[-30:],
+                }
+                metadata["last_sync_at"] = now
+                if existing:
+                    existing.extra_data = json.dumps(metadata, ensure_ascii=False)
+                else:
+                    project.extra_data = json.dumps(metadata, ensure_ascii=False)
+
                 db.commit()
 
                 return {
@@ -603,6 +658,10 @@ class GitHubImportService:
                     "project_id": project_id,
                     "name": import_result["name"],
                     "files_saved": len(import_result.get("files", [])),
+                    "added": len(added), "changed": len(changed), "removed": len(removed),
+                    "stored_files": stored,
+                    "repo_files": report.get("tree_total"),
+                    "report": report,
                     "message": "پروژه با موفقیت ذخیره شد"
                 }
 

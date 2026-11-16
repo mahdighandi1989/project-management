@@ -303,35 +303,46 @@ async def refresh_imported_project(
         if not owner or not repo:
             raise HTTPException(status_code=400, detail="اطلاعات GitHub ناقص است")
 
-        # دریافت توکن مناسب
-        effective_token = token
-        if not effective_token and use_global_token:
-            effective_token = os.environ.get("GITHUB_TOKEN", "")
-
-        # Re-import
-        service = get_github_import_service()
-        result = await service.import_repository(
-            url_or_path=f"{owner}/{repo}",
-            token=effective_token if effective_token else None,
-            include_files=True,
-        )
-
+        # (PM-INS-0014) همان مسیرِ سینکِ خودکار: افزایشی (فقط فایل‌های عوض‌شده)، حذف‌ها اعمال و ثبت،
+        # برچسبِ خصوصی از خودِ GitHub، و گزارشِ «N از M فایل» با دلیلِ هر ردشده.
+        from ...services.github_autosync import sync_project
+        result = await sync_project(project_id, force=True, trigger="manual")
         if not result.get("success"):
-            raise HTTPException(status_code=400, detail=result.get("error"))
+            raise HTTPException(status_code=400, detail=result.get("error") or "سینک ناموفق")
 
-        # ذخیره
-        save_result = await service.save_imported_project(result)
-
+        report = result.get("report") or {}
         return {
             "success": True,
             "message": "پروژه بروزرسانی شد",
-            "files_updated": len(result.get("files", [])),
+            "files_updated": result.get("files_saved", 0),
+            "added": result.get("added", 0),
+            "changed": result.get("changed", 0),
+            "removed": result.get("removed", 0),
+            "stored_files": result.get("stored_files"),
+            "repo_files": result.get("repo_files"),
+            "report": report,
+            "head_sha": result.get("head_sha"),
         }
 
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/imported-sync-all")
+async def sync_all_imported_projects(force: bool = False):
+    """(PM-INS-0014) همان دورِ سینکِ خودکار، همین حالا برای همهٔ پروژه‌های GitHub."""
+    from ...services.github_autosync import sync_all
+    res = await sync_all(force=force, trigger="manual-all")
+    return {
+        "success": True,
+        "results": {
+            k: {kk: v.get(kk) for kk in ("success", "skipped", "error", "added", "changed", "removed",
+                                         "stored_files", "repo_files", "head_sha")}
+            for k, v in res.items()
+        },
+    }
 
 
 @router.delete("/imported/{project_id}")

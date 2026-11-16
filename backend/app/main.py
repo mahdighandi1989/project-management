@@ -339,6 +339,20 @@ async def lifespan(app: FastAPI):
         app.state.kc_autosync_stop = None
         app.state.kc_autosync_task = None
 
+    # 🔄 (PM-INS-0014) سینکِ خودکارِ همهٔ پروژه‌های GitHub با هر کامیتِ تازه
+    try:
+        import asyncio as _asyncio_gs
+        from .services.github_autosync import github_autosync_loop
+        app.state.gh_autosync_stop = _asyncio_gs.Event()
+        app.state.gh_autosync_task = _asyncio_gs.create_task(
+            github_autosync_loop(app.state.gh_autosync_stop),
+        )
+        logger.info("🔄 GitHub projects auto-sync started")
+    except Exception as e:
+        logger.warning(f"GitHub projects auto-sync failed to start: {e}")
+        app.state.gh_autosync_stop = None
+        app.state.gh_autosync_task = None
+
     yield
 
     # Shutdown
@@ -379,6 +393,17 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(task, timeout=5)
     except Exception as e:
         logger.warning(f"Knowledge Center auto-sync stop error: {e}")
+
+    # Stop GitHub projects auto-sync
+    try:
+        stop_evt = getattr(app.state, "gh_autosync_stop", None)
+        task = getattr(app.state, "gh_autosync_task", None)
+        if stop_evt:
+            stop_evt.set()
+        if task:
+            await asyncio.wait_for(task, timeout=5)
+    except Exception as e:
+        logger.warning(f"GitHub projects auto-sync stop error: {e}")
 
     # close oversight session
     try:

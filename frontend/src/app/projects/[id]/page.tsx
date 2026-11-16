@@ -24,6 +24,7 @@ import ReactFlow, {
   MarkerType,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
+import GithubSyncBadge, { skippedReasons } from '@/components/GithubSyncBadge';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -55,6 +56,8 @@ interface Project {
     owner?: string;
     repo?: string;
     private?: boolean;
+    private_checked_at?: string;
+    github_sync?: import('@/components/GithubSyncBadge').GithubSync;
     stats?: {
       stars?: number;
       forks?: number;
@@ -9760,7 +9763,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
       const data = await res.json();
 
       if (data.success) {
-        showSuccess(`✅ سینک موفق! ${data.files_updated || 0} فایل بروزرسانی شد`);
+        showSuccess(`✅ سینک موفق! ${data.files_updated || 0} فایل دریافت شد · +${data.added || 0} ~${data.changed || 0} −${data.removed || 0}${data.repo_files != null ? ` · ${data.stored_files} از ${data.repo_files} فایلِ مخزن` : ''}`);
         // ریلود پروژه
         loadProject();
       } else {
@@ -10021,6 +10024,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                     ⚙️
                   </button>
                 </div>
+                <GithubSyncBadge sync={project.metadata?.github_sync} />
                 {syncSettings.auto_sync_enabled && (
                   <span className="text-xs text-green-500 flex items-center gap-1">
                     <span className="animate-pulse">●</span>
@@ -10161,8 +10165,8 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                 </div>
                 <div className="bg-white dark:bg-gray-800 rounded-lg p-4 text-center">
                   <div className="text-2xl mb-1">📄</div>
-                  <div className="font-bold">{files.length}</div>
-                  <div className="text-xs text-gray-500">فایل</div>
+                  <div className="font-bold">{files.length}{project.metadata?.github_sync?.repo_files != null ? ` از ${project.metadata.github_sync.repo_files}` : ''}</div>
+                  <div className="text-xs text-gray-500" title={skippedReasons(project.metadata?.github_sync?.report).join('، ') || undefined}>فایل{skippedReasons(project.metadata?.github_sync?.report).length ? ' ⓘ' : ''}</div>
                 </div>
                 <div className="bg-white dark:bg-gray-800 rounded-lg p-4 text-center">
                   <div className="text-2xl mb-1">💻</div>
@@ -10172,7 +10176,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                 <div className="bg-white dark:bg-gray-800 rounded-lg p-4 text-center">
                   <div className="text-2xl mb-1">{project.metadata.private ? '🔒' : '🌐'}</div>
                   <div className="font-bold text-sm">{project.metadata.private ? 'خصوصی' : 'عمومی'}</div>
-                  <div className="text-xs text-gray-500">دسترسی</div>
+                  <div className="text-xs text-gray-500" title={project.metadata.private_checked_at ? `طبقِ خودِ GitHub API — بررسی: ${project.metadata.private_checked_at}` : 'طبقِ GitHub API در آخرین سینک'}>دسترسی (طبقِ GitHub)</div>
                 </div>
               </div>
             )}
