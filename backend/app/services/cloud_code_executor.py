@@ -38,6 +38,7 @@ SUPPORTED_TOOLS_PHASE_3 = {
     "read_file",
     "list_files",
     "list_branches",
+    "list_commits",  # (PM-INS-0007)
     "read_file_from_branch",
     "render_list_services",
     "render_get_env_vars",
@@ -168,6 +169,39 @@ def build_inspector_executor(
                     return _ok("\n".join(names) or "(no branches)")
                 except Exception as e:
                     return _err(f"خطا در فراخوانی GitHub branches: {str(e)[:200]}")
+
+            if name == "list_commits":
+                # (PM-INS-0007) «آخرین commit چیست؟» — live from GitHub, same formatter as the agent loop.
+                if not github_token:
+                    return _err("توکن GitHub ست نشده.")
+                try:
+                    from .inspector_agent import format_commits
+                    try:
+                        lim = max(1, min(30, int(args.get("limit") or 10)))
+                    except (TypeError, ValueError):
+                        lim = 10
+                    br = (args.get("branch") or "").strip() or (branch or "")
+                    pth = (args.get("path") or "").strip().lstrip("/")
+                    params = {"per_page": str(lim)}
+                    if br:
+                        params["sha"] = br
+                    if pth:
+                        params["path"] = pth
+                    import httpx as _httpx_lc
+                    async with _httpx_lc.AsyncClient(timeout=15.0) as _cli:
+                        r = await _cli.get(
+                            f"https://api.github.com/repos/{owner}/{repo}/commits",
+                            params=params,
+                            headers={
+                                "Authorization": f"token {github_token}",
+                                "Accept": "application/vnd.github+json",
+                            },
+                        )
+                    if r.status_code != 200:
+                        return _err(f"GitHub commits API HTTP {r.status_code}")
+                    return _ok(format_commits(r.json(), lim, branch=br, path=pth))
+                except Exception as e:
+                    return _err(f"خطا در فراخوانی GitHub commits: {str(e)[:200]}")
 
             if name == "read_file_from_branch":
                 path = (args.get("path") or "").strip().lstrip("/")

@@ -70,6 +70,23 @@ def supports_tool_calling(model_id: str) -> bool:
 
 
 # ── تعریف ابزارها (Anthropic tools schema) ──────────────────────────────────
+def format_commits(data: Any, limit: int = 10, *, branch: str = "", path: str = "") -> str:
+    """GitHub /commits JSON ⇒ «sha · date · author · first line», newest first (PM-INS-0007)."""
+    rows = []
+    for c in (data or [])[:limit]:
+        if not isinstance(c, dict):
+            continue
+        cm = c.get("commit") or {}
+        who = (cm.get("author") or {}).get("name") or ((c.get("author") or {}).get("login")) or ""
+        when = (cm.get("committer") or {}).get("date") or (cm.get("author") or {}).get("date") or ""
+        msg = (cm.get("message") or "").splitlines()[0][:200] if cm.get("message") else ""
+        rows.append(f"- {(c.get('sha') or '')[:7]} · {when} · {who} · {msg}")
+    if not rows:
+        return "هیچ کامیتی پیدا نشد."
+    where = (f" شاخهٔ {branch}" if branch else "") + (f" فایلِ {path}" if path else "")
+    return f"آخرین کامیت‌ها{where} (تازه‌ترین اول، زنده از GitHub):\n" + "\n".join(rows)
+
+
 def _build_tools() -> List[Dict[str, Any]]:
     return [
         {
@@ -530,6 +547,24 @@ def _build_tools() -> List[Dict[str, Any]]:
             "input_schema": {"type": "object", "properties": {}, "required": []},
         },
         {
+            "name": "list_commits",
+            "description": (
+                "آخرین کامیت‌های مخزن را زنده از GitHub برمی‌گرداند (هش کوتاه، زمان، نویسنده، پیام)،"
+                " تازه‌ترین اول. برای سؤال‌هایی مثلِ «آخرین commit چیست؟»، «چه چیزی اخیراً عوض شد؟»"
+                " یا پیدا کردنِ کامیتی که یک تغییر را آورده. اختیاری: branch (پیش‌فرض شاخهٔ فعلی)،"
+                " path (فقط کامیت‌هایی که این فایل را عوض کرده‌اند)، limit (۱ تا ۳۰، پیش‌فرض ۱۰)."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "branch": {"type": "string", "description": "نام شاخه (اختیاری)"},
+                    "path": {"type": "string", "description": "مسیر فایل برای محدود کردن (اختیاری)"},
+                    "limit": {"type": "integer", "description": "تعداد (۱..۳۰، پیش‌فرض ۱۰)"},
+                },
+                "required": [],
+            },
+        },
+        {
             "name": "read_file_from_branch",
             "description": (
                 "محتوای یک فایل رو از یک branch مشخص (نه branch فعلی) می‌خونه. وقتی کاربر می‌گه"
@@ -949,6 +984,35 @@ async def run_inspector_agent(
                     })
                 except Exception as _be:
                     tool_results.append(_tr(f"خطا: {str(_be)[:200]}", is_error=True))
+
+            # (PM-INS-0007) recent commits — the roaming assistant already reads them; the agent could not.
+            elif name == "list_commits":
+                try:
+                    _lim = max(1, min(30, int(args.get("limit") or 10)))
+                except (TypeError, ValueError):
+                    _lim = 10
+                _cb = (args.get("branch") or branch or "").strip()
+                _cp = (args.get("path") or "").strip().lstrip("/")
+                try:
+                    _session = await github_svc._get_session()
+                    _params = {"per_page": str(_lim)}
+                    if _cb:
+                        _params["sha"] = _cb
+                    if _cp:
+                        _params["path"] = _cp
+                    _url = f"{github_svc.GITHUB_API}/repos/{owner}/{repo}/commits"
+                    async with _session.get(_url, headers=github_svc._get_headers(token), params=_params, timeout=20) as _resp:
+                        if _resp.status != 200:
+                            tool_results.append(_tr(f"خطا در گرفتن کامیت‌ها: HTTP {_resp.status}", is_error=True))
+                            continue
+                        _data = await _resp.json()
+                    tool_results.append(_tr(format_commits(_data, _lim, branch=_cb, path=_cp)))
+                    yield ("progress", {
+                        "step": "agent_list_commits",
+                        "message": f"🕘 {_tag} آخرین کامیت‌ها خوانده شد ({min(len(_data or []), _lim)} مورد)",
+                    })
+                except Exception as _ce:
+                    tool_results.append(_tr(f"خطا: {str(_ce)[:200]}", is_error=True))
 
             elif name == "read_file_from_branch":
                 _path = (args.get("path") or "").strip().lstrip("/")

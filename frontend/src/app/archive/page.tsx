@@ -57,6 +57,23 @@ interface DebateDetail {
 // 2026-11-15 (owner plan item 4): «مناظره» left the menu for «دستیار»; its conversations
 // are the archive's first tab, the old debates stay (last tab) and the page still opens.
 type TabType = 'assistant' | 'files' | 'projects' | 'debates';
+
+// (PM-INS-0007) debate statuses in Persian — the raw English enum used to show on the cards.
+const DEBATE_STATUS_FA: Record<string, string> = {
+  pending: 'در انتظار',
+  running: 'در حالِ اجرا',
+  paused: 'متوقف',
+  scoring: 'در حالِ امتیازدهی',
+  judging: 'در حالِ داوری',
+  synthesizing: 'در حالِ ترکیب',
+  generating: 'در حالِ ساختِ فایل',
+  summarizing: 'در حالِ خلاصه‌سازی',
+  completed: 'کامل‌شده',
+  finished: 'کامل‌شده',
+  failed: 'ناموفق',
+  error: 'خطا',
+};
+const debateStatusFa = (s?: string) => (s ? DEBATE_STATUS_FA[s] || s : '—');
 const TAB_IDS: TabType[] = ['assistant', 'files', 'projects', 'debates'];
 
 interface ConversationItem {
@@ -500,7 +517,7 @@ function ArchiveContent() {
               <option value="all">همه وضعیت‌ها</option>
               {debateStatuses.map((s) => (
                 <option key={s} value={s}>
-                  {s}
+                  {debateStatusFa(s)}
                 </option>
               ))}
             </select>
@@ -586,7 +603,7 @@ function ArchiveContent() {
                             : 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300'
                         }`}
                       >
-                        {d.status}
+                        {debateStatusFa(d.status)}
                       </span>
                       <span>📌 {d.mode}</span>
                       {d.rounds_count !== undefined && d.rounds_count > 0 && (
@@ -802,7 +819,7 @@ function ArchiveContent() {
                       حالت: {selectedDebate.mode}
                     </span>
                     <span className="px-2 py-1 bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300 rounded">
-                      وضعیت: {selectedDebate.status}
+                      وضعیت: {debateStatusFa(selectedDebate.status)}
                     </span>
                     {selectedDebate.models && selectedDebate.models.length > 0 && (
                       <span className="px-2 py-1 bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300 rounded">

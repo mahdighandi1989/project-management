@@ -15141,7 +15141,18 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - ⚠️ اگر واقعاً فقط سؤال دانشی/نظری است و هیچ اشاره‌ای به مشکل ندارد → QUESTION
 - فقط یک کلمه بنویس: QUESTION یا ACTION یا ERROR_LOG"""
 
+        # (PM-INS-0007) «آخرین commit چیست؟» was sent down the agent path because the LLM classifier leans to ACTION.
+        # A short, problem-free lookup is a QUESTION — no model call. Replies to an earlier message stay with the LLM.
+        _quick_question = False
         try:
+            from ...services.inspector_quick_classify import is_simple_info_question
+            _quick_question = (not request.reply_to) and is_simple_info_question(request.message)
+        except Exception as _qe:
+            slog.warning(f"[smart-chat] quick classify skipped: {_qe}")
+        if _quick_question:
+            msg_type = "QUESTION"
+        else:
+          try:
             classify_response = await ai_manager.generate(
                 model_id=primary_model,
                 messages=[
@@ -15163,7 +15174,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
             else:
                 # اگر مدل چیز عجیبی برگردوند → ACTION (بهتره فایل بخونه تا نخونه)
                 msg_type = "ACTION"
-        except Exception:
+          except Exception:
             # خطا در طبقه‌بندی → فرض ACTION (بهتره تحلیل عمیق انجام بشه)
             msg_type = "ACTION"
 
@@ -15209,7 +15220,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 else:
                     yield sse("progress", {
                         "step": "agent_model_selected",
-                        "message": "🧠 برای این کار از Claude (حالت عامل) استفاده می‌شود — تحلیل دقیق‌تر و خواندن هوشمند فایل‌ها",
+                        "message": f"🧠 برای این کار از {primary_model} (حالت عامل) استفاده می‌شود — تحلیل دقیق‌تر و خواندن هوشمند فایل‌ها",
                         "model": primary_model,
                     })
 
@@ -15320,6 +15331,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 ### 🆕 revert/recovery — وقتی کاربر می‌گوید «برگرد به branch X» یا «این فایل را از branch قدیمی بازیابی کن»:
 - 🔴 `revert_to_branch(target_branch, file_paths?, commit_message?)`: **بهترین راه** برای revert کامل به یک branch. این ابزار خودش با GitHub compare API تفاوت‌ها رو پیدا می‌کنه، محتوا رو از target branch می‌خونه، و action_plan رو می‌سازه و submit می‌کنه. **فقط همین یک ابزار رو صدا بزن** وقتی کاربر می‌گه «منو برگردون به branch X». نیازی به list_branches یا read_file_from_branch تک‌تک نیست.
 - `list_branches()`: لیست branchها (فقط برای discovery، اگر اسم branch مطمئن نیستی).
+- `list_commits(branch?, path?, limit?)`: آخرین کامیت‌ها زنده از GitHub (هش، زمان، نویسنده، پیام) — برای «آخرین commit چیست؟» همین را بزن؛ هرگز نگو «ابزارش را ندارم».
 - `read_file_from_branch(path, branch)`: خواندن یک فایل از branch مرجع (برای revert تک‌فایلی یا inspection).
 
   ❗ این operations explicit هستند — کاربر صریحاً revert خواسته. بدون درخواست صریح کاربر از این‌ها استفاده نکن.

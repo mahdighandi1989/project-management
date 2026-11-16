@@ -5,7 +5,7 @@
 
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 import asyncio
@@ -1064,9 +1064,60 @@ class DebateService:
         """دریافت یک جلسه"""
         return self._sessions.get(session_id)
 
+    # (PM-INS-0007) phases a background task is in the middle of. A process restart kills that task, so a
+    # debate left in one of these for long is stuck forever ("synthesizing" for days) — settle it honestly.
+    _TRANSIENT_STATUSES = {"pending", "running", "scoring", "judging", "synthesizing", "generating", "summarizing"}
+    STALE_AFTER = timedelta(hours=2)
+
+    def _reconcile_stale(self, session: DebateSession, now: Optional[datetime] = None) -> bool:
+        """A long-idle transient debate ⇒ completed (it has a result) or failed (it has none). True if changed."""
+        status = session.status.value if isinstance(session.status, DebateStatus) else str(session.status)
+        if status not in self._TRANSIENT_STATUSES:
+            return False
+        updated = session.updated_at
+        if isinstance(updated, str):
+            try:
+                updated = datetime.fromisoformat(updated)
+            except ValueError:
+                updated = None
+        if updated is not None:
+            now = now or (datetime.now(updated.tzinfo) if updated.tzinfo else datetime.now())
+            if now - updated < self.STALE_AFTER:
+                return False
+        has_result = bool(session.synthesized_output or session.judge_result or session.summary)
+        session.status = (DebateStatus.COMPLETED if has_result else DebateStatus.FAILED).value
+        meta = dict(session.metadata or {})
+        meta["stale_reconciled"] = {"from": status, "at": datetime.now().isoformat()}
+        session.metadata = meta
+        self._save_debate(session)
+        return True
+
     def list_sessions(self) -> List[DebateSession]:
-        """لیست همه جلسات"""
-        return list(self._sessions.values())
+        """لیست همه جلسات — بی‌تکرار و بی‌وضعیتِ گیرکرده (PM-INS-0007).
+
+        A double-submitted create left two files with the same prompt and the same second; the
+        list shows one (the one that got furthest). Nothing is deleted — every file stays on disk
+        and is still reachable by id.
+        """
+        best: Dict[tuple, DebateSession] = {}
+        for session in list(self._sessions.values()):
+            try:
+                self._reconcile_stale(session)
+            except Exception as e:  # never let the list fail over one bad record
+                print(f"stale reconcile skipped for {session.id}: {e}")
+            created = session.created_at
+            created_key = created.isoformat()[:19] if isinstance(created, datetime) else str(created)[:19]
+            key = ((session.prompt or "").strip(), created_key)
+            prev = best.get(key)
+            if prev is None or self._progress_rank(session) > self._progress_rank(prev):
+                best[key] = session
+        return list(best.values())
+
+    @staticmethod
+    def _progress_rank(session: DebateSession) -> tuple:
+        status = session.status.value if isinstance(session.status, DebateStatus) else str(session.status)
+        updated = session.updated_at.isoformat() if isinstance(session.updated_at, datetime) else str(session.updated_at)
+        return (status == "completed", len(session.rounds), bool(session.synthesized_output), updated)
 
 
 # Singleton instance

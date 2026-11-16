@@ -3334,14 +3334,21 @@ export default function ProjectDetailPage() {
   // و اگر هیچ مدلِ روشنی نیست صریح می‌گوید کجا روشنش کنند.
   const _inspectorEnabledModels = inspectorModels.filter(m => m.enabled);
   const _inspectorModelName = (id?: string) => inspectorModels.find(m => m.id === id)?.name || id || '';
+  // (PM-INS-0007) the header used to name the model it *guessed* (first enabled) while the server
+  // auto-routed to another one; once an answer exists, name the model that really answered it.
+  const _lastAnswerModel = [...inspectorChatMessages].reverse()
+    .find(m => m.role === 'assistant' && m.model_id)?.model_id;
+  const _lastAnswerSuffix = _lastAnswerModel ? ` · پاسخِ آخر: ${_inspectorModelName(_lastAnswerModel)}` : '';
   const inspectorModelStatusText = inspectorEngine === 'cloud_code'
-    ? 'موتور: Cloud Code'
+    ? `موتور: Cloud Code${_lastAnswerSuffix}`
     : inspectorModels.length === 0
       ? 'در حالِ بارگذاریِ مدل‌ها…'
       : _inspectorEnabledModels.length === 0
         ? '⚠️ هیچ مدلِ روشنی نیست — از «مدل‌ها و تنظیمات» یکی را روشن کنید'
         : inspectorAutoSelect
-          ? `✨ خودکار: ${_inspectorModelName(inspectorSelectedModels[0] || _inspectorEnabledModels[0]?.id)}`
+          ? (_lastAnswerModel
+              ? `✨ خودکار — پاسخِ آخر: ${_inspectorModelName(_lastAnswerModel)}`
+              : `✨ خودکار: ${_inspectorModelName(inspectorSelectedModels[0] || _inspectorEnabledModels[0]?.id)}`)
           : inspectorSelectedModels.length > 0
             ? (inspectorSelectedModels.length === 1
                 ? `مدل: ${_inspectorModelName(inspectorSelectedModels[0])}`
