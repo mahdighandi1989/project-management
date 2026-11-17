@@ -1297,3 +1297,13 @@
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · pytest
 
+## 2026-11-17 (۶۱) — PM-INS-0024 «الف»: اجرا روی production + کوتاه‌کردنِ WAL
+
+- **[VERIFY]** پس از a55a6ca، پاک‌سازِ ۶ ساعته در نخستین تیک اجرا شد: render_logs ۳۹۴٬۹۳۲ ⇐ ۴٬۴۹۰ ردیف (۳۹۰٬۴۴۲ در ۲۰ فایلِ درایو)، ai_logs ۲۸٬۴۹۰ ⇐ ۵۸۹ (۲۷٬۹۰۱ در ۲ فایل)؛
+  جدول‌ها: render_logs ≈۱٫۳MB و ai_logs ≈۲MB (پیش‌تر ≈۱۷۰ و ۹۶MB).
+- **[FINDING]** دیسک ۸۰٫۱٪ ⇐ ۸۵٫۲٪: حذف‌های بزرگ اول در WAL نوشته شد (`database.db-wal` ۷ ⇐ ۷۴MB) و WAL خودبه‌خود کوچک نمی‌شود؛ `database.db` (۵۰۸MB) حالا ~۲۵۰MB صفحهٔ آزاد دارد که دوباره
+  استفاده می‌شود. VACUUM ِ کامل ~۲۶۰MB جای موقت می‌خواهد و فقط ~۱۳۰MB آزاد است — انجام نشد.
+- **[CHANGE]** `log_archive.run`: پس از جابه‌جایی `PRAGMA wal_checkpoint(TRUNCATE)`؛ `database.py`: `journal_size_limit=32MB`.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · API و لاگ‌های production
+

@@ -1946,7 +1946,7 @@ async def log_archive_run(body: LogArchiveRun):
         _db = SessionLocal()
         try:
             before = LA.preview(_db, _cutoffs_from(body.render_days, body.ai_days, _db))
-            res = LA.run(_db, _cutoffs_from(body.render_days, body.ai_days, _db), max_batches=200)
+            res = LA.run(_db, _cutoffs_from(body.render_days, body.ai_days, _db), max_batches=200, force_checkpoint=True)
             after = LA.preview(_db, _cutoffs_from(body.render_days, body.ai_days, _db))
             return {"before": before, "result": res, "after": after}
         finally:

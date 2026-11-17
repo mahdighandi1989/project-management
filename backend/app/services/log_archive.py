@@ -101,7 +101,8 @@ def _upload(db, table: str, rows: List[dict], start: datetime, end: datetime) ->
     return {"id": res["id"], "link": res.get("link") or "", "name": name, "compressed": len(data), "raw": len(raw)}
 
 
-def run(db, cutoffs: Optional[Dict[str, datetime]] = None, *, max_batches: int = 50) -> Dict[str, Any]:
+def run(db, cutoffs: Optional[Dict[str, datetime]] = None, *, max_batches: int = 50,
+        force_checkpoint: bool = False) -> Dict[str, Any]:
     """Archive-then-delete, oldest first. Synchronous (call it in a thread). Stops at the first Drive failure."""
     from . import gdrive
     from ..models.render_log import LogDriveArchive
@@ -141,6 +142,15 @@ def run(db, cutoffs: Optional[Dict[str, datetime]] = None, *, max_batches: int =
         result[name] = {"moved": moved, "files": files, "error": err}
         if err:
             result["ok"] = False
+    # the deletes land in the WAL first — give that space back to the disk (no data is lost; the database file itself keeps
+    # its free pages and reuses them, so it stops growing)
+    if any(isinstance(v, dict) and v.get("moved") for v in result.values()) or force_checkpoint:
+        try:
+            from sqlalchemy import text
+            res = db.execute(text("PRAGMA wal_checkpoint(TRUNCATE)")).fetchone()
+            result["wal_checkpoint"] = list(res) if res is not None else None
+        except Exception as e:  # noqa: BLE001
+            result["wal_checkpoint"] = f"{type(e).__name__}: {str(e)[:100]}"
     logger.info(f"log_archive: {result}")
     return result
 

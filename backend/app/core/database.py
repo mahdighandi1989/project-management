@@ -51,6 +51,9 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.execute("PRAGMA journal_mode=WAL")  # Write-Ahead Logging برای performance بهتر
     cursor.execute("PRAGMA synchronous=NORMAL")
+    # PM-INS-0024 — after a checkpoint the WAL file is cut back to at most 32 MB (it stayed at its largest size: 74 MB on the
+    # 1 GB disk after the big log move)
+    cursor.execute("PRAGMA journal_size_limit=33554432")
     cursor.close()
 
 
