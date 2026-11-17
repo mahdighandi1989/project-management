@@ -33,3 +33,23 @@ def test_pages_without_a_bridge_are_untouched():
 def test_proxy_route_calls_it():
     import inspect
     assert "_enable_project_bridge(html, project_id)" in inspect.getsource(RL.inspector_page_proxy)
+
+
+def test_ticket_in_the_asset_path_opens_only_that_project(monkeypatch):
+    """Module scripts from the sandboxed preview carry no cookie — the ticket rides in the path (live 401 on
+    /assets/index-CjLBx5Le.js left the quran app blank, 2026-11-17)."""
+    from app.core import auth
+    t = auth.preview_ticket(PID)
+    ok = f"/api/render/inspector/proxy/{PID}/~pt~{t}/assets/index-CjLBx5Le.js"
+    assert auth.preview_allowed(ok, "GET", {})
+    assert not auth.preview_allowed(ok, "POST", {})
+    assert not auth.preview_allowed(f"/api/render/inspector/proxy/other_project/~pt~{t}/assets/x.js", "GET", {})
+    assert not auth.preview_allowed(f"/api/render/inspector/proxy/{PID}/~pt~1.bad/assets/x.js", "GET", {})
+    assert not auth.preview_allowed(f"/api/render/inspector/proxy/{PID}/assets/x.js", "GET", {})
+
+
+def test_proxy_rewrites_assets_with_the_ticket_and_strips_it_upstream():
+    import inspect
+    src = inspect.getsource(RL.inspector_page_proxy)
+    assert "path.startswith(PREVIEW_PATH_MARK)" in src and "asset_prefix" in src
+    assert '"Access-Control-Allow-Origin": "*"' in src

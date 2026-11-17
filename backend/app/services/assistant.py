@@ -111,25 +111,44 @@ async def _live_counts() -> str:
         by_status: dict[str, int] = {}
         for t in tasks:
             by_status[t.get("status", "?")] = by_status.get(t.get("status", "?"), 0) + 1
-        lines.append(f"- «اتاق فرمان»: {len(watched)} مخزنِ تحتِ پایش؛ تسک‌ها بر اساسِ وضعیت: "
+        lines.append(f"- «اتاق فرمان» — **تسک‌ها** (کارهای ساخته‌شده برای مخازن؛ «برگه» نیستند): {len(watched)} مخزنِ تحتِ پایش؛ "
+                     f"تسک‌ها بر اساسِ وضعیت (awaiting_review = منتظرِ بازبینیِ تسک، نه برگه): "
                      + "، ".join(f"{k}={v}" for k, v in sorted(by_status.items())))
         if watched:
             lines.append("  مخازن: " + "، ".join(w.get("repo_full_name", "?") for w in watched[:15]))
     except Exception as e:  # noqa: BLE001
         lines.append(f"- «اتاق فرمان»: خوانده نشد ({type(e).__name__})")
     try:
+        from datetime import timedelta as _td
+
         from ..core.database import SessionLocal
         from ..models.inspection import InspectionReport
 
+        # PM-INS-0020 — the assistant answered «آخرین برگه 0018، ۲۶۷ در انتظار» (real: 0019 and 1): it got bare status
+        # counts and mixed them with the command-room TASKS. Now: labelled, the same numbers the page shows, the
+        # newest sheets by number with their Dubai time.
         db = SessionLocal()
         try:
-            rows = db.query(InspectionReport.status).all()
+            rows = db.query(InspectionReport.number, InspectionReport.status, InspectionReport.title,
+                            InspectionReport.created_at, InspectionReport.urgent_at).all()
         finally:
             db.close()
         counts: dict[str, int] = {}
-        for (st,) in rows:
+        for _n, st, _t, _c, _u in rows:
             counts[st] = counts.get(st, 0) + 1
-        lines.append("- «نظارت و سرکشی»: " + ("، ".join(f"{k}={v}" for k, v in counts.items()) or "برگه‌ای نیست"))
+        fa_status = {"open": "در انتظارِ ناظر", "answered": "ناظر پاسخ داد", "approved": "تأییدِ مالک",
+                     "filed": "بایگانی"}
+        newest = sorted(rows, key=lambda r: r[0] or 0, reverse=True)[:5]
+
+        def _dubai(dt):
+            return (dt + _td(hours=4)).strftime("%Y-%m-%d %H:%M") + " دبی" if dt else "?"
+
+        lines.append(
+            "- «نظارت و سرکشی» — **برگه‌ها** (گزارش‌های مالک برای ناظر؛ با «تسکِ اتاق فرمان» فرق دارند): "
+            f"کل {len(rows)}؛ " + "، ".join(f"{fa_status.get(k, k)}={v}" for k, v in counts.items())
+        )
+        for n, st, t, c, u in newest:
+            lines.append(f"  - PM-INS-{(n or 0):04d} · {fa_status.get(st, st)}{' · فوری' if u else ''} · {_dubai(c)} · {_clip(t or '', 90)}")
     except Exception as e:  # noqa: BLE001
         lines.append(f"- «نظارت و سرکشی»: خوانده نشد ({type(e).__name__})")
     return "\n".join(lines)
@@ -182,6 +201,8 @@ SYSTEM = """تو «دستیار» ِ برنامهٔ AI Creator Engine (پروژ�
 - آنچه دربارهٔ برنامه می‌گویی فقط از «بافتِ زنده» ِ زیر است؛ اگر در آن نیست، صادقانه بگو «در داده‌هایم نیست» و بگو کجا را ببیند.
 - تو فقط می‌خوانی و راهنمایی می‌کنی؛ هیچ تغییری خودت اعمال نمی‌کنی. برای گزارشِ ایراد، «نظارت و سرکشی» را پیشنهاد کن.
 - رمز، کلید یا ایمیل هرگز تکرار نکن.
+- «برگه» (PM-INS-…، صفحهٔ «نظارت و سرکشی») و «تسک» (اتاق فرمان) دو چیزِ جدا هستند؛ عددِ یکی را برای دیگری نگو. «آخرین برگه» = بزرگ‌ترین
+  شمارهٔ PM-INS در بافتِ زنده. زمان‌ها را به وقتِ دبی بگو (در بافت آمده).
 """
 
 

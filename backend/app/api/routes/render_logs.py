@@ -19421,6 +19421,14 @@ async def inspector_page_proxy(
             headers={"Content-Security-Policy": PROXY_SANDBOX_CSP},
         )
 
+    # PM-INS-0021 — the preview ticket may travel in the path (see core/auth.preview_allowed); strip it before the
+    # upstream request and keep it for the rewritten asset URLs of this page
+    from ...core.auth import PREVIEW_PATH_MARK, PREVIEW_COOKIE
+    _pt = ""
+    if path.startswith(PREVIEW_PATH_MARK):
+        _pt, _, path = path[len(PREVIEW_PATH_MARK):].partition("/")
+    _pt = _pt or request.cookies.get(PREVIEW_COOKIE, "")
+
     # 2. ساخت URL هدف
     target_url = frontend_url.rstrip("/")
     if path:
@@ -19452,6 +19460,8 @@ async def inspector_page_proxy(
         html = resp.text
         base_url = frontend_url.rstrip("/")
         proxy_prefix = f"/api/render/inspector/proxy/{project_id}"
+        # assets carry the ticket in their path — module scripts from the sandboxed (opaque-origin) preview send no cookie
+        asset_prefix = f"{proxy_prefix}/{PREVIEW_PATH_MARK}{_pt}" if _pt else proxy_prefix
 
         # ✅ بازنویسی مسیرهای مطلق در attribute های HTML
         # src="/_next/..." → src="/api/render/inspector/proxy/projId/_next/..."
@@ -19459,13 +19469,13 @@ async def inspector_page_proxy(
         import re as _re
         html = _re.sub(
             r'((?:src|href|action)\s*=\s*["\'])(\/(?!\/|api\/render\/inspector\/proxy))',
-            f'\\1{proxy_prefix}/',
+            f'\\1{asset_prefix}/',
             html,
         )
         # srcset="/_next/image 1x, ..." — بازنویسی
         html = _re.sub(
             r'(srcset\s*=\s*["\'])(/)',
-            f'\\1{proxy_prefix}/',
+            f'\\1{asset_prefix}/',
             html,
         )
 
@@ -19506,7 +19516,9 @@ async def inspector_page_proxy(
         content=body,
         status_code=resp.status_code,
         media_type=ct or "application/octet-stream",
-        headers={"Content-Security-Policy": PROXY_SANDBOX_CSP},
+        # PM-INS-0021: a module script requested from the sandboxed (origin «null») preview needs a CORS «yes»; these
+        # are the project's own public frontend files, and no credentials are involved (the ticket is in the path)
+        headers={"Content-Security-Policy": PROXY_SANDBOX_CSP, "Access-Control-Allow-Origin": "*"},
     )
 
 

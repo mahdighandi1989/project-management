@@ -241,6 +241,7 @@ def session_from(headers: dict, query: str, method: str) -> Optional[dict]:
 # prefix, so only those GET requests carry it. The session token itself never enters a URL or a cookie.
 PREVIEW_PREFIX = "/api/render/inspector/proxy/"
 PREVIEW_COOKIE = "pm_preview"
+PREVIEW_PATH_MARK = "~pt~"
 PREVIEW_TTL = int(os.environ.get("PREVIEW_TICKET_TTL", "1800"))
 
 
@@ -266,7 +267,13 @@ def preview_allowed(path: str, method: str, headers: dict) -> bool:
     """A GET/HEAD under one project's proxy prefix carrying that project's valid ticket cookie."""
     if method not in ("GET", "HEAD") or not path.startswith(PREVIEW_PREFIX):
         return False
-    project_id = path[len(PREVIEW_PREFIX):].split("/", 1)[0]
+    project_id, _, rest = path[len(PREVIEW_PREFIX):].partition("/")
+    # PM-INS-0021 — the preview runs in a sandbox (opaque origin, PM-INS-0015), so a page's module scripts
+    # (`<script type="module" crossorigin>`, every Vite app) are fetched WITHOUT cookies and got 401 — the project
+    # rendered blank. The proxy therefore writes the same signed, project-scoped, 30-minute ticket into the asset
+    # paths: /api/render/inspector/proxy/<project>/~pt~<ticket>/assets/… (relative imports keep it).
+    if rest.startswith(PREVIEW_PATH_MARK):
+        return preview_ticket_ok(rest[len(PREVIEW_PATH_MARK):].split("/", 1)[0], project_id)
     from http.cookies import SimpleCookie
 
     jar = SimpleCookie()
