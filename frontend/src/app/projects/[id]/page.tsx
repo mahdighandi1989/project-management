@@ -446,6 +446,10 @@ export default function ProjectDetailPage() {
   // پیام‌هایی که کاربر روی آن‌ها پاسخ ask_user داده — برای hide دکمه ارسال
   const [clarifyAnswered, setClarifyAnswered] = useState<Set<string>>(new Set());
   const scanPollRef = useRef<NodeJS.Timeout | null>(null);
+  // (PM-INS-0027) the request that started the running scan, and a late-bound sender — an aborted scan
+  // («scope matched no file») is shown at the BOTTOM of the chat and the request goes again as a plain chat
+  const lastScanRequestRef = useRef<string>('');
+  const sendInspectorChatRef = useRef<any>(null);
   // 🆕 (auto-scroll) — sentinel در انتهای لیست پیام‌ها + container چت برای
   // اسکرول خودکار به آخرین پیام هنگام نوشتن مدل‌ها.
   const inspectorChatEndRef = useRef<HTMLDivElement | null>(null);
@@ -1666,6 +1670,28 @@ export default function ProjectDetailPage() {
           if (scanPollRef.current) {
             clearInterval(scanPollRef.current);
             scanPollRef.current = null;
+          }
+          // (PM-INS-0027) an aborted scan used to be logged in the DB but sorted ABOVE the local «در حال اسکن…»
+          // messages — the chat kept saying «پیشنهادها چند دقیقه دیگر…» forever
+          const _res = data.result || {};
+          if (data.status === 'completed' && _res.aborted) {
+            const again = lastScanRequestRef.current;
+            setInspectorChatMessages(prev => [...prev.map((m: any) => m.isScanInitiated ? { ...m, isScanInitiated: false } : m), {
+              id: `scan_aborted_${Date.now()}`,
+              role: 'assistant' as const,
+              content: `🚫 اسکنِ موردی لغو شد — ${_res.message || _res.reason || 'بدونِ دلیل'}`
+                + (_res.reason === 'scope_empty' ? ' (مسیرِ خواسته‌شده هنوز در repo نیست — مثلاً فایلی که باید ساخته شود).' : '')
+                + (again ? '\n\n↪️ همان درخواست همین حالا بدونِ اسکن، به‌صورتِ چتِ ساده (action_plan) فرستاده می‌شود.' : ''),
+              timestamp: new Date(),
+            } as any]);
+            setActiveScanId(null);
+            setActiveScanSessionId(null);
+            setScanProgress(null);
+            lastScanRequestRef.current = '';
+            if (again && sendInspectorChatRef.current) {
+              setTimeout(() => { sendInspectorChatRef.current(again, false, true, false, true); }, 300);
+            }
+            return;
           }
           // 🆕 (v3 reliability) — restore را با تلاش‌های متعدد انجام بده
           // تا قطعاً کاربر پیام scan_complete را ببیند بدون نیاز به
@@ -5845,6 +5871,7 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
     _isRetry = false,
     _bypassOversightCheck = false,
     _forceLocal = false,  // (PM-INS-0006) Cloud Code failed → same message through Local AI (auto model)
+    _noScan = false,  // (PM-INS-0027) an aborted scan resends the request as a plain chat
   ) => {
     // 🆕 (Inspector → Oversight) اگر تیک ارسال به نظارت فعال است، مسیر متفاوت
     // _bypassOversightCheck برای دکمهٔ «🔍 بررسی همین پرامپت در چت» استفاده می‌شود
@@ -6372,6 +6399,7 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
             } : undefined,
             // 🆕 (v2 audit E3) — mode بر اساس state واقعی فرانت‌اند
             inspector_mode: visualDebugMode ? 'visual_debug' : 'chat',
+            enable_selective_scan: _noScan ? false : undefined,
           }),
           signal: inspectorOpAbortRef.current?.signal,
         });
@@ -6437,6 +6465,7 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
                     responseReceived = true;
                   }
                 } else if (eventType === 'scan_initiated') {
+                  lastScanRequestRef.current = rawMessage;
                   // 🆕 (inspector-scan) — backend تشخیص داد scan موردی لازم است.
                   // یک پیام assistant با محتوای scan_initiated اضافه می‌کنیم،
                   // session_id را ذخیره می‌کنیم، polling progress شروع می‌شود،
@@ -6764,6 +6793,7 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
       setInspectorOpType(null);
     }
   };
+  sendInspectorChatRef.current = sendInspectorChat;
 
   // 🆕 Toggle انتخاب مدل
   const toggleInspectorModel = (modelId: string) => {

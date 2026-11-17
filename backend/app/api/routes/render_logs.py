@@ -15030,6 +15030,14 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
             except Exception:
                 _hist_for_intent = []
 
+        # (PM-INS-0027) «فایلِ X را بساز / این خط را بنویس» must go straight to a plain action_plan. The check used to
+        # run on the STRUCTURED text (enhanced prompt — full of «بررسی/review»), so the coordinator's one-line request
+        # became a deep scan whose scope matched no file (the file did not exist yet) and was silently aborted.
+        from ...services.inspector_intent_resolver import _is_simple_file_op as _simple_op
+        _orig_msg = (getattr(request, "original_message", None) or "").strip()
+        if _simple_op(_orig_msg or request.message):
+            slog.info("[smart-chat] simple file op (by the user's own words) — no scan, direct to action_plan")
+            raise _SkipIntentPath()
         intent = resolve_intent_from_chat_context(
             user_message=request.message,
             backend_logs=request.backend_logs,

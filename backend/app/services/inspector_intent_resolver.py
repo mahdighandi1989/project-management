@@ -234,8 +234,8 @@ def _has_build_error(
 # scan ۱۲-pass به‌صورت ذاتی scope broad می‌گیرد و برای fix دقیق و کوچک
 # اشتباه است.
 # Verb های file-creation
-_CREATE_VERBS_FA = ("بساز", "ایجاد کن", "ساختن", "ایجاد", "بسازش")
-_CREATE_VERBS_EN = ("create", "make", "generate", "build")
+_CREATE_VERBS_FA = ("بساز", "ایجاد کن", "ساختن", "ایجاد", "بسازش", "بنویس", "بنویسش")  # PM-INS-0027: «این خط را بنویس»
+_CREATE_VERBS_EN = ("create", "make", "generate", "build", "write")
 
 # Pattern برای filename — هر چیزی شامل دات و extension، یا نام‌های شناخته‌شده
 # بدون extension (Dockerfile، Makefile، …)
