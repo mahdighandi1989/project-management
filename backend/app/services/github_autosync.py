@@ -126,6 +126,16 @@ async def sync_project(project_id: str, *, force: bool = False, trigger: str = "
         return {"success": False, "error": result["tree_error"]}
     result["sync_trigger"] = trigger
     saved = await svc.save_imported_project(result)
+    # (PM-INS-0026) new files ⇒ check the memory against the real stack (stale framework instructions are archived)
+    try:
+        from .memory_stack_review import review as _review_memory
+        db2 = SessionLocal()
+        try:
+            saved["memory_review"] = _review_memory(db2, project_id)
+        finally:
+            db2.close()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"memory_stack_review after sync {project_id}: {e}")
     return {**saved, "head_sha": result.get("head_sha"), "skipped": False}
 
 

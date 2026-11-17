@@ -17,6 +17,9 @@ type Summary = {
   automation: { watched_id: string; repo: string; on: string[]; off: string[] }[];
   top_tasks: { id: string; title: string; repo: string; priority: string; status: string; verification_status: string }[];
   cleanup: { duplicates: number; duplicate_tasks: number; stale: number };
+  // (PM-INS-0026 «ب») when did a task REALLY run, and can anything change code right now
+  last_real_run?: { line: string; safe_path: string; runner_on: string[]; allow_push_on: string[]; auto_but_verify_only: string[];
+    task_days_ago: number | null };
 };
 type Preview = {
   stale_days: number;
@@ -106,6 +109,18 @@ export default function OversightSummary({ onOpenTask }: { onOpenTask?: (id: str
                   {data.models_on > 0 ? `${fa(data.models_on)} مدلِ روشن` : 'هیچ مدلی روشن نیست'}
                 </span>
               </div>
+
+              {data.last_real_run && (
+                <div data-testid="oversight-last-real-run"
+                  className={`rounded-lg p-2 text-xs ${(data.last_real_run.task_days_ago ?? 999) > 14 || data.last_real_run.runner_on.length === 0
+                    ? 'bg-amber-50 text-amber-900 dark:bg-amber-900/30 dark:text-amber-100' : 'bg-gray-50 dark:bg-gray-700/40'}`}>
+                  <div className="font-semibold">⏱ {data.last_real_run.line}</div>
+                  {data.last_real_run.auto_but_verify_only.length > 0 && (
+                    <div className="mt-1">ℹ️ «خودمختاری: auto» ولی «فقط verify» هم روشن است (پس فقط verify اجرا می‌شود): {data.last_real_run.auto_but_verify_only.join('، ')}</div>
+                  )}
+                  <div className="mt-1 opacity-80">🛡 {data.last_real_run.safe_path}</div>
+                </div>
+              )}
 
               <div>
                 <div className="font-semibold mb-1">⚙️ الان چه چیزی خودکار اجرا می‌شود و چه چیزی خاموش است</div>

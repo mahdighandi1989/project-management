@@ -14,6 +14,8 @@ function ProjectsContent() {
   const [projects, setProjects] = useState<any[]>([]);
   const [githubProjects, setGithubProjects] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  // (PM-INS-0026) backend restarting ⇒ «سرور در حال راه‌اندازی»، not «پروژه‌ای نیست (۰)»
+  const [serverDown, setServerDown] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [activeTab, setActiveTab] = useState<'all' | 'github'>('all');
@@ -150,18 +152,32 @@ function ProjectsContent() {
     setTimeout(() => setSuccess(''), 4000);
   };
 
-  const loadProjects = async () => {
+  const loadProjects = async (): Promise<void> => {
     setLoading(true);
+    let down = false;
     try {
       const res = await fetch(`${API_BASE}/api/projects`);
       if (res.ok) {
         const data = await res.json();
         setProjects(data.projects || []);
+      } else if ([502, 503, 504].includes(res.status)) {
+        down = true;
       }
     } catch (e) {
-      showError('خطا در بارگذاری');
+      down = true;
     } finally {
       setLoading(false);
+    }
+    setServerDown(down);
+    if (down) {
+      // try again on its own until the server answers (every 10 s, up to ~3 minutes)
+      for (let i = 0; i < 18; i++) {
+        await new Promise((r) => setTimeout(r, 10000));
+        try {
+          const h = await fetch(`${API_BASE}/health`, { cache: 'no-store' });
+          if (h.ok) { setServerDown(false); loadGitHubProjects(); return loadProjects(); }
+        } catch { /* still starting */ }
+      }
     }
   };
 
@@ -606,6 +622,14 @@ function ProjectsContent() {
 
               {loading ? (
                 <p className="text-gray-400 text-center py-4">در حال بارگذاری...</p>
+              ) : serverDown && displayProjects.length === 0 ? (
+                <div className="text-center py-8" data-testid="projects-server-starting">
+                  <div className="animate-spin text-3xl mb-2">⏳</div>
+                  <p className="text-gray-300">سرور در حال راه‌اندازی است… (خودکار دوباره تلاش می‌کنم)</p>
+                  <button onClick={() => { loadProjects(); loadGitHubProjects(); }} className="mt-3 text-sm text-blue-500 hover:underline">
+                    تلاشِ دوباره
+                  </button>
+                </div>
               ) : displayProjects.length === 0 ? (
                 <div className="text-center py-8">
                   <div className="text-4xl mb-2">📭</div>

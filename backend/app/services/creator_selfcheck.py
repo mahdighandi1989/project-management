@@ -698,13 +698,54 @@ async def plan_browser_steps(ai: AIGen, root: Path, description: str) -> List[Di
     return steps[:40]
 
 
+def failing_tests(out: str, limit: int = 15) -> List[str]:
+    """`not ok` blocks of the TAP output ⇒ «name — file:line — expected X, got Y / error» (what a weak model can act on;
+    the raw tail of 117 tests showed it only passing ones)."""
+    items: List[str] = []
+    lines = (out or "").splitlines()
+    for i, ln in enumerate(lines):
+        m = re.match(r"^\s*not ok \d+ - (.+?)(?:\s+#\s.*)?$", ln)
+        if not m or m.group(1).strip().endswith((".js", ".mjs", ".cjs")):
+            continue
+        block = []
+        for nxt in lines[i + 1:i + 40]:
+            if re.match(r"^\s*(not )?ok \d+ - ", nxt) or nxt.strip() == "...":
+                break
+            block.append(nxt)
+        txt = "\n".join(block)
+
+        def _g(key: str) -> str:
+            mm = re.search(rf"^\s*{key}:\s*(.+)$", txt, re.M)
+            return mm.group(1).strip().strip("'\"") if mm else ""
+        err = _g("error")
+        if err in ("|-", "|", ">-"):
+            mm = re.search(r"error:\s*\|-?\n((?:\s{4,}.*\n?){1,4})", txt)
+            err = " ".join(x.strip() for x in (mm.group(1).splitlines() if mm else []) if x.strip())
+        loc = _g("location").split("/")[-1]
+        exp, act = _g("expected"), _g("actual")
+        d = f"«{m.group(1).strip()}» ({loc})"
+        if exp or act:
+            d += f": انتظار {exp!s} بود، {act!s} آمد"
+        if err:
+            d += f" — {err[:160]}"
+        items.append(d)
+        if len(items) >= limit:
+            break
+    return items
+
+
 def summarize(report: Dict[str, Any]) -> List[str]:
     lines: List[str] = []
     for p in report.get("static", []):
         lines.append(f"[{p['file']}] {p['problem']}")
     t = report.get("tests") or {}
     if t.get("ran") and not t.get("ok"):
-        lines.append(f"[tests] npm test شکست خورد (exit {t.get('exit_code')}):\n{(t.get('output') or '')[-2500:]}")
+        fails = failing_tests(t.get("output") or "")
+        if fails:
+            lines.append(f"[tests] npm test: {t.get('failed')} تست رد شد از {t.get('tests')}؛ ردشده‌ها:")
+            lines += [f"[tests] ✗ {x}" for x in fails]
+        else:
+            lines.append(f"[tests] npm test شکست خورد (exit {t.get('exit_code')}):\n{(t.get('output') or '')[-2500:]}")
     elif t.get("ok") is False and t.get("reason"):
         lines.append(f"[tests] {t['reason']}")
     b = report.get("browser") or {}
@@ -846,7 +887,9 @@ async def fix_loop(root: Path, *, ai: AIGen, description: str, constraints: Dict
             "موجود را عوض نکن. تست‌ها را حذف یا ضعیف نکن — کد را درست کن؛ تست را فقط وقتی عوض کن که خودش با خواستهٔ "
             "کاربر نمی‌خواند.\n"
             f"{rules}\n\n"
-            "## ایرادها\n" + "\n".join(f"- {x}" for x in rep["problems"][:25]) + "\n\n"
+            "## ایرادها\n" + "\n".join(f"- {x}" for x in rep["problems"][:30]) + "\n\n"
+            + "اگر تستی با خواستهٔ کاربر می‌خواند، **کد** را درست کن؛ اگر خودِ تست غلط است (انتظارِ نادرست)، همان تست را "
+              "با همان نام اصلاح کن. تستی که الان قبول است را دست نزن.\n\n"
             + ("## سناریوی مرورگر (همین باید درست کار کند)\n" + json.dumps(steps, ensure_ascii=False) + "\n\n" if steps else "")
             + f"## هدفِ برنامه\n{description[:1500]}\n\n## همهٔ فایل‌ها\n{project_snapshot(root)}\n\n"
             "## قالبِ خروجی (فقط همین، هر فایلِ تغییر‌کرده یک بلوک):\n=== FILE: مسیر ===\nمحتوای کاملِ فایل\n=== END FILE ===\n"

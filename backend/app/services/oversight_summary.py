@@ -96,6 +96,7 @@ def build_summary(svc: Any, *, now: Optional[datetime] = None) -> Dict[str, Any]
 
     top = sorted(open_tasks, key=_rank)[:10]
     cand = cleanup_candidates(svc, now=now)
+    last_real = last_real_runs(svc, tasks, watched, names, now=now)
     return {
         "generated_at": now.isoformat(),
         "models_on": models_on,
@@ -110,9 +111,48 @@ def build_summary(svc: Any, *, now: Optional[datetime] = None) -> Dict[str, Any]
             "status": t.status, "verification_status": getattr(t, "verification_status", ""),
             "updated_at": t.updated_at,
         } for t in top],
+        "last_real_run": last_real,
         "cleanup": {"duplicates": len(cand["duplicate_groups"]),
                     "duplicate_tasks": sum(len(g["archive"]) for g in cand["duplicate_groups"]),
                     "stale": len(cand["stale"])},
+    }
+
+
+def last_real_runs(svc: Any, tasks: List[Any], watched: List[Any], names: Dict[str, str], *,
+                   now: datetime) -> Dict[str, Any]:
+    """(PM-INS-0026 «ب») One honest line: when did a task REALLY run last, and can anything change code right now?
+    Scans/verifies run weekly, but «اجرای تسک» (last_run_at) stopped in early June and no project has the Claude runner —
+    the summary said nothing about it."""
+    def _latest(items, attr):
+        best = None
+        for x in items:
+            d = _parse(getattr(x, attr, None))
+            if d and (best is None or d > best[0]):
+                best = (d, x)
+        return best
+
+    t = _latest(tasks, "last_run_at")
+    w = _latest(watched, "last_run_at")
+    runner_on = [x.repo_full_name for x in watched if getattr(x, "claude_runner_enabled", False)]
+    push_on = [x.repo_full_name for x in watched if getattr(x, "allow_push", False)]
+    contradictory = [x.repo_full_name for x in watched
+                     if getattr(x, "autonomy_level", "") == "auto" and getattr(x, "verify_only_mode", False)]
+    at = t[0] if t else None
+    days = (now - at).days if at else None
+    line = ("آخرین اجرای واقعیِ یک تسک: " + (f"{at:%Y-%m-%d} ({days} روز پیش) — «{(t[1].title or '')[:60]}» در "
+                                           f"{names.get(t[1].watched_id, t[1].project_full_name)}" if at else "هرگز"))
+    line += ("؛ هیچ پروژه‌ای «اجرای خودکارِ کد» (Claude runner) ندارد ⇒ هیچ اصلاحِ کدی خودکار انجام نمی‌شود"
+             if not runner_on else f"؛ اجرای خودکارِ کد روشن برای: {', '.join(runner_on)}")
+    return {
+        "task_at": at.isoformat() if at else None, "task_days_ago": days,
+        "task_title": (t[1].title if t else None), "task_repo": (names.get(t[1].watched_id, t[1].project_full_name) if t else None),
+        "project_run_at": w[0].isoformat() if w else None,
+        "runner_on": runner_on, "allow_push_on": push_on,
+        "auto_but_verify_only": contradictory,
+        "line": line,
+        "safe_path": ("برای آزمونِ یک‌خطی: «بازرس ویژه» ِ همان پروژه ⇒ درخواستِ یک‌خطی ⇒ «اعمال» = شاخهٔ تازه "
+                      "inspector/smart-fix-… + PR (هرگز main). هیچ تنظیمِ «اتاق فرمان» لازم نیست؛ PR را ادغام نکنید مگر "
+                      "پس از بررسی — ادغام = دیپلوی."),
     }
 
 

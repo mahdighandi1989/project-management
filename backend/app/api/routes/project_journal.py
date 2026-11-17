@@ -405,6 +405,54 @@ def detailed_op_to_response(op: DetailedOperation) -> Dict:
 
 # ===================== توابع کمکی =====================
 
+def sync_inspector_activity(db: Session, project_id: str, days: int = 30) -> int:
+    """(PM-INS-0026) The «بازرس ویژه» chat, its agent and the multi-step runs write to `inspector_messages`, never to
+    `activity_logs` — so the journal said «۰ فعالیت» on a day full of work. Mirror every assistant/agent answer of the
+    project into the journal (id `act_insp_<message id>`, so it is idempotent and also back-fills the past `days`)."""
+    try:
+        from ...models.inspector_session import InspectorMessage, InspectorSession
+        since = datetime.utcnow() - timedelta(days=days)
+        rows = (db.query(InspectorMessage, InspectorSession.id)
+                .join(InspectorSession, InspectorSession.id == InspectorMessage.session_id)
+                .filter(InspectorSession.project_id == project_id, InspectorMessage.role == "assistant",
+                        InspectorMessage.timestamp >= since)
+                .all())
+        if not rows:
+            return 0
+        have = {i for (i,) in db.query(ActivityLog.id).filter(ActivityLog.project_id == project_id,
+                                                                 ActivityLog.id.like("act_insp_%")).all()}
+        added = 0
+        for m, sid in rows:
+            aid = f"act_insp_{m.id}"
+            if aid in have:
+                continue
+            try:
+                extra = json.loads(m.extra_data) if m.extra_data else {}
+            except Exception:  # noqa: BLE001
+                extra = {}
+            if not isinstance(extra, dict):
+                extra = {}
+            kind = "inspector_agent" if ((m.action_type or "").startswith("agent") or extra.get("agent")) else (
+                "inspector_multi_step" if extra.get("is_multi_step_report") else "inspector_chat")
+            text = m.content or ""
+            db.add(ActivityLog(
+                id=aid, project_id=project_id, model_id=m.model_id or "—",
+                model_provider=((m.model_id or "").split("-")[0] or None), activity_type=kind,
+                prompt=f"بازرس ویژه (سشن {sid})", response=text[:4000], tokens_used=int(m.tokens_used or 0),
+                latency_ms=0, success=not text.lstrip().startswith("❌"),
+                created_at=m.timestamp or datetime.utcnow(),
+                extra_data=json.dumps({"source": "inspector_messages", "message_id": m.id, "session_id": sid},
+                                      ensure_ascii=False)))
+            added += 1
+        if added:
+            db.commit()
+        return added
+    except Exception as e:  # noqa: BLE001
+        db.rollback()
+        logger.warning(f"journal: inspector sync failed for {project_id}: {e}")
+        return 0
+
+
 def log_to_response(log: ActivityLog) -> Dict:
     """تبدیل لاگ به دیکشنری"""
     extra = {}
@@ -525,6 +573,7 @@ async def get_activity_journal(
     if not project:
         raise HTTPException(status_code=404, detail="پروژه یافت نشد")
 
+    sync_inspector_activity(db, project_id)
     query = db.query(ActivityLog).filter(ActivityLog.project_id == project_id)
 
     # فیلترها
@@ -766,6 +815,7 @@ async def get_journal_stats(
         raise HTTPException(status_code=404, detail="پروژه یافت نشد")
 
     since = datetime.utcnow() - timedelta(days=days)
+    sync_inspector_activity(db, project_id, days=min(days, 90))
 
     logs = db.query(ActivityLog).filter(
         ActivityLog.project_id == project_id,
@@ -883,6 +933,7 @@ async def generate_report(
         raise HTTPException(status_code=404, detail="پروژه یافت نشد")
 
     since = datetime.utcnow() - timedelta(days=days)
+    sync_inspector_activity(db, project_id, days=min(days, 90))
 
     logs = db.query(ActivityLog).filter(
         ActivityLog.project_id == project_id,

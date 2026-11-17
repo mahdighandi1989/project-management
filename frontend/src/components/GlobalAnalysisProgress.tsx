@@ -22,7 +22,12 @@ export default function GlobalAnalysisProgress() {
   const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
-    // Poll for active analyses every 3 seconds
+    // (PM-INS-0026) was: GET /api/projects every 3 s on EVERY page (~7 calls / 20 s), and it read `project.id` while
+    // the list carries `project_id` — so it never found an analysis at all. Now: 3 s only while an analysis runs,
+    // 30 s otherwise, nothing while the tab is hidden.
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let stopped = false;
+    let active = 0;
     const checkActiveAnalyses = async () => {
       try {
         // Get list of projects
@@ -37,17 +42,18 @@ export default function GlobalAnalysisProgress() {
 
         for (const project of projects.slice(0, 10)) { // Limit to 10 projects
           // Skip if project has no valid id
-          if (!project || !project.id) continue;
+          const pid = project?.project_id || project?.id;
+          if (!pid) continue;
 
           try {
-            const progressRes = await fetch(`${API_BASE}/api/projects/${project.id}/health/progress`);
+            const progressRes = await fetch(`${API_BASE}/api/projects/${pid}/health/progress`);
             if (progressRes.ok) {
               const data = await progressRes.json();
               const progress = data.progress;
 
               if (progress && (progress.status === 'running' || progress.status === 'paused')) {
                 activeList.push({
-                  project_id: project.id,
+                  project_id: pid,
                   project_name: project.name,
                   status: progress.status,
                   phase: progress.phase || 'preparing',
@@ -65,18 +71,30 @@ export default function GlobalAnalysisProgress() {
         }
 
         setActiveAnalyses(activeList);
+        active = activeList.length;
       } catch (e) {
         console.error('Error checking active analyses:', e);
       }
     };
 
-    // Initial check
-    checkActiveAnalyses();
-
-    // Poll every 3 seconds
-    const interval = setInterval(checkActiveAnalyses, 3000);
-
-    return () => clearInterval(interval);
+    let running = false;
+    const loop = async () => {
+      if (stopped || running) return;
+      running = true;
+      if (timer) clearTimeout(timer);
+      try {
+        if (typeof document === 'undefined' || document.visibilityState !== 'hidden') await checkActiveAnalyses();
+      } finally {
+        running = false;
+      }
+      if (!stopped) timer = setTimeout(loop, active > 0 ? 3000 : 30000);
+    };
+    loop();
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') { if (timer) clearTimeout(timer); loop(); }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => { stopped = true; if (timer) clearTimeout(timer); document.removeEventListener('visibilitychange', onVisible); };
   }, []);
 
   if (activeAnalyses.length === 0) {

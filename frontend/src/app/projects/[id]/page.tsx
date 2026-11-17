@@ -5060,6 +5060,8 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
     const modelIds = inspectorAutoSelect ? [] : inspectorSelectedModels;
 
     const _startIndex = _resumeState?.startIndex ?? 0;
+    // (PM-INS-0026) what really happened to each step — the final report says it honestly
+    const stepOutcome: Record<number, 'ok' | 'empty' | 'server' | 'error'> = {};
     for (let i = _startIndex; i < steps.length; i++) {
       const step = steps[i];
       const stepId = `ms_step_${i}_${Date.now()}`;
@@ -5169,7 +5171,10 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
         let stepReviewCriticalSignals: string[] = [];
         let _stepOk = false;
         let _lastStepErr: any = null;
+        let _stepEmpty = false;
 
+        // (PM-INS-0026) «Failed to fetch» = the backend is down (deploy/restart): 2 s/4 s retries lost 4 of 5 steps.
+        // Now a network failure WAITS for /health (up to ~2 minutes) and only then retries; an empty answer is retried.
         for (let attempt = 1; attempt <= 3; attempt++) {
           try {
             const res = await fetch(`${API_BASE}/api/render/inspector/smart-chat`, {
@@ -5245,23 +5250,62 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
                 }
               }
             }
+            if (!stepResponseContent.trim() && !stepActionPlan) {
+              // an empty answer is not a result — mark it and ask again
+              _stepEmpty = true;
+              if (attempt < 3) {
+                setInspectorChatMessages(prev => [...prev, {
+                  id: `ms_empty_${i}_${attempt}_${Date.now()}`,
+                  role: 'system' as const,
+                  content: `⚪ مرحله ${step.step_number}: پاسخِ مدل خالی بود (تلاش ${attempt}/3) — دوباره می‌پرسم...`,
+                  timestamp: new Date(),
+                }]);
+                await new Promise(r => setTimeout(r, 3000));
+                continue;
+              }
+              break;
+            }
+            _stepEmpty = false;
             _stepOk = true;
             _lastStepErr = null;
             break;
           } catch (e: any) {
             _lastStepErr = e;
             if (attempt < 3) {
+              const down = _isNetworkFailure(e?.message);
               setInspectorChatMessages(prev => [...prev, {
                 id: `ms_retry_${i}_${attempt}_${Date.now()}`,
                 role: 'system' as const,
-                content: `🔁 خطا در مرحله ${step.step_number} (تلاش ${attempt}/3): ${(e?.message || 'network error').slice(0, 80)} — تلاش مجدد در ${attempt * 2} ثانیه...`,
+                content: down
+                  ? `⏸ مرحله ${step.step_number}: ${SERVER_DOWN_NOTE}. اجرا مکث کرد تا سرور برگردد (حداکثر ~۲ دقیقه)، بعد همین مرحله دوباره (تلاش ${attempt + 1}/3)...`
+                  : `🔁 خطا در مرحله ${step.step_number} (تلاش ${attempt}/3): ${(e?.message || 'error').slice(0, 80)} — تلاش مجدد در ${attempt * 5} ثانیه...`,
                 timestamp: new Date(),
               }]);
-              await new Promise(r => setTimeout(r, attempt * 2000));
+              if (down) {
+                const back = await waitForBackend(120000);
+                if (back) await new Promise(r => setTimeout(r, 2000));  // let the new instance settle
+              } else {
+                await new Promise(r => setTimeout(r, attempt * 5000));
+              }
             }
           }
         }
-        if (!_stepOk) throw _lastStepErr || new Error('No response after 3 retries');
+        if (!_stepOk && _stepEmpty) {
+          stepOutcome[i] = 'empty';
+          setInspectorChatMessages(prev => [...prev, {
+            id: `ms_empty_final_${i}_${Date.now()}`,
+            role: 'system' as const,
+            content: `⚪ مرحله ${step.step_number}: پس از ۳ تلاش پاسخِ مدل خالی ماند — «خالی» علامت خورد.`,
+            timestamp: new Date(),
+          }]);
+          continue;
+        }
+        if (!_stepOk) {
+          const err: any = _lastStepErr || new Error('No response after 3 retries');
+          err._serverDown = _isNetworkFailure(err?.message);
+          throw err;
+        }
+        stepOutcome[i] = 'ok';
 
         // 🆕 (multi-step-cascade-fix) — اگر این step با concurrent_lock
         // err گرفت، کل multi-step رو متوقف کن (نه ادامه به stepهای بعدی
@@ -5396,10 +5440,14 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
         } as any]);
 
       } catch (err: any) {
+        const down = err?._serverDown || _isNetworkFailure(err?.message);
+        stepOutcome[i] = down ? 'server' : 'error';
         setInspectorChatMessages(prev => [...prev, {
           id: `ms_err_${i}_${Date.now()}`,
           role: 'system' as const,
-          content: `❌ خطا در مرحله ${step.step_number}: ${err?.message || 'خطای ناشناخته'}`,
+          content: down
+            ? `🔌 مرحله ${step.step_number} اجرا نشد: ${SERVER_DOWN_NOTE} (پس از ۳ تلاش و انتظار برای برگشتِ سرور) — تقصیرِ مدل نیست.`
+            : `❌ خطا در مرحله ${step.step_number}: ${err?.message || 'خطای ناشناخته'}`,
           timestamp: new Date(),
         }]);
       }
@@ -5410,7 +5458,16 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
     const totalFiles = collectedActionFiles.length;
     // 🆕 (v3 render-ops)
     const totalRenderActions = collectedRenderActions.length;
-    let finalContent = `## 📊 گزارش نهایی — ${steps.length} مرحله کامل شد\n\n`;
+    const _ran = Object.keys(stepOutcome).map(Number);
+    const _n = (k: string) => _ran.filter(i => stepOutcome[i] === k).length;
+    const okSteps = _n('ok'), emptySteps = _n('empty'), serverSteps = _n('server'), errSteps = _n('error');
+    let finalContent = okSteps === _ran.length
+      ? `## 📊 گزارش نهایی — ${steps.length} مرحله کامل شد\n\n`
+      : `## 📊 گزارش نهایی — ${okSteps} از ${_ran.length} مرحله کامل شد\n\n`
+        + (serverSteps ? `- 🔌 **${serverSteps} مرحله به‌خاطرِ قطعیِ سرور اجرا نشد** (${SERVER_DOWN_NOTE}) — تقصیرِ مدل نیست؛ وقتی سرور برگشت همان را دوباره بفرست.\n` : '')
+        + (emptySteps ? `- ⚪ ${emptySteps} مرحله پاسخِ خالی داد (پس از ۳ تلاش).\n` : '')
+        + (errSteps ? `- ❌ ${errSteps} مرحله با خطای دیگر شکست خورد (جزئیات بالا).\n` : '')
+        + '\n';
     finalContent += `**فایل‌های تغییر یافته: ${totalFiles}**\n`;
     if (totalRenderActions > 0) {
       finalContent += `**عملیات Render: ${totalRenderActions}** (در apply ، Render API صدا زده می‌شود)\n`;
@@ -5445,7 +5502,14 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
       }
     }
     // 🆕 (v3) — هشدار صریح فقط اگر **هیچ‌چیز** تولید نشد (نه فایل نه render_action)
-    if (totalFiles === 0 && totalRenderActions === 0) {
+    if (totalFiles === 0 && totalRenderActions === 0 && okSteps < _ran.length) {
+      // (PM-INS-0026) nothing to blame on the model when the steps never ran
+      finalContent += `\nهیچ تغییری پیشنهاد نشد چون ${_ran.length - okSteps} مرحله اصلاً نتیجه نداد (بالا). `;
+      finalContent += `این گزارش کامل نیست.\n\n`;
+    } else if (totalFiles === 0 && totalRenderActions === 0 && collectedAnalysis.some(a => a.trim().length > 40)) {
+      // an analysis (security review, bug hunt…) may rightly propose no file change
+      finalContent += `\nℹ️ مدل تحلیل کرد و تغییرِ فایلی پیشنهاد نداد. اگر انتظارِ اصلاح داشتی، صریح بخواه «… را درست کن».\n\n`;
+    } else if (totalFiles === 0 && totalRenderActions === 0) {
       finalContent += `\n## 🚨 خطای جدی — AI اقدام نکرد!\n\n`;
       finalContent += `مدل **${lastModelUsed || 'فعلی'}** فقط تحلیل کرد ولی هیچ action_plan تولید نکرد.\n`;
       finalContent += `این یعنی **هیچ فایلی commit یا اعمال نشد**.\n\n`;
@@ -5470,7 +5534,12 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
       finalContent += `اگر deploy همچنان شکست خورد، محتوای فعلی این فایل‌ها را روی GitHub چک کنید — `;
       finalContent += `احتمالاً همان خط مشکل‌دار همچنان موجود است.\n\n`;
     }
-    finalContent += collectedAnalysis.map((a, idx) => `**مرحله ${idx + 1}:** ${a.slice(0, 200)}`).join('\n\n');
+    // (PM-INS-0026) the summary carries the findings (500 chars per step), numbered by the REAL step
+    finalContent += collectedAnalysis.map((a) => a.slice(0, 500)).map((a, idx) => {
+      const okIdx = _ran.filter(i => stepOutcome[i] === 'ok')[idx];
+      const num = okIdx !== undefined ? steps[okIdx].step_number : idx + 1;
+      return `**مرحله ${num}:** ${a}`;
+    }).join('\n\n');
 
     // پیام نهایی با action_plan ترکیبی
     // 🆕 (v3 render-ops) — combinedActionPlan الان شامل render_actions هم است
@@ -5755,6 +5824,21 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
     return false;
   };
   const SERVER_DOWN_NOTE = 'سرور پاسخ نداد (احتمالاً در حال دیپلوی یا بیدار شدن است — ربطی به پاورِ پیش‌نمایش ندارد)';
+
+  // (PM-INS-0026) the quick buttons used to only fill the box — users thought nothing happened. Now they SEND;
+  // while another request runs, the text waits in the box with a hint.
+  const quickSendInspector = (text: string) => {
+    if (inspectorChatLoading || inspectorOpLock) {
+      setInspectorChatInput(text);
+      setInspectorChatMessages(prev => [...prev, {
+        id: `quick_wait_${Date.now()}`, role: 'system' as const,
+        content: '⏳ یک درخواست در حال اجراست — متن در کادر گذاشته شد؛ پس از پایان، ➤ را بزن.',
+        timestamp: new Date(),
+      }]);
+      return;
+    }
+    sendInspectorChat(text);
+  };
 
   const sendInspectorChat = async (
     overrideMessage?: string,
@@ -7872,14 +7956,27 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
     }
   }, [inspectorPowerOn, inspectorServices]);
 
-  const loadProject = async () => {
+  // (PM-INS-0026) while the backend restarts (deploy) every fetch fails — that is «server starting», never «not found»
+  const [serverStarting, setServerStarting] = useState(false);
+  const loadProject = async (): Promise<void> => {
     setLoading(true);
+    let serverDown = false;
+    const _f = async (url: string) => {
+      try {
+        const r = await fetch(url);
+        if ([502, 503, 504].includes(r.status)) serverDown = true;
+        return r;
+      } catch (e) {
+        serverDown = true;
+        return new Response('{}', { status: 599 });
+      }
+    };
     try {
       let foundProject = false;
 
       // اگر ID با gh_ شروع میشه، از GitHub API بگیر
       if (projectId.startsWith('gh_')) {
-        const res = await fetch(`${API_BASE}/api/github/imported/${projectId}`);
+        const res = await _f(`${API_BASE}/api/github/imported/${projectId}`);
         if (res.ok) {
           const data = await res.json();
           if (data.success && data.project) {
@@ -7899,8 +7996,8 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
 
       // اگر پیدا نشد، از creator بگیر
       if (!foundProject) {
-        let res = await fetch(`${API_BASE}/api/creator/projects/${projectId}`);
-        let data = await res.json();
+        let res = await _f(`${API_BASE}/api/creator/projects/${projectId}`);
+        let data = await res.json().catch(() => ({}));
 
         if (res.ok && data.project) {
           setProject(data.project);
@@ -7915,8 +8012,8 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
 
       // اگر هنوز پیدا نشد، از projects API بگیر
       if (!foundProject) {
-        const res = await fetch(`${API_BASE}/api/projects/${projectId}`);
-        const data = await res.json();
+        const res = await _f(`${API_BASE}/api/projects/${projectId}`);
+        const data = await res.json().catch(() => ({}));
         if (res.ok) {
           setProject(data.project || data);
           foundProject = true;
@@ -7925,9 +8022,21 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
 
       // اگر پروژه پیدا نشد
       if (!foundProject) {
+        if (serverDown) {
+          // wait for /health, then try again by itself
+          setServerStarting(true);
+          setLoading(false);
+          if (await waitForBackend(180000)) {
+            setServerStarting(false);
+            return loadProject();
+          }
+          return;
+        }
+        setServerStarting(false);
         showError('پروژه پیدا نشد');
         return;
       }
+      setServerStarting(false);
 
       // فایل‌های پروژه رو بگیر (برای پروژه‌های غیر GitHub)
       if (!projectId.startsWith('gh_')) {
@@ -10120,6 +10229,19 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
         <div className="text-center">
           <div className="animate-spin text-4xl mb-4">⏳</div>
           <p>در حال بارگذاری پروژه...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!project && serverStarting) {
+    return (
+      <div className="min-h-screen bg-gray-100 dark:bg-gray-900 flex items-center justify-center" dir="rtl">
+        <div className="text-center">
+          <div className="animate-spin text-4xl mb-4">⏳</div>
+          <p className="text-xl mb-2">سرور در حال راه‌اندازی است…</p>
+          <p className="text-sm text-gray-500 mb-4">بک‌اند پاسخ نمی‌دهد (احتمالاً دیپلوی یا بیدار شدن). خودکار دوباره تلاش می‌کنم.</p>
+          <button onClick={() => loadProject()} className="px-4 py-2 rounded-lg bg-blue-600 text-white">تلاشِ دوباره</button>
         </div>
       </div>
     );
@@ -15459,19 +15581,22 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                     <>
                       <div className="flex flex-wrap gap-1 px-2 sticky top-0 z-10 py-1 bg-gray-50/95 dark:bg-gray-900/95" data-testid="inspector-quick-actions">
                         <button
-                          onClick={() => { setInspectorChatInput('لاگ‌های خطا را تحلیل کن'); }}
+                          onClick={() => quickSendInspector('لاگ‌های خطا را تحلیل کن')}
+                          title="همین الان فرستاده می‌شود"
                           className="text-xs bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 px-2 py-1 rounded-full hover:bg-red-200 transition"
                         >
                           تحلیل خطاها
                         </button>
                         <button
-                          onClick={() => { setInspectorChatInput('امنیت پروژه را بررسی کن'); }}
+                          onClick={() => quickSendInspector('امنیت پروژه را بررسی کن')}
+                          title="همین الان فرستاده می‌شود"
                           className="text-xs bg-orange-100 dark:bg-orange-900/30 text-orange-600 dark:text-orange-400 px-2 py-1 rounded-full hover:bg-orange-200 transition"
                         >
                           بررسی امنیت
                         </button>
                         <button
-                          onClick={() => { setInspectorChatInput('باگ‌های احتمالی را پیدا کن'); }}
+                          onClick={() => quickSendInspector('باگ‌های احتمالی را پیدا کن')}
+                          title="همین الان فرستاده می‌شود"
                           className="text-xs bg-yellow-100 dark:bg-yellow-900/30 text-yellow-600 dark:text-yellow-400 px-2 py-1 rounded-full hover:bg-yellow-200 transition"
                         >
                           یافتن باگ

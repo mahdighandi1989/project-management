@@ -318,3 +318,12 @@ def test_undo_puts_back_the_files_before_the_last_fix(tmp_path):
     assert next(f for f in p.files if f.path == "js/calculator.js").content == CALC_OK
     assert creator.list_backups(p.id) == []
     assert not asyncio.run(creator.undo_last_fix(p.id))["ok"]
+
+
+@pytest.mark.skipif(not SC.node_bin(), reason="node not installed")
+def test_the_model_sees_which_tests_fail_not_the_output_tail(tmp_path):
+    root = _broken_calc(tmp_path / "calc", CALC_BAD)
+    SC.deterministic_fixes(root, static_web=True)
+    r = SC.run_tests(root)
+    fails = SC.failing_tests(r["output"])
+    assert len(fails) == 1 and "«2+3»" in fails[0] and "calculator.test.js" in fails[0] and "5" in fails[0]

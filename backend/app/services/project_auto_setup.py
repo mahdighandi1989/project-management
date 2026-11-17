@@ -243,8 +243,13 @@ def _parse_dependencies(path: str, content: str, insights: Dict):
             insights["dependencies"].extend(deps[:30])
 
             # تشخیص فریم‌ورک
-            if "react" in deps or "next" in deps:
-                insights["frameworks"].append("React/Next.js")
+            # (PM-INS-0026) «react» alone is NOT Next.js — quran (Vite + React) got Next.js instructions from this
+            if "next" in deps:
+                insights["frameworks"].append("Next.js")
+            elif "react" in deps:
+                insights["frameworks"].append("React")
+            if "vite" in deps:
+                insights["frameworks"].append("Vite")
             if "vue" in deps:
                 insights["frameworks"].append("Vue.js")
             if "express" in deps:
@@ -355,7 +360,7 @@ def _detect_architecture(insights: Dict) -> str:
             return "Clean Architecture / Layered"
         return "REST API Backend"
 
-    if "React/Next.js" in frameworks or "Vue.js" in frameworks:
+    if any(f in frameworks for f in ("Next.js", "React", "React/Next.js", "Vue.js")):
         if insights.get("api_endpoints"):
             return "Full-Stack Application"
         return "Frontend SPA"

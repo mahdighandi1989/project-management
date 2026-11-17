@@ -3494,6 +3494,17 @@ async def archive_field(
     return {"success": True, "message": "فیلد بایگانی شد"}
 
 
+@router.post("/{project_id}/memory/review-stack")
+async def review_memory_stack(project_id: str, apply: bool = True, db: Session = Depends(get_db)):
+    """(PM-INS-0026) حافظه و فیلدها را با پشتهٔ واقعیِ پروژه (package.json/requirements) می‌سنجد: فیلدِ فریم‌ورکِ ناموجود
+    بایگانی (قابلِ بازگردانی) و یک پاراگرافِ اصلاح بالای دستورات؛ با apply=false فقط پیش‌نمایش."""
+    from ...services.memory_stack_review import review
+    res = review(db, project_id, apply=apply)
+    if not res.get("ok"):
+        raise HTTPException(status_code=404, detail=res.get("reason") or "پروژه پیدا نشد")
+    return {"success": True, **res}
+
+
 @router.post("/{project_id}/memory/fields/{field_id}/unarchive")
 async def unarchive_field(
     project_id: str,
