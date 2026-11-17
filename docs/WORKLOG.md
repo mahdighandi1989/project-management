@@ -1458,3 +1458,14 @@
 - **[VERIFY]** `tests/test_pm_ins_0027.py` ‏(۴).
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · مرورگرِ واقعی روی production + pytest
+
+## 2026-11-17 (۷۲) — PM-INS-0027: پاک‌کنِ محتوا هر .md/.txt ِ فارسی را خالی می‌کرد
+
+- **[VERIFY]** پس از 003ed542: DeepSeek بی‌مرحله‌بندی، action_plan در **۱۵ ث**، «✅ اعمال تغییرات» ⇒ حالا پیامِ صریح «⚠️ docs/COORDINATOR_TEST.md: محتوای فایل در action_plan خالی است».
+- **[FINDING]** محتوا را مدل داده بود؛ `content_sanitizer.sanitize_file_content` آن را خالی کرد: مرحلهٔ ۲ و ۴ («حذفِ خط‌های فارسی/markdown ِ غیرکد از ابتدا و انتها») برای همهٔ `CODE_EXTENSIONS`
+  اجرا می‌شد که **md و txt** را هم دارد ⇒ «آزمونِ … PM-INS-0027» ⇒ `""`، «# Title\n\nسلام» ⇒ «# Title». یعنی هر سندِ فارسی‌ای که بازرس/موتور خالق با هر مدلی می‌نوشت ناقص یا خالی commit
+  می‌شد (یا اصلاً نمی‌شد) — ریشهٔ واقعیِ «هیچ فایلی commit نشد».
+- **[CHANGE]** `PROSE_EXTENSIONS` (md/markdown/mdx/txt/rst) از مراحلِ ۲ و ۴ معاف؛ کد مثلِ قبل محافظت می‌شود.
+- **[VERIFY]** `tests/test_pm_ins_0027.py` ‏(۵)؛ کلِ تست‌ها ۹۴۰.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · مرورگرِ واقعی روی production + pytest

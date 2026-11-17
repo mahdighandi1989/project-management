@@ -49,3 +49,13 @@ def test_only_inspector_branches_can_be_deleted():
     assert not asyncio.run(svc.delete_branch("o", "r", "main"))["success"] and not called
     assert asyncio.run(svc.delete_branch("o", "r", "inspector/smart-fix-1"))["success"]
     assert called[0][0] == "DELETE" and called[0][1].endswith("/git/refs/heads/inspector/smart-fix-1")
+
+
+def test_persian_markdown_is_not_wiped_by_the_sanitizer():
+    from app.services.content_sanitizer import sanitize_file_content as s
+    assert s("آزمونِ برنامه‌نویسی با مدلِ ضعیف — PM-INS-0027\n", "docs/COORDINATOR_TEST.md") == \
+        "آزمونِ برنامه‌نویسی با مدلِ ضعیف — PM-INS-0027"
+    assert s("# عنوان\n\nسلام\n- مورد\n", "README.md") == "# عنوان\n\nسلام\n- مورد"
+    assert s("یادداشت\n", "notes.txt") == "یادداشت"
+    # code files keep the old protection
+    assert s("توضیح:\nimport os\nprint(1)\nاین کد کار می‌کند", "a.py") == "import os\nprint(1)"

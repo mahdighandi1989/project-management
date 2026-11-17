@@ -66,6 +66,10 @@ CODE_EXTENSIONS = {
     "toml", "ini", "cfg", "xml", "svg", "md", "txt", "env", "graphql",
 }
 
+# (PM-INS-0027) prose files: Persian text and markdown ARE the content — stages 2 and 4 (strip «non-code» lines) emptied
+# every Persian .md/.txt (the coordinator's one-line docs/COORDINATOR_TEST.md became "" ⇒ «هیچ فایلی commit نشد»)
+PROSE_EXTENSIONS = {"md", "markdown", "mdx", "txt", "rst"}
+
 CODE_START_PATTERNS = {
     "ts": ["import ", "export ", "//", "/*", "'use", '"use', "const ", "var ", "let ", "type ", "interface ", "enum ", "{", "declare ", "namespace ", "module "],
     "tsx": ["import ", "export ", "//", "/*", "'use", '"use', "const ", "var ", "let ", "type ", "interface ", "enum ", "{", "declare ", "namespace ", "module "],
@@ -185,7 +189,7 @@ def sanitize_file_content(content: str, file_path: str) -> str:
     # ---- مرحله ۲: حذف متن غیرکد قبل از کد واقعی ----
     ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
 
-    if ext in CODE_EXTENSIONS:
+    if ext in CODE_EXTENSIONS and ext not in PROSE_EXTENSIONS:
         lines = content.split('\n')
         valid_starts = CODE_START_PATTERNS.get(ext, [])
 
@@ -241,7 +245,7 @@ def sanitize_file_content(content: str, file_path: str) -> str:
             content = '\n'.join(lines)
 
     # ---- مرحله ۴: حذف متن غیرکد از انتهای فایل ----
-    if ext in CODE_EXTENSIONS:
+    if ext in CODE_EXTENSIONS and ext not in PROSE_EXTENSIONS:
         _trailing_lines = content.split('\n')
         _last_valid = len(_trailing_lines)
         for i in range(len(_trailing_lines) - 1, -1, -1):
