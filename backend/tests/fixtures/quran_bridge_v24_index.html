@@ -1,0 +1,787 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>مرکز دادهٔ قرآن — نسخهٔ وب</title>
+    <!-- SPA deep-link restore: public/404.html redirects /settings -> /?/settings on static
+         hosts (Render/GitHub Pages) that don't rewrite unknown paths to index.html. This runs
+         before the app and rewrites the URL back to /settings via replaceState so refresh and
+         deep links work. No-op for normal URLs. -->
+    <script>
+      (function (l) {
+        if (l.search && l.search[1] === '/') {
+          var decoded = l.search.slice(1).split('&').map(function (s) {
+            return s.replace(/~and~/g, '&');
+          }).join('?');
+          window.history.replaceState(null, null, l.pathname.slice(0, -1) + decoded + l.hash);
+        }
+      })(window.location);
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@200;300;400;600;700;900&display=swap" rel="stylesheet">
+    <style>
+      :root { color-scheme: light; }
+      body{ font-family: "Vazirmatn", system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin:0; }
+      *{ box-sizing: border-box; }
+      .arabic input,.arabic textarea{ font-family:"Scheherazade New","Amiri","Noto Naskh Arabic","Vazirmatn",system-ui,sans-serif; }
+      /* very small utility classes used by the app */
+      .min-h-screen{ min-height: 100vh; }
+      .bg-gray-50{ background: #f9fafb; }
+      .bg-white{ background: #ffffff; }
+      .bg-gray-100{ background:#f3f4f6; }
+      .bg-gray-200{ background:#e5e7eb; }
+      .bg-amber-50{ background:#fffbeb; }
+      .bg-blue-600{ background:#2563eb; }
+      .bg-green-600{ background:#16a34a; }
+      .bg-orange-500{ background:#f97316; }
+      .bg-red-100{ background:#fee2e2; }
+      .text-white{ color:#fff; }
+      .text-gray-900{ color:#111827; }
+      .text-gray-800{ color:#1f2937; }
+      .text-gray-600{ color:#4b5563; }
+      .text-gray-500{ color:#6b7280; }
+      .text-red-600{ color:#dc2626; }
+      .p-4{ padding:1rem; }
+      .p-5{ padding:1.25rem; }
+      .p-3{ padding:.75rem; }
+      .px-2{ padding-left:.5rem; padding-right:.5rem; }
+      .px-3{ padding-left:.75rem; padding-right:.75rem; }
+      .px-4{ padding-left:1rem; padding-right:1rem; }
+      .py-1{ padding-top:.25rem; padding-bottom:.25rem; }
+      .py-2{ padding-top:.5rem; padding-bottom:.5rem; }
+      .py-3{ padding-top:.75rem; padding-bottom:.75rem; }
+      .rounded-xl{ border-radius:.75rem; }
+      .rounded-2xl{ border-radius:1rem; }
+      .border{ border:1px solid #e5e7eb; }
+      .shadow{ box-shadow: 0 1px 2px rgba(0,0,0,.06), 0 1px 3px rgba(0,0,0,.1); }
+      .max-w-7xl{ max-width: 80rem; }
+      .mx-auto{ margin-left:auto; margin-right:auto; }
+      .mt-1{ margin-top:.25rem; }
+      .mt-2{ margin-top:.5rem; }
+      .mt-10{ margin-top:2.5rem; }
+      .mb-1{ margin-bottom:.25rem; }
+      .mb-6{ margin-bottom:1.5rem; }
+      .space-y-3 > * + * { margin-top:.75rem; }
+      .space-y-4 > * + * { margin-top:1rem; }
+      .grid{ display:grid; }
+      .gap-2{ gap:.5rem; }
+      .gap-3{ gap:.75rem; }
+      .gap-8{ gap:2rem; }
+      .grid-cols-1{ grid-template-columns: repeat(1,minmax(0,1fr)); }
+      @media (min-width: 640px){ .sm\:grid-cols-3{ grid-template-columns: repeat(3,minmax(0,1fr)); } .sm\:flex-row{ flex-direction:row; } .sm\:items-center{ align-items:center; } .sm\:justify-between{ justify-content:space-between; } }
+      @media (min-width: 768px){ .md\:grid-cols-2{ grid-template-columns: repeat(2,minmax(0,1fr)); } .md\:grid-cols-6{ grid-template-columns: repeat(6,minmax(0,1fr)); } .md\:grid-cols-7{ grid-template-columns: repeat(7,minmax(0,1fr)); } .md\:text-3xl{ font-size:1.875rem; line-height:2.25rem; } }
+      .flex{ display:flex; }
+      .flex-wrap{ flex-wrap: wrap; }
+      .items-center{ align-items:center; }
+      .justify-between{ justify-content:space-between; }
+      .gap-3{ gap:.75rem; }
+      .w-full{ width:100%; }
+      .w-fit{ width:fit-content; }
+      .w-20{ width:5rem; }
+      .w-24{ width:6rem; }
+      .text-sm{ font-size:.875rem; }
+      .text-xl{ font-size:1.25rem; }
+      .text-2xl{ font-size:1.5rem; }
+      .font-bold{ font-weight:700; }
+      .font-extrabold{ font-weight:800; }
+      .rounded-lg{ border-radius:.5rem; }
+      button{ cursor:pointer; }
+      .animate-pulse{ animation: pulse 1.5s ease-in-out infinite; }
+      @keyframes pulse{ 0%,100%{ opacity:1;} 50%{ opacity:.5;} }
+
+      /* ---- Telegram settings panel ---- */
+      .tg-card{ background:#fff; border:1px solid #e6eaf0; border-radius:14px; padding:1.1rem 1.2rem; margin-bottom:1rem; box-shadow:0 1px 3px rgba(16,24,40,.06); }
+      .tg-head{ display:flex; align-items:center; justify-content:space-between; gap:.5rem; margin-bottom:.25rem; }
+      .tg-title{ font-size:1.15rem; font-weight:800; color:#0f172a; }
+      .tg-badge{ font-size:.75rem; font-weight:700; padding:.2rem .6rem; border-radius:999px; }
+      .tg-badge.on{ background:#dcfce7; color:#166534; }
+      .tg-badge.off{ background:#f1f5f9; color:#64748b; }
+      .tg-switch{ display:flex; align-items:center; gap:.6rem; font-weight:700; margin:.75rem 0; padding:.7rem .9rem; background:#f8fafc; border:1px solid #eef2f7; border-radius:10px; }
+      .tg-block{ border-top:1px solid #eef2f7; padding-top:.9rem; margin-top:.9rem; }
+      .tg-block h4{ margin:0 0 .6rem; font-size:.98rem; color:#1e293b; }
+      .tg-block h4 small{ color:#94a3b8; font-weight:500; }
+      .tg-warn{ background:#fffbeb; color:#92400e; border:1px solid #fde68a; border-radius:8px; padding:.45rem .65rem; font-size:.82rem; margin:.3rem 0 .6rem; }
+      .tg-field{ margin-bottom:.6rem; }
+      .tg-field label{ display:block; font-size:.85rem; color:#475569; margin-bottom:.25rem; }
+      .tg-field input{ width:100%; padding:.55rem .7rem; border:1px solid #d8dee9; border-radius:9px; font-size:.95rem; box-sizing:border-box; }
+      .tg-actions{ display:flex; flex-wrap:wrap; gap:.5rem; align-items:center; }
+      .tg-bot{ font-size:.82rem; color:#0d9488; font-weight:700; }
+      .tg-chips{ display:flex; flex-wrap:wrap; gap:.45rem; margin-top:.6rem; }
+      .tg-chip{ background:#eef2ff; border:1px solid #c7d2fe; color:#3730a3; border-radius:999px; padding:.3rem .7rem; font-size:.85rem; }
+      .tg-item{ display:flex; align-items:center; gap:.6rem; padding:.45rem .2rem; border-bottom:1px dashed #eef2f7; }
+      .tg-item-main{ flex:1; font-size:.92rem; }
+      .tg-item-main code{ background:#f1f5f9; border-radius:5px; padding:0 .35rem; direction:ltr; display:inline-block; }
+      .tg-x{ background:#fef2f2; color:#b91c1c; border:1px solid #fecaca; border-radius:8px; padding:.25rem .6rem; font-size:.8rem; }
+      .tg-add{ display:flex; flex-wrap:wrap; gap:.5rem; margin-top:.6rem; }
+      .tg-add input{ flex:1 1 8rem; min-width:6rem; padding:.5rem .65rem; border:1px solid #d8dee9; border-radius:9px; box-sizing:border-box; }
+      .tg-notif-head, .tg-notif-row{ display:grid; grid-template-columns:1fr 4rem 4rem; align-items:center; gap:.5rem; }
+      .tg-notif-head{ font-size:.78rem; color:#94a3b8; padding:.2rem 0; text-align:center; }
+      .tg-notif-head span:first-child{ text-align:right; }
+      .tg-notif-row{ padding:.4rem 0; border-bottom:1px solid #f5f7fa; }
+      .tg-notif-row input{ justify-self:center; }
+      .tg-notif-label{ font-size:.92rem; }
+      .tg-banner{ border-radius:9px; padding:.55rem .75rem; margin-top:.75rem; font-size:.9rem; }
+      .tg-banner.ok{ background:#dcfce7; color:#166534; border:1px solid #bbf7d0; }
+      .tg-banner.err{ background:#fee2e2; color:#991b1b; border:1px solid #fecaca; }
+      .tg-foot{ margin-top:.9rem; }
+      .tg-saving{ color:#0d9488; font-weight:700; }
+      .tg-setup{ background:#fff7ed; border:1px solid #fed7aa; border-radius:12px; padding:.85rem 1rem; margin:.6rem 0; }
+      .tg-setup-title{ font-weight:800; color:#9a3412; margin-bottom:.3rem; }
+      .tg-setup-sub{ color:#7c2d12; font-size:.88rem; margin:0 0 .5rem; }
+      .tg-setup-steps{ margin:0; padding-inline-start:1.25rem; display:flex; flex-direction:column; gap:.45rem; }
+      .tg-setup-steps li{ font-size:.92rem; color:#431407; line-height:1.7; }
+      .tg-setup a{ color:#0d9488; font-weight:700; text-decoration:underline; }
+      .tg-setup code{ background:#fff; border:1px solid #fde68a; border-radius:5px; padding:0 .35rem; direction:ltr; display:inline-block; }
+
+      /* ---- AI widgets (tafsir / hifz helper / Q&A) ---- */
+      .ai-assist{ display:inline-block; position:relative; }
+      .ai-btn{ font-size:.82rem; }
+      .ai-panel{ margin-top:.5rem; background:var(--card-bg, #fff); border:1px solid var(--border-color,#e2e8f0); border-radius:12px; padding:.7rem .8rem; box-shadow:var(--card-shadow); max-width:560px; }
+      .ai-answer{ white-space:pre-wrap; line-height:2; font-size:.95rem; color:var(--text-main,#334155); }
+      .ai-loading{ color:#0d9488; font-weight:600; }
+      .ai-err{ color:#b91c1c; background:#fee2e2; border:1px solid #fecaca; border-radius:8px; padding:.4rem .6rem; font-size:.9rem; }
+      .ai-panel-actions{ display:flex; gap:.3rem; justify-content:flex-start; margin-top:.5rem; }
+      .ai-chat{ display:flex; flex-direction:column; gap:.5rem; }
+      .ai-chat-log{ display:flex; flex-direction:column; gap:.5rem; max-height:50vh; overflow-y:auto; padding:.3rem; }
+      .ai-msg{ padding:.5rem .75rem; border-radius:14px; max-width:85%; white-space:pre-wrap; line-height:1.9; font-size:.95rem; }
+      .ai-msg.me{ align-self:flex-start; background:var(--primary-color-light,#ccfbf1); color:#0f172a; }
+      .ai-msg.bot{ align-self:flex-end; background:var(--chip-bg,#f1f5f9); color:var(--text-main,#334155); }
+      .ai-chat-input{ display:flex; gap:.5rem; }
+      .ai-chat-input input{ flex:1; padding:.55rem .7rem; border:1px solid var(--border-color,#d8dee9); border-radius:9px; }
+      .app-container.dark .ai-msg.me{ color:#e2e8f0; }
+      .ai-row{ display:flex; gap:.5rem; flex-wrap:wrap; margin:.5rem 0; }
+      .ai-quiz-q{ border:1px solid var(--border-color,#e2e8f0); border-radius:12px; padding:.7rem .85rem; margin-bottom:.6rem; background:var(--card-bg,#fff); }
+      .ai-quiz-stem{ font-weight:600; margin:0 0 .5rem; line-height:1.9; }
+      .ai-quiz-choices{ display:flex; flex-direction:column; gap:.4rem; }
+      .ai-choice{ text-align:right; padding:.5rem .75rem; border:1px solid var(--border-color,#d8dee9); border-radius:9px; background:var(--card-bg,#fff); cursor:pointer; color:var(--text-main,#334155); }
+      .ai-choice.chosen{ border-color:var(--primary-color,#0d9488); box-shadow:0 0 0 2px var(--primary-color-light,#ccfbf1) inset; }
+      .ai-choice.correct{ background:#dcfce7; border-color:#86efac; color:#166534; }
+      .ai-choice.wrong{ background:#fee2e2; border-color:#fecaca; color:#991b1b; }
+
+      /* ---- Settings appearance bar (compact, not a big empty card) ---- */
+      .appearance-bar{ display:grid; grid-template-columns:1fr; gap:.75rem; margin-bottom:1rem; }
+      @media (min-width:640px){ .appearance-bar{ grid-template-columns:minmax(12rem,1fr) 2fr; align-items:stretch; } }
+      .appearance-toggle{ display:flex; align-items:center; justify-content:space-between; gap:.6rem; background:var(--card-bg); border:1px solid var(--border-color); border-radius:12px; padding:.8rem 1rem; cursor:pointer; font-weight:700; color:var(--text-heading); box-shadow:var(--card-shadow); transition:all .2s; }
+      .appearance-toggle.on{ background:var(--primary-color-light); border-color:var(--primary-color); }
+      .mini-toggle{ width:40px; height:22px; border-radius:999px; background:#cbd5e1; position:relative; transition:background .2s; flex:0 0 auto; }
+      .mini-toggle::after{ content:""; position:absolute; top:2px; inset-inline-start:2px; width:18px; height:18px; border-radius:50%; background:#fff; transition:transform .2s; }
+      .mini-toggle.checked{ background:var(--primary-color); }
+      .mini-toggle.checked::after{ transform:translateX(-18px); }
+      .appearance-font{ background:var(--card-bg); border:1px solid var(--border-color); border-radius:12px; padding:.8rem 1rem; box-shadow:var(--card-shadow); }
+      .appearance-font-head{ display:flex; align-items:center; justify-content:space-between; font-weight:600; color:var(--text-main); margin-bottom:.5rem; }
+      .appearance-font input[type=range]{ width:100%; }
+      .appearance-preview{ margin:.5rem 0 0; text-align:center; color:var(--text-heading); }
+    </style>
+  
+<!-- Inspector Bridge Script - Auto-injected -->
+<!-- Version: 2.4 -->
+<script>
+(function() {
+  // Inspector Bridge is a development/debug tool. Keep it OFF unless explicitly enabled at
+  // build/dev time via VITE_ENABLE_INSPECTOR_BRIDGE=true (Vite substitutes the %VITE_*% token
+  // in this HTML). In production builds without it set, the ENTIRE bridge — WebSocket
+  // connection, network hooks, event listeners — never runs, so no console errors appear. (task 37d678ef)
+  if ('%VITE_ENABLE_INSPECTOR_BRIDGE%' !== 'true') return;
+
+  console.log('🌉 Inspector Bridge: Script starting...');
+
+  // جلوگیری از اجرای چندباره
+  if (window.__inspectorBridgeLoaded) {
+    console.log('🌉 Inspector Bridge: Already loaded, skipping');
+    return;
+  }
+  window.__inspectorBridgeLoaded = true;
+
+  // بررسی اینکه آیا در iframe هستیم
+  const isInIframe = window !== window.parent;
+  console.log('🌉 Inspector Bridge: In iframe?', isInIframe);
+  console.log('🌉 Inspector Bridge: Page URL:', window.location.href);
+
+  // تنظیمات WebSocket
+  // آدرس WS اختیاری و قابل‌پیکربندی است و دیگر به هیچ backend خارجیِ ثابت گره نخورده.
+  // اگر تنظیم نشده باشد (پیش‌فرض)، هیچ اتصالی برقرار نمی‌شود و bridge فقط از postMessage
+  // استفاده می‌کند؛ بنابراین هیچ خطای WebSocket در کنسول ظاهر نمی‌شود. یک inspector/پلتفرمِ
+  // میزبان می‌تواند پیش از بارگذاری، window.__INSPECTOR_WS_URL__ را روی یک endpoint معتبر ست کند.
+  const WS_URL = (typeof window !== 'undefined' && window.__INSPECTOR_WS_URL__) || '';
+  const PROJECT_ID = 'gh_mahdighandi1989_quran_web_app_v1';
+  const DEBOUNCE_MS = 100;
+  let lastEventTime = 0;
+  let messagesSent = 0;
+  let ws = null;
+  let wsReady = false;
+  let reconnectTimer = null;
+  let messageQueue = [];
+
+  // 🌐 اتصال WebSocket به Backend Hub
+  function connectWebSocket() {
+    if (!WS_URL) {
+      console.log('🌉 Inspector Bridge: No WS URL configured, using postMessage only');
+      return;
+    }
+    try {
+      ws = new WebSocket(WS_URL);
+      ws.onopen = function() {
+        console.log('🌉 Inspector Bridge: WebSocket connected');
+        ws.send(JSON.stringify({ type: 'register', role: 'bridge' }));
+      };
+      ws.onmessage = function(event) {
+        try {
+          var msg = JSON.parse(event.data);
+          if (msg.type === 'registered') {
+            wsReady = true;
+            console.log('🌉 Inspector Bridge: Registered as bridge via WebSocket');
+            // ارسال پیام‌های در صف
+            while (messageQueue.length > 0) {
+              var queued = messageQueue.shift();
+              ws.send(JSON.stringify(queued));
+            }
+            // ارسال پیام آماده بودن
+            // مهم (feedback loop): pageUrl باید آدرس کامل صفحه یعنی window.location.href باشد؛
+            // نسخهٔ بریده‌شده/ناقص باعث ارسال URL نادرست به backend و عدم شناسایی صفحه می‌شود.
+            ws.send(JSON.stringify({
+              type: 'inspector-bridge-ready',
+              pageUrl: window.location.href,
+              isInIframe: isInIframe,
+              timestamp: Date.now()
+            }));
+          } else if (msg.type === 'pong') {
+            // heartbeat response
+          } else if (msg.type === 'command') {
+            // دریافت دستور از Inspector
+            console.log('🌉 Inspector Bridge: Received command:', msg);
+            handleInspectorCommand(msg);
+          }
+        } catch (e) {
+          console.warn('🌉 Inspector Bridge: WS message parse error', e);
+        }
+      };
+      ws.onclose = function() {
+        wsReady = false;
+        console.log('🌉 Inspector Bridge: WebSocket disconnected, reconnecting in 3s...');
+        reconnectTimer = setTimeout(connectWebSocket, 3000);
+      };
+      ws.onerror = function(e) {
+        console.warn('🌉 Inspector Bridge: WebSocket error', e);
+      };
+    } catch (e) {
+      console.warn('🌉 Inspector Bridge: Failed to create WebSocket', e);
+    }
+  }
+
+  // اعتبارسنجی selector پیش از querySelector: فقط کاراکترهای متداول CSS مجازند و طول محدود است.
+  // این از تزریق ورودی غیرمنتظره و throw شدن querySelector جلوگیری می‌کند (دفاع لایه‌ای).
+  function sanitizeSelector(sel) {
+    if (typeof sel !== 'string') return '';
+    return sel.slice(0, 200).replace(/[^\w\s#.\-\[\]="':>~+*(),|^$]/g, '');
+  }
+
+  // فقط هدایت به آدرس‌های مطلقِ https:// مجاز است. استفاده از سازندهٔ URL (به‌جای
+  // بررسی پیشوند رشته‌ای) به‌طور قابل‌اعتماد javascript:, data:, vbscript:, blob:,
+  // file: و ورودی‌های نامعتبر را — مستقل از حروف بزرگ/کوچک و فاصله — رد می‌کند.
+  function isSafeNavigationUrl(url) {
+    if (typeof url !== 'string' || !url) return false;
+    try {
+      var u = new URL(url);
+      return u.protocol === 'https:';
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // پردازش دستورات از Inspector
+  function handleInspectorCommand(msg) {
+    if (msg.command === 'click') {
+      // کلیک روی المان با selector اعتبارسنجی‌شده
+      var safeSelector = sanitizeSelector(msg.selector);
+      if (!safeSelector) { sendToInspector('command-result', { success: false, command: 'click', error: 'Invalid selector' }); return; }
+      var el = null;
+      try { el = document.querySelector(safeSelector); } catch (e) { el = null; }
+      if (el) { el.click(); sendToInspector('command-result', { success: true, command: 'click', selector: safeSelector }); }
+      else { sendToInspector('command-result', { success: false, command: 'click', error: 'Element not found' }); }
+    } else if (msg.command === 'navigate') {
+      // فقط https:// مجاز؛ javascript:/data:/... مسدود می‌شود (جلوگیری از XSS و Open Redirect)
+      if (isSafeNavigationUrl(msg.url)) { window.location.assign(msg.url); }
+      else { sendToInspector('command-result', { success: false, command: 'navigate', error: 'Blocked unsafe URL' }); }
+    } else if (msg.command === 'get-elements') {
+      var elements = [];
+      document.querySelectorAll('a, button, input, textarea, select, [role="button"], [onclick]').forEach(function(el, i) {
+        elements.push({
+          index: i,
+          tag: el.tagName.toLowerCase(),
+          text: (el.innerText || el.value || '').trim().slice(0, 50),
+          id: el.id || '',
+          className: (el.className || '').toString().slice(0, 50),
+          href: el.href || ''
+        });
+      });
+      sendToInspector('elements-list', { elements: elements });
+    }
+  }
+
+  // تابع ارسال پیام (WebSocket اولویت اول، postMessage فالبک)
+  function sendToInspector(action, data) {
+    try {
+      var message = {
+        type: 'inspector-bridge-event',
+        action: action,
+        target: data.target || '',
+        elementInfo: data.elementInfo || '',
+        position: data.position || { xPercent: 50, yPercent: 50 },
+        pageUrl: window.location.href,
+        timestamp: Date.now(),
+        level: data.level || null,
+        source: 'imported-project',
+        networkMeta: data.networkMeta || null
+      };
+
+      // ارسال از طریق WebSocket
+      if (ws && wsReady) {
+        ws.send(JSON.stringify(message));
+      } else if (ws && !wsReady) {
+        messageQueue.push(message);
+      }
+
+      // همیشه postMessage هم بفرست (فالبک)
+      if (isInIframe) {
+        window.parent.postMessage(message, '*');
+      }
+
+      messagesSent++;
+      console.log('🌉 Inspector Bridge: Sent message #' + messagesSent, action, data.elementInfo);
+    } catch (e) {
+      console.warn('Inspector bridge: failed to send message', e);
+    }
+  }
+
+  // 🌐 Network Monitoring (fetch + XHR) — v2.4
+  // hook کردن window.fetch و XMLHttpRequest برای ثبت درخواست‌های شبکه پروژهٔ deploy شده.
+  // event ها: network-request (شروع)، network-response (موفق)، network-error (ناموفق).
+  // قبل از send، header های Authorization/Cookie و query paramهای حساس masked می‌شوند.
+  (function setupNetworkMonitoring() {
+    try {
+      var __netReqSeq = 0;
+      var __maskValue = function(v) {
+        if (!v) return v;
+        var s = String(v);
+        return s.length > 8 ? s.slice(0, 4) + '****' + s.slice(-2) : '****';
+      };
+      var __maskUrl = function(url) {
+        try {
+          var u = new URL(url, window.location.origin);
+          u.searchParams.forEach(function(val, key) {
+            var lk = key.toLowerCase();
+            if (lk.indexOf('token') >= 0 || lk.indexOf('key') >= 0 || lk.indexOf('secret') >= 0 || lk.indexOf('password') >= 0) {
+              u.searchParams.set(key, __maskValue(val));
+            }
+          });
+          return u.toString();
+        } catch (e) { return String(url); }
+      };
+      var __summarizeUrl = function(url) {
+        try {
+          var u = new URL(url, window.location.origin);
+          var path = u.pathname;
+          if (path.length > 80) path = path.slice(0, 77) + '...';
+          return u.host + path;
+        } catch (e) { return String(url).slice(0, 100); }
+      };
+      // ---- fetch ----
+      if (typeof window.fetch === 'function' && !window.__inspectorFetchHooked) {
+        window.__inspectorFetchHooked = true;
+        var origFetch = window.fetch.bind(window);
+        window.fetch = function(input, init) {
+          var reqId = 'fetch_' + (++__netReqSeq) + '_' + Date.now();
+          var url = typeof input === 'string' ? input : (input && input.url) || '';
+          var method = (init && init.method) || (input && input.method) || 'GET';
+          var maskedUrl = __maskUrl(url);
+          var startedAt = Date.now();
+          try {
+            sendToInspector('network-request', {
+              elementInfo: method.toUpperCase() + ' ' + __summarizeUrl(maskedUrl),
+              level: null,
+              networkMeta: { reqId: reqId, method: method.toUpperCase(), url: maskedUrl, startedAt: startedAt }
+            });
+          } catch (e) {}
+          return origFetch(input, init).then(function(res) {
+            try {
+              var dur = Date.now() - startedAt;
+              var ok = res && res.ok;
+              var status = res ? res.status : 0;
+              var label = method.toUpperCase() + ' ' + __summarizeUrl(maskedUrl) + ' → ' + status + ' (' + dur + 'ms)';
+              sendToInspector(ok ? 'network-response' : 'network-error', {
+                elementInfo: label,
+                level: ok ? null : 'error',
+                networkMeta: { reqId: reqId, method: method.toUpperCase(), url: maskedUrl, status: status, durationMs: dur, ok: !!ok }
+              });
+            } catch (e) {}
+            return res;
+          }).catch(function(err) {
+            try {
+              var dur = Date.now() - startedAt;
+              sendToInspector('network-error', {
+                elementInfo: method.toUpperCase() + ' ' + __summarizeUrl(maskedUrl) + ' ✗ ' + (err && err.message || 'fetch failed'),
+                level: 'error',
+                networkMeta: { reqId: reqId, method: method.toUpperCase(), url: maskedUrl, status: 0, durationMs: dur, ok: false, errorMessage: err && err.message }
+              });
+            } catch (e) {}
+            throw err;
+          });
+        };
+      }
+      // ---- XMLHttpRequest ----
+      if (window.XMLHttpRequest && !window.__inspectorXhrHooked) {
+        window.__inspectorXhrHooked = true;
+        var origOpen = XMLHttpRequest.prototype.open;
+        var origSend = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.open = function(method, url) {
+          try {
+            this.__inspectorReqId = 'xhr_' + (++__netReqSeq) + '_' + Date.now();
+            this.__inspectorMethod = (method || 'GET').toUpperCase();
+            this.__inspectorUrl = __maskUrl(url);
+          } catch (e) {}
+          return origOpen.apply(this, arguments);
+        };
+        XMLHttpRequest.prototype.send = function() {
+          var xhr = this;
+          try {
+            xhr.__inspectorStartedAt = Date.now();
+            sendToInspector('network-request', {
+              elementInfo: xhr.__inspectorMethod + ' ' + __summarizeUrl(xhr.__inspectorUrl),
+              level: null,
+              networkMeta: { reqId: xhr.__inspectorReqId, method: xhr.__inspectorMethod, url: xhr.__inspectorUrl, startedAt: xhr.__inspectorStartedAt }
+            });
+            xhr.addEventListener('loadend', function() {
+              try {
+                var dur = Date.now() - xhr.__inspectorStartedAt;
+                var status = xhr.status || 0;
+                var ok = status >= 200 && status < 400;
+                var label = xhr.__inspectorMethod + ' ' + __summarizeUrl(xhr.__inspectorUrl) + ' → ' + status + ' (' + dur + 'ms)';
+                sendToInspector(ok ? 'network-response' : 'network-error', {
+                  elementInfo: label,
+                  level: ok ? null : 'error',
+                  networkMeta: { reqId: xhr.__inspectorReqId, method: xhr.__inspectorMethod, url: xhr.__inspectorUrl, status: status, durationMs: dur, ok: ok }
+                });
+              } catch (e) {}
+            });
+          } catch (e) {}
+          return origSend.apply(this, arguments);
+        };
+      }
+    } catch (e) { /* network monitoring boot failed - non-critical */ }
+  })();
+
+  // شروع اتصال WebSocket
+  connectWebSocket();
+
+  // Heartbeat هر 25 ثانیه
+  setInterval(function() {
+    if (ws && wsReady) {
+      try { ws.send(JSON.stringify({ type: 'ping' })); } catch(e) {}
+    }
+  }, 25000);
+
+  // گرفتن اطلاعات المنت
+  function getElementInfo(el) {
+    if (!el) return 'عنصر ناشناخته';
+
+    // متن المنت
+    let text = (el.innerText || el.value || '').trim().slice(0, 50);
+
+    // نوع المنت
+    let type = el.tagName?.toLowerCase() || 'unknown';
+
+    // کلاس یا آیدی
+    let identifier = el.id ? '#' + el.id :
+                     el.className ? '.' + el.className.split(' ')[0] : '';
+
+    // ترجمه تگ‌های معروف به فارسی
+    const tagLabels = {
+      'button': 'دکمه',
+      'a': 'لینک',
+      'input': 'فیلد ورودی',
+      'textarea': 'فیلد متن',
+      'select': 'منوی انتخاب',
+      'img': 'تصویر',
+      'video': 'ویدیو',
+      'form': 'فرم',
+      'table': 'جدول',
+      'div': 'بخش',
+      'span': 'متن',
+      'p': 'پاراگراف',
+      'h1': 'عنوان اصلی',
+      'h2': 'عنوان',
+      'h3': 'عنوان',
+      'nav': 'منوی ناوبری',
+      'header': 'سربرگ',
+      'footer': 'پاورقی',
+      'li': 'آیتم لیست'
+    };
+
+    let typeLabel = tagLabels[type] || type;
+
+    if (text) {
+      return typeLabel + ' "' + text + '"';
+    }
+    return typeLabel + (identifier ? ' ' + identifier : '');
+  }
+
+  // محاسبه درصد موقعیت
+  function getPositionPercent(e) {
+    return {
+      xPercent: (e.clientX / window.innerWidth) * 100,
+      yPercent: (e.clientY / window.innerHeight) * 100
+    };
+  }
+
+  // Debounce
+  function shouldSend() {
+    const now = Date.now();
+    if (now - lastEventTime < DEBOUNCE_MS) return false;
+    lastEventTime = now;
+    return true;
+  }
+
+  // Event Listeners - window capture phase (بالاترین اولویت ممکن)
+  // mousedown + pointerdown به عنوان فالبک برای زمانی که overlay ها click رو مصرف می‌کنند
+
+  // کلیک - بالاترین لایه capture
+  window.addEventListener('click', function(e) {
+    if (!shouldSend()) return;
+    sendToInspector('click', {
+      target: e.target?.tagName,
+      elementInfo: getElementInfo(e.target),
+      position: getPositionPercent(e)
+    });
+  }, true);
+
+  // 🆕 فالبک: mousedown و pointerdown (برای overlay هایی که click رو stop می‌کنند)
+  var lastPointerDownTime = 0;
+  window.addEventListener('pointerdown', function(e) {
+    lastPointerDownTime = Date.now();
+    // اگر 200ms بعد click نیومد، pointerdown رو ارسال کن
+    setTimeout(function() {
+      if (Date.now() - lastEventTime > 180) {
+        sendToInspector('click', {
+          target: e.target?.tagName,
+          elementInfo: getElementInfo(e.target) + ' (pointerdown)',
+          position: getPositionPercent(e)
+        });
+      }
+    }, 200);
+  }, true);
+
+  // اسکرول
+  let scrollTimeout;
+  window.addEventListener('scroll', function(e) {
+    clearTimeout(scrollTimeout);
+    scrollTimeout = setTimeout(function() {
+      sendToInspector('scroll', {
+        elementInfo: 'صفحه',
+        position: {
+          xPercent: (window.scrollX / (document.body.scrollWidth - window.innerWidth)) * 100 || 0,
+          yPercent: (window.scrollY / (document.body.scrollHeight - window.innerHeight)) * 100 || 0
+        }
+      });
+    }, 200);
+  }, true);
+
+  // تایپ در فیلدها
+  window.addEventListener('input', function(e) {
+    if (!shouldSend()) return;
+    if (e.target?.tagName === 'INPUT' || e.target?.tagName === 'TEXTAREA') {
+      sendToInspector('input', {
+        target: e.target?.tagName,
+        elementInfo: getElementInfo(e.target),
+        position: { xPercent: 50, yPercent: 50 }
+      });
+    }
+  }, true);
+
+  // فوکوس
+  window.addEventListener('focus', function(e) {
+    if (!shouldSend()) return;
+    if (e.target && e.target !== document && e.target !== document.body) {
+      sendToInspector('focus', {
+        target: e.target?.tagName,
+        elementInfo: getElementInfo(e.target),
+        position: { xPercent: 50, yPercent: 50 }
+      });
+    }
+  }, true);
+
+  // 🔴 گیرنده خطاهای جاوااسکریپت فرانت‌اند
+  var errorCount = 0;
+  var MAX_ERRORS = 50; // حداکثر خطا در هر صفحه
+  var consoleLogCount = 0;
+  var MAX_CONSOLE_LOGS = 200; // حداکثر لاگ کنسول
+
+  window.onerror = function(message, source, lineno, colno, error) {
+    if (errorCount >= MAX_ERRORS) return;
+    errorCount++;
+    var errorInfo = (message || 'Unknown error').toString().slice(0, 150);
+    if (source) errorInfo += ' (at ' + source.split('/').pop() + ':' + lineno + ')';
+    sendToInspector('error', {
+      target: 'window',
+      elementInfo: errorInfo,
+      position: { xPercent: 50, yPercent: 10 },
+      level: 'error'
+    });
+  };
+
+  window.addEventListener('unhandledrejection', function(e) {
+    if (errorCount >= MAX_ERRORS) return;
+    errorCount++;
+    var reason = (e.reason && (e.reason.message || e.reason.toString())) || 'Promise rejected';
+    sendToInspector('error', {
+      target: 'promise',
+      elementInfo: reason.toString().slice(0, 150),
+      position: { xPercent: 50, yPercent: 10 },
+      level: 'error'
+    });
+  });
+
+  // 🔵 رهگیری تمام متدهای کنسول - تفکیک لاگ‌های پروژه ایمپورت شده
+  function interceptConsole(level, origFn) {
+    return function() {
+      origFn.apply(console, arguments);
+      if (consoleLogCount >= MAX_CONSOLE_LOGS) return;
+      consoleLogCount++;
+      var msg = Array.prototype.slice.call(arguments).map(function(a) {
+        return typeof a === 'object' ? JSON.stringify(a).slice(0, 200) : String(a).slice(0, 200);
+      }).join(' ').slice(0, 500);
+      // فیلتر: لاگ‌های خود bridge رو ارسال نکن
+      if (msg.indexOf('Inspector Bridge') !== -1) return;
+      if (msg.indexOf('🌉') !== -1) return;
+      // ارسال به inspector با تفکیک سطح
+      sendToInspector(level === 'error' ? 'console-error' : 'console-log', {
+        target: 'console',
+        elementInfo: msg,
+        position: { xPercent: 50, yPercent: 10 },
+        level: level
+      });
+    };
+  }
+
+  var origConsoleLog = console.log;
+  var origConsoleWarn = console.warn;
+  var origConsoleError = console.error;
+  var origConsoleInfo = console.info;
+  var origConsoleDebug = console.debug;
+
+  console.log = interceptConsole('log', origConsoleLog);
+  console.warn = interceptConsole('warn', origConsoleWarn);
+  console.error = interceptConsole('error', origConsoleError);
+  console.info = interceptConsole('info', origConsoleInfo);
+  console.debug = interceptConsole('debug', origConsoleDebug);
+
+  // 🔍 MutationObserver - تشخیص لایه‌های خطا (Error Overlays)
+  var __attachedOverlays = new WeakSet();
+  function attachOverlayListeners(node) {
+    if (__attachedOverlays.has(node)) return;
+    __attachedOverlays.add(node);
+    var overlayText = (node.textContent || '').slice(0, 500);
+    sendToInspector('error-overlay', {
+      target: node.tagName,
+      elementInfo: 'لایه خطا شناسایی شد: ' + overlayText.slice(0, 200),
+      position: { xPercent: 50, yPercent: 50 },
+      level: 'error'
+    });
+    // اتصال listener ها به لایه خطا (click + pointerdown)
+    node.addEventListener('click', function(e) {
+      sendToInspector('click', {
+        target: e.target?.tagName,
+        elementInfo: getElementInfo(e.target) + ' (error overlay)',
+        position: getPositionPercent(e)
+      });
+    }, true);
+    node.addEventListener('pointerdown', function(e) {
+      sendToInspector('click', {
+        target: e.target?.tagName,
+        elementInfo: getElementInfo(e.target) + ' (overlay pointerdown)',
+        position: getPositionPercent(e)
+      });
+    }, true);
+    // اگر Shadow DOM داره، listener داخلش هم بذار
+    if (node.shadowRoot) {
+      node.shadowRoot.addEventListener('click', function(e) {
+        sendToInspector('click', {
+          target: e.target?.tagName,
+          elementInfo: getElementInfo(e.target) + ' (shadow DOM)',
+          position: { xPercent: 50, yPercent: 50 }
+        });
+      }, true);
+    }
+  }
+
+  function isOverlayElement(node) {
+    try {
+      var style = window.getComputedStyle(node);
+      var zIndex = parseInt(style.zIndex) || 0;
+      var isFixed = style.position === 'fixed' || style.position === 'absolute';
+      var isFullScreen = node.offsetWidth > window.innerWidth * 0.8 && node.offsetHeight > window.innerHeight * 0.5;
+      return isFixed && (zIndex > 1000 || isFullScreen);
+    } catch(e) { return false; }
+  }
+
+  try {
+    var overlayObserver = new MutationObserver(function(mutations) {
+      mutations.forEach(function(mutation) {
+        for (var i = 0; i < mutation.addedNodes.length; i++) {
+          var node = mutation.addedNodes[i];
+          if (node.nodeType !== 1) continue;
+          if (isOverlayElement(node)) attachOverlayListeners(node);
+        }
+      });
+    });
+    if (document.body) {
+      overlayObserver.observe(document.body, { childList: true, subtree: true });
+    } else {
+      document.addEventListener('DOMContentLoaded', function() {
+        overlayObserver.observe(document.body, { childList: true, subtree: true });
+      });
+    }
+  } catch(obsErr) {}
+
+  // 🔁 اسکن دوره‌ای DOM برای overlay هایی که MutationObserver ممکنه از دست بده
+  setInterval(function() {
+    try {
+      var allFixed = document.querySelectorAll('[style*="position: fixed"], [style*="position:fixed"]');
+      for (var i = 0; i < allFixed.length; i++) {
+        if (isOverlayElement(allFixed[i])) attachOverlayListeners(allFixed[i]);
+      }
+      // بررسی nextjs-portal و shadow roots
+      var portals = document.querySelectorAll('nextjs-portal, [id*="overlay"], [id*="error"], [class*="overlay"], [class*="error-boundary"]');
+      for (var j = 0; j < portals.length; j++) {
+        if (portals[j].shadowRoot && !__attachedOverlays.has(portals[j])) {
+          attachOverlayListeners(portals[j]);
+        }
+      }
+    } catch(e) {}
+  }, 2000);
+
+  // اعلام آماده بودن
+  try {
+    window.parent.postMessage({
+      type: 'inspector-bridge-ready',
+      pageUrl: window.location.href,
+      isInIframe: isInIframe,
+      timestamp: Date.now()
+    }, '*');
+    console.log('🌉 Inspector Bridge: Ready message sent to parent');
+  } catch (readyErr) {
+    console.warn('🌉 Inspector Bridge: Failed to send ready message', readyErr);
+  }
+
+  console.log('🌉 Inspector Bridge: Script loaded and active!');
+  console.log('🌉 Inspector Bridge: Click, scroll, or type to test');
+})();
+</script>
+
+  <script type="module" crossorigin src="/assets/index-CjLBx5Le.js"></script>
+</head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

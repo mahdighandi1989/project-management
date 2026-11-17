@@ -1116,3 +1116,18 @@
 - **[REVERT]** همین کامیت را revert کنید.
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · pytest + next build
+
+## 2026-11-17 (۴۸) — فوری PM-INS-0021: Bridge ِ قرآن در بیلدِ production خاموش بود — پیش‌نمایش روشنش می‌کند
+
+- **[OWNER]** (هماهنگ‌کننده، ۱۰:۴۰ دبی) پس از a1e02e5 هنوز «WS: منتظر Bridge»؛ ریشهٔ دوم: اسکریپتِ ۲٫۴ ِ قرآن با `if ('%VITE_ENABLE_INSPECTOR_BRIDGE%' !== 'true') return;`
+  شروع می‌شود و WS_URL فقط از `window.__INSPECTOR_WS_URL__` می‌آید. خواسته: پروکسی نگهبان را خنثی و نشانی را پیش از اسکریپت ست کند (بی‌کامیت در ریپوی قرآن)، «🔍 تشخیص» همین را بگوید، بررسیِ هر ۹ پروژه.
+- **[FINDING]** HTML ِ واقعیِ https://quran-web-app-8rwy.onrender.com (۳۷٬۵۲۸ بایت) خطِ ۱۸۶ همان نگهبان را دارد (توکنِ Vite جایگزین نشده) و خطِ ۲۰۷ `WS_URL = window.__INSPECTOR_WS_URL__ || ''`.
+  بررسیِ ۹ پروژه (HTML ِ زندهٔ فرانتِ هر کدام): Bridge دارند ۳ — quran v2.4 (خاموش در بیلد، نشانی از window)، video-processor v2.4 و trading-system v2.2 (نشانیِ ثابتِ wss)؛ بی Bridge ۶ —
+  project-management، language، detective، ALLIN1، Lifemanager (نشانیِ فرانت در اتاق فرمان ثبت نیست؛ با نشانیِ Render سنجیده شد)، Detective-1.
+- **[CHANGE]** `render_logs.py`: `analyze_bridge_html` (حضور، نسخه، خاموشی در بیلد، منبعِ نشانیِ WS)؛ `_enable_project_bridge` در پروکسیِ پیش‌نمایش (فقط نمای مالک؛ سایتِ عمومی و ریپو دست نمی‌خورند):
+  `'%VITE_ENABLE_INSPECTOR_BRIDGE%'` ⇐ `'true'` و `window.__INSPECTOR_WS_URL__` اولِ `<head>`؛ «🔍 تشخیص» (`debug-bridge`) حالا «⚠️ Bridge در بیلدِ production خاموش است (VITE_ENABLE_INSPECTOR_BRIDGE)…» می‌گوید
+  نه «✅ اسکریپت موجود است»؛ `GET /api/render/inspector/bridge-survey` (همین بررسی برای همهٔ پروژه‌های تحتِ پایش).
+- **[VERIFY]** `tests/test_pm_ins_0021_bridge_build_guard.py` (۴ تست روی HTML ِ واقعیِ قرآن به‌عنوانِ fixture). سنجشِ زنده پس از دیپلوی در همین برگه.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · pytest + HTML ِ زندهٔ ۹ پروژه
+

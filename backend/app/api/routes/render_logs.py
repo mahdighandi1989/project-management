@@ -7968,9 +7968,23 @@ async def debug_bridge_injection(
                         deployed_html = deployed_res.text
                         result["deployed_has_bridge"] = "Inspector Bridge Script" in deployed_html
                         result["deployed_has_bridge_marker"] = "__inspectorBridgeLoaded" in deployed_html
+                        # PM-INS-0021: what the deployed script actually does — «present» is not «works»
+                        _bi = analyze_bridge_html(deployed_html)
+                        result["deployed_bridge"] = _bi
 
                         # اگر در سورس هست ولی در دیپلوی نیست
-                        if result["bridge_injected"] and not result["deployed_has_bridge"]:
+                        if _bi["present"] and _bi["build_disabled"]:
+                            result["diagnosis"] = (
+                                "⚠️ Bridge در بیلدِ production ِ پروژه خاموش است (VITE_ENABLE_INSPECTOR_BRIDGE تنظیم نشده) — "
+                                "اسکریپت هست ولی همان اول برمی‌گردد. پیش‌نمایشِ «بازرس ویژه» آن را برای همین نما روشن می‌کند و "
+                                "نشانیِ WS را می‌دهد (بی‌کامیت در ریپوی پروژه)؛ سایتِ عمومیِ پروژه دست نمی‌خورد."
+                            )
+                        elif _bi["present"] and _bi["ws_source"] == "window":
+                            result["diagnosis"] = (
+                                "✅ اسکریپت موجود است؛ نشانیِ WS را از window.__INSPECTOR_WS_URL__ می‌خواند — پیش‌نمایشِ "
+                                "«بازرس ویژه» آن را پیش از اسکریپت ست می‌کند"
+                            )
+                        elif result["bridge_injected"] and not result["deployed_has_bridge"]:
                             result["diagnosis"] = "⚠️ اسکریپت در GitHub هست ولی در سایت دیپلوی شده نیست! احتمالاً deploy هنوز انجام نشده یا build process اسکریپت را حذف کرده"
                         elif result["deployed_has_bridge"]:
                             result["diagnosis"] = "✅ اسکریپت در سایت دیپلوی شده موجود است"
@@ -19251,6 +19265,71 @@ def _heal_bridge_self_guard(text: str) -> str:
     return _BRIDGE_SELF_GUARD_RE.sub(_sub, text)
 
 
+def _bridge_ws_url_for(project_id: str) -> str:
+    """The bridge hub address of a project — the same rule `inject-bridge` uses when it writes the script."""
+    import os as _os
+    backend_url = (_os.environ.get("BACKEND_URL", "") or _os.environ.get("RENDER_EXTERNAL_URL", "")).rstrip("/")
+    if not backend_url and _os.environ.get("RENDER_SERVICE_NAME"):
+        backend_url = f"https://{_os.environ['RENDER_SERVICE_NAME']}.onrender.com"
+    backend_url = backend_url or "http://localhost:8000"
+    ws_base = backend_url.replace("https://", "wss://").replace("http://", "ws://")
+    return f"{ws_base}/api/render/ws/bridge/{project_id}"
+
+
+_BRIDGE_BUILD_GUARD_RE = None
+
+
+def analyze_bridge_html(html: str) -> Dict[str, Any]:
+    """PM-INS-0021 — what the project's own HTML does with the inspector bridge, read from the HTML itself.
+
+    * present / version — the bridge script is in the page (any of our template generations);
+    * build_disabled — the script starts with ``if ('%VITE_ENABLE_INSPECTOR_BRIDGE%' !== 'true') return;`` and Vite
+      left the token unreplaced (the project's production build has the bridge switched off);
+    * ws_source — where the WebSocket address comes from: ``window`` (only ``window.__INSPECTOR_WS_URL__``, i.e. the
+      host must set it), ``hardcoded`` (a ``wss://…/ws/bridge/…`` literal), or ``none`` (postMessage only)."""
+    import re as _re
+    global _BRIDGE_BUILD_GUARD_RE
+    if _BRIDGE_BUILD_GUARD_RE is None:
+        _BRIDGE_BUILD_GUARD_RE = _re.compile(r"""(['"])%VITE_ENABLE_INSPECTOR_BRIDGE%\1""")
+    text = html or ""
+    present = any(m in text for m in ("Inspector Bridge", "__inspectorBridgeLoaded", "inspector-bridge-ready"))
+    ver = (_re.search(r"Inspector Bridge[^\n]{0,60}?\n?\s*<!--\s*Version:\s*(\d+(?:\.\d+)+)", text)
+           or _re.search(r"BRIDGE_VERSION\s*=\s*['\"](\d+(?:\.\d+)+)", text)
+           or _re.search(r"Inspector Bridge[^\n]{0,40}?v(\d+\.\d+)", text))
+    hard = _re.search(r"""['"](wss?://[^'"\s]+/ws/bridge/[^'"\s]+)['"]""", text)
+    if "__INSPECTOR_WS_URL__" in text:
+        ws_source = "window"
+    elif hard:
+        ws_source = "hardcoded"
+    else:
+        ws_source = "none"
+    return {
+        "present": present,
+        "version": ver.group(1) if ver else None,
+        "build_disabled": bool(_BRIDGE_BUILD_GUARD_RE.search(text)),
+        "ws_source": ws_source,
+        "ws_url": hard.group(1) if hard else None,
+    }
+
+
+def _enable_project_bridge(html: str, project_id: str) -> str:
+    """PM-INS-0021 — in the owner-only preview proxy only (the project's public site is untouched, nothing is
+    committed to its repo): (1) a build that left ``'%VITE_ENABLE_INSPECTOR_BRIDGE%'`` unreplaced is switched on for
+    this view, and (2) ``window.__INSPECTOR_WS_URL__`` is set BEFORE any of the page's scripts, so a bridge that only
+    reads its address from there connects to this project's hub."""
+    import json as _json
+    import re as _re
+    info = analyze_bridge_html(html)
+    if not info["present"]:
+        return html
+    if info["build_disabled"]:
+        html = _re.sub(r"""(['"])%VITE_ENABLE_INSPECTOR_BRIDGE%\1""", lambda m: f"{m.group(1)}true{m.group(1)}", html)
+    pre = ("<script>/* AI Creator preview: inspector bridge address (PM-INS-0021) */"
+           f"window.__INSPECTOR_WS_URL__={_json.dumps(_bridge_ws_url_for(project_id))};</script>")
+    m = _re.search(r"<head[^>]*>", html, _re.I)
+    return html[:m.end()] + pre + html[m.end():] if m else pre + html
+
+
 def _inject_storage_shim(html: str) -> str:
     """The shim must run before ANY of the page's own scripts ⇒ first thing inside <head>."""
     import re as _re
@@ -19261,6 +19340,35 @@ def _inject_storage_shim(html: str) -> str:
     if m:
         return html[:m.end()] + "<head>" + _PROXY_STORAGE_SHIM + "</head>" + html[m.end():]
     return _PROXY_STORAGE_SHIM + html
+
+
+@router.get("/inspector/bridge-survey")
+async def inspector_bridge_survey():
+    """PM-INS-0021 (3) — every watched project: does its deployed frontend carry the inspector bridge, which version,
+    is it switched off in the production build, and where does it take its WebSocket address from. Read-only."""
+    import httpx as _hx
+    from ...services.oversight_service import get_oversight_service
+    out = []
+    async with _hx.AsyncClient(timeout=30.0, follow_redirects=True) as cl:
+        for w in get_oversight_service().watched:
+            fe = getattr(w, "frontend_base_url", None)
+            row = {"repo": w.repo_full_name, "watched_id": w.id, "frontend": fe}
+            if not fe:
+                row["result"] = "نشانیِ فرانت در «اتاق فرمان» ثبت نشده"
+                out.append(row)
+                continue
+            try:
+                r = await cl.get(fe)
+                row.update(http=r.status_code, **analyze_bridge_html(r.text))
+                row["result"] = (
+                    "بی Bridge" if not row["present"]
+                    else "Bridge در بیلدِ production خاموش — پیش‌نمایش روشنش می‌کند" if row["build_disabled"]
+                    else "Bridge فعال"
+                )
+            except Exception as e:  # noqa: BLE001
+                row["result"] = f"باز نشد: {str(e)[:120]}"
+            out.append(row)
+    return {"projects": out, "count": len(out)}
 
 
 @router.get("/inspector/proxy/{project_id}/{path:path}")
@@ -19373,6 +19481,7 @@ async def inspector_page_proxy(
             html = f"<head>{monitor_script}</head>\n" + html
         html = _inject_storage_shim(html)
         html = _heal_bridge_self_guard(html)
+        html = _enable_project_bridge(html, project_id)
 
         # حذف هدرهایی که iframe را بلاک میکنند
         return FastAPIResponse(
