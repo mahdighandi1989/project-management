@@ -327,3 +327,20 @@ def test_the_model_sees_which_tests_fail_not_the_output_tail(tmp_path):
     r = SC.run_tests(root)
     fails = SC.failing_tests(r["output"])
     assert len(fails) == 1 and "«2+3»" in fails[0] and "calculator.test.js" in fails[0] and "5" in fails[0]
+
+
+@pytest.mark.skipif(not SC.node_bin(), reason="node not installed")
+def test_working_but_rewritten_tests_gets_its_own_verdict(tmp_path):
+    root = _broken_calc(tmp_path / "calc")
+    (root / "index.html").unlink()
+
+    async def rename(prompt: str) -> str:  # same check, new name — and the extra failing test fixed
+        return ("=== FILE: tests/calculator.test.js ===\nimport { test } from 'node:test';\n"
+                "import assert from 'node:assert/strict';\nimport { calculate } from '../js/calculator.js';\n"
+                "test('two plus three', () => assert.equal(calculate(2, '+', 3), 5));\n=== END FILE ===\n"
+                "=== FILE: tests/w.test.js ===\nimport { test } from 'node:test';\n"
+                "import assert from 'node:assert/strict';\ntest('w', () => assert.ok(true));\n=== END FILE ===")
+    (root / "tests/w.test.js").write_text("import { test } from 'node:test';\nimport assert from 'node:assert/strict';\n"
+                                          "test('w', () => assert.equal(1, 2));\n")
+    res = asyncio.run(SC.fix_loop(root, ai=rename, description="x", constraints={}, static_web=True, max_rounds=1))
+    assert not res["green"] and res["verdict"] == "works_tests_rewritten" and res["lost_passing"] == 1

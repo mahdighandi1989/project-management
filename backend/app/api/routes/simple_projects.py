@@ -519,6 +519,8 @@ async def create_project(request: CreateProjectRequest):
             "message": f"پروژه {project.name} با {len(project.files)} فایل ساخته شد!" + (
                 "" if not project.selfcheck or project.selfcheck.get("skipped") else
                 (" ✅ خودسنجی سبز (تست‌ها + مرورگر)" if project.selfcheck.get("green")
+                 else " 🟡 کار می‌کند (همهٔ تست‌های فعلی + سناریوی مرورگر قبول) ولی مدل تست‌هایی را که قبول بودند بازنویسی کرد — "
+                      "بررسی کنید" if project.selfcheck.get("verdict") == "works_tests_rewritten"
                  else " ⚠️ خودسنجی هنوز ایراد دارد — گزارشِ خودسنجی را ببین")),
         }
 

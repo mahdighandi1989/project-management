@@ -105,3 +105,15 @@ def test_summary_states_the_last_real_task_run():
     assert lr["task_at"].startswith("2026-06-07") and lr["task_days_ago"] == 162
     assert "هیچ پروژه‌ای «اجرای خودکارِ کد»" in lr["line"] and lr["auto_but_verify_only"] == ["o/pm"]
     assert "PR" in lr["safe_path"]
+
+
+def test_summary_falls_back_to_the_project_run_when_tasks_have_no_stamp():
+    from app.services.oversight_summary import build_summary
+    now = datetime(2026, 11, 17, tzinfo=timezone.utc)
+    W = SimpleNamespace
+    watched = [W(id="w1", repo_full_name="o/pm", schedule_enabled=True, scan_interval_hours=168, verify_interval_hours=24,
+                 autonomy_level="auto", verify_only_mode=False, claude_runner_enabled=False, allow_push=False,
+                 interval_hours=6, scan_fail_count=0, last_run_at="2026-06-07T18:30:50+00:00")]
+    svc = SimpleNamespace(watched=watched, tasks=[], reports=[])
+    lr = build_summary(svc, now=now)["last_real_run"]
+    assert lr["source"] == "project" and "2026-06-07" in lr["line"] and "هرگز" not in lr["line"]

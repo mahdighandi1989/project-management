@@ -167,6 +167,9 @@ export default function CreatorSelfcheckPanel({
       ? { cls: 'bg-white/5 border-white/10 text-gray-300', txt: `⏭ ${sc.skipped}` }
       : sc.green
         ? { cls: 'bg-green-500/15 border-green-500/40 text-green-200', txt: '✅ سبز — تست‌ها و سناریوی مرورگر درست‌اند' }
+        : (sc as any).verdict === 'works_tests_rewritten'
+          ? { cls: 'bg-yellow-500/15 border-yellow-500/40 text-yellow-100',
+              txt: `🟡 کار می‌کند — همهٔ تست‌های فعلی و سناریوی مرورگر قبول؛ ولی مدل ${(sc as any).lost_passing ?? '?'} تا از ${(sc as any).base_passing ?? '?'} تستی را که قبول بود حذف/بازنویسی کرد (نمی‌شود فهمید تستِ غلط بود یا ضعیف شد — نگاه کنید)` }
         : { cls: 'bg-amber-500/15 border-amber-500/40 text-amber-100', txt: '⚠️ هنوز ایراد دارد — جزئیات پایین' };
 
   return (
