@@ -1173,3 +1173,13 @@
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · مرورگرِ واقعی + API روی production
 
+## 2026-11-17 (۵۲) — فوری PM-INS-0022: Bridge برای همهٔ پروژه‌ها در پیش‌نمایش
+
+- **[OWNER]** (هماهنگ‌کننده، ۱۳:۵۸ دبی) PM-INS-0020 و 0021 تأیید شد. حالا: Bridge و لاگ در چت برای همهٔ پروژه‌ها — در پاسخِ پروکسیِ پیش‌نمایشِ detective_1، language، allin1، lifemanager، project_management
+  هیچ Bridge ای نیست؛ Detective-1 ۴۶ ثانیه «منتظر Bridge». پروکسی Bridge ِ ۲٫۵ را فقط در پاسخِ پیش‌نمایش تزریق کند (بی‌کامیت)؛ «🔍 تشخیص» منبع را بگوید؛ اپ‌های فرانت/بک‌اندِ جدا کامل باز شوند.
+- **[CHANGE]** `render_logs._inject_preview_bridge`: صفحه‌ای که Bridge ندارد (`analyze_bridge_html`) قالبِ فعلیِ `INSPECTOR_BRIDGE_SCRIPT` را با نشانیِ هابِ همان پروژه پیش از `</body>` می‌گیرد، با نشانهٔ
+  «injected by the preview proxy»؛ صفحه‌ای که خودش Bridge دارد دست نمی‌خورد. `debug-bridge`: `bridge_source` (repo / preview_injection) و پیامِ «ℹ️ Bridge در ریپوی این پروژه نیست — پیش‌نمایش … تزریق می‌کند».
+- **[VERIFY]** `tests/test_pm_ins_0022_preview_bridge.py` (۳). سنجشِ زنده در برگه.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · pytest
+

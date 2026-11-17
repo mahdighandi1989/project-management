@@ -7973,13 +7973,22 @@ async def debug_bridge_injection(
                         result["deployed_bridge"] = _bi
 
                         # اگر در سورس هست ولی در دیپلوی نیست
-                        if _bi["present"] and _bi["build_disabled"]:
+                        if not _bi["present"]:
+                            # PM-INS-0022 — no bridge in the repo: the preview injects the current template itself
+                            result["bridge_source"] = "preview_injection"
+                            result["diagnosis"] = (
+                                f"ℹ️ Bridge در ریپوی این پروژه نیست — پیش‌نمایشِ «بازرس ویژه» نسخهٔ {INSPECTOR_BRIDGE_VERSION} را خودش "
+                                "در پاسخِ پیش‌نمایش تزریق می‌کند (بی‌کامیت در ریپو؛ سایتِ عمومیِ پروژه دست نمی‌خورد). منبع: تزریقِ پیش‌نمایش."
+                            )
+                        elif _bi["present"] and _bi["build_disabled"]:
+                            result["bridge_source"] = "repo"
                             result["diagnosis"] = (
                                 "⚠️ Bridge در بیلدِ production ِ پروژه خاموش است (VITE_ENABLE_INSPECTOR_BRIDGE تنظیم نشده) — "
                                 "اسکریپت هست ولی همان اول برمی‌گردد. پیش‌نمایشِ «بازرس ویژه» آن را برای همین نما روشن می‌کند و "
                                 "نشانیِ WS را می‌دهد (بی‌کامیت در ریپوی پروژه)؛ سایتِ عمومیِ پروژه دست نمی‌خورد."
                             )
                         elif _bi["present"] and _bi["ws_source"] == "window":
+                            result["bridge_source"] = "repo"
                             result["diagnosis"] = (
                                 "✅ اسکریپت موجود است؛ نشانیِ WS را از window.__INSPECTOR_WS_URL__ می‌خواند — پیش‌نمایشِ "
                                 "«بازرس ویژه» آن را پیش از اسکریپت ست می‌کند"
@@ -19312,6 +19321,25 @@ def analyze_bridge_html(html: str) -> Dict[str, Any]:
     }
 
 
+def _inject_preview_bridge(html: str, project_id: str) -> str:
+    """PM-INS-0022 — a project whose own HTML carries NO bridge gets the current template (INSPECTOR_BRIDGE_SCRIPT,
+    v{INSPECTOR_BRIDGE_VERSION}) in the preview response only: nothing is committed to its repo and its public site is
+    untouched. Marked so «🔍 تشخیص» can tell «from the repo» from «injected by the preview»."""
+    if analyze_bridge_html(html)["present"]:
+        return html
+    script = (INSPECTOR_BRIDGE_SCRIPT
+              .replace("__BRIDGE_WS_URL__", _bridge_ws_url_for(project_id))
+              .replace("__BRIDGE_PROJECT_ID__", str(project_id)))
+    script = "<!-- AI Creator preview: bridge injected by the preview proxy (PM-INS-0022) -->" + script
+    import re as _re
+    m = None
+    for m in _re.finditer(r"</body\s*>", html, _re.I):
+        pass
+    if m:
+        return html[:m.start()] + script + html[m.start():]
+    return html + script
+
+
 def _enable_project_bridge(html: str, project_id: str) -> str:
     """PM-INS-0021 — in the owner-only preview proxy only (the project's public site is untouched, nothing is
     committed to its repo): (1) a build that left ``'%VITE_ENABLE_INSPECTOR_BRIDGE%'`` unreplaced is switched on for
@@ -19492,6 +19520,7 @@ async def inspector_page_proxy(
         html = _inject_storage_shim(html)
         html = _heal_bridge_self_guard(html)
         html = _enable_project_bridge(html, project_id)
+        html = _inject_preview_bridge(html, project_id)
 
         # حذف هدرهایی که iframe را بلاک میکنند
         return FastAPIResponse(
