@@ -3891,7 +3891,11 @@ export default function ProjectDetailPage() {
     }
 
     // لایه ۲ فرانت‌اند: هشدار اگر فایل‌ها خوانده نشده بودن
-    if (msg.files_were_read === false) {
+    // (PM-INS-0027) a plan that only CREATES new files needs nothing read (Gemini Flash's one-line file was blocked);
+    // the server refuses a «create» over a file that already exists, so nothing can be overwritten blindly
+    const _onlyCreates = (msg.action_plan.files || []).length > 0
+      && (msg.action_plan.files || []).every((f: any) => (f.operation || 'modify') === 'create');
+    if (msg.files_were_read === false && !_onlyCreates) {
       setInspectorChatMessages(prev => [...prev, {
         id: `apply_warn_${Date.now()}`,
         role: 'system' as const,

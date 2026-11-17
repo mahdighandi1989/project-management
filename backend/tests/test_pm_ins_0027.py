@@ -59,3 +59,11 @@ def test_persian_markdown_is_not_wiped_by_the_sanitizer():
     assert s("یادداشت\n", "notes.txt") == "یادداشت"
     # code files keep the old protection
     assert s("توضیح:\nimport os\nprint(1)\nاین کد کار می‌کند", "a.py") == "import os\nprint(1)"
+
+
+def test_create_never_overwrites_an_existing_file():
+    from app.api.routes import render_logs as R
+    src = inspect.getsource(R)
+    i = src.index("# (PM-INS-0027) «create» never overwrites")
+    block = src[i:i + 900]
+    assert "get_file_content(owner, repo, file_path" in block and "dropped_files.append" in block and "continue" in block

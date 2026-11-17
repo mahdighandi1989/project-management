@@ -18409,6 +18409,19 @@ async def apply_action(request: ApplyActionRequest, db: Session = Depends(get_db
             file_path = f.get("path", "").strip()
             operation = f.get("operation", "modify")
             if operation == "create":
+                # (PM-INS-0027) «create» never overwrites: a model that did not read the repo (Gemini Flash) may call an
+                # existing file «new» — the frontend now lets create-only plans through, so the server checks here
+                try:
+                    _exists = await github_svc.get_file_content(owner, repo, file_path, token=token)
+                except Exception:  # noqa: BLE001
+                    _exists = {}
+                if (_exists or {}).get("success"):
+                    yield sse("progress", {
+                        "step": "file_rejected",
+                        "message": f"🚫 {file_path}: این فایل از قبل وجود دارد — «create» آن را بازنویسی نمی‌کند (باید modify باشد)",
+                    })
+                    dropped_files.append({"path": file_path, "reason": "create روی فایلِ موجود — بازنویسی نشد"})
+                    continue
                 # فایل‌های جدید مجازند — ولی باید پاکسازی + سینتکس‌شون سالم باشه
                 _create_content = f.get("content", "")
                 if _create_content:

@@ -1469,3 +1469,15 @@
 - **[VERIFY]** `tests/test_pm_ins_0027.py` ‏(۵)؛ کلِ تست‌ها ۹۴۰.
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · مرورگرِ واقعی روی production + pytest
+
+## 2026-11-17 (۷۳) — PM-INS-0027: PR با DeepSeek ساخته شد؛ Gemini Flash به نگهبانِ «فایل خوانده نشد» خورد
+
+- **[VERIFY]** پس از 4c5e8a9d، مرورگرِ واقعی، بازرس ویژهٔ project-management، DeepSeek Chat: ارسال ۲۳:۰۴:۴۴ ⇒ action_plan ‏۲۳:۰۴:۵۳ ⇒ «✅ اعمال تغییرات» ⇒ commit ‏۲۳:۰۴:۵۸ ⇒ **PR ‏۲۳:۰۵:۰۰ (~۱۶ ث)**:
+  https://github.com/mahdighandi1989/project-management/pull/930 — شاخهٔ `inspector/smart-fix-1794956696`، فقط `docs/COORDINATOR_TEST.md` با یک خط («آزمونِ برنامه‌نویسی با مدلِ ضعیف —
+  PM-INS-0027 — deepseek»)، ادغام‌نشده.
+- **[FINDING]** Gemini 2.5 Flash: action_plan در ۸ ث، ولی «🚫 اعمال لغو شد: فایل‌های پروژه خوانده نشده بودند» — نگهبانِ فرانت هر plan ِ «بی‌خواندن» را رد می‌کرد، حتی ساختِ فایلِ تازه. و در
+  سرور «create» وجودِ فایل را نمی‌سنجید (یعنی می‌توانست فایلِ موجود را بازنویسی کند).
+- **[CHANGE]** فرانت: plan ِ فقط-create بی‌خواندن هم اعمال می‌شود؛ سرور: «create» روی فایلِ موجود رد می‌شود («باید modify باشد») — هیچ بازنویسیِ کورکورانه‌ای.
+- **[VERIFY]** `tests/test_pm_ins_0027.py` ‏(۶).
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · مرورگرِ واقعی روی production + GitHub
