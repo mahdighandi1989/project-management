@@ -1223,3 +1223,11 @@
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · مرورگرِ واقعی روی production + pytest
 
+## 2026-11-17 (۵۷) — سنجشِ نهاییِ PM-INS-0022 روی production و جواب در برگه
+
+- **[VERIFY]** روی 5ad6d72، مرورگرِ ناظر: «WS: متصل» Detective-1 ۶٫۲ ث، language ۶٫۴، ALLIN1 ۵٫۷؛ کلیک تا ثبت در چت ۰٫۳ ث برای هر سه؛ Detective-1 صفحهٔ ورودِ خودش را پایدار نشان داد
+  (حلقه رفع شد)؛ «🔍 تشخیص»: Detective-1 ⇐ `preview_injection`، quran ⇐ `repo`. جواب در برگه: fixed + تصویر.
+- **[TODO]** (آگاهانه) ورودِ گوگلِ خودِ اپ‌ها داخلِ sandbox ِ پیش‌نمایش ممکن نیست؛ پروکسی فقط GET.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · مرورگرِ واقعی روی production
+
