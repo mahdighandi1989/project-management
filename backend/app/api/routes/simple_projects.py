@@ -3296,7 +3296,18 @@ async def rerun_selfcheck(project_id: str, request: SelfcheckRequest):
     rounds = max(0, min(5, int(request.max_rounds))) if request.fix else 0
     res = await creator.run_selfcheck(project, gen if request.model_ids else no_model, max_rounds=rounds,
                                       model_ref=model_ref, replan=bool(request.replan and request.model_ids))
-    return {"success": True, "selfcheck": res, "project": project.to_dict()}
+    return {"success": True, "selfcheck": res, "project": project.to_dict(),
+            "backups": len(creator.list_backups(project_id))}
+
+
+@router.post("/projects/{project_id}/selfcheck/undo")
+async def undo_selfcheck_fix(project_id: str):
+    """برگرداندنِ فایل‌ها به پیش از آخرین «اجرا و اصلاح» (۵ نسخهٔ پشتیبان، بیرون از پوشهٔ پروژه)."""
+    creator, project = _creator_project_or_404(project_id)
+    res = await creator.undo_last_fix(project_id)
+    if not res.get("ok"):
+        raise HTTPException(status_code=409, detail=res.get("reason") or "برگرداندن ممکن نشد")
+    return {"success": True, **res, "backups_left": len(creator.list_backups(project_id)), "project": project.to_dict()}
 
 
 @router.get("/projects/{project_id}/selfcheck/screenshot")

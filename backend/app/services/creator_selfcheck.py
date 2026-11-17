@@ -485,8 +485,27 @@ async def _locate(page: Any, target: str) -> Any:
     return None
 
 
-async def _read(page: Any, selector: str) -> str:
-    sels = [selector] if selector else []
+_ATTR_SEL = re.compile(r"^(.*)\[([\w:-]+)\]$")
+
+
+async def _read(page: Any, selector: str) -> Optional[str]:
+    """Text/value at `selector`; `el[attr]` reads the attribute. A selector that matches nothing ⇒ None (a scenario bug,
+    not the app's); no selector ⇒ the usual display/result places."""
+    if selector:
+        try:
+            loc = page.locator(selector)
+            if await loc.count() == 0:
+                return None
+            m = _ATTR_SEL.match(selector.strip())
+            if m and "=" not in m.group(2):
+                v = await loc.first.get_attribute(m.group(2))
+                return (v or "").strip()
+            v = await loc.first.evaluate(
+                "e => ('value' in e && !['BUTTON','LI','OPTION'].includes(e.tagName)) ? e.value : e.innerText")
+            return str(v or "").strip()
+        except Exception:  # noqa: BLE001
+            return None
+    sels: List[str] = []
     sels += ["output", "#display", "#result", "#screen", "#output", ".display", ".result", ".screen", ".output",
              "input[readonly]", "input[type=text]", "[role=status]", "[aria-live]"]
     for s in sels:
@@ -501,6 +520,19 @@ async def _read(page: Any, selector: str) -> str:
         except Exception:  # noqa: BLE001
             continue
     return ""
+
+
+def _norm(t: str) -> str:
+    return " ".join((t or "").replace("\u200c", " ").split())
+
+
+def _matches(got: str, want: str, contains: bool = False) -> bool:
+    g, w = _norm(got), _norm(want)
+    if g == w or _num_equal(g, w):
+        return True
+    numeric = bool(re.fullmatch(r"[-+]?[\d.,٫]+", w))
+    # text (not a bare number) may sit among other text: «2 × 4 = 8» in «2 × 4 = 8 20:34»
+    return bool(w) and (contains or (not numeric and len(w) >= 3)) and w in g
 
 
 def _num_equal(a: str, b: str) -> bool:
@@ -548,7 +580,7 @@ async def run_browser(root: Path, steps: List[Dict[str, Any]], *, page_path: str
                         if st.get("click") is not None:
                             loc = await _locate(page, str(st["click"]))
                             if loc is None:
-                                r.update(ok=False, why=f"دکمه/المانِ «{st['click']}» پیدا نشد")
+                                r.update(ok=False, scenario_error=True, why=f"دکمه/المانِ «{st['click']}» پیدا نشد")
                             else:
                                 await loc.click(timeout=3000)
                                 await page.wait_for_timeout(120)
@@ -556,17 +588,21 @@ async def run_browser(root: Path, steps: List[Dict[str, Any]], *, page_path: str
                         elif st.get("type") is not None:
                             loc = await _locate(page, str(st.get("into") or "input"))
                             if loc is None:
-                                r.update(ok=False, why=f"ورودیِ «{st.get('into')}» پیدا نشد")
+                                r.update(ok=False, scenario_error=True, why=f"ورودیِ «{st.get('into')}» پیدا نشد")
                             else:
                                 await loc.fill(str(st["type"]))
                                 r["ok"] = True
                         elif st.get("expect") is not None:
                             want = str(st["expect"]).strip()
                             got = await _read(page, str(st.get("in") or ""))
-                            ok = got == want or _num_equal(got, want) or (bool(st.get("contains")) and want in got)
-                            r.update(ok=ok, got=got, want=want)
-                            if not ok:
-                                r["why"] = f"انتظار «{want}» بود ولی صفحه «{got}» نشان داد"
+                            if got is None:
+                                r.update(ok=False, scenario_error=True, want=want,
+                                         why=f"انتخابگرِ «{st.get('in')}» در صفحه نیست")
+                            else:
+                                ok = _matches(got, want, bool(st.get("contains")))
+                                r.update(ok=ok, got=got[:300], want=want)
+                                if not ok:
+                                    r["why"] = f"انتظار «{want}» بود ولی صفحه «{got[:200]}» نشان داد"
                         else:
                             r.update(ok=True, skipped=True)
                     except Exception as e:  # noqa: BLE001
@@ -674,7 +710,7 @@ def summarize(report: Dict[str, Any]) -> List[str]:
     for f in b.get("failed_requests", []):
         lines.append(f"[browser] درخواستِ ناموفق: {f}")
     for s in b.get("steps", []):
-        if not s.get("ok"):
+        if not s.get("ok") and not s.get("scenario_error"):
             lines.append(f"[browser] قدمِ {s['i']} {json.dumps(s['step'], ensure_ascii=False)}: {s.get('why')}")
     return lines
 
@@ -695,34 +731,116 @@ async def run_checks(root: Path, steps: List[Dict[str, Any]], shot: Optional[Pat
         blocked.append(f"تست‌ها اجرا نشد: {tests.get('reason')}")
     if _files(root, ".html") and not browser.get("ran"):
         blocked.append(f"مرورگر اجرا نشد: {(browser.get('reason') or '')[:300]}")
+    # a scenario step that points at nothing could not CHECK anything — not green, but not the app's bug either
+    for x in ((browser.get("steps") or []) if isinstance(browser, dict) else []):
+        if x.get("scenario_error"):
+            blocked.append(f"سناریو، قدمِ {x['i']}: {x.get('why')}")
     rep["blocked"] = blocked
     rep["green"] = not rep["problems"] and not blocked
     return rep
+
+
+def _scenario_errors(rep: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [x for x in ((rep.get("browser") or {}).get("steps") or []) if x.get("scenario_error")]
+
+
+async def repair_scenario(ai: AIGen, root: Path, steps: List[Dict[str, Any]], bad: List[Dict[str, Any]],
+                          description: str) -> List[Dict[str, Any]]:
+    """A step whose element/selector is not in the page is the SCENARIO's bug — fix the scenario, never the app."""
+    prompt = (
+        "سناریوی آزمونِ مرورگرِ زیر انتخابگرهایی دارد که در این صفحه وجود ندارند. **سناریو** را درست کن (نه برنامه): "
+        "فقط انتخابگرهایی که واقعاً در همین HTML/JS هستند (یا متنِ دقیقِ دکمه)؛ برای خواندنِ attribute بنویس "
+        "\"in\": \"html[data-theme]\". اگر ویژگیِ خواسته‌شده‌ای واقعاً هیچ المانی در صفحه ندارد، آن قدم را با "
+        "\"missing\": true نگه دار. همان قالب؛ فقط آرایهٔ JSON.\n\n"
+        "## قدم‌های خراب\n" + "\n".join(f"- قدمِ {x['i']}: {json.dumps(x['step'], ensure_ascii=False)} — {x.get('why')}"
+                                       for x in bad[:30])
+        + f"\n\n## سناریوی فعلی\n{json.dumps(steps, ensure_ascii=False)}\n\n## هدفِ برنامه\n{description[:1200]}\n\n"
+        + project_snapshot(root, 24000)
+    )
+    try:
+        data = _parse_json(await ai(prompt))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"selfcheck: repair_scenario failed: {e}")
+        return steps
+    if isinstance(data, dict):
+        data = data.get("steps") or []
+    new = [x for x in (data or []) if isinstance(x, dict) and ({"click", "type", "expect"} & set(x))][:40]
+    return new or steps
+
+
+def _snapshot(root: Path) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for p in root.rglob("*"):
+        if p.is_file() and not (set(p.relative_to(root).parts) & _SKIP_DIRS) and p.name != "project.json":
+            try:
+                out[_rel(root, p)] = p.read_text(encoding="utf-8")
+            except Exception:  # noqa: BLE001
+                continue
+    return out
+
+
+def _restore(root: Path, snap: Dict[str, str]) -> List[str]:
+    changed: List[str] = []
+    now = _snapshot(root)
+    for path in now:
+        if path not in snap:
+            (root / path).unlink(missing_ok=True)
+            changed.append(path)
+    for path, body in snap.items():
+        if now.get(path) != body:
+            (root / path).parent.mkdir(parents=True, exist_ok=True)
+            (root / path).write_text(body, encoding="utf-8")
+            changed.append(path)
+    return changed
+
+
+def _score(rep: Dict[str, Any], base_cases: int) -> Tuple:
+    t = rep.get("tests") or {}
+    b = rep.get("browser") or {}
+    cases = int(t.get("cases") or 0)
+    return (bool(rep.get("green")), bool(t.get("ok")), cases >= base_cases, int(b.get("steps_passed") or 0),
+            int(t.get("passed") or 0), -len(rep.get("problems") or []))
 
 
 async def fix_loop(root: Path, *, ai: AIGen, description: str, constraints: Dict[str, Any], static_web: bool,
                    max_rounds: int = 3, shot_dir: Optional[Path] = None,
                    on_write: Optional[Callable[[str, str], None]] = None,
                    steps: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-    """Deterministic fixes → plan the browser scenario → run → (model fixes → run)×N. Returns the self-check record."""
+    """Deterministic fixes → plan the browser scenario → run → repair the SCENARIO where it points at nothing →
+    (model fixes the app → run)×N → keep the best round (a fix never leaves the project worse than it found it)."""
     rounds: List[Dict[str, Any]] = []
     auto = deterministic_fixes(root, static_web=static_web)
     if not steps:
         steps = await plan_browser_steps(ai, root, description)
     shot = (shot_dir / "selfcheck_0.png") if shot_dir else None
     rep = await run_checks(root, steps, shot)
-    base_tests = int(((rep.get("tests") or {}).get("cases")) or 0)
+    scenario_fixes = 0
+    for _ in range(2):
+        bad = _scenario_errors(rep)
+        if not bad:
+            break
+        new = await repair_scenario(ai, root, steps, bad, description)
+        if new == steps:
+            break
+        steps = new
+        scenario_fixes += 1
+        rep = await run_checks(root, steps, shot)
+    base_cases = int(((rep.get("tests") or {}).get("cases")) or 0)
+    bad = _scenario_errors(rep)
     rounds.append({"round": 0, "auto_fixes": auto, "green": rep["green"], "problems": rep["problems"][:30],
-                   "blocked": rep["blocked"],
+                   "blocked": rep["blocked"], "scenario_repairs": scenario_fixes,
+                   "scenario_unresolved": [f"قدمِ {x['i']}: {x.get('why')}" for x in bad][:10],
                    "tests": _brief_tests(rep), "browser": _brief_browser(rep)})
+    best = (_score(rep, base_cases), 0, _snapshot(root), rep)
     rules = structure_prompt_rules(constraints, static_web)
     for n in range(1, max_rounds + 1):
-        if rep["green"] or not rep["problems"]:  # nothing a model can fix (only «blocked»)
+        if rep["green"] or not rep["problems"]:  # nothing the APP has to fix (only «blocked» / scenario issues)
             break
         prompt = (
             "این پروژه را اجرا کردیم و این ایرادها پیدا شد. فایل‌هایی را که باید عوض شوند **کامل** بازنویسی کن تا همهٔ "
-            "ایرادها رفع شوند (تست‌ها سبز، صفحه بی‌خطا، سناریوی مرورگر درست). منطقِ درست را خراب نکن. "
-            "تست‌ها را حذف یا ضعیف نکن — کد را درست کن؛ تست را فقط وقتی عوض کن که خودش با خواستهٔ کاربر نمی‌خواند.\n"
+            "ایرادها رفع شوند (تست‌ها سبز، صفحه بی‌خطا، سناریوی مرورگر درست). منطقِ درست را خراب نکن؛ id/class/data-* ِ "
+            "موجود را عوض نکن. تست‌ها را حذف یا ضعیف نکن — کد را درست کن؛ تست را فقط وقتی عوض کن که خودش با خواستهٔ "
+            "کاربر نمی‌خواند.\n"
             f"{rules}\n\n"
             "## ایرادها\n" + "\n".join(f"- {x}" for x in rep["problems"][:25]) + "\n\n"
             + ("## سناریوی مرورگر (همین باید درست کار کند)\n" + json.dumps(steps, ensure_ascii=False) + "\n\n" if steps else "")
@@ -750,20 +868,34 @@ async def fix_loop(root: Path, *, ai: AIGen, description: str, constraints: Dict
         shot = (shot_dir / f"selfcheck_{n}.png") if shot_dir else None
         rep = await run_checks(root, steps, shot)
         # green by deleting tests is not green: the model must fix the code, not shrink the suite
-        now_tests = int(((rep.get("tests") or {}).get("cases")) or 0)
-        if base_tests and now_tests < base_tests:
-            rep["problems"].append(f"[tests] تعدادِ تست‌ها از {base_tests} به {now_tests} کم شد — تست‌ها را حذف/ضعیف نکن؛ "
+        now_cases = int(((rep.get("tests") or {}).get("cases")) or 0)
+        if base_cases and now_cases < base_cases:
+            rep["problems"].append(f"[tests] تعدادِ تست‌ها از {base_cases} به {now_cases} کم شد — تست‌ها را حذف/ضعیف نکن؛ "
                                    "کد را درست کن (تست را فقط اگر خودش غلط است اصلاح کن و همان تعداد را نگه دار)")
             rep["green"] = False
         rounds.append({"round": n, "rewritten": written, "auto_fixes": auto, "green": rep["green"], "blocked": rep["blocked"],
                        "problems": rep["problems"][:30], "tests": _brief_tests(rep), "browser": _brief_browser(rep)})
+        sc = _score(rep, base_cases)
+        if sc > best[0]:
+            best = (sc, n, _snapshot(root), rep)
         if not written and not auto:
             break
-    return {"green": rep["green"], "rounds": rounds, "steps": steps, "final": {
+    restored: Optional[int] = None
+    if best[1] != rounds[-1]["round"] and best[0] > _score(rep, base_cases):
+        changed = _restore(root, best[2])
+        if on_write:
+            for path in changed:
+                if path in best[2]:
+                    on_write(path, best[2][path])
+        restored, rep = best[1], best[3]
+        if shot_dir and (shot_dir / f"selfcheck_{restored}.png").exists():
+            shutil.copyfile(shot_dir / f"selfcheck_{restored}.png", shot_dir / f"selfcheck_{rounds[-1]['round'] + 1}.png")
+    return {"green": rep["green"], "rounds": rounds, "steps": steps, "restored_round": restored, "final": {
         "static": rep["static"], "tests": {k: v for k, v in (rep.get("tests") or {}).items() if k != "output"},
         "tests_output": ((rep.get("tests") or {}).get("output") or "")[-3000:],
         "browser": {k: v for k, v in (rep.get("browser") or {}).items() if k != "body_text"},
-        "problems": rep["problems"][:40], "blocked": rep["blocked"]}}
+        "problems": rep["problems"][:40], "blocked": rep["blocked"],
+        "scenario_unresolved": [f"قدمِ {x['i']}: {x.get('why')}" for x in _scenario_errors(rep)][:10]}}
 
 
 def _brief_tests(rep: Dict[str, Any]) -> Dict[str, Any]:

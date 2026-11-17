@@ -230,3 +230,72 @@ def test_deleting_the_failing_test_is_not_green(tmp_path):
     res = asyncio.run(SC.fix_loop(root, ai=cheat, description="x", constraints={}, static_web=True, max_rounds=1))
     assert not res["green"]
     assert any("کم شد" in p for p in res["rounds"][-1]["problems"])
+
+
+def _fixed_calc(root: Path) -> Path:
+    _broken_calc(root)
+    SC.deterministic_fixes(root, static_web=True)
+    return root
+
+
+@pytest.mark.skipif(not (SC.node_bin() and _browser_ok()), reason="node or chromium not available")
+def test_a_wrong_selector_fixes_the_scenario_not_the_app(tmp_path):
+    root = _fixed_calc(tmp_path / "calc")
+    before = SC._snapshot(root)
+    prompts = []
+
+    async def ai(prompt: str) -> str:
+        prompts.append(prompt)
+        if "سناریو** را درست کن" in prompt:
+            return json.dumps([{"click": "2"}, {"click": "+"}, {"click": "3"}, {"click": "="},
+                               {"expect": "5", "in": "#display"}])
+        return "=== FILE: index.html ===\n<html>rewritten</html>\n=== END FILE ==="  # must never be asked
+
+    bad = [{"click": "button[data-digit='2']"}, {"click": "+"}, {"click": "3"}, {"click": "="},
+           {"expect": "5", "in": ".nope"}]
+    res = asyncio.run(SC.fix_loop(root, ai=ai, description="ماشین‌حساب", constraints={}, static_web=True, steps=bad))
+    assert res["green"] and res["rounds"][0]["scenario_repairs"] == 1
+    assert SC._snapshot(root) == before  # the app was not touched
+    assert not any("فایل‌هایی را که باید عوض شوند" in p for p in prompts)
+
+
+@pytest.mark.skipif(not (SC.node_bin() and _browser_ok()), reason="node or chromium not available")
+def test_a_fix_that_makes_things_worse_is_rolled_back(tmp_path):
+    root = _broken_calc(tmp_path / "calc", CALC_BAD)  # tests fail, 2+3 shows -1
+    SC.deterministic_fixes(root, static_web=True)
+    worse = "export function calculate() { throw new Error('boom'); }\n"
+    written = {}
+
+    async def ai(prompt: str) -> str:
+        return "=== FILE: js/calculator.js ===\n" + worse + "=== END FILE ==="
+
+    steps = [{"click": "2"}, {"click": "+"}, {"click": "3"}, {"click": "="}, {"expect": "5", "in": "#display"}]
+    res = asyncio.run(SC.fix_loop(root, ai=ai, description="x", constraints={}, static_web=True, steps=steps,
+                                  max_rounds=1, on_write=lambda p, b: written.__setitem__(p, b)))
+    assert not res["green"]
+    assert res["restored_round"] == 0
+    assert (root / "js/calculator.js").read_text() == CALC_BAD and written["js/calculator.js"] == CALC_BAD
+
+
+def test_expectations_ignore_layout_whitespace_but_not_numbers():
+    assert SC._matches("2 × 4\n=\n8\n20:34", "2 × 4 = 8")
+    assert SC._matches(" 5 ", "5") and SC._matches("3.50", "3.5")
+    assert not SC._matches("15", "5") and not SC._matches("-1", "5")
+
+
+def test_undo_puts_back_the_files_before_the_last_fix(tmp_path):
+    from app.services.simple_creator import SimpleProjectCreator, Project, ProjectFile
+    creator = SimpleProjectCreator(workspace=str(tmp_path / "ws"))
+    p = Project(id="proj_undo1", name="c", description="", project_type="static-web")
+    creator.projects[p.id] = p
+    root = _broken_calc(tmp_path / "ws" / p.id)
+    p.files = [ProjectFile(path="js/calculator.js", content=CALC_OK)]
+    p.selfcheck = {"green": True}
+    creator._backup_files(p.id, SC._snapshot(root))
+    (root / "js/calculator.js").write_text(CALC_BAD)
+    (root / "js/extra.js").write_text("x")
+    res = asyncio.run(creator.undo_last_fix(p.id))
+    assert res["ok"] and (root / "js/calculator.js").read_text() == CALC_OK and not (root / "js/extra.js").exists()
+    assert next(f for f in p.files if f.path == "js/calculator.js").content == CALC_OK
+    assert creator.list_backups(p.id) == []
+    assert not asyncio.run(creator.undo_last_fix(p.id))["ok"]

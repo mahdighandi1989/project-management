@@ -118,6 +118,24 @@ export default function CreatorSelfcheckPanel({
     }
   };
 
+  const undo = async () => {
+    if (!window.confirm('فایل‌ها به پیش از آخرین «اجرا و اصلاح» برگردند؟')) return;
+    setBusy('check');
+    setErr('');
+    try {
+      const r = await fetch(`${API_BASE}/api/simple/projects/${projectId}/selfcheck/undo`, { method: 'POST' });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      setSc(d.project?.selfcheck || null);
+      await openPreview();
+      onUpdated?.();
+    } catch (e: any) {
+      setErr(e?.message || 'خطا');
+    } finally {
+      setBusy('');
+    }
+  };
+
   const downloadZip = async () => {
     setBusy('zip');
     setErr('');
@@ -165,6 +183,10 @@ export default function CreatorSelfcheckPanel({
             className="px-3 py-1.5 rounded-lg text-sm bg-blue-600 hover:bg-blue-500 disabled:opacity-50">
             {busy === 'fix' ? '⏳ اجرا و اصلاح… (۱ تا ۳ دقیقه)' : '🔧 اجرا و اصلاح تا سبز'}
           </button>
+          <button onClick={undo} disabled={!!busy} title="۵ نسخهٔ پشتیبان پیش از هر «اجرا و اصلاح» نگه داشته می‌شود"
+            className="px-3 py-1.5 rounded-lg text-sm bg-white/10 hover:bg-white/20 disabled:opacity-50">
+            ↩ برگرداندن به پیش از آخرین اصلاح
+          </button>
           <button onClick={downloadZip} disabled={!!busy}
             className="px-3 py-1.5 rounded-lg text-sm bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50">
             {busy === 'zip' ? '⏳…' : '⬇️ دانلودِ zip'}
@@ -182,6 +204,13 @@ export default function CreatorSelfcheckPanel({
       <div className={`rounded-xl border p-3 text-sm mb-3 ${status.cls}`}>
         <div className="font-bold">{status.txt}</div>
         {sc?.error && <div className="text-xs mt-1">خطا: {sc.error}</div>}
+        {(sc as any)?.note && <div className="text-xs mt-1">{(sc as any).note}</div>}
+        {(sc as any)?.restored_round !== undefined && (sc as any)?.restored_round !== null && (
+          <div className="text-xs mt-1">↩ دورهای بعدی بدتر کردند؛ بهترین نسخه (دورِ {(sc as any).restored_round}) نگه داشته شد.</div>
+        )}
+        {fin && (fin as any).scenario_unresolved?.length > 0 && (
+          <div className="text-xs mt-1">🧭 قدم‌هایی از سناریو که در صفحه پیدا نشد (ایرادِ سناریو، نه لزوماً برنامه): {(fin as any).scenario_unresolved.join(' · ')}</div>
+        )}
         {sc?.rounds && (
           <div className="grid sm:grid-cols-3 gap-2 mt-2 text-xs">
             <div>📦 تست‌ها ({t?.command || 'npm test'}): {t?.ran

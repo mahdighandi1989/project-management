@@ -611,6 +611,8 @@ class SimpleProjectCreator:
             pf.generated_by = (model_ref or {}).get("id") or pf.generated_by
             pf.generated_at = datetime.now().isoformat()
 
+        if max_rounds > 0 and project.selfcheck:  # a re-run that may rewrite files: keep what was there (undo)
+            self._backup_files(project.id, SC._snapshot(root))
         try:
             res = await SC.fix_loop(root, ai=ai_generate, description=project.description, constraints=cons,
                                     static_web=static_web, max_rounds=max_rounds,
@@ -632,6 +634,40 @@ class SimpleProjectCreator:
         project.selfcheck = res
         await self._save_project_meta(project)
         return res
+
+    def _backup_files(self, project_id: str, snap: Dict[str, str], keep: int = 5) -> None:
+        d = self.selfcheck_dir(project_id)
+        (d / f"backup_{datetime.now():%Y%m%d-%H%M%S-%f}.json").write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")
+        for old in sorted(d.glob("backup_*.json"))[:-keep]:
+            old.unlink(missing_ok=True)
+
+    def list_backups(self, project_id: str) -> List[str]:
+        d = self.workspace / "_selfcheck" / project_id
+        return [p.stem[len("backup_"):] for p in sorted(d.glob("backup_*.json"))] if d.exists() else []
+
+    async def undo_last_fix(self, project_id: str) -> Dict[str, Any]:
+        """(PM-INS-0025) Put back the files as they were before the latest «اجرا و اصلاح»."""
+        from . import creator_selfcheck as SC
+        project = self.projects.get(project_id)
+        d = self.workspace / "_selfcheck" / project_id
+        backups = sorted(d.glob("backup_*.json")) if d.exists() else []
+        if project is None or not backups:
+            return {"ok": False, "reason": "نسخهٔ پشتیبانی نیست"}
+        snap = json.loads(backups[-1].read_text(encoding="utf-8"))
+        root = self.workspace / project_id
+        changed = SC._restore(root, snap)
+        files = []
+        old = {f.path: f for f in project.files if isinstance(f, ProjectFile)}
+        for path, body in sorted(snap.items()):
+            pf = old.get(path) or ProjectFile(path=path, language=self._detect_language(path))
+            pf.content = body
+            files.append(pf)
+        project.files = files
+        project.selfcheck = {**(project.selfcheck or {}), "green": None, "undone_at": datetime.now().isoformat(),
+                             "note": "فایل‌ها به پیش از آخرین اصلاح برگشت — خودسنجی را دوباره اجرا کنید"}
+        backups[-1].unlink(missing_ok=True)
+        await self._save_project_meta(project)
+        return {"ok": True, "restored_from": backups[-1].stem[len("backup_"):], "changed": changed}
 
     def _get_default_structure(self, project_type: str) -> Dict:
         """ساختار پیش‌فرض بر اساس نوع پروژه"""
