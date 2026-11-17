@@ -427,9 +427,12 @@ def run_tests(root: Path, timeout: int = 90) -> Dict[str, Any]:
     # named cases (a file without tests still shows up as one «test» named after the file)
     cases = len([n for n in re.findall(r"^\s*# Subtest: (.+)$", out, re.M)
                  if not n.strip().endswith((".js", ".mjs", ".cjs"))])
+    passing = sorted({n.strip() for n in re.findall(r"^\s*ok \d+ - (.+?)(?:\s+#\s.*)?$", out, re.M)
+                      if not n.strip().endswith((".js", ".mjs", ".cjs"))})
     ok = cp.returncode == 0 and nums.get("tests", 1) > 0
     return {"ran": True, "ok": ok, "exit_code": cp.returncode, "command": "npm test → " + script,
             "tests": nums.get("tests"), "passed": nums.get("pass"), "failed": nums.get("fail"), "cases": cases,
+            "passing_names": passing[:500],
             "output": out[-4000:]}
 
 
@@ -826,6 +829,7 @@ async def fix_loop(root: Path, *, ai: AIGen, description: str, constraints: Dict
         scenario_fixes += 1
         rep = await run_checks(root, steps, shot)
     base_cases = int(((rep.get("tests") or {}).get("cases")) or 0)
+    base_passing = set((rep.get("tests") or {}).get("passing_names") or [])
     bad = _scenario_errors(rep)
     rounds.append({"round": 0, "auto_fixes": auto, "green": rep["green"], "problems": rep["problems"][:30],
                    "blocked": rep["blocked"], "scenario_repairs": scenario_fixes,
@@ -868,12 +872,20 @@ async def fix_loop(root: Path, *, ai: AIGen, description: str, constraints: Dict
         shot = (shot_dir / f"selfcheck_{n}.png") if shot_dir else None
         rep = await run_checks(root, steps, shot)
         # green by deleting tests is not green: the model must fix the code, not shrink the suite
-        now_cases = int(((rep.get("tests") or {}).get("cases")) or 0)
-        if base_cases and now_cases < base_cases:
-            rep["problems"].append(f"[tests] تعدادِ تست‌ها از {base_cases} به {now_cases} کم شد — تست‌ها را حذف/ضعیف نکن؛ "
-                                   "کد را درست کن (تست را فقط اگر خودش غلط است اصلاح کن و همان تعداد را نگه دار)")
+        # a test that PASSED before must still exist and pass (by name); rewriting/removing a test that was failing
+        # because it was itself wrong is allowed — and reported
+        now_t = rep.get("tests") or {}
+        now_cases = int(now_t.get("cases") or 0)
+        lost = sorted(base_passing - set(now_t.get("passing_names") or []))
+        if lost:
+            rep["problems"].append(f"[tests] {len(lost)} تستی که پیش‌تر قبول بود حالا نیست یا رد می‌شود: "
+                                   + "، ".join(f"«{x}»" for x in lost[:8])
+                                   + " — تست‌های درست را حذف/ضعیف نکن؛ کد را درست کن")
             rep["green"] = False
+        elif base_cases and now_cases < base_cases:
+            rep["tests_removed_failing"] = base_cases - now_cases
         rounds.append({"round": n, "rewritten": written, "auto_fixes": auto, "green": rep["green"], "blocked": rep["blocked"],
+                       "tests_removed_failing": rep.get("tests_removed_failing"),
                        "problems": rep["problems"][:30], "tests": _brief_tests(rep), "browser": _brief_browser(rep)})
         sc = _score(rep, base_cases)
         if sc > best[0]:
@@ -891,7 +903,9 @@ async def fix_loop(root: Path, *, ai: AIGen, description: str, constraints: Dict
         if shot_dir and (shot_dir / f"selfcheck_{restored}.png").exists():
             shutil.copyfile(shot_dir / f"selfcheck_{restored}.png", shot_dir / f"selfcheck_{rounds[-1]['round'] + 1}.png")
     return {"green": rep["green"], "rounds": rounds, "steps": steps, "restored_round": restored, "final": {
-        "static": rep["static"], "tests": {k: v for k, v in (rep.get("tests") or {}).items() if k != "output"},
+        "static": rep["static"], "tests": {k: v for k, v in (rep.get("tests") or {}).items()
+                                           if k not in ("output", "passing_names")},
+        "tests_removed_failing": rep.get("tests_removed_failing"),
         "tests_output": ((rep.get("tests") or {}).get("output") or "")[-3000:],
         "browser": {k: v for k, v in (rep.get("browser") or {}).items() if k != "body_text"},
         "problems": rep["problems"][:40], "blocked": rep["blocked"],
@@ -900,7 +914,7 @@ async def fix_loop(root: Path, *, ai: AIGen, description: str, constraints: Dict
 
 def _brief_tests(rep: Dict[str, Any]) -> Dict[str, Any]:
     t = rep.get("tests") or {}
-    return {k: t.get(k) for k in ("ran", "ok", "tests", "cases", "passed", "failed", "reason") if k in t}
+    return {k: t.get(k) for k in ("ran", "ok", "tests", "cases", "passed", "failed", "reason") if k in t}  # no names
 
 
 def _brief_browser(rep: Dict[str, Any]) -> Dict[str, Any]:

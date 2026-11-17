@@ -227,9 +227,28 @@ def test_deleting_the_failing_test_is_not_green(tmp_path):
     async def cheat(prompt: str) -> str:  # «fixes» by emptying the failing test file
         return ("=== FILE: tests/calculator.test.js ===\nimport { test } from 'node:test';\n=== END FILE ===")
 
-    res = asyncio.run(SC.fix_loop(root, ai=cheat, description="x", constraints={}, static_web=True, max_rounds=1))
+    async def cheat2(prompt: str) -> str:  # «fixes» by deleting a test that PASSED
+        return ("=== FILE: tests/extra.test.js ===\nimport { test } from 'node:test';\n=== END FILE ===\n"
+                "=== FILE: js/calculator.js ===\n" + CALC_OK + "=== END FILE ===")
+
+    res = asyncio.run(SC.fix_loop(root, ai=cheat2, description="x", constraints={}, static_web=True, max_rounds=1))
     assert not res["green"]
-    assert any("کم شد" in p for p in res["rounds"][-1]["problems"])
+    assert any("پیش‌تر قبول بود" in p and "«one»" in p for p in res["rounds"][-1]["problems"])
+
+
+@pytest.mark.skipif(not SC.node_bin(), reason="node not installed")
+def test_replacing_a_wrong_failing_test_is_allowed_and_reported(tmp_path):
+    root = _broken_calc(tmp_path / "calc")
+    (root / "index.html").unlink()
+    (root / "tests/wrong.test.js").write_text(
+        "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\n"
+        "test('wrong expectation', () => assert.equal(1, 2));\n")
+
+    async def fix(prompt: str) -> str:
+        return "=== FILE: tests/wrong.test.js ===\nimport { test } from 'node:test';\n=== END FILE ==="
+
+    res = asyncio.run(SC.fix_loop(root, ai=fix, description="x", constraints={}, static_web=True, max_rounds=1))
+    assert res["green"] and res["final"]["tests_removed_failing"] == 1
 
 
 def _fixed_calc(root: Path) -> Path:

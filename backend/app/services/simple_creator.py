@@ -227,7 +227,7 @@ class SimpleProjectCreator:
         constraints = dict(constraints or {})
         technologies = SC.clean_technologies(technologies or [], constraints)
         static_web = SC.is_static_web(constraints, project_type, technologies)
-        if static_web and project_type in ("auto", "fullstack", "full-stack", "python", "fastapi", "nextjs", "react", ""):
+        if static_web:  # the user asked for a plain browser app — whatever auto-detect guessed ("node", "fullstack", …)
             project_type = "static-web"
 
         # ایجاد ID و مسیر
