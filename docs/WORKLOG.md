@@ -1490,3 +1490,13 @@
 - **[VERIFY]** `tests/test_pm_ins_0027.py` ‏(۷).
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · مرورگرِ واقعی روی production + pytest
+
+## 2026-11-17 (۷۵) — PM-INS-0027: پذیرش — دو PR با مدلِ ضعیف، هر کدام فقط یک فایل/یک خط
+
+- **[VERIFY]** مرورگرِ واقعی، بازرس ویژهٔ project-management، موتور Local AI، انتخابِ دستیِ مدل، همان درخواستِ هماهنگ‌کننده:
+  - DeepSeek Chat (پس از 4c5e8a9d): ارسال ۲۳:۰۴:۴۴ ⇒ PR ‏۲۳:۰۵:۰۰ (~۱۶ ث) — https://github.com/mahdighandi1989/project-management/pull/930
+  - Gemini 2.5 Flash (پس از c4f238d3): ارسال ۲۳:۳۳:۵۱ ⇒ PR ‏۲۳:۳۴:۳۷ (~۴۶ ث؛ دامنهٔ هدفمند، ۲۵ فایل خوانده شد) — https://github.com/mahdighandi1989/project-management/pull/931
+  - diff ِ هر دو: فقط `docs/COORDINATOR_TEST.md` (new file، یک خط)؛ هیچ‌کدام ادغام نشده‌اند. بی‌اسکنِ عمیق، بی‌مرحله‌بندی.
+- **[TODO]** مالک: دو PR ِ آزمونی ادغام نشوند (یا بسته شوند)؛ شاخهٔ خالیِ `inspector/smart-fix-1794952526` از نخستین تلاش (پیش از پاک‌کنِ خودکارِ شاخهٔ خالی) هنوز هست.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · مرورگرِ واقعی روی production + GitHub
