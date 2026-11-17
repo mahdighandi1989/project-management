@@ -1481,3 +1481,12 @@
 - **[VERIFY]** `tests/test_pm_ins_0027.py` ‏(۶).
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · مرورگرِ واقعی روی production + GitHub
+
+## 2026-11-17 (۷۴) — PM-INS-0027: Gemini Flash برای یک خط ۵۰۰ فایل را خواند
+
+- **[VERIFY]** پس از 5c591056، Gemini 2.5 Flash: حلقهٔ عامل این بار رسیدگی نکرد و مسیرِ قدیمی «دامنه: کل پروژه» را برگزید ⇒ ۵۰۰ فایل در ۱۷ دسته، بیش از ۷ دقیقه، بی action_plan در زمانِ آزمون.
+- **[FINDING]** `_detect_request_scope` روی پرامپتِ ساختارمند (پر از «پروژه») اجرا می‌شد؛ DeepSeek در همان درخواست «هدفمند» گرفته بود.
+- **[CHANGE]** عملیاتِ سادهٔ فایل (متنِ خودِ کاربر) ⇒ همیشه `TARGETED`.
+- **[VERIFY]** `tests/test_pm_ins_0027.py` ‏(۷).
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · مرورگرِ واقعی روی production + pytest

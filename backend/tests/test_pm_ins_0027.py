@@ -67,3 +67,11 @@ def test_create_never_overwrites_an_existing_file():
     i = src.index("# (PM-INS-0027) «create» never overwrites")
     block = src[i:i + 900]
     assert "get_file_content(owner, repo, file_path" in block and "dropped_files.append" in block and "continue" in block
+
+
+def test_simple_file_op_never_reads_the_whole_project():
+    from app.api.routes import render_logs as R
+    src = inspect.getsource(R)
+    i = src.index("request_scope = _detect_request_scope(request.message, history_text)")
+    block = src[i:i + 900]
+    assert '_sfo2((getattr(request, "original_message"' in block and 'request_scope = "TARGETED"' in block

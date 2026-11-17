@@ -16701,6 +16701,14 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 
             # 🆕 تشخیص دامنه درخواست — آیا کاربر همه فایل‌ها رو میخواد یا فقط بخشی؟
             request_scope = _detect_request_scope(request.message, history_text)
+            # (PM-INS-0027) «فایلِ X را بساز / این خط را بنویس» (judged on the user's OWN words) is TARGETED — the structured
+            # prompt mentions «پروژه» everywhere, and Gemini Flash's fallback read 500 files in 17 batches for one line
+            try:
+                from ...services.inspector_intent_resolver import _is_simple_file_op as _sfo2
+                if request_scope != "TARGETED" and _sfo2((getattr(request, "original_message", None) or "").strip()):
+                    request_scope = "TARGETED"
+            except Exception:  # noqa: BLE001
+                pass
             scope_labels = {
                 "FULL_PROJECT": "کل پروژه",
                 "BROAD": "بررسی گسترده",
