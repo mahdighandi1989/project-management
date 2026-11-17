@@ -1161,3 +1161,15 @@
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · pytest + next build
 
+## 2026-11-17 (۵۱) — سنجشِ زندهٔ PM-INS-0020 و PM-INS-0021 روی production و جواب در برگه‌ها
+
+- **[VERIFY]** PM-INS-0021 (مرورگرِ ناظر، c0d9b16): «WS: متصل» quran ۴٫۶ ث (اجراهای دیگر ۱٫۰ و ۵٫۱)، video-processor ۵٫۶، trading-system ۴٫۶؛ اپِ قرآن در پیش‌نمایش رندر شد (۵۲۱ نویسه، پیش‌تر ۰ و ۴۰۱ روی
+  `assets/index-CjLBx5Le.js`)؛ کلیک در چت: «کلیک کردی روی دکمه "تمرین" (pointerdown)»؛ «🔍 تشخیص»: «⚠️ Bridge در بیلدِ production ِ پروژه خاموش است (VITE_ENABLE_INSPECTOR_BRIDGE…)»؛
+  `bridge-survey` روی production: ۳ با Bridge، ۵ بی Bridge، Lifemanager بی نشانیِ فرانت. جواب: fixed + تصویر.
+- **[VERIFY]** PM-INS-0020 (9a26974): دستیار با همان پرسش ⇐ «PM-INS-0021 … ۱۰:۳۳ دبی؛ در انتظارِ ناظر ۱» (واقعی: بیشینه ۲۱، open=1)؛ تبِ کلیدها: OpenAI ✕، Claude ✕، Gemini ✓، DeepSeek ✓،
+  Perplexity آزموده‌نشده (درست)؛ استخراج: GPT-4o off/failed؛ تستِ Gemini Pro: نوارِ «در حالِ تست» و پنجرهٔ نتیجه پس از ۱۰۹ ثانیه؛ `last_call.at` با `+00:00`؛
+  خلاصه: ۹ مخزن، ۱٬۳۷۹ باز (۱٬۲۲۱ پیشنهاد، ۱۱۴ در انتظار، ۴۴ منتظرِ بازبینی)، ۶۱۵ بایگانی، ۳٬۰۵۸ گزارش، ۴ مدلِ روشن؛ پاک‌سازی: ۸ تکراری در ۴ گروه، ۸۴۳ کهنه — پیش‌نمایش باز شد، تأیید نزدم.
+  جواب: fixed + تصویر.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · مرورگرِ واقعی + API روی production
+
