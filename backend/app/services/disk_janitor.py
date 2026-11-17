@@ -179,6 +179,19 @@ async def run_all(db=None, root: Optional[Path] = None, min_age_days: Optional[f
         result["freed"] += await drop_extraction_caches()
     except Exception as e:  # noqa: BLE001
         result["errors"].append(f"extractions: {type(e).__name__}")
+    try:  # PM-INS-0024 «الف»: render_logs past their retention (48 h) and ai_logs past 30 days → Drive → out of the DB
+        from . import log_archive
+        from ..core.database import SessionLocal as _SL
+
+        def _logs():
+            _d = _SL()
+            try:
+                return log_archive.run(_d)
+            finally:
+                _d.close()
+        result["logs"] = await asyncio.to_thread(_logs)
+    except Exception as e:  # noqa: BLE001
+        result["errors"].append(f"logs: {type(e).__name__}: {str(e)[:100]}")
     try:  # old oversight reports: full copies to Drive, slim copies stay (services/reports_archive.py)
         from . import reports_archive
 

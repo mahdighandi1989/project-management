@@ -149,3 +149,23 @@ class RenderLogArchive(Base):
     # متادیتا
     archived_at = Column(DateTime, server_default=func.now())
     size_bytes = Column(Integer)  # سایز داده فشرده نشده
+
+
+class LogDriveArchive(Base):
+    """PM-INS-0024 (الف) — old render_logs / ai_logs rows moved to Google Drive as gzipped JSON-lines. The rows are
+    deleted from their table only AFTER Drive confirmed the upload; this index keeps them findable and searchable from
+    the app («لاگ رندر › آرشیو»)."""
+    __tablename__ = "log_drive_archives"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    table_name = Column(String(40), nullable=False, index=True)   # render_logs | ai_logs
+    start_time = Column(DateTime, nullable=False, index=True)
+    end_time = Column(DateTime, nullable=False, index=True)
+    rows_count = Column(Integer, default=0)
+    services = Column(Text, default="")                            # comma-separated service ids / providers inside
+    drive_id = Column(String(120), nullable=False)
+    drive_link = Column(String(500), default="")
+    file_name = Column(String(200), default="")
+    compressed_bytes = Column(Integer, default=0)
+    raw_bytes = Column(Integer, default=0)
+    created_at = Column(DateTime, server_default=func.now())

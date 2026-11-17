@@ -1,5 +1,6 @@
 'use client';
 
+import LogDriveArchive from './LogDriveArchive';
 import { useState, useEffect, useRef, useCallback } from 'react';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -1564,6 +1565,8 @@ export default function RenderLogsPanel() {
 
       {activeTab === 'archive' && (
         <div className="space-y-4">
+          {/* PM-INS-0024 «الف» — old logs moved to Google Drive, searchable here */}
+          <LogDriveArchive />
           {/* هدر آرشیو */}
           <div className="flex flex-wrap gap-3 items-center bg-gray-50 dark:bg-gray-800 p-4 rounded-lg">
             <div className="flex items-center gap-2 flex-wrap">

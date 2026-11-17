@@ -1902,6 +1902,96 @@ async def cleanup_old_logs(
     }
 
 
+# ---------------------------------------------------------------------------------------------------------------
+# PM-INS-0024 «الف» — old render_logs / ai_logs rows → Google Drive (gz JSON-lines) → deleted; searchable from here.
+# services/log_archive.py. Writes only after an explicit confirm; the 6-hourly disk janitor keeps it running afterwards.
+# ---------------------------------------------------------------------------------------------------------------
+_LOG_ARCHIVE_JOB: Dict[str, Any] = {"running": False}
+
+
+def _cutoffs_from(render_days: Optional[float], ai_days: Optional[float], db) -> Dict[str, Any]:
+    from ...services import log_archive as LA
+    cut = LA.default_cutoffs(db)
+    now = datetime.utcnow()
+    if render_days is not None:
+        cut["render_logs"] = now - timedelta(days=max(1.0, float(render_days)))
+    if ai_days is not None:
+        cut["ai_logs"] = now - timedelta(days=max(1.0, float(ai_days)))
+    return cut
+
+
+@router.get("/log-archive/preview")
+async def log_archive_preview(render_days: Optional[float] = None, ai_days: Optional[float] = None,
+                              db: Session = Depends(get_db)):
+    from ...services import log_archive as LA
+    return LA.preview(db, _cutoffs_from(render_days, ai_days, db))
+
+
+class LogArchiveRun(BaseModel):
+    confirm: bool = False
+    render_days: Optional[float] = None
+    ai_days: Optional[float] = None
+
+
+@router.post("/log-archive/run")
+async def log_archive_run(body: LogArchiveRun):
+    if not body.confirm:
+        raise HTTPException(400, "بدونِ تأییدِ صریح (confirm=true) هیچ ردیفی جابه‌جا نمی‌شود")
+    if _LOG_ARCHIVE_JOB.get("running"):
+        return {"started": False, "reason": "انتقال در جریان است", "job": _LOG_ARCHIVE_JOB}
+    from ...core.database import SessionLocal
+    from ...services import log_archive as LA
+
+    def _work():
+        _db = SessionLocal()
+        try:
+            before = LA.preview(_db, _cutoffs_from(body.render_days, body.ai_days, _db))
+            res = LA.run(_db, _cutoffs_from(body.render_days, body.ai_days, _db), max_batches=200)
+            after = LA.preview(_db, _cutoffs_from(body.render_days, body.ai_days, _db))
+            return {"before": before, "result": res, "after": after}
+        finally:
+            _db.close()
+
+    async def _bg():
+        _LOG_ARCHIVE_JOB.update(running=True, started_at=datetime.utcnow().isoformat(), finished_at=None, out=None, error=None)
+        try:
+            _LOG_ARCHIVE_JOB["out"] = await asyncio.to_thread(_work)
+        except Exception as e:  # noqa: BLE001
+            _LOG_ARCHIVE_JOB["error"] = f"{type(e).__name__}: {str(e)[:300]}"
+        finally:
+            _LOG_ARCHIVE_JOB.update(running=False, finished_at=datetime.utcnow().isoformat())
+
+    from ...services.oversight_service import get_oversight_service
+    get_oversight_service()._spawn_bg(_bg())
+    return {"started": True}
+
+
+@router.get("/log-archive/status")
+async def log_archive_status():
+    return _LOG_ARCHIVE_JOB
+
+
+@router.get("/log-archive/list")
+async def log_archive_list(table: Optional[str] = None, db: Session = Depends(get_db)):
+    from ...services import log_archive as LA
+    return {"archives": LA.list_archives(db, table)}
+
+
+@router.get("/log-archive/search")
+async def log_archive_search(table: str = "render_logs", q: str = "", service: str = "", level: str = "",
+                             since: Optional[str] = None, until: Optional[str] = None,
+                             limit: int = Query(200, ge=1, le=1000), db: Session = Depends(get_db)):
+    from ...services import log_archive as LA
+
+    def _dt(v):
+        try:
+            return datetime.fromisoformat(v) if v else None
+        except ValueError:
+            return None
+    return await asyncio.to_thread(LA.search, db, table=table, q=q, service=service, level=level,
+                                   since=_dt(since), until=_dt(until), limit=limit)
+
+
 @router.get("/archives")
 async def get_archives(
     service_id: Optional[str] = None,
