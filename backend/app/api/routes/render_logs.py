@@ -19582,7 +19582,8 @@ async def inspector_page_proxy(
     # 5. سایر انواع (JS, CSS, تصاویر) — عبور بدون تغییر (CSP sandbox هم، تا هیچ سندی از این مسیر same-origin نشود)
     body = resp.content
     # PM-INS-0022: Next.js chunks / CSS reference «/_next/…» absolutely — keep them inside this project's preview
-    if ("javascript" in ct or "css" in ct or "x-component" in ct) and b"/_next/" in body:
+    # (a static Next export serves its RSC payload as `…/index.txt` with text/plain — ALLIN1)
+    if (any(k in ct for k in ("javascript", "css", "x-component", "text/plain", "json"))) and b"/_next/" in body:
         try:
             _ap = f"/api/render/inspector/proxy/{project_id}" + (f"/{PREVIEW_PATH_MARK}{_pt}" if _pt else "")
             body = _rewrite_next_paths(body.decode("utf-8"), _ap).encode("utf-8")

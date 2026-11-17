@@ -50,5 +50,5 @@ def test_page_fetches_go_through_the_ticketed_prefix():
 
 def test_next_client_navigation_stays_in_the_preview():
     src = inspect.getsource(RL.inspector_page_proxy)
-    assert '"rsc", "next-router-state-tree"' in src and '"x-component" in ct' in src
+    assert '"rsc", "next-router-state-tree"' in src and '"x-component"' in src and '"text/plain"' in src
     assert "u instanceof URL" in RL._PROXY_MONITOR_SCRIPT_TEMPLATE and "pushState" in RL._PROXY_MONITOR_SCRIPT_TEMPLATE

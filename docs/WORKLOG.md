@@ -1205,3 +1205,11 @@
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · مرورگرِ واقعی روی production + pytest
 
+## 2026-11-17 (۵۵) — PM-INS-0022 (ادامه): بارِ RSC ِ خروجیِ ایستای Next (text/plain)
+
+- **[VERIFY]** پس از 196f71f: قابِ Detective-1 و ALLIN1 داخلِ مسیرِ پروکسی می‌ماند (پیش‌تر به `/login` ِ AI Creator می‌پرید)؛ Detective-1 بی‌خطا.
+- **[FINDING]** ALLIN1 خروجیِ ایستای Next است و بارِ RSC را به‌صورتِ `…/index.txt` با `text/plain` می‌دهد ⇒ ارجاعِ `/_next/static/css/…` در آن بازنویسی نمی‌شد ⇒ یک CSS از `/_next` ِ AI Creator.
+- **[CHANGE]** بازنویسیِ `/_next/` برای پاسخ‌های `text/plain` و `json` هم.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · مرورگرِ واقعی روی production + pytest
+
