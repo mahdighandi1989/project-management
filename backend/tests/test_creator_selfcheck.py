@@ -344,6 +344,9 @@ def test_working_but_rewritten_tests_gets_its_own_verdict(tmp_path):
                                           "test('w', () => assert.equal(1, 2));\n")
     res = asyncio.run(SC.fix_loop(root, ai=rename, description="x", constraints={}, static_web=True, max_rounds=1))
     assert not res["green"] and res["verdict"] == "works_tests_rewritten" and res["lost_passing"] == 1
+
+
+@pytest.mark.skipif(not SC.node_bin(), reason="node not installed")
 def test_a_test_that_passed_in_a_later_round_may_not_be_dropped(tmp_path):
     """Production, proj_aea848f1: round 0 had a SyntaxError (0 cases ran), round 2 had 79/81 passing, round 3
     «went green» with 70/70 — the old baseline was round 0 only, so 9+ passing tests vanished unnoticed."""
