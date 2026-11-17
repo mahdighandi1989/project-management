@@ -876,7 +876,8 @@ async def fix_loop(root: Path, *, ai: AIGen, description: str, constraints: Dict
                    "blocked": rep["blocked"], "scenario_repairs": scenario_fixes,
                    "scenario_unresolved": [f"قدمِ {x['i']}: {x.get('why')}" for x in bad][:10],
                    "tests": _brief_tests(rep), "browser": _brief_browser(rep)})
-    best = (_score(rep, base_cases), 0, _snapshot(root), rep)
+    # every round is kept (projects are small) and the best one is picked at the end against the FINAL baseline
+    history: List[Tuple[int, Dict[str, str], Dict[str, Any]]] = [(0, _snapshot(root), rep)]
     rules = structure_prompt_rules(constraints, static_web)
     for n in range(1, max_rounds + 1):
         if rep["green"] or not rep["problems"]:  # nothing the APP has to fix (only «blocked» / scenario issues)
@@ -930,11 +931,16 @@ async def fix_loop(root: Path, *, ai: AIGen, description: str, constraints: Dict
         rounds.append({"round": n, "rewritten": written, "auto_fixes": auto, "green": rep["green"], "blocked": rep["blocked"],
                        "tests_removed_failing": rep.get("tests_removed_failing"),
                        "problems": rep["problems"][:30], "tests": _brief_tests(rep), "browser": _brief_browser(rep)})
-        sc = _score(rep, base_cases)
-        if sc > best[0]:
-            best = (sc, n, _snapshot(root), rep)
+        history.append((n, _snapshot(root), rep))
+        # the baseline only ever grows: a test that passed in ANY earlier round (not just round 0, which may not
+        # have run at all — e.g. a SyntaxError) must keep passing, and the suite may never shrink below its largest
+        # size without that being reported (PM-INS-0025: 81 ⇒ 70 cases went unnoticed when round 0 had 0)
+        base_passing |= set(now_t.get("passing_names") or [])
+        base_cases = max(base_cases, now_cases)
         if not written and not auto:
             break
+    best_n, best_snap, best_rep = max(history, key=lambda h: (_score(h[2], base_cases), h[0]))
+    best = (_score(best_rep, base_cases), best_n, best_snap, best_rep)
     restored: Optional[int] = None
     if best[1] != rounds[-1]["round"] and best[0] > _score(rep, base_cases):
         changed = _restore(root, best[2])

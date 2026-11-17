@@ -327,3 +327,33 @@ def test_the_model_sees_which_tests_fail_not_the_output_tail(tmp_path):
     r = SC.run_tests(root)
     fails = SC.failing_tests(r["output"])
     assert len(fails) == 1 and "«2+3»" in fails[0] and "calculator.test.js" in fails[0] and "5" in fails[0]
+
+
+@pytest.mark.skipif(not SC.node_bin(), reason="node not installed")
+def test_a_test_that_passed_in_a_later_round_may_not_be_dropped(tmp_path):
+    """Production, proj_aea848f1: round 0 had a SyntaxError (0 cases ran), round 2 had 79/81 passing, round 3
+    «went green» with 70/70 — the old baseline was round 0 only, so 9+ passing tests vanished unnoticed."""
+    root = _broken_calc(tmp_path / "calc")
+    (root / "index.html").unlink()
+    (root / "js/calculator.js").write_text("export function calculate(a, op, b) { return <oops>; }\n")
+    two = ("import { test } from 'node:test';\nimport assert from 'node:assert/strict';\n"
+           "import { calculate } from '../js/calculator.js';\n"
+           "test('2+3', () => assert.equal(calculate(2, '+', 3), 5));\n"
+           "test('7-2', () => assert.equal(calculate(7, '-', 2), 5));\n"
+           "test('6/0 wrong', () => assert.equal(calculate(6, '/', 0), 0));\n")
+    calls = {"n": 0}
+
+    async def model(prompt: str) -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:  # repairs the syntax error, adds a suite: 2 pass, 1 wrong test fails
+            return ("=== FILE: js/calculator.js ===\n" + CALC_OK + "=== END FILE ===\n"
+                    "=== FILE: tests/calculator.test.js ===\n" + two + "=== END FILE ===")
+        # «fixes» the failing test by deleting it AND the passing «7-2»
+        return ("=== FILE: tests/calculator.test.js ===\n" + TEST_JS + "=== END FILE ===")
+
+    res = asyncio.run(SC.fix_loop(root, ai=model, description="x", constraints={}, static_web=True, max_rounds=2))
+    assert res["rounds"][0]["tests"]["cases"] == 0
+    assert res["rounds"][1]["tests"]["passed"] == 2
+    assert not res["rounds"][2]["green"]
+    assert any("پیش‌تر قبول بود" in p and "«7-2»" in p for p in res["rounds"][2]["problems"])
+    assert not res["green"]
