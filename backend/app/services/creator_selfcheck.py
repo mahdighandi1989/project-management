@@ -424,9 +424,12 @@ def run_tests(root: Path, timeout: int = 90) -> Dict[str, Any]:
             m = re.search(rf"ℹ\s*{k}\s+(\d+)", out)
             if m:
                 nums[k] = int(m.group(1))
+    # named cases (a file without tests still shows up as one «test» named after the file)
+    cases = len([n for n in re.findall(r"^\s*# Subtest: (.+)$", out, re.M)
+                 if not n.strip().endswith((".js", ".mjs", ".cjs"))])
     ok = cp.returncode == 0 and nums.get("tests", 1) > 0
     return {"ran": True, "ok": ok, "exit_code": cp.returncode, "command": "npm test → " + script,
-            "tests": nums.get("tests"), "passed": nums.get("pass"), "failed": nums.get("fail"),
+            "tests": nums.get("tests"), "passed": nums.get("pass"), "failed": nums.get("fail"), "cases": cases,
             "output": out[-4000:]}
 
 
@@ -634,8 +637,10 @@ async def plan_browser_steps(ai: AIGen, root: Path, description: str) -> List[Di
     if not _files(root, ".html"):
         return []
     prompt = (
-        "این یک اپِ مرورگری است. یک سناریوی کوتاهِ آزمونِ کاربری (۳ تا ۱۲ قدم) بنویس که ثابت کند کارِ اصلیِ برنامه "
-        "واقعاً در مرورگر کار می‌کند — دقیقاً با همین HTML و JS (برای ماشین‌حساب مثلاً: 2 بعد + بعد 3 بعد = و انتظارِ 5).\n"
+        "این یک اپِ مرورگری است. یک سناریوی آزمونِ کاربری (۵ تا ۴۰ قدم) بنویس که ثابت کند برنامه واقعاً در مرورگر کار "
+        "می‌کند — دقیقاً با همین HTML و JS. اول کارِ اصلی (برای ماشین‌حساب: 2 + 3 = و انتظارِ 5)، بعد **هر ویژگیِ "
+        "خواسته‌شده که روی صفحه دیدنی است** (مثلاً پیامِ دقیقِ خطای تقسیم بر صفر، پاک‌کردن، حذفِ آخرین رقم)، و انتظارِ "
+        "متنی که کاربر خواسته (نه متنی که کد الان نشان می‌دهد). بینِ دو آزمونِ مستقل وضعیت را پاک کن.\n"
         "قدم‌ها:\n"
         '  {"click": "<متنِ دقیقِ دکمه یا CSS selector>"}\n'
         '  {"type": "<متن>", "into": "<CSS selector>"}\n'
@@ -651,7 +656,7 @@ async def plan_browser_steps(ai: AIGen, root: Path, description: str) -> List[Di
     if isinstance(data, dict):
         data = data.get("steps") or []
     steps = [s for s in (data or []) if isinstance(s, dict) and ({"click", "type", "expect"} & set(s))]
-    return steps[:20]
+    return steps[:40]
 
 
 def summarize(report: Dict[str, Any]) -> List[str]:
@@ -706,6 +711,7 @@ async def fix_loop(root: Path, *, ai: AIGen, description: str, constraints: Dict
         steps = await plan_browser_steps(ai, root, description)
     shot = (shot_dir / "selfcheck_0.png") if shot_dir else None
     rep = await run_checks(root, steps, shot)
+    base_tests = int(((rep.get("tests") or {}).get("cases")) or 0)
     rounds.append({"round": 0, "auto_fixes": auto, "green": rep["green"], "problems": rep["problems"][:30],
                    "blocked": rep["blocked"],
                    "tests": _brief_tests(rep), "browser": _brief_browser(rep)})
@@ -715,7 +721,8 @@ async def fix_loop(root: Path, *, ai: AIGen, description: str, constraints: Dict
             break
         prompt = (
             "این پروژه را اجرا کردیم و این ایرادها پیدا شد. فایل‌هایی را که باید عوض شوند **کامل** بازنویسی کن تا همهٔ "
-            "ایرادها رفع شوند (تست‌ها سبز، صفحه بی‌خطا، سناریوی مرورگر درست). منطقِ درست را خراب نکن.\n"
+            "ایرادها رفع شوند (تست‌ها سبز، صفحه بی‌خطا، سناریوی مرورگر درست). منطقِ درست را خراب نکن. "
+            "تست‌ها را حذف یا ضعیف نکن — کد را درست کن؛ تست را فقط وقتی عوض کن که خودش با خواستهٔ کاربر نمی‌خواند.\n"
             f"{rules}\n\n"
             "## ایرادها\n" + "\n".join(f"- {x}" for x in rep["problems"][:25]) + "\n\n"
             + ("## سناریوی مرورگر (همین باید درست کار کند)\n" + json.dumps(steps, ensure_ascii=False) + "\n\n" if steps else "")
@@ -742,6 +749,12 @@ async def fix_loop(root: Path, *, ai: AIGen, description: str, constraints: Dict
         auto = deterministic_fixes(root, static_web=static_web)
         shot = (shot_dir / f"selfcheck_{n}.png") if shot_dir else None
         rep = await run_checks(root, steps, shot)
+        # green by deleting tests is not green: the model must fix the code, not shrink the suite
+        now_tests = int(((rep.get("tests") or {}).get("cases")) or 0)
+        if base_tests and now_tests < base_tests:
+            rep["problems"].append(f"[tests] تعدادِ تست‌ها از {base_tests} به {now_tests} کم شد — تست‌ها را حذف/ضعیف نکن؛ "
+                                   "کد را درست کن (تست را فقط اگر خودش غلط است اصلاح کن و همان تعداد را نگه دار)")
+            rep["green"] = False
         rounds.append({"round": n, "rewritten": written, "auto_fixes": auto, "green": rep["green"], "blocked": rep["blocked"],
                        "problems": rep["problems"][:30], "tests": _brief_tests(rep), "browser": _brief_browser(rep)})
         if not written and not auto:
@@ -755,7 +768,7 @@ async def fix_loop(root: Path, *, ai: AIGen, description: str, constraints: Dict
 
 def _brief_tests(rep: Dict[str, Any]) -> Dict[str, Any]:
     t = rep.get("tests") or {}
-    return {k: t.get(k) for k in ("ran", "ok", "tests", "passed", "failed", "reason") if k in t}
+    return {k: t.get(k) for k in ("ran", "ok", "tests", "cases", "passed", "failed", "reason") if k in t}
 
 
 def _brief_browser(rep: Dict[str, Any]) -> Dict[str, Any]:

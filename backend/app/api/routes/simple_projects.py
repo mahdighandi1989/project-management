@@ -454,7 +454,8 @@ async def create_project(request: CreateProjectRequest):
     # 🆕 (model attribution) — returns (content, model_id) tuple so
     # simple_creator can record per-file which model wrote it.
     async def gen(prompt: str):
-        return await ai_generate_with_meta(prompt, model_ids=request.model_ids)
+        # (PM-INS-0025) fix rounds rewrite whole files — 4000 tokens cut them mid-file
+        return await ai_generate_with_meta(prompt, model_ids=request.model_ids, max_tokens=8000)
 
     # 🆕 (Reference Projects) — نرمال‌سازی selected_projects برای persist:
     # حذف self-references و آیتم‌های غیرمعتبر. (در این مرحله پروژهٔ جدید
@@ -3264,6 +3265,7 @@ class SelfcheckRequest(BaseModel):
     model_ids: List[str] = []
     fix: bool = True  # false = فقط اجرا و گزارش (بدونِ تغییرِ فایل)
     max_rounds: int = 3
+    replan: bool = False  # سناریوی مرورگر از نو نوشته شود (با مدل)
 
 
 def _creator_project_or_404(project_id: str):
@@ -3293,7 +3295,7 @@ async def rerun_selfcheck(project_id: str, request: SelfcheckRequest):
 
     rounds = max(0, min(5, int(request.max_rounds))) if request.fix else 0
     res = await creator.run_selfcheck(project, gen if request.model_ids else no_model, max_rounds=rounds,
-                                      model_ref=model_ref)
+                                      model_ref=model_ref, replan=bool(request.replan and request.model_ids))
     return {"success": True, "selfcheck": res, "project": project.to_dict()}
 
 

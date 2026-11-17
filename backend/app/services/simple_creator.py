@@ -589,7 +589,7 @@ class SimpleProjectCreator:
         return d
 
     async def run_selfcheck(self, project: "Project", ai_generate: callable, *, max_rounds: int = 3,
-                            model_ref: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+                            model_ref: Optional[Dict[str, str]] = None, replan: bool = False) -> Dict[str, Any]:
         """(PM-INS-0025) Run what was built (tests + a real browser), fix until green, and keep project.files in sync."""
         from . import creator_selfcheck as SC
         root = self.workspace / project.id
@@ -615,7 +615,7 @@ class SimpleProjectCreator:
             res = await SC.fix_loop(root, ai=ai_generate, description=project.description, constraints=cons,
                                     static_web=static_web, max_rounds=max_rounds,
                                     shot_dir=self.selfcheck_dir(project.id), on_write=_on_write,
-                                    steps=(project.selfcheck or {}).get("steps") or None)
+                                    steps=None if replan else ((project.selfcheck or {}).get("steps") or None))
         except Exception as e:  # noqa: BLE001
             logger.exception("selfcheck failed")
             res = {"green": False, "error": f"{type(e).__name__}: {str(e)[:300]}"}

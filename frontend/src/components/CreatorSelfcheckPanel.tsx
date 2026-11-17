@@ -102,7 +102,8 @@ export default function CreatorSelfcheckPanel({
       const r = await fetch(`${API_BASE}/api/simple/projects/${projectId}/selfcheck`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model_ids: fix ? modelIds : [], fix, max_rounds: 3 }),
+        // with a model the scenario is rewritten from the current HTML/JS + every requested feature
+        body: JSON.stringify({ model_ids: fix ? modelIds : [], fix, max_rounds: 3, replan: fix }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);

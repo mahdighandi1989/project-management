@@ -215,3 +215,18 @@ def test_creator_preview_is_ticketed_and_sandboxed(tmp_path, monkeypatch):
     assert c.get(path + "project.json").status_code == 404
     assert c.get(path + "../../etc/passwd").status_code in (404, 401)
     assert c.get(bad).status_code == 401
+
+
+@pytest.mark.skipif(not SC.node_bin(), reason="node not installed")
+def test_deleting_the_failing_test_is_not_green(tmp_path):
+    root = _broken_calc(tmp_path / "calc", CALC_BAD)
+    (root / "index.html").unlink()  # tests only
+    (root / "tests/extra.test.js").write_text(
+        "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('one', () => assert.ok(true));\n")
+
+    async def cheat(prompt: str) -> str:  # «fixes» by emptying the failing test file
+        return ("=== FILE: tests/calculator.test.js ===\nimport { test } from 'node:test';\n=== END FILE ===")
+
+    res = asyncio.run(SC.fix_loop(root, ai=cheat, description="x", constraints={}, static_web=True, max_rounds=1))
+    assert not res["green"]
+    assert any("کم شد" in p for p in res["rounds"][-1]["problems"])
