@@ -1194,3 +1194,14 @@
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · مرورگرِ واقعی روی production + pytest
 
+## 2026-11-17 (۵۴) — PM-INS-0022 (ادامه): ناوبریِ سمتِ کاربرِ Next.js داخلِ پیش‌نمایش می‌ماند
+
+- **[VERIFY]** پس از af2170f: Detective-1 و ALLIN1 بالا می‌آیند (متن ۰ ⇐ ۱۰۰ نویسه)؛ language کلیک روی SVG را ثبت کرد («کلیک کردی روی path»)؛ WS: ۶٫۶ / ۵٫۶ / ۵٫۱ ث.
+- **[FINDING]** نگهبانِ ورودِ خودِ Detective-1 و ALLIN1 به `/login` می‌رود: درخواستِ RSC ِ Next با شیءِ URL ِ مطلق ساخته می‌شود (رهگیر فقط رشتهٔ «/…» را می‌گرفت) و پروکسی هدرهای RSC را نمی‌فرستاد
+  ⇒ بازگشتِ Next به ناوبریِ کامل ⇒ خروج از پیش‌نمایش به `/login` ِ خودِ AI Creator (۴۰۴/۴۰۱).
+- **[CHANGE]** اسکریپتِ رصدِ پروکسی: `_px` برای رشته‌های مطلق/نسبی، `URL` و `Request` ِ هم‌مبدأ؛ `history.pushState/replaceState` زیرِ مسیرِ پروکسی؛ پروکسی هدرهای `RSC`، `Next-Router-State-Tree`،
+  `Next-Router-Prefetch`، `Next-Url` را می‌فرستد و پاسخِ `text/x-component` هم بازنویسیِ `/_next/` می‌گیرد.
+- **[VERIFY]** +۱ تست؛ pytest سبز.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · مرورگرِ واقعی روی production + pytest
+

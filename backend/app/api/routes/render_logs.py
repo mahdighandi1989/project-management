@@ -19213,10 +19213,34 @@ _PROXY_MONITOR_SCRIPT_TEMPLATE = """<script data-inspector-proxy="true">
 
   /* رهگیری fetch — مسیرهای مطلق (/) از طریق proxy ارسال شوند (same-origin = بدون CORS) */
   var _fetch=window.fetch;
+  /* PM-INS-0022: Next.js builds its RSC requests as absolute URL objects on the page origin — keep those (and Request
+     objects) inside this project's proxy too, or the router falls back to a navigation OUT of the preview */
+  function _px(u){
+    try{
+      if(typeof u==='string'){
+        if(u.charAt(0)==='/'&&u.charAt(1)!=='/'&&u.indexOf(PROXY)!==0)return PROXY+u;
+        if(u.indexOf(location.origin+'/')===0&&u.indexOf(location.origin+PROXY)!==0)return location.origin+PROXY+u.slice(location.origin.length);
+        return u;
+      }
+      if(u&&typeof URL!=='undefined'&&u instanceof URL&&u.origin===location.origin&&u.pathname.indexOf(PROXY)!==0){
+        var c=new URL(u.href);c.pathname=PROXY+u.pathname;return c;
+      }
+    }catch(e){}
+    return u;
+  }
   window.fetch=function(url,opts){
-    if(typeof url==='string'&&url.charAt(0)==='/'&&url.indexOf(PROXY)!==0){url=PROXY+url;}
+    try{
+      if(typeof Request!=='undefined'&&url instanceof Request){
+        var nu=_px(url.url);if(nu!==url.url){url=new Request(nu,url);}
+      }else{url=_px(url);}
+    }catch(e){}
     return _fetch.call(this,url,opts);
   };
+  /* client-side navigations (history API) stay under the proxy path, so a reload stays in the preview */
+  ['pushState','replaceState'].forEach(function(k){
+    var o=history[k];
+    history[k]=function(st,t,u){try{if(u!=null)u=_px(typeof u==='string'?u:(u instanceof URL?u:String(u)));}catch(e){}return o.call(this,st,t,u);};
+  });
 
   /* رهگیری XMLHttpRequest.open */
   var _xopen=XMLHttpRequest.prototype.open;
@@ -19482,7 +19506,12 @@ async def inspector_page_proxy(
     import httpx
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=20.0) as client:
+            # PM-INS-0022: Next.js client navigation asks for its RSC payload with these headers — without them the app
+            # answers HTML and the router falls back to a full navigation out of the preview
+            _fwd = {k: v for k, v in request.headers.items()
+                    if k.lower() in ("rsc", "next-router-state-tree", "next-router-prefetch", "next-url", "accept-language")}
             resp = await client.get(target_url, headers={
+                **_fwd,
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             })
@@ -19553,7 +19582,7 @@ async def inspector_page_proxy(
     # 5. سایر انواع (JS, CSS, تصاویر) — عبور بدون تغییر (CSP sandbox هم، تا هیچ سندی از این مسیر same-origin نشود)
     body = resp.content
     # PM-INS-0022: Next.js chunks / CSS reference «/_next/…» absolutely — keep them inside this project's preview
-    if ("javascript" in ct or "css" in ct) and b"/_next/" in body:
+    if ("javascript" in ct or "css" in ct or "x-component" in ct) and b"/_next/" in body:
         try:
             _ap = f"/api/render/inspector/proxy/{project_id}" + (f"/{PREVIEW_PATH_MARK}{_pt}" if _pt else "")
             body = _rewrite_next_paths(body.decode("utf-8"), _ap).encode("utf-8")

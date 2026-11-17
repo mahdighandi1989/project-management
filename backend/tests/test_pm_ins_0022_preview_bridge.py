@@ -46,3 +46,9 @@ def test_svg_clicks_do_not_crash_the_bridge():
 
 def test_page_fetches_go_through_the_ticketed_prefix():
     assert '.replace("__PROXY__", asset_prefix)' in inspect.getsource(RL.inspector_page_proxy)
+
+
+def test_next_client_navigation_stays_in_the_preview():
+    src = inspect.getsource(RL.inspector_page_proxy)
+    assert '"rsc", "next-router-state-tree"' in src and '"x-component" in ct' in src
+    assert "u instanceof URL" in RL._PROXY_MONITOR_SCRIPT_TEMPLATE and "pushState" in RL._PROXY_MONITOR_SCRIPT_TEMPLATE
