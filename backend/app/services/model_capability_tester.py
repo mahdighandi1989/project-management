@@ -223,7 +223,9 @@ def record_last_call(model_id: str, ok: bool, error: Optional[str] = None, sourc
                 setting = ModelSettings(model_id=model_id, enabled=1 if (reg is None or reg.enabled) else 0)
                 db.add(setting)
             adv = dict(setting.advanced_settings or {})
-            adv["last_call"] = {"ok": bool(ok), "at": datetime.now().isoformat(timespec="seconds"),
+            # PM-INS-0020 (۶د): with its time zone — a bare server time (UTC) was shown as «۵:۳۸» to an owner in Dubai
+            from datetime import timezone as _tz
+            adv["last_call"] = {"ok": bool(ok), "at": datetime.now(_tz.utc).isoformat(timespec="seconds"),
                                 "error": (error or None) and str(error)[:300], "source": source}
             setting.advanced_settings = adv  # reassign so SQLAlchemy sees the JSON change
             db.commit()
@@ -270,7 +272,7 @@ class ModelCapabilityTester:
                 logger.warning(f"Model {model_id} is disabled, skipping test")
                 return {
                     "model_id": model_id,
-                    "tested_at": datetime.now().isoformat(),
+                    "tested_at": datetime.now(__import__("datetime").timezone.utc).isoformat(),  # PM-INS-0020 (۶د)
                     "error": "این مدل غیرفعال است",
                     "disabled": True,
                     "overall_score": 0,
@@ -284,7 +286,7 @@ class ModelCapabilityTester:
 
         results = {
             "model_id": model_id,
-            "tested_at": datetime.now().isoformat(),
+            "tested_at": datetime.now(__import__("datetime").timezone.utc).isoformat(),  # PM-INS-0020 (۶د)
             "categories": {},
             "overall_score": 0,
             "badges": [],

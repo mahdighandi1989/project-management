@@ -18,6 +18,9 @@ interface Candidate {
   provider: string;
   priority: number;
   enabled: boolean;
+  key_state?: "ok" | "failed" | "untested" | "no_key";
+  usable?: boolean;
+  key_error?: string | null;
   capabilities: string[];
 }
 
@@ -113,7 +116,12 @@ export default function ExtractionDefaultPicker({ apiBase }: Props) {
         <option value="">— از پیش‌فرض سیستم استفاده کن ({data.hard_coded_default}) —</option>
         {data.candidates.map((c) => (
           <option key={c.id} value={c.id} disabled={!c.enabled}>
-            {c.enabled ? '✅' : '❌'} {c.name} ({c.provider} · priority {c.priority})
+            {/* PM-INS-0020 (۶ج): ✅ only when the model is on AND its provider's key really works */}
+            {!c.enabled ? '❌' : c.key_state === 'failed' ? '⚠️' : c.key_state === 'no_key' ? '🔑✕' : c.key_state === 'untested' ? '❔' : '✅'}{' '}
+            {c.name} ({c.provider} · priority {c.priority})
+            {c.enabled && c.key_state === 'failed' ? ' — کلید: فراخوانی شکست خورد' : ''}
+            {c.enabled && c.key_state === 'no_key' ? ' — کلید ندارد' : ''}
+            {c.enabled && c.key_state === 'untested' ? ' — کلید آزموده نشده' : ''}
             {c.id === data.hard_coded_default ? ' ⭐' : ''}
           </option>
         ))}

@@ -317,6 +317,35 @@ class SettingsUpdate(BaseModel):
 # Status & Settings
 # ============================================================
 
+class SummaryCleanupBody(BaseModel):
+    merge: List[Dict[str, Any]] = Field(default_factory=list)  # [{"keep": id, "archive": [ids]}]
+    stale_ids: List[str] = Field(default_factory=list)
+    confirm: bool = False
+
+
+@router.get("/summary")
+async def oversight_summary():
+    """PM-INS-0020 (۱۳) — «اتاق فرمان» on one page: what runs automatically and what is off and why, the 10 most
+    important open tasks, and how many duplicates/stale tasks a cleanup could archive. Read-only."""
+    from ...services.oversight_summary import build_summary
+    return build_summary(get_oversight_service())
+
+
+@router.get("/summary/cleanup-preview")
+async def oversight_cleanup_preview(stale_days: int = Query(45, ge=7, le=365)):
+    from ...services.oversight_summary import cleanup_candidates
+    return cleanup_candidates(get_oversight_service(), stale_days=stale_days)
+
+
+@router.post("/summary/cleanup")
+async def oversight_cleanup_apply(body: SummaryCleanupBody):
+    """Archives ONLY what the owner ticked in the preview (`confirm=true` required). Nothing is deleted."""
+    if not body.confirm:
+        raise HTTPException(400, "بدونِ تأییدِ صریح (confirm=true) هیچ تغییری انجام نمی‌شود")
+    from ...services.oversight_summary import apply_cleanup
+    return await apply_cleanup(get_oversight_service(), merge=body.merge, stale_ids=body.stale_ids)
+
+
 @router.get("/status")
 async def get_status():
     """خلاصه وضعیت سیستم نظارت."""
@@ -4189,19 +4218,49 @@ async def get_extraction_default():
     eff_model = get_model(effective_id)
     # کاندیداهای ممکن: همهٔ مدل‌های multimodal capable
     cands = list_extraction_model_candidates("application/pdf", include_disabled=True)
+    # PM-INS-0020 (۶ج) — «✅» meant only «the registry has it on»: GPT-4o showed ✅ while the OpenAI key failed every call.
+    # Now: on/off from the owner's model settings (DB, else registry), and the provider key's state from the newest REAL
+    # call of that provider's models (same rule as «کلیدهای AI»): ok / failed / untested; no key ⇒ «no_key».
+    from ...core.database import SessionLocal
+    from ...models.ai_profile import ModelSettings
+    from ...core.models_registry import MODEL_REGISTRY
+    try:
+        from ...services.ai_manager import get_ai_manager
+        _avail = {str(getattr(p, "value", p)) for p in get_ai_manager().get_available_providers()}
+    except Exception:  # noqa: BLE001
+        _avail = set()
+    _db = SessionLocal()
+    try:
+        _rows = {r.model_id: r for r in _db.query(ModelSettings).all()}
+    finally:
+        _db.close()
+    _newest: Dict[str, Dict[str, Any]] = {}
+    for _mid, _r in _rows.items():
+        _lc = (_r.advanced_settings or {}).get("last_call") if _r else None
+        _m = MODEL_REGISTRY.get(_mid)
+        if _lc and _m:
+            _pv = str(getattr(_m.provider, "value", _m.provider))
+            if (_lc.get("at") or "") > (_newest.get(_pv, {}).get("at") or ""):
+                _newest[_pv] = _lc
+
+    def _cand(c):
+        pv = str(getattr(c.provider, "value", c.provider))
+        row = _rows.get(c.id)
+        on = bool(row.enabled) if row is not None else bool(c.enabled)
+        lc = _newest.get(pv)
+        key = ("no_key" if pv not in _avail and pv != "cloud_code"
+               else "untested" if not lc else "ok" if lc.get("ok") else "failed")
+        return {"id": c.id, "name": c.name, "provider": pv, "priority": c.priority,
+                "enabled": on, "key_state": key, "usable": on and key in ("ok", "untested"),
+                "key_error": (lc or {}).get("error") if key == "failed" else None,
+                "capabilities": [str(cap) for cap in c.capabilities]}
+
     return {
         "user_pick": user_pick,
         "effective_id": effective_id,
         "effective_name": eff_model.name if eff_model else effective_id,
         "hard_coded_default": DEFAULT_EXTRACTION_MODEL_ID,
-        "candidates": [
-            {
-                "id": c.id, "name": c.name, "provider": c.provider.value,
-                "priority": c.priority, "enabled": c.enabled,
-                "capabilities": [str(cap) for cap in c.capabilities],
-            }
-            for c in cands
-        ],
+        "candidates": [_cand(c) for c in cands],
     }
 
 

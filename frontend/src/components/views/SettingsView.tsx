@@ -78,6 +78,17 @@ export default function SettingsView() {
     setTimeout(() => setSuccess(''), 4000);
   };
 
+  // (PM-INS-0020 ۶ب) key states come from the newest REAL call of each provider's models — refresh them after a model
+  // test (event from «مدل‌ها») and when the tab comes back into view; they used to stay as loaded at page open
+  useEffect(() => {
+    const again = () => { void loadData(); };
+    const onVis = () => { if (document.visibilityState === 'visible') again(); };
+    window.addEventListener('models:tested', again);
+    document.addEventListener('visibilitychange', onVis);
+    return () => { window.removeEventListener('models:tested', again); document.removeEventListener('visibilitychange', onVis); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const loadData = async () => {
     setLoading(true);
     try {

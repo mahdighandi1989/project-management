@@ -1,5 +1,6 @@
 'use client';
 
+import { localTime } from '@/lib/time';
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 
@@ -959,7 +960,7 @@ export default function AnalysisPage() {
                                 <div className="flex-1">
                                   <h2 className="text-xl font-bold">{selectedCapabilityModel}</h2>
                                   <p className="text-gray-500 text-sm">
-                                    تست شده در {result.tested_at ? new Date(result.tested_at).toLocaleString('fa-IR') : '-'}
+                                    تست شده در {localTime(result.tested_at)}
                                   </p>
 
                                   {/* Badge ها */}

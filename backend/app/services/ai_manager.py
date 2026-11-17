@@ -702,6 +702,20 @@ class AIManager:
     def _schedule_usage_log(self, **kw) -> None:
         """(PM-INS-0011) fire-and-forget usage log that KEEPS a reference to its task — a bare create_task() may be
         garbage-collected before it runs (asyncio docs), silently dropping rows from «مصرف AI». Never raises."""
+        # PM-INS-0020 (۶ب) — a successful REAL call (chat, agent, scan …) is proof the key works, not only the
+        # capability test: the keys tab said «آزموده نشده» for a key the agent had just used. Throttled to one DB write
+        # per model per 10 minutes.
+        try:
+            import time as _time
+            mid = kw.get("model_id") or ""
+            last = self.__dict__.setdefault("_last_call_marked", {})
+            if mid and _time.time() - last.get(mid, 0) > 600:
+                last[mid] = _time.time()
+                from .model_capability_tester import record_last_call
+                import asyncio as _aio2
+                _aio2.get_running_loop().run_in_executor(None, lambda: record_last_call(mid, ok=True, source="real_use"))
+        except Exception:
+            pass
         try:
             import asyncio as _asyncio
             tasks = self.__dict__.setdefault("_usage_log_tasks", set())

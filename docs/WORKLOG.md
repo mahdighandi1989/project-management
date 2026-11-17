@@ -1145,3 +1145,19 @@
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · مرورگرِ واقعی روی production + pytest
 
+## 2026-11-17 (۵۰) — فوری PM-INS-0020: کلیدها از نتیجهٔ واقعی، ✅ ِ درست، زمانِ محلی، و خلاصهٔ یک‌صفحه‌ایِ اتاق فرمان
+
+- **[OWNER]** (هماهنگ‌کننده، ۰۹:۴۸ دبی) بندِ ۶: (الف) پنجرهٔ نتیجهٔ Gemini Pro پس از ۴۵ ثانیه باز نشد، (ب) «کلید ✓ · آزموده نشده» با وجودِ تستِ موفق، (ج) GPT-4o با ✅ با کلیدِ خراب،
+  (د) زمان‌ها UTC؛ بندِ ۱۳: خلاصهٔ یک‌صفحه‌ای + پاک‌سازیِ امنِ تکراری/کهنه با پیش‌نمایش و تأیید، بی حذفِ خودکار.
+- **[FINDING]** دادهٔ production درست بود (DeepSeek/Gemini Pro/Flash/Cloud Code ⇐ `last_call.ok=True` ِ امروز)؛ تبِ «کلیدهای AI» فقط هنگامِ باز شدنِ صفحه می‌خواند و پس از تست تازه نمی‌شد؛
+  مصرفِ واقعی (عامل، چت) هم ثبت نمی‌شد. فهرستِ «مدل پیش‌فرض برای استخراج فایل» ✅ را از رجیستری می‌داد، نه از تنظیمات و کلید. `tested_at`/`last_call.at` بی‌منطقهٔ زمانی ذخیره می‌شد.
+- **[CHANGE]** `ModelsView`: نوارِ «⏳ در حالِ تستِ …» در طولِ تست؛ پنجرهٔ نتیجه همیشه باز می‌شود؛ پاسخِ نرسیده ⇒ پیامِ روشن و تازه‌سازیِ خودکار پس از ۲۰ ثانیه؛ رویدادِ `models:tested`.
+  `SettingsView`: با آن رویداد و با بازگشت به تب دوباره می‌خواند. `ai_manager._schedule_usage_log`: هر فراخوانیِ موفقِ واقعی `last_call` (source=real_use، حداکثر ۱ بار در ۱۰ دقیقه برای هر مدل).
+  `GET /oversight/models/extraction-default`: `enabled` از تنظیمات + `key_state` (ok/failed/untested/no_key) از تازه‌ترین فراخوانیِ واقعیِ همان provider؛ ✅ فقط روشن + کلیدِ سالم (⚠️/🔑✕/❔ در غیرِ این صورت).
+  زمان‌ها: ذخیره با `+00:00`؛ `lib/time.ts` (`localTime`) مقدارِ بی‌منطقه را UTC می‌خواند و به ساعتِ مرورگر (دبی) نشان می‌دهد.
+- **[CHANGE]** بندِ ۱۳: `services/oversight_summary.py` + `GET /oversight/summary`، `GET /summary/cleanup-preview`، `POST /summary/cleanup` (فقط با `confirm=true`؛ بایگانی با `owner_cleanup_duplicate`
+  + `merged_into` / `owner_cleanup_stale` — هیچ حذفی)؛ `components/OversightSummary.tsx` بالای /oversight: خودکار/خاموش و چرا برای هر پروژه، ۱۰ تسکِ مهم، پیش‌نمایشِ تیک‌دار و تأیید.
+- **[VERIFY]** `tests/test_pm_ins_0020_summary.py` (۴)؛ pytest و build در ship؛ سنجشِ زنده در همان برگه.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · pytest + next build
+

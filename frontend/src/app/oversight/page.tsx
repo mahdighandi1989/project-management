@@ -1,5 +1,6 @@
 'use client';
 
+import OversightSummary from '@/components/OversightSummary';
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import TaskFilePicker, { type UploadSessionState } from '@/components/TaskFilePicker';
@@ -3806,6 +3807,12 @@ export default function OversightPage() {
             </Link>
           </div>
         </div>
+
+        {/* PM-INS-0020 (۱۳) — one page: what runs automatically and what is off and why, the 10 key open tasks, safe cleanup */}
+        <OversightSummary onOpenTask={(id) => {
+          const t = tasks.find((x) => x.id === id);
+          if (t) setViewingTask(t);
+        }} />
 
         {/* (PM-INS-0013) هر کامیت و هر فایلِ افزوده/تغییر/حذف‌شده در همهٔ مخزن‌های تحتِ نظارت — زنده از GitHub */}
         <div className="mb-6" id="events-feed">

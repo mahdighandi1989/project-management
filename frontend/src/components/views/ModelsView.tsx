@@ -4,6 +4,7 @@
 
 'use client';
 
+import { localTime } from '@/lib/time';
 import { useState, useEffect } from 'react';
 import { modelsApi, Model, ProviderStatus } from '@/services/api';
 import ExtractionDefaultPicker from '@/components/ExtractionDefaultPicker';
@@ -163,7 +164,7 @@ export default function ModelsView() {
 
   const showError = (msg: string) => {
     setErrorMessage(msg);
-    setTimeout(() => setErrorMessage(''), 3000);
+    setTimeout(() => setErrorMessage(''), Math.max(3000, msg.length * 70));  // long messages stay readable
   };
 
   const toggleModelEnabled = async (modelId: string) => {
@@ -282,20 +283,29 @@ export default function ModelsView() {
         body: JSON.stringify({ model_id: modelId }),
       });
 
-      const data = await res.json();
-      if (data.success) {
+      const data = await res.json().catch(() => ({} as any));
+      if (res.ok && data.success) {
         setCapabilityResults(prev => ({
           ...prev,
           [modelId]: data.results
         }));
         setSelectedModel(modelId);
-        setShowTestPanel(!data.results?.all_failed);
+        // (PM-INS-0020 ۶الف) always open the result — a test where every call failed shows its errors there too
+        setShowTestPanel(true);
         void loadData();
+      } else {
+        showError(`تستِ ${modelId} نتیجه نداد (${res.status}) — ${data?.detail || data?.error || 'پاسخِ نامعتبر'}`);
       }
     } catch (e) {
+      // (PM-INS-0020 ۶الف) a long test (Gemini Pro ~۴۵ ثانیه+) can outlive the connection while the server finishes it
+      // and saves the score: say so, then pick the saved result up instead of staying silent
       console.error('Error testing model:', e);
+      showError(`پاسخِ تستِ ${modelId} نرسید (احتمالاً طولانی بود) — نتیجه پس از پایان روی کارت می‌آید؛ چند ثانیهٔ دیگر تازه می‌شود`);
+      setTimeout(() => { void loadData(); }, 20000);
     } finally {
       setTestingModel(null);
+      // the keys tab («کلیدهای AI») reads the same real-call results — tell it to refresh
+      if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('models:tested', { detail: { modelId } }));
     }
   };
 
@@ -310,6 +320,11 @@ export default function ModelsView() {
   return (
     <div className="space-y-6 animate-fade-in" dir="rtl">
       {/* Messages */}
+      {testingModel && (
+        <div className="fixed top-4 left-4 bg-sky-600 text-white px-4 py-2 rounded-lg shadow-lg z-50 text-sm">
+          ⏳ در حالِ تستِ {testingModel} — معمولاً ۳۰ تا ۹۰ ثانیه؛ پایانِ تست همین‌جا اعلام و پنجرهٔ نتیجه باز می‌شود
+        </div>
+      )}
       {successMessage && (
         <div className="fixed top-4 right-4 bg-green-500 text-white px-4 py-2 rounded-lg shadow-lg z-50">
           {successMessage}
@@ -505,7 +520,7 @@ export default function ModelsView() {
                 {/* (PM-INS-0005) «API ✓» فقط پس از یک فراخوانیِ واقعیِ موفق؛ کلیدِ تنها = «آزموده نشده»؛ شکست = خطای واقعی */}
                 {model.is_available && model.last_call?.ok ? (
                   <span className="px-2 py-0.5 rounded bg-cyan-100 dark:bg-cyan-900 text-cyan-600 dark:text-cyan-300"
-                        title={`آخرین فراخوانیِ موفق: ${model.last_call.at || ''}`}>
+                        title={`آخرین فراخوانیِ موفق: ${localTime(model.last_call.at)}${model.last_call.source === 'real_use' ? ' (مصرفِ واقعی)' : ' (تست)'}`}>
                     API ✓
                   </span>
                 ) : model.is_available && model.last_call && !model.last_call.ok ? (
@@ -964,7 +979,7 @@ export default function ModelsView() {
                       </div>
                       <div className="flex-1">
                         <p className="text-gray-500 text-sm">
-                          تست شده: {result.tested_at ? new Date(result.tested_at).toLocaleString('fa-IR') : '-'}
+                          تست شده: {localTime(result.tested_at)}
                         </p>
                         <div className="flex flex-wrap gap-2 mt-2">
                           {(result.badges || []).map((badge, idx) => (
