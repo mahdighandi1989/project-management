@@ -20994,3 +20994,78 @@ async def inspector_apply_all(
         except Exception as e:
             slog.error("apply_all failed", exception=e, session_id=session_id)
             raise HTTPException(status_code=500, detail=str(e)[:300])
+
+
+# =====================================================
+# 🩹 PM-INS-0018 — «خوداصلاح»: خطای تازهٔ پیش‌نمایش ⇒ تحلیل + پیشنهادِ diff (بی‌اعمال)
+# =====================================================
+
+class SelfHealProposeRequest(BaseModel):
+    project_id: str
+    error_message: str
+    log_details: Optional[str] = None
+    page_url: Optional[str] = None
+    model_id: Optional[str] = None
+
+
+async def _self_heal_pick_model(project_id: str, db: Session, requested: Optional[str]) -> str:
+    if requested:
+        return requested
+    try:
+        res = await get_models_for_investigation(project_id, db)
+        for m in res.get("models") or []:
+            if m.get("enabled") and m.get("provider_available"):
+                return m["id"]
+    except Exception as e:  # noqa: BLE001
+        slog.warning(f"self-heal model pick failed: {e}")
+    return "gemini-2.0-flash"
+
+
+@router.post("/inspector/self-heal/propose")
+async def self_heal_propose(request: SelfHealProposeRequest, db: Session = Depends(get_db)):
+    """🩹 خوداصلاح: خطا ⇒ فایل‌های مرتبط از GitHub ⇒ تحلیل + diff ِ پیشنهادی. هیچ‌چیز اعمال نمی‌شود —
+    اعمال فقط با تأییدِ مالک از مسیرِ موجودِ `/inspector/fix` (شاخه + PR)."""
+    from ...models.project import Project
+    from ...services import self_heal
+    from ...services.github_import import get_github_import_service
+    from ...services.ai_manager import get_ai_manager
+    from ...services.ai_base import Message
+
+    msg = (request.error_message or "").strip()
+    if not msg:
+        return {"success": False, "error": "پیامِ خطا خالی است"}
+    project = db.query(Project).filter(Project.id == request.project_id).first()
+    if not project:
+        return {"success": False, "error": "پروژه یافت نشد"}
+    repo_ref = self_heal.resolve_repo(project)
+    if not repo_ref:
+        return {"success": False, "error": "این پروژه به GitHub متصل نیست — بی‌کد، پیشنهادِ diff ممکن نیست"}
+    owner, repo = repo_ref
+    token = os.environ.get("GITHUB_TOKEN", "") or _github_token_from_db(db) or ""
+    gh = get_github_import_service()
+    ai = get_ai_manager()
+    model_id = await _self_heal_pick_model(request.project_id, db, request.model_id)
+
+    async def list_tree(o: str, r: str):
+        t = await gh.get_repo_tree(o, r, token=token or None)
+        return [i["path"] for i in (t.get("tree") or []) if i.get("type") == "blob"] if t.get("success") else []
+
+    async def read_file(o: str, r: str, path: str):
+        f = await gh.get_file_content(o, r, path, token=token or None)
+        c = f.get("content") if f.get("success") else None
+        return None if c == "[Binary file]" else c
+
+    async def generate(mid: str, prompt: str) -> str:
+        resp = await ai.generate(model_id=mid, messages=[
+            Message(role="system", content="تو مهندسِ دیباگِ وب هستی. فقط JSON ِ خواسته‌شده را برگردان."),
+            Message(role="user", content=prompt)], max_tokens=3000, temperature=0.2)
+        return resp.content or ""
+
+    try:
+        return await self_heal.propose(owner=owner, repo=repo, error_message=msg[:4000],
+                                       log_details=(request.log_details or "")[:6000],
+                                       page_url=request.page_url or "", model_id=model_id,
+                                       list_tree=list_tree, read_file=read_file, generate=generate)
+    except Exception as e:  # noqa: BLE001
+        slog.error("self-heal propose failed", exception=e)
+        return {"success": False, "error": f"تحلیلِ خودکار شکست خورد: {e}", "model_used": model_id}

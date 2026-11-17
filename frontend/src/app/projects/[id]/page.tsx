@@ -25,6 +25,7 @@ import ReactFlow, {
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import GithubSyncBadge, { skippedReasons } from '@/components/GithubSyncBadge';
+import { inspectionApi } from '@/lib/inspection/api';  // PM-INS-0018 — برگهٔ فوری از «🩹 خوداصلاح»
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -522,6 +523,19 @@ export default function ProjectDetailPage() {
   const [fixModalOpen, setFixModalOpen] = useState(false);
   const [fixSelectedModels, setFixSelectedModels] = useState<string[]>([]);
   const [fixLoading, setFixLoading] = useState(false);
+
+  // 🩹 PM-INS-0018 — «خوداصلاح»: هر خطای تازهٔ پیش‌نمایش ⇒ تحلیلِ خودکار + پیشنهادِ diff در چت؛
+  // اعمال فقط با تأییدِ مالک (همان پنجرهٔ «🔧 اصلاح» ⇒ شاخه + PR) یا برگهٔ فوری.
+  const [selfHealOn, setSelfHealOn] = useState(false);
+  const selfHealOnRef = useRef(false);
+  const selfHealBusyRef = useRef(false);
+  const selfHealSeenRef = useRef<Map<string, number>>(new Map());
+  const selfHealTriggerRef = useRef<((e: { message: string; action: string }) => void) | null>(null);
+  const [selfHealProposals, setSelfHealProposals] = useState<Record<string, {
+    analysis: string; diff: string; files: Array<{ path: string; issue?: string }>; files_read: string[];
+    confidence: string; github_repo: string; model_used: string; error_message: string; page_url: string;
+    ticket?: string;
+  }>>({});
 
   // 🆕 انتخاب چندتایی خطاها برای بررسی کلی
   const [errorMultiSelectMode, setErrorMultiSelectMode] = useState(false);
@@ -2340,6 +2354,11 @@ export default function ProjectDetailPage() {
         }
         return merged;
       });
+    }
+
+    // 🩹 PM-INS-0018 — خوداصلاح: خطای تازهٔ JS / console.error / لایهٔ خطا ⇒ تحلیلِ خودکار (اگر روشن است)
+    if (selfHealOnRef.current && (action === 'error' || action === 'console-error' || action === 'error-overlay')) {
+      selfHealTriggerRef.current?.({ message: String(elementInfo || target || ''), action });
     }
 
     // 🔧 فیلتر اکشن: اگر این نوع غیرفعال باشد، در چت ثبت نشود
@@ -4351,6 +4370,143 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         analyzing: false,
         details: 'خطا در تحلیل کد منبع'
       } : null);
+    }
+  };
+
+  // 🩹 PM-INS-0018 — «خوداصلاح»
+  const SELF_HEAL_KEY = `inspector-self-heal:${projectId}`;
+  const SELF_HEAL_REPEAT_MS = 10 * 60 * 1000;  // همان خطا تا ۱۰ دقیقه دوباره تحلیل نمی‌شود
+  const selfHealSignature = (m: string) => m.toLowerCase().replace(/https?:\/\/\S+/g, '<url>')
+    .replace(/\b[0-9a-f]{8,}\b/g, '<hex>').replace(/\d+/g, '<n>').replace(/\s+/g, ' ').trim().slice(0, 240);
+
+  useEffect(() => {
+    try {
+      const on = localStorage.getItem(SELF_HEAL_KEY) === '1';
+      setSelfHealOn(on);
+      selfHealOnRef.current = on;
+    } catch { /* localStorage در دسترس نیست — خاموش می‌ماند */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
+
+  const toggleSelfHeal = () => {
+    const on = !selfHealOnRef.current;
+    selfHealOnRef.current = on;
+    setSelfHealOn(on);
+    try { localStorage.setItem(SELF_HEAL_KEY, on ? '1' : '0'); } catch { /* نادیده */ }
+    setInspectorChatMessages(prev => [...prev, {
+      id: `selfheal_toggle_${Date.now()}`,
+      role: 'system' as const,
+      content: on
+        ? '🩹 خوداصلاح روشن شد — با هر خطای تازه در پیش‌نمایش، خودکار تحلیل و diff ِ پیشنهادی همین‌جا می‌آید. اعمال فقط با تأییدِ شما.'
+        : '🩹 خوداصلاح خاموش شد.',
+      timestamp: new Date(),
+    }]);
+  };
+
+  const persistInspectorMessage = (body: { role: string; content: string; action_type?: string; model_id?: string; extra_data?: any }) => {
+    const sid = inspectorSessionIdRef.current;
+    if (!sid) return;
+    fetch(`${API_BASE}/api/render/inspector/session/message`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sid, ...body }),
+    }).catch(() => { /* ثبتِ تاریخچه نباید جریان را بشکند */ });
+  };
+
+  const runSelfHeal = async (evt: { message: string; action: string }) => {
+    const message = (evt.message || '').trim();
+    if (!message) return;
+    const sig = selfHealSignature(message);
+    const now = Date.now();
+    const last = selfHealSeenRef.current.get(sig);
+    if (last !== undefined && now - last < SELF_HEAL_REPEAT_MS) return;
+    if (selfHealBusyRef.current) return;  // یکی‌یکی؛ خطای بعدی پس از پایانِ این، دوباره می‌آید
+    selfHealSeenRef.current.set(sig, now);
+    selfHealBusyRef.current = true;
+    const pageUrl = inspectorBaseUrl || inspectorFrontendUrl || '';
+    const logs = importedConsoleLogsRef.current.slice(-15)
+      .map(l => `[${l.level}] ${String(l.message || '').slice(0, 400)}`).join('\n');
+    const startText = `🩹 خوداصلاح: خطای تازه (${actionLabelsRef.current[evt.action] || evt.action}) — در حال تحلیل و ساختِ پیشنهادِ اصلاح…\n\`${message.slice(0, 300)}\``;
+    setInspectorChatMessages(prev => [...prev, { id: `selfheal_start_${now}`, role: 'system' as const, content: startText, timestamp: new Date() }]);
+    try {
+      const res = await fetch(`${API_BASE}/api/render/inspector/self-heal/propose`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project_id: projectId, error_message: message, log_details: logs, page_url: pageUrl,
+          model_id: inspectorSelectedModels[0] || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (!data.success) {
+        const t = `🩹 خوداصلاح: تحلیل انجام نشد — ${data.error || `HTTP ${res.status}`}`;
+        setInspectorChatMessages(prev => [...prev, { id: `selfheal_fail_${Date.now()}`, role: 'system' as const, content: t, timestamp: new Date() }]);
+        persistInspectorMessage({ role: 'system', content: t, action_type: 'self_heal' });
+        return;
+      }
+      const id = `selfheal_${Date.now()}`;
+      const conf: Record<string, string> = { high: 'بالا', medium: 'متوسط', low: 'پایین' };
+      const content = `## 🩹 خوداصلاح — پیشنهادِ اصلاح\n\n**خطا:** \`${message.slice(0, 300)}\`\n\n**علت:** ${data.analysis}\n\n`
+        + (data.files?.length ? `**فایل‌ها:**\n${data.files.map((f: any) => `- \`${f.path}\`${f.issue ? ` — ${f.issue}` : ''}`).join('\n')}\n\n` : '')
+        + (data.diff ? `**diff ِ پیشنهادی** (اطمینان: ${conf[data.confidence] || data.confidence}):\n\`\`\`diff\n${data.diff}\n\`\`\`\n\n` : '**diff ِ مطمئنی پیشنهاد نشد.**\n\n')
+        + `_هیچ تغییری اعمال نشده. «✅ اعمال با تأیید» ⇒ شاخه + Pull Request؛ «⚡ برگهٔ فوری» ⇒ نظارت و سرکشی._`;
+      setSelfHealProposals(prev => ({ ...prev, [id]: {
+        analysis: data.analysis || '', diff: data.diff || '', files: data.files || [], files_read: data.files_read || [],
+        confidence: data.confidence || 'low', github_repo: data.github_repo || '', model_used: data.model_used || '',
+        error_message: message, page_url: pageUrl,
+      } }));
+      setInspectorChatMessages(prev => [...prev, {
+        id, role: 'assistant' as const, content, timestamp: new Date(), model_id: data.model_used,
+        action_type: 'self_heal_proposal' as any,
+      }]);
+      persistInspectorMessage({ role: 'assistant', content, action_type: 'self_heal_proposal', model_id: data.model_used,
+        extra_data: { self_heal: { diff: data.diff, files: data.files, confidence: data.confidence, page_url: pageUrl } } });
+    } catch (e: any) {
+      setInspectorChatMessages(prev => [...prev, { id: `selfheal_err_${Date.now()}`, role: 'system' as const,
+        content: `🩹 خوداصلاح: خطای شبکه — ${e?.message || e}`, timestamp: new Date() }]);
+    } finally {
+      selfHealBusyRef.current = false;
+    }
+  };
+  selfHealTriggerRef.current = (e) => { void runSelfHeal(e); };
+
+  const applySelfHeal = async (msgId: string) => {
+    const p = selfHealProposals[msgId];
+    if (!p) return;
+    setInvestigateReport({
+      report: `${p.analysis}\n\n${p.diff ? `diff ِ پیشنهادی:\n\`\`\`diff\n${p.diff}\n\`\`\`` : ''}`,
+      files_investigated: p.files_read, files_to_fix: p.files.map(f => ({ path: f.path })),
+      error_content: p.error_message, github_repo: p.github_repo, model_used: p.model_used,
+    });
+    if (investigateModels.length === 0) {
+      try {
+        const r = await fetch(`${API_BASE}/api/render/inspector/models/for-investigation/${projectId}`);
+        const d = await r.json();
+        if (d.success && Array.isArray(d.models)) setInvestigateModels(d.models);
+      } catch { /* پنجره با فهرستِ خالی باز می‌شود و پیام می‌دهد */ }
+    }
+    setFixSelectedModels(p.model_used ? [p.model_used] : []);
+    setFixModalOpen(true);  // همین پنجره تأییدِ مالک است — بی‌آن هیچ کامیتی ساخته نمی‌شود
+  };
+
+  const ticketSelfHeal = async (msgId: string) => {
+    const p = selfHealProposals[msgId];
+    if (!p || p.ticket) return;
+    const name = project?.name || projectId;
+    const text = `[🩹 خوداصلاحِ بازرس ویژه — ${name}]\nخطای تازه در پیش‌نمایش (${p.page_url || 'نامشخص'}):\n${p.error_message.slice(0, 1500)}\n\nتحلیلِ خودکار (${p.model_used}):\n${p.analysis}`
+      + (p.diff ? `\n\ndiff ِ پیشنهادی (اعمال نشده):\n${p.diff.slice(0, 6000)}` : '');
+    try {
+      const r = await inspectionApi.create({
+        text, kind: 'spot', urgent: true,
+        spot: { page: `/projects/${projectId}`, page_label: `پروژهٔ ${name}`, section_id: 'inspector-self-heal',
+                section_label: 'بازرس ویژه — 🩹 خوداصلاح', reopen: `/projects/${projectId}`, url: `/projects/${projectId}` } as any,
+      });
+      const ref = `#${(r as any)?.report?.number ?? ''}`;
+      setSelfHealProposals(prev => ({ ...prev, [msgId]: { ...prev[msgId], ticket: ref } }));
+      const t = `⚡ برگهٔ فوری ${ref} در «نظارت و سرکشی» ساخته شد — ناظر در دورِ فوریِ بعدی رسیدگی می‌کند.`;
+      setInspectorChatMessages(prev => [...prev, { id: `selfheal_ticket_${Date.now()}`, role: 'system' as const, content: t, timestamp: new Date() }]);
+      persistInspectorMessage({ role: 'system', content: t, action_type: 'self_heal' });
+    } catch (e: any) {
+      setInspectorChatMessages(prev => [...prev, { id: `selfheal_ticket_err_${Date.now()}`, role: 'system' as const,
+        content: `❌ ساختِ برگهٔ فوری نشد: ${e?.message || e}`, timestamp: new Date() }]);
     }
   };
 
@@ -15257,6 +15413,17 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                         >
                           یافتن باگ
                         </button>
+                        <button
+                          onClick={toggleSelfHeal}
+                          data-testid="inspector-self-heal-toggle"
+                          aria-pressed={selfHealOn}
+                          title="با هر خطای تازه در پیش‌نمایش (JS، console.error، لایهٔ خطا) خودکار تحلیل و diff ِ پیشنهادی در چت؛ اعمال فقط با تأیید شما"
+                          className={`text-xs px-2 py-1 rounded-full transition ${selfHealOn
+                            ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+                            : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-300'}`}
+                        >
+                          🩹 خوداصلاح: {selfHealOn ? 'روشن' : 'خاموش'}
+                        </button>
                       </div>
                     </>
                   )}
@@ -16136,6 +16303,26 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                                 disabled={investigateLoading}
                               >
                                 {investigateLoading ? '...' : msg.verified_by_model === 'console-error' ? '🖥️ بررسی' : '🔍 بررسی'}
+                              </button>
+                            </>
+                          )}
+                          {/* 🩹 PM-INS-0018 — دکمه‌های پیشنهادِ خوداصلاح */}
+                          {(msg as any).action_type === 'self_heal_proposal' && selfHealProposals[msg.id] && (
+                            <>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); void applySelfHeal(msg.id); }}
+                                className="text-[10px] bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 px-1.5 py-0.5 rounded hover:bg-emerald-200 transition-colors"
+                                disabled={fixLoading}
+                                title="پنجرهٔ تأیید باز می‌شود؛ پس از تأیید، شاخه + Pull Request ساخته می‌شود"
+                              >
+                                {fixLoading ? '...' : '✅ اعمال با تأیید'}
+                              </button>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); void ticketSelfHeal(msg.id); }}
+                                className="text-[10px] bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 px-1.5 py-0.5 rounded hover:bg-amber-200 transition-colors"
+                                disabled={!!selfHealProposals[msg.id].ticket}
+                              >
+                                {selfHealProposals[msg.id].ticket ? `⚡ برگه ${selfHealProposals[msg.id].ticket}` : '⚡ برگهٔ فوری'}
                               </button>
                             </>
                           )}
