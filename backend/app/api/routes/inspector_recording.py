@@ -213,10 +213,39 @@ async def start_playwright_screencast(
     getDisplayMedia + MediaRecorder می‌کند و chunks را به /video-chunk می‌فرستد.
     """
     svc = get_inspector_recording_service()
+    # PM-INS-0023 — «server recording»: the panel may only know the PREVIEW address (our signed-in proxy, or an AI Creator
+    # path a Next app rewrote) or nothing at all; the server's own Chromium has no session for those. Use the project's
+    # real public frontend instead (same lookup as the preview proxy), keeping the page path when there is one.
+    target = (payload.target_url or "").strip()
+    try:
+        sess = svc.get_session(session_id)
+        pid = getattr(sess, "project_id", "") if sess else ""
+        if pid and (not target or "/api/render/inspector/proxy/" in target or "ai-creator-frontend" in target
+                    or not target.startswith("http")):
+            from ...core.database import SessionLocal
+            from .render_logs import resolve_preview_frontend_url
+            from ...core.auth import PREVIEW_PATH_MARK
+            _db = SessionLocal()
+            try:
+                fe = resolve_preview_frontend_url(_db, pid)
+            finally:
+                _db.close()
+            if fe:
+                rest = ""
+                marker = f"/api/render/inspector/proxy/{pid}"
+                if marker in target:
+                    rest = target.split(marker, 1)[1]
+                    if rest.startswith("/" + PREVIEW_PATH_MARK):
+                        rest = "/" + rest[1 + len(PREVIEW_PATH_MARK):].partition("/")[2]
+                target = fe.rstrip("/") + (rest if rest.startswith("/") else "/")
+    except Exception as _te:  # noqa: BLE001
+        logger.warning(f"start-screencast target resolution skipped: {_te}")
+    if not target.startswith("http"):
+        raise HTTPException(status_code=400, detail="نشانیِ صفحهٔ پروژه پیدا نشد")
     try:
         result = await svc.start_playwright_screencast(
             session_id,
-            target_url=payload.target_url,
+            target_url=target,
             viewport_width=payload.viewport_width,
             viewport_height=payload.viewport_height,
         )

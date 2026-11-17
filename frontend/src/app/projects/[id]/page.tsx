@@ -483,7 +483,11 @@ export default function ProjectDetailPage() {
   // dedup map: کلید = action_type:timestamp:digest(target+content) → مقدار = Date.now()
   // entryهای قدیمی‌تر از window×۵ هر ۳۰ ثانیه پاک می‌شوند (در WebSocket useEffect)
   const inspectorSeenEventsRef = useRef<Map<string, number>>(new Map());
-  const INSPECTOR_DEDUP_WINDOW_MS = 2000;
+  // PM-INS-0023 — one event = one line. A click made while the bridge's WebSocket is still connecting goes out at once by
+  // postMessage AND is queued for the socket; the queued copy can arrive many seconds later, outside a 2-second window,
+  // and was logged twice. The key holds the event's exact millisecond timestamp, so a long window never merges two real
+  // clicks — 60 s covers any reconnect flush.
+  const INSPECTOR_DEDUP_WINDOW_MS = 60000;
   const [inspectorDuplicatesDroppedCount, setInspectorDuplicatesDroppedCount] = useState(0);
   const [inspectorVerifyPendingCount, setInspectorVerifyPendingCount] = useState(0);
   const inspectorPowerOnRef = useRef(false);
@@ -14404,6 +14408,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                                 projectFullName={(project as any)?.repo_full_name || project?.name || ''}
                                 enabled={!inspectorOpLock}
                                 inspectorIframeRef={inspectorIframeRef}
+                                previewUrl={inspectorFrontendUrl || ''}
                                 getConsoleLogsSnapshot={() => importedProjectConsoleLogs}
                                 getBackendLogsSnapshot={() => inspectorBackendLogs || []}
                                 onComplete={(res) => {

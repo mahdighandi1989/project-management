@@ -15281,6 +15281,39 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
 - ⚠️ اگر واقعاً فقط سؤال دانشی/نظری است و هیچ اشاره‌ای به مشکل ندارد → QUESTION
 - فقط یک کلمه بنویس: QUESTION یا ACTION یا ERROR_LOG"""
 
+        # PM-INS-0023 — «دقیقاً با چه مدلی و از چه مسیری جواب می‌دهی؟»: a question ONLY about identity gets the server's
+        # fact and a light prompt (no repo context — it cost ~12 800 tokens and the model still named another model).
+        try:
+            from ...services.model_identity import is_identity_question, identity_note, describe
+            if (not request.reply_to) and is_identity_question(request.message):
+                yield sse("progress", {"step": "identity", "message": "🪪 پرسش دربارهٔ هویتِ مدل — پاسخ با واقعیتِ سرور، بی‌بافتِ مخزن"})
+                _id_resp = await ai_manager.generate(
+                    model_id=primary_model,
+                    messages=[
+                        Message(role="system", content=identity_note(primary_model)
+                                + "\nکوتاه (یک تا سه جمله) و فارسی جواب بده."),
+                        Message(role="user", content=request.message),
+                    ],
+                    max_tokens=400,
+                    temperature=0.1,
+                )
+                _id_text = _strip_reasoning_blocks(_id_resp.content or "")
+                _used = getattr(_id_resp, "model_id", None) or primary_model
+                if str(_used).split(":", 1)[0] != str(primary_model).split(":", 1)[0]:
+                    # a fallback model answered — its own identity, stated by the server, never the guess
+                    _d = describe(_used)
+                    _id_text = (f"این پاسخ را مدلِ جایگزینِ «{_d['name']}» (`{_used}`) داد، چون «{primary_model}» در دسترس نبود؛ "
+                                f"مسیر: {_d['route']}.")
+                yield sse("response", {
+                    "type": "answer", "content": _id_text, "model_used": _used,
+                    "tokens_used": getattr(_id_resp, "tokens_used", 0), "has_action": False, "action_plan": None,
+                    "files_were_read": False, "selected_file_paths": [],
+                })
+                yield sse("done", {"success": True})
+                return
+        except Exception as _ide:
+            slog.warning(f"[smart-chat] identity fast path skipped: {_ide}")
+
         # (PM-INS-0007) «آخرین commit چیست؟» was sent down the agent path because the LLM classifier leans to ACTION.
         # A short, problem-free lookup is a QUESTION — no model call. Replies to an earlier message stay with the LLM.
         _quick_question = False
@@ -15384,6 +15417,13 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 })
         except Exception as _cpe:
             slog.warning(f"[smart-chat] compact prompt skipped: {_cpe}")
+
+        # PM-INS-0023 — every inspector prompt states the real model + provider + route as a fact (final model, after routing)
+        try:
+            from ...services.model_identity import identity_note as _idn
+            general_instructions_text = _idn(primary_model) + "\n" + general_instructions_text
+        except Exception as _ine:
+            slog.warning(f"[smart-chat] identity note skipped: {_ine}")
 
         # 🆕🆕 (agent-loop) — helper مشترک ACTION و ERROR_LOG.
         # اگر مدل tool-calling دارد (Claude)، به‌جای pipeline تک‌شات حلقهٔ عامل
@@ -19413,6 +19453,37 @@ def _inject_storage_shim(html: str) -> str:
     return _PROXY_STORAGE_SHIM + html
 
 
+def resolve_preview_frontend_url(db: Session, project_id: str) -> Optional[str]:
+    """The project's own frontend address — the one the preview proxy shows (shared with «server recording», PM-INS-0023)."""
+    services = db.query(RenderService).filter(
+        RenderService.project_id == project_id
+    ).all()
+    if not services:
+        from ...models.project import Project
+        proj = db.query(Project).filter(Project.id == project_id).first()
+        if proj:
+            st = proj.name.lower().replace(" ", "-").replace("_", "-")
+            all_svc = db.query(RenderService).all()
+            services = [s for s in all_svc if st in s.name.lower() or s.name.lower() in st]
+
+    frontend_url = None
+    for s in services:
+        surl = s.service_url if hasattr(s, 'service_url') and s.service_url else None
+        if not surl and s.type in ("web_service", "static_site"):
+            slug = s.name.lower().replace(" ", "-").replace("_", "-")
+            surl = f"https://{slug}.onrender.com"
+        if surl:
+            nm = s.name.lower()
+            is_fe = any(x in nm for x in ("frontend", "front", "client", "ui", "static"))
+            is_be = any(x in nm for x in ("backend", "back", "api", "server"))
+            if is_fe and not is_be:
+                frontend_url = surl
+                break
+            if not frontend_url:
+                frontend_url = surl
+    return frontend_url
+
+
 @router.get("/inspector/bridge-survey")
 async def inspector_bridge_survey():
     """PM-INS-0021 (3) — every watched project: does its deployed frontend carry the inspector bridge, which version,
@@ -19457,32 +19528,7 @@ async def inspector_page_proxy(
     from fastapi.responses import Response as FastAPIResponse
 
     # 1. پیدا کردن frontend_url پروژه
-    services = db.query(RenderService).filter(
-        RenderService.project_id == project_id
-    ).all()
-    if not services:
-        from ...models.project import Project
-        proj = db.query(Project).filter(Project.id == project_id).first()
-        if proj:
-            st = proj.name.lower().replace(" ", "-").replace("_", "-")
-            all_svc = db.query(RenderService).all()
-            services = [s for s in all_svc if st in s.name.lower() or s.name.lower() in st]
-
-    frontend_url = None
-    for s in services:
-        surl = s.service_url if hasattr(s, 'service_url') and s.service_url else None
-        if not surl and s.type in ("web_service", "static_site"):
-            slug = s.name.lower().replace(" ", "-").replace("_", "-")
-            surl = f"https://{slug}.onrender.com"
-        if surl:
-            nm = s.name.lower()
-            is_fe = any(x in nm for x in ("frontend", "front", "client", "ui", "static"))
-            is_be = any(x in nm for x in ("backend", "back", "api", "server"))
-            if is_fe and not is_be:
-                frontend_url = surl
-                break
-            if not frontend_url:
-                frontend_url = surl
+    frontend_url = resolve_preview_frontend_url(db, project_id)
 
     if not frontend_url:
         return FastAPIResponse(

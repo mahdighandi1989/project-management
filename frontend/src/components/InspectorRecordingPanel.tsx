@@ -73,6 +73,8 @@ interface InspectorRecordingPanelProps {
   getConsoleLogsSnapshot?: () => any[];
   /** snapshot لاگ‌های backend برای ارسال در /stop */
   getBackendLogsSnapshot?: () => any[];
+  /** PM-INS-0023 — the project's real page address, for «server recording» (Chromium on the server opens it) */
+  previewUrl?: string;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -93,7 +95,12 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
     inspectorIframeRef,
     getConsoleLogsSnapshot,
     getBackendLogsSnapshot,
+    previewUrl,
   } = props;
+  // PM-INS-0023 — «🖥 ضبطِ سمتِ سرور»: no screen-share picker (and no mic prompt) — the server's Chromium photographs the
+  // project page (backend Playwright screencast, frames) while the bridge's clicks/typing from the preview are recorded
+  // as interactions. Testable automatically, unlike getDisplayMedia.
+  const [serverRec, setServerRec] = useState(false);
 
   const [phase, setPhaseState] = useState<Phase>('idle');
   // 🩹 (2026-11-15, owner plan item 12) — the phase is also kept in a ref: «Stop sharing», the 60-min timer and
@@ -329,9 +336,9 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
       const startParams = {
         project_id: projectId,
         project_full_name: projectFullName || null,
-        mode,
-        audio_mic: audioConfig.mic,
-        audio_system: audioConfig.system,
+        mode: serverRec ? 'A' : mode,           // the server screencast stores frames (mode A)
+        audio_mic: serverRec ? false : audioConfig.mic,   // no permission prompt at all in server mode
+        audio_system: serverRec ? false : audioConfig.system,
         mic_device_id: audioConfig.micDeviceId,
       };
       keptChunksRef.current = [];
@@ -346,7 +353,7 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
       sessionIdRef.current = sid;
 
       // ─── شروع audio recording (mic + اختیاری system audio)
-      if (audioConfig.mic || audioConfig.system) {
+      if (!serverRec && (audioConfig.mic || audioConfig.system)) {
         const audioStream = await getAudioStream(audioConfig);
         // 🆕 (fix #429-recording) — اگر هیچ track صوتی واقعی برگردانده نشد
         // (مثلاً mic در دسترس نیست و system هم پشتیبانی نمی‌شود)، اصلاً
@@ -381,7 +388,18 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
       }
 
       // ─── شروع video/frames بسته به mode
-      if (mode === 'B') {
+      if (serverRec) {
+        const target = previewUrl || '';
+        const sc = await apiPost(`/${sid}/start-screencast`, {
+          target_url: target, viewport_width: 1280, viewport_height: 720,
+        }).catch((e: any) => ({ success: false, error: String(e?.message || e) }));
+        if (!sc?.success || sc?.method === 'frontend_polling') {
+          // the server could not run its browser — fall back to the same server screenshots, polled from here
+          setErrorMsg(`ضبطِ سمتِ سرور: ${sc?.error || 'مرورگرِ سرور در دسترس نیست'} — عکس‌برداریِ پیاپی از همین‌جا ادامه می‌یابد`);
+          startScreenshotPolling(sid);
+        }
+        attachPostMessageBridge();
+      } else if (mode === 'B') {
         // getDisplayMedia: کاربر تب/پنجره/screen را انتخاب می‌کند
         // 🆕 (fix #429-recording) — اگر system audio درخواست شد ولی browser
         // یا device نتوانست (مثلاً system audio روی macOS/Linux معمولاً
@@ -592,7 +610,7 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
       // cleanup any partial state
       cleanupStreams();
     }
-  }, [apiPost, apiUploadBlob, trackUpload, projectId, projectFullName, mode, audioConfig]);
+  }, [apiPost, apiUploadBlob, trackUpload, projectId, projectFullName, mode, audioConfig, serverRec, previewUrl]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // Audio stream (mic + optional system)
@@ -1124,7 +1142,19 @@ export default function InspectorRecordingPanel(props: InspectorRecordingPanelPr
               🎬 شروع ضبط — حالت را انتخاب کنید
             </h2>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+            {/* PM-INS-0023 — third way: no screen-share picker, no mic prompt — testable automatically */}
+            <label className={`flex items-start gap-2 mb-3 p-3 rounded-lg border-2 cursor-pointer ${
+              serverRec ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-900/30' : 'border-gray-300 dark:border-gray-700'}`}>
+              <input type="checkbox" className="mt-1" checked={serverRec} onChange={(e) => setServerRec(e.target.checked)} />
+              <span className="text-xs text-gray-700 dark:text-gray-200 leading-relaxed">
+                <b>🖥 ضبطِ سمتِ سرور (بی‌پنجرهٔ اشتراکِ صفحه و بی‌میکروفون)</b><br />
+                مرورگرِ سرور همان صفحهٔ پروژه را {previewUrl ? <code dir="ltr" className="text-[10px]">{previewUrl.slice(0, 60)}</code> : 'پروژه'} باز
+                می‌کند و پیاپی عکس می‌گیرد؛ کلیک‌ها و تایپِ شما در پیش‌نمایش (از Bridge) کنارش ثبت می‌شوند. بعد از توقف، عکس‌ها + لاگ + پرامپت در چت
+                می‌آید. مناسبِ آزمونِ خودکار؛ صدا ضبط نمی‌شود و عکس‌ها صفحهٔ عمومیِ پروژه‌اند (نه نشستِ واردشدهٔ شما).
+              </span>
+            </label>
+
+            <div className={`grid grid-cols-1 md:grid-cols-2 gap-3 mb-4 ${serverRec ? 'opacity-40 pointer-events-none' : ''}`}>
               <button
                 onClick={() => setMode('A')}
                 className={`p-4 rounded-lg border-2 text-right transition-all ${
