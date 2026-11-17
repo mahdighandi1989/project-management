@@ -10779,7 +10779,8 @@ AC = «طراحی شیک‌تر باشد»:
                 self._last_janitor_run = now_ts
                 from . import disk_janitor
                 await disk_janitor.run_all()
-                _alert = disk_janitor.needs_alert(disk_janitor.report())
+                # (PM-INS-0024) Telegram only past 85% (TELEGRAM_ALERT_PERCENT), with the biggest consumers named
+                _alert = disk_janitor.telegram_alert(disk_janitor.report())
                 last_a = getattr(self, "_last_disk_alert", None)
                 if _alert and (last_a is None or (now_ts - last_a) >= timedelta(hours=6)):
                     self._last_disk_alert = now_ts

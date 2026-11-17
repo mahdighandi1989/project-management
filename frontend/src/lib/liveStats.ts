@@ -29,6 +29,8 @@ export interface LiveStats {
   oversight: any;
   inspection: any;
   disk: any;
+  /** (PM-INS-0024) «اتاق فرمان» one-page summary — the SAME open-task numbers its card shows */
+  summary: any;
   insOpen: number | null;
 }
 
@@ -69,6 +71,7 @@ export function useLiveStats(active = true): LiveStats {
   const [oversight, setOversight] = useState<any>(null);
   const [inspection, setInspection] = useState<any>(null);
   const [disk, setDisk] = useState<any>(null);
+  const [summary, setSummary] = useState<any>(null);
 
   useEffect(() => {
     if (!active) return;
@@ -78,9 +81,10 @@ export function useLiveStats(active = true): LiveStats {
     getJson<any>('/api/oversight/status').then(setOversight);
     getJson<any>('/api/inspection?limit=1').then(setInspection);
     getJson<any>('/api/oversight/disk').then(setDisk);
+    getJson<any>('/api/oversight/summary').then(setSummary);
   }, [active]);
 
   const keys = providers && models ? providerKeyStates(providers, models) : null;
   const insOpen = inspection?.counts ? (inspection.counts.open || 0) + (inspection.counts.answered || 0) : null;
-  return { providers, keys, enabledModels, oversight, inspection, disk, insOpen };
+  return { providers, keys, enabledModels, oversight, inspection, disk, summary, insOpen };
 }

@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 STORAGE_ROOT = Path(os.environ.get("STORAGE_ROOT", "storage"))
 MIN_AGE_DAYS = float(os.environ.get("JANITOR_MIN_AGE_DAYS", "7"))
 ALERT_PERCENT = float(os.environ.get("JANITOR_ALERT_PERCENT", "80"))
+#: (PM-INS-0024) the owner: «هشدار وقتی از ۸۵٪ گذشت به تلگرام برود» — the home banner still warns from ALERT_PERCENT
+TELEGRAM_ALERT_PERCENT = float(os.environ.get("JANITOR_TELEGRAM_PERCENT", "85"))
 
 #: (kind, directory, unit) — unit "file": each file archived alone; "dir": each sub-directory as one .tar.gz
 TARGETS: List[tuple] = [
@@ -68,6 +70,10 @@ def report(root: Optional[Path] = None) -> Dict[str, Any]:
     out["json_stores"] = {f.name: f.stat().st_size for f in sorted((root / "oversight").glob("*.json"))} \
         if (root / "oversight").is_dir() else {}
     out["last_run"] = _last or None
+    try:
+        out["breakdown"] = breakdown(root)
+    except Exception as e:  # noqa: BLE001 — the report must still answer
+        out["breakdown"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
     try:
         from .oversight_service import last_write_error
         out["last_write_error"] = last_write_error()
@@ -180,6 +186,213 @@ async def run_all(db=None, root: Optional[Path] = None, min_age_days: Optional[f
     except Exception as e:  # noqa: BLE001
         result["errors"].append(f"reports: {type(e).__name__}: {str(e)[:100]}")
     return result
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# (PM-INS-0024, 2026-11-17) «بگو چه چیزی جا گرفته» + safe cleanup with preview and confirmation
+# ---------------------------------------------------------------------------------------------------------------------
+CACHE_DIR_NAMES = {"__pycache__", ".cache", "cache", ".pytest_cache", "tmp", ".tmp"}
+LOG_SUFFIXES = (".log", ".log.1", ".log.2", ".log.gz", ".jsonl.log")
+LOG_MIN_AGE_DAYS = float(os.environ.get("JANITOR_LOG_MIN_AGE_DAYS", "14"))
+TMP_MIN_AGE_DAYS = 1.0
+
+
+def _entries(root: Path, depth: int = 2):
+    """Every file and directory down to `depth` levels below root, with its total size."""
+    out = []
+    stack = [(root, 0)]
+    while stack:
+        d, lvl = stack.pop()
+        try:
+            children = list(d.iterdir())
+        except OSError:
+            continue
+        for c in children:
+            try:
+                if c.is_symlink():
+                    continue
+                out.append((c, _size(c), lvl + 1, c.is_dir()))
+                if c.is_dir() and lvl + 1 < depth:
+                    stack.append((c, lvl + 1))
+            except OSError:
+                continue
+    return out
+
+
+def db_tables(db_path: Optional[Path] = None, n: int = 10) -> List[Dict[str, Any]]:
+    """Largest SQLite tables — exact bytes via `dbstat` when the build has it, else row counts only."""
+    import sqlite3
+
+    if db_path is None:
+        try:
+            from ..core.database import DATABASE_PATH
+            db_path = Path(DATABASE_PATH)
+        except Exception:  # noqa: BLE001
+            return []
+    if not db_path.is_file():
+        return []
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+    try:
+        try:
+            rows = con.execute("SELECT name, SUM(pgsize) AS b FROM dbstat GROUP BY name ORDER BY b DESC LIMIT ?",
+                               (n,)).fetchall()
+            return [{"table": r[0], "bytes": int(r[1] or 0)} for r in rows]
+        except sqlite3.Error:
+            names = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            out = []
+            for t in names:
+                try:
+                    out.append({"table": t, "rows": con.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]})
+                except sqlite3.Error:
+                    continue
+            return sorted(out, key=lambda x: -x["rows"])[:n]
+    finally:
+        con.close()
+
+
+def breakdown(root: Optional[Path] = None, n: int = 10) -> Dict[str, Any]:
+    """The `n` biggest folders and the `n` biggest files on the disk, plus the biggest database tables."""
+    root = root or STORAGE_ROOT
+    if not root.is_dir():
+        return {"top_dirs": [], "top_files": [], "db_tables": [], "root_bytes": 0}
+    ents = _entries(root, depth=2)
+    rel = lambda p: str(p.relative_to(root))  # noqa: E731
+    top_dirs = sorted((e for e in ents if e[3]), key=lambda e: -e[1])[:n]
+    files = []
+    for f in root.rglob("*"):
+        try:
+            if f.is_file() and not f.is_symlink():
+                files.append((f, f.stat().st_size))
+        except OSError:
+            continue
+    files.sort(key=lambda x: -x[1])
+    try:
+        tables = db_tables(n=n)
+    except Exception as e:  # noqa: BLE001
+        tables = [{"error": f"{type(e).__name__}: {str(e)[:100]}"}]
+    return {
+        "root_bytes": sum(e[1] for e in ents if e[2] == 1),
+        "top_dirs": [{"path": rel(p), "bytes": b} for p, b, _l, _d in top_dirs],
+        "top_files": [{"path": rel(p), "bytes": b} for p, b in files[:n]],
+        "db_tables": tables,
+    }
+
+
+def cleanup_preview(root: Optional[Path] = None) -> Dict[str, Any]:
+    """What a SAFE cleanup would touch — nothing changes here. Kinds:
+      * cache — re-creatable caches and stale temp files: removed in place;
+      * log   — log files older than LOG_MIN_AGE_DAYS: archived to Drive, then removed;
+      * old_artifact — what the 6-hourly janitor would archive (scan bundles/screenshots/uploads older than MIN_AGE_DAYS):
+        archived to Drive, then removed.
+    The database and the JSON stores are never candidates."""
+    root = root or STORAGE_ROOT
+    items: List[Dict[str, Any]] = []
+    if not root.is_dir():
+        return {"root": str(root), "items": [], "bytes": 0}
+    now = time.time()
+
+    def add(p: Path, kind: str, action: str):
+        try:
+            age = (now - p.stat().st_mtime) / 86400
+            items.append({"path": str(p.relative_to(root)), "kind": kind, "action": action,
+                          "bytes": _size(p), "age_days": round(age, 1)})
+        except OSError:
+            pass
+
+    seen: set = set()
+    for p in root.rglob("*"):
+        try:
+            if p.is_symlink() or any(str(p).startswith(s + os.sep) for s in seen):
+                continue
+            if p.is_dir() and p.name in CACHE_DIR_NAMES:
+                seen.add(str(p))
+                add(p, "cache", "delete")
+            elif p.is_file() and (p.name.endswith(".tmp") or p.name.endswith(".partial")) \
+                    and (now - p.stat().st_mtime) > TMP_MIN_AGE_DAYS * 86400:
+                add(p, "cache", "delete")
+            elif p.is_file() and p.name.endswith(LOG_SUFFIXES) and (now - p.stat().st_mtime) > LOG_MIN_AGE_DAYS * 86400:
+                add(p, "log", "archive")
+        except OSError:
+            continue
+    for kind, rel_dir, unit in TARGETS:
+        d = root / rel_dir
+        if not d.is_dir():
+            continue
+        for it in sorted(d.iterdir()):
+            try:
+                if it.name.endswith(".tmp") or (unit == "file" and not it.is_file()) or (unit == "dir" and not it.is_dir()):
+                    continue
+                if _old(it, MIN_AGE_DAYS):
+                    add(it, "old_artifact", "archive")
+            except OSError:
+                continue
+    items.sort(key=lambda x: -x["bytes"])
+    return {"root": str(root), "items": items, "bytes": sum(i["bytes"] for i in items),
+            "log_min_age_days": LOG_MIN_AGE_DAYS, "artifact_min_age_days": MIN_AGE_DAYS}
+
+
+def cleanup_apply(paths: List[str], db=None, root: Optional[Path] = None) -> Dict[str, Any]:
+    """Act ONLY on paths that a fresh preview still lists (no arbitrary path can be sent). «archive» items go to Drive
+    first and are removed only when Drive confirmed the copy; Drive not connected ⇒ they stay."""
+    root = root or STORAGE_ROOT
+    allowed = {i["path"]: i for i in cleanup_preview(root)["items"]}
+    res: Dict[str, Any] = {"removed": 0, "freed": 0, "kept": [], "skipped": [], "errors": [], "drive": False}
+    own_db = False
+    try:
+        from . import gdrive
+
+        if db is None:
+            from ..core.database import SessionLocal
+            db, own_db = SessionLocal(), True
+        res["drive"] = bool(gdrive.is_connected(db))
+    except Exception as e:  # noqa: BLE001
+        res["errors"].append(f"drive: {type(e).__name__}")
+    try:
+        for rp in paths or []:
+            it = allowed.get(rp)
+            if it is None:
+                res["skipped"].append(rp)
+                continue
+            p = root / rp
+            try:
+                if it["action"] == "archive":
+                    if not res["drive"]:
+                        res["kept"].append(rp)
+                        continue
+                    if not _archive_item(db, it["kind"], p):
+                        res["kept"].append(rp)
+                        continue
+                shutil.rmtree(p) if p.is_dir() else p.unlink()
+                res["removed"] += 1
+                res["freed"] += it["bytes"]
+            except Exception as e:  # noqa: BLE001
+                res["errors"].append(f"{rp}: {str(e)[:120]}")
+    finally:
+        if own_db:
+            db.close()
+    return res
+
+
+def _mb(b: int) -> str:
+    return f"{b / 1048576:.1f}MB"
+
+
+def telegram_alert(rep: Dict[str, Any]) -> Optional[str]:
+    """(PM-INS-0024) the Telegram message — only when the disk passed TELEGRAM_ALERT_PERCENT (or a data write failed),
+    with the biggest consumers in it so the owner knows what to clean without opening the app."""
+    pct = rep.get("percent")
+    if rep.get("last_write_error"):
+        return f"نوشتنِ دادهٔ اتاق فرمان شکست خورد: {rep['last_write_error']}"
+    if pct is None or pct < TELEGRAM_ALERT_PERCENT:
+        return None
+    lines = [f"دیسکِ سرور {pct}% پر است (آستانه {TELEGRAM_ALERT_PERCENT:g}%) — آزاد: {_mb(rep.get('free') or 0)}"]
+    if not (rep.get("last_run") or {}).get("drive", True):
+        lines.append("گوگل درایو وصل نیست — بایگانیِ خودکار ممکن نیست")
+    top = (rep.get("breakdown") or {}).get("top_files") or []
+    if top:
+        lines.append("بزرگ‌ترین‌ها: " + "، ".join(f"{t['path']} {_mb(t['bytes'])}" for t in top[:5]))
+    lines.append("پاک‌سازیِ امن (پیش‌نمایش ← تأیید): اتاق فرمان ← خلاصهٔ یک‌صفحه‌ای ← دیسک")
+    return "\n".join(lines)
 
 
 def needs_alert(rep: Dict[str, Any]) -> Optional[str]:

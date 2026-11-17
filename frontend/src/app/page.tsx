@@ -57,6 +57,13 @@ function KeyChips({ keys }: { keys: ProviderKey[] }) {
   );
 }
 
+/** (PM-INS-0024) the same three numbers, labels and order as the «اتاق فرمان» summary */
+const OPEN_STATUS_LABEL: Record<string, string> = { suggested: 'پیشنهادِ اسکن', pending: 'در انتظار', awaiting_review: 'منتظرِ بازبینی', running: 'در حال اجرا', failed: 'ناموفق' };
+function openTasksHint(by: Record<string, number>) {
+  return Object.entries(by).sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${OPEN_STATUS_LABEL[k] || k} ${v.toLocaleString('fa-IR')}`).join(' · ');
+}
+
 function Stat({ href, label, value, hint, extra, tone = 'gray' }: { href: string; label: string; value: React.ReactNode; hint?: string; extra?: React.ReactNode; tone?: 'gray' | 'green' | 'amber' | 'red' | 'blue' }) {
   const tones: Record<string, string> = {
     gray: 'border-gray-200 dark:border-gray-700',
@@ -103,7 +110,7 @@ function PageCard({ e }: { e: SiteEntry }) {
 
 export default function HomePage() {
   // (PM-INS-0010) the status numbers come from lib/liveStats — the help circle's «آمار» reads the same source
-  const { providers, keys, oversight, inspection, disk, enabledModels, insOpen } = useLiveStats();
+  const { providers, keys, oversight, inspection, disk, summary, enabledModels, insOpen } = useLiveStats();
   const [recent, setRecent] = useState<Recent | null>(null);
 
   useEffect(() => {
@@ -151,16 +158,21 @@ export default function HomePage() {
           value={oversight ? oversight.watched_count : '…'}
           hint={oversight ? `GitHub ${oversight.github_token ? 'متصل' : 'بی‌توکن'} · Render ${oversight.render_token ? 'متصل' : 'بی‌توکن'}` : ''}
           tone={oversight && !oversight.github_token ? 'red' : 'blue'} />
+        {/* (PM-INS-0024) same definition and same API as «خلاصهٔ یک‌صفحه‌ایِ اتاق فرمان» (GET /api/oversight/summary):
+            open = not archived and not done/cancelled — tasks_by_status of /status also counted archived tasks */}
         <Stat href="/oversight?tab=tasks" label="تسک‌های فعال"
-          value={oversight ? (oversight.tasks_active_count ?? oversight.tasks_count) : '…'}
-          hint={oversight?.tasks_by_status ? `در انتظارِ بازبینی ${oversight.tasks_by_status.awaiting_review || 0} · در حالِ اجرا ${oversight.tasks_by_status.running || 0}` : ''} />
+          value={summary?.totals ? summary.totals.tasks_open.toLocaleString('fa-IR') : (oversight ? (oversight.tasks_active_count ?? oversight.tasks_count) : '…')}
+          hint={summary?.totals ? openTasksHint(summary.totals.open_by_status || {}) : ''} />
         <Stat href="/inspection" label="برگه‌های بازِ نظارت و سرکشی"
           value={insOpen === null ? '…' : insOpen}
           hint={inspection?.counts ? `باز ${inspection.counts.open} · پاسخ‌داده ${inspection.counts.answered}` : ''}
           tone={insOpen ? 'amber' : 'gray'} />
-        <Stat href="/handbook?doc=ACTIVITY" label="دیسکِ سرور (۱ گیگ)"
+        <Stat href="/oversight#disk" label="دیسکِ سرور (۱ گیگ)"
           value={disk?.percent != null ? `${disk.percent}%` : '…'}
-          hint={disk ? (disk.last_run ? `آخرین پاک‌سازی: ${Math.round((disk.last_run.freed || 0) / 1048576)}MB آزاد${disk.last_run.drive ? '' : ' — درایو وصل نیست'}` : 'بایگانی به درایو هر ۶ ساعت') : ''}
+          hint={disk ? [
+            disk.breakdown?.top_files?.[0] ? `بزرگ‌ترین: ${disk.breakdown.top_files[0].path.split('/').pop()} ${Math.round(disk.breakdown.top_files[0].bytes / 1048576)}MB` : '',
+            disk.last_run ? `آخرین پاک‌سازی: ${Math.round((disk.last_run.freed || 0) / 1048576)}MB آزاد${disk.last_run.drive ? '' : ' — درایو وصل نیست'}` : 'بایگانی به درایو هر ۶ ساعت',
+          ].filter(Boolean).join(' · ') : ''}
           tone={disk?.percent >= 80 ? 'red' : disk?.percent >= 60 ? 'amber' : 'green'} />
       </div>
 

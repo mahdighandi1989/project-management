@@ -6,6 +6,7 @@
  * archived with a reason, never deleted). Backend: services/oversight_summary.py, GET /api/oversight/summary.
  */
 import { useEffect, useState } from 'react';
+import DiskPanel from './DiskPanel';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -133,6 +134,8 @@ export default function OversightSummary({ onOpenTask }: { onOpenTask?: (id: str
                   ))}
                 </ol>
               </div>
+
+              <DiskPanel />
 
               <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 p-3 text-xs">
                 <div className="mb-2">

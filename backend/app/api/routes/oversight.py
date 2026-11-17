@@ -4677,10 +4677,30 @@ async def verify_project_task(project_id: str, task_id: str, payload: Optional[R
 # ============================================================
 @router.get("/disk")
 async def disk_report():
+    import asyncio
     from ...services import disk_janitor
-    rep = disk_janitor.report()
+    rep = await asyncio.to_thread(disk_janitor.report)
     rep["alert"] = disk_janitor.needs_alert(rep)
     return rep
+
+
+@router.get("/disk/cleanup-preview")
+async def disk_cleanup_preview():
+    """(PM-INS-0024) what a safe cleanup would touch — nothing changes."""
+    import asyncio
+    from ...services import disk_janitor
+    return await asyncio.to_thread(disk_janitor.cleanup_preview)
+
+
+@router.post("/disk/cleanup")
+async def disk_cleanup(body: dict):
+    """(PM-INS-0024) act only on the paths the owner ticked in the preview; needs `confirm: true`."""
+    import asyncio
+    from ...services import disk_janitor
+    if not body.get("confirm"):
+        raise HTTPException(status_code=400, detail="confirm: true لازم است")
+    paths = [str(p) for p in (body.get("paths") or []) if isinstance(p, str)]
+    return await asyncio.to_thread(disk_janitor.cleanup_apply, paths)
 
 
 @router.post("/disk/janitor")
