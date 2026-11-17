@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -80,46 +80,78 @@ export default function ExecutingPromptsPanel({
     setMinimized(true);
   };
 
-  const fetchExecutions = useCallback(async () => {
+  // PM-INS-0019: `previousExecutions` was a dependency of this callback and every fetch replaced it ⇒ new callback ⇒
+  // the effect below re-ran ⇒ an immediate refetch — a tight loop (88 GETs in 20 s on the inspector tab). Now the
+  // callback is stable (refs), polling is a single self-rescheduling timer of ≥5 s with backoff when idle/failing
+  // (10 s when idle, 30 s on errors), and it pauses while the tab is hidden.
+  const previousExecutionsRef = useRef<string[]>([]);
+  const onCompleteRef = useRef(onExecutionComplete);
+  onCompleteRef.current = onExecutionComplete;
+
+  const fetchExecutions = useCallback(async (): Promise<'busy' | 'idle' | 'error'> => {
     try {
       const url = projectId
         ? `${API_BASE}/api/prompts/executions/active?project_id=${projectId}`
         : `${API_BASE}/api/prompts/executions/active`;
 
       const res = await fetch(url);
-      if (res.ok) {
-        const data = await res.json();
-        const newExecutions = data.executions || [];
+      if (!res.ok) return 'error';
+      const data = await res.json();
+      const newExecutions = data.executions || [];
 
-        // Check for completed executions
-        if (onExecutionComplete) {
-          const currentIds = newExecutions.map((e: PromptExecution) => e.id);
-          const completedIds = previousExecutions.filter(id => !currentIds.includes(id));
-          // Note: We don't have the full execution object here, but we can notify
-        }
-
-        setExecutions(newExecutions);
-        setPreviousExecutions(newExecutions.map((e: PromptExecution) => e.id));
-
-        // اگر minimize شده و اجراها تموم شد، دوباره نشون بده
-        if (newExecutions.length === 0) {
-          setMinimized(false);
-        }
-        setVisible(newExecutions.length > 0);
+      // Check for completed executions
+      if (onCompleteRef.current) {
+        const currentIds = newExecutions.map((e: PromptExecution) => e.id);
+        const completedIds = previousExecutionsRef.current.filter(id => !currentIds.includes(id));
+        void completedIds; // Note: We don't have the full execution object here, but we can notify
       }
+
+      setExecutions(newExecutions);
+      const ids = newExecutions.map((e: PromptExecution) => e.id);
+      previousExecutionsRef.current = ids;
+      setPreviousExecutions(ids);
+
+      // اگر minimize شده و اجراها تموم شد، دوباره نشون بده
+      if (newExecutions.length === 0) {
+        setMinimized(false);
+      }
+      setVisible(newExecutions.length > 0);
+      return newExecutions.length > 0 ? 'busy' : 'idle';
     } catch (e) {
       console.error('Error fetching executions:', e);
+      return 'error';
     }
-  }, [projectId, previousExecutions, onExecutionComplete]);
+  }, [projectId]);
 
   useEffect(() => {
-    // Initial fetch
-    fetchExecutions();
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const base = Math.max(refreshInterval, 5000);
+    let delay = base;
+    let inflight = false;
 
-    // Set up polling
-    const interval = setInterval(fetchExecutions, refreshInterval);
+    const tick = async () => {
+      timer = null;
+      if (cancelled || inflight) return;
+      if (typeof document !== 'undefined' && document.hidden) return; // resumed by visibilitychange
+      inflight = true;
+      const r = await fetchExecutions();
+      inflight = false;
+      if (cancelled) return;
+      delay = r === 'busy' ? base : r === 'idle' ? Math.min(delay * 1.5, 10000) : Math.min(delay * 2, 30000);
+      timer = setTimeout(tick, delay);
+    };
+    const onVisible = () => {
+      if (!document.hidden && !timer && !inflight && !cancelled) { delay = base; tick(); }
+    };
 
-    return () => clearInterval(interval);
+    tick();
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [fetchExecutions, refreshInterval]);
 
   // Don't render if no executions

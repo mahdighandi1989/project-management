@@ -163,7 +163,8 @@ export default function PromptManager({
 
     // Polling for active executions
     if (showExecutionStatus) {
-      const interval = setInterval(fetchActiveExecutions, 3000);
+      // PM-INS-0019: 3 s → 6 s and skipped while the tab is hidden (request storm on the inspector tab)
+      const interval = setInterval(() => { if (typeof document === 'undefined' || !document.hidden) fetchActiveExecutions(); }, 6000);
       return () => clearInterval(interval);
     }
   }, [fetchCategories, fetchPrompts, fetchActiveExecutions, showExecutionStatus]);

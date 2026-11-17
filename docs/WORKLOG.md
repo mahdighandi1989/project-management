@@ -1090,3 +1090,29 @@
 - **[REVERT]** همین کامیت را revert کنید (فقط مستندات).
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · pytest + next build
+
+
+## 2026-11-17 (۴۷) — فوری PM-INS-0019: Bridge ِ پیش‌نمایش، دکمه‌های گیج‌کننده، طوفانِ درخواست، هویتِ مدل
+
+- **[OWNER]** برگهٔ فوریِ PM-INS-0019 (بند ۱۲، پروژهٔ quran-web-app-v1)، هشت بند: ۱) Bridge هرگز وصل نمی‌شود؛ ۲) «نسخه قدیمی v1.0» در حالی که پروکسی v2.4 دارد؛
+  ۳) برچسب‌های وضعیت که کارِ معکوس می‌کنند + تأییدِ پیش از commit در ریپوی پروژه + راهنما؛ ۴) ورود در پیش‌نمایش (sandbox بی‌allow-same-origin) و اندازهٔ کوچک؛
+  ۵) ۸۸ درخواستِ `executions/active` در ۲۰ ثانیه؛ ۶) مدل خودش را «Claude 3.5 Sonnet» می‌نامد؛ ۷) مثبتِ کاذبِ تأیید و پاسخِ انگلیسیِ عامل؛ ۸) ضبط پس از رفعِ ۱.
+- **[FINDING]** ۱) `str.replace("__BRIDGE_WS_URL__", url)` همهٔ رخدادها را عوض می‌کند، از جمله نگهبانِ `WS_URL === '__BRIDGE_WS_URL__'` ⇒ `WS_URL === '<url>'` همیشه
+  درست ⇒ `return` پیش از `new WebSocket` در هر سه قالب (HTML، JS، کامپوننتِ Next). جدا از آن، بازرسی که بعد از Bridge وصل شود `peer_connected` نمی‌گرفت.
+  ۲) regex ِ نسخه فقط `// Version:` را می‌خواند؛ قالبِ HTML `<!-- Version: 2.4 -->` دارد ⇒ «1.0» ⇒ و «آپدیتِ خودکار» در هر بررسیِ وضعیت بی‌خبر commit می‌کرد.
+  ۵) در `ExecutingPromptsPanel` تابعِ fetch به `previousExecutions` وابسته بود که هر fetch عوضش می‌کرد ⇒ effect دوباره ⇒ fetch ِ فوری (حلقه به سرعتِ شبکه).
+  ۷) `<button>` ِ بی‌type خارج از فرم هم `type==='submit'` گزارش می‌شود ⇒ تبِ ناوبری «ارسال» شمرده می‌شد.
+- **[CHANGE]** بک‌اند `render_logs.py`: نگهبانِ قالب‌ها `!/^wss?:[/][/]/.test(WS_URL)`، `INSPECTOR_BRIDGE_VERSION` ۲٫۵، regex ِ نسخه `(?://|<!--)`، دلیلِ تازهٔ
+  needs_update برای نگهبانِ خراب، `_heal_bridge_self_guard` در پاسخِ HTML و JS ِ پروکسی (فقط literal ِ مقایسه را `__unset__` می‌کند)، `peers` در پیامِ `registered`.
+  `cloud_code_service._build_system_blocks(…, model)` یک بلوکِ «هویتِ مدل» با شناسهٔ واقعی (پس از پرامپتِ کاربر). `browser_agent.py`: `submits` فقط با فرمِ واقعی؛
+  قاعدهٔ زبانِ فارسی در SYSTEM. فرانت `projects/[id]/page.tsx`: `peers>0` ⇒ متصل؛ «آپدیتِ خودکار» قرنطینه (پرچمِ `BRIDGE_AUTO_UPDATE_QUARANTINED`، کدِ قبلی سرِ جا،
+  فقط پیام)؛ `confirm` با نامِ فایل برای نصب/حذف/آپدیت؛ برچسبِ وضعیت جدا از دکمهٔ عمل برای «رصد لاگ» و «Bridge» + `<details>` راهنما؛ ⛶ تمام‌صفحه (Esc) و ↗ پنجرهٔ جدا.
+  `ExecutingPromptsPanel`: ref + یک تایمرِ خودزمان‌بند (≥۵ ثانیه، backoff ۱۰/۳۰، توقف در تبِ پنهان)؛ `PromptManager` ۳⇒۶ ثانیه و توقف در تبِ پنهان. چیزی حذف نشد.
+- **[DECISION]** بند ۴: پیش‌نمایشِ داخلی sandbox ِ بی‌allow-same-origin می‌ماند (امنیتِ PM-INS-0015)؛ راهِ امنِ ورود = پنجرهٔ جدا روی origin ِ خودِ سایت (Bridge ِ ترمیم‌شده
+  از آن‌جا هم به چت وصل می‌شود). زیردامنهٔ جدا برای پیش‌نمایش نیازمندِ DNS/سرویسِ تازه است ⇒ با مالک.
+- **[VERIFY]** `tests/test_pm_ins_0019_bridge.py` (۵ تست). pytest ۸۸۳ سبز / ۴ skip؛ next build سبز. روی production با مرورگرِ واقعی (پشتِ ورودِ گوگل) سنجیده **نشده**؛
+  بندِ ۸ (ضبط) و شمارشِ درخواست‌ها پس از دیپلوی باید زنده سنجیده شود. Bridge ِ ریپوی quran-web-app-v1 هنوز ۲٫۴ است: پروکسی ترمیمش می‌کند، ولی پنجرهٔ جدا تا آپدیت (با دکمه و تأییدِ مالک) وصل نمی‌شود.
+- **[TODO]** پس از دیپلوی: «WS: متصل» در پیش‌نمایش، شمارِ `executions/active` در ۲۰ ثانیه (انتظار ≤۴)، و یک ضبطِ کوتاه با لاگِ کلیک.
+- **[REVERT]** همین کامیت را revert کنید.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · pytest + next build

@@ -5303,7 +5303,7 @@ class InjectBridgeRequest(BaseModel):
 # محتوای Bridge Script که به پروژه‌ها تزریق می‌شود (نسخه HTML)
 INSPECTOR_BRIDGE_SCRIPT = '''
 <!-- Inspector Bridge Script - Auto-injected -->
-<!-- Version: 2.4 -->
+<!-- Version: 2.5 -->
 <script>
 (function() {
   console.log('🌉 Inspector Bridge: Script starting...');
@@ -5333,7 +5333,7 @@ INSPECTOR_BRIDGE_SCRIPT = '''
 
   // 🌐 اتصال WebSocket به Backend Hub
   function connectWebSocket() {
-    if (!WS_URL || WS_URL === '__BRIDGE_WS_URL__') {
+    if (!WS_URL || !/^wss?:[/][/]/.test(WS_URL)) {
       console.log('🌉 Inspector Bridge: No WS URL configured, using postMessage only');
       return;
     }
@@ -5893,7 +5893,7 @@ INSPECTOR_BRIDGE_SCRIPT = '''
 # 🆕 محتوای Bridge Script برای پروژه‌های React/Next.js (نسخه JS/TS)
 INSPECTOR_BRIDGE_SCRIPT_JS = '''
 // 🌉 Inspector Bridge Script - Auto-injected
-// Version: 2.4
+// Version: 2.5
 // ارتباط با Inspector از طریق WebSocket (حل مشکل cross-origin)
 /* eslint-disable */
 // @ts-nocheck
@@ -5922,7 +5922,7 @@ if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
 
   // اتصال WebSocket
   const connectWS = () => {
-    if (!WS_URL || WS_URL === '__BRIDGE_WS_URL__') return;
+    if (!WS_URL || !/^wss?:[/][/]/.test(WS_URL)) return;
     try {
       ws = new WebSocket(WS_URL);
       ws.onopen = () => { ws.send(JSON.stringify({ type: 'register', role: 'bridge' })); };
@@ -6258,12 +6258,12 @@ if (typeof window !== 'undefined' && !window.__inspectorBridgeLoaded) {
 '''
 
 # 🆕 Next.js App Router - Client Component برای Bridge Script (WebSocket)
-INSPECTOR_BRIDGE_VERSION = "2.4"  # نسخه فعلی bridge template - افزایش بده هر وقت template تغییر کرد
+INSPECTOR_BRIDGE_VERSION = "2.5"  # PM-INS-0019: 2.4 guard self-compared after injection ⇒ never connected  # نسخه فعلی bridge template - افزایش بده هر وقت template تغییر کرد
 
 INSPECTOR_BRIDGE_CLIENT_COMPONENT = '''// @ts-nocheck
 "use client";
 // 🌉 Inspector Bridge Script - Client Component for Next.js App Router
-// Version: 2.4
+// Version: 2.5
 // ارتباط با Inspector از طریق WebSocket (حل مشکل cross-origin)
 import { useEffect } from "react";
 
@@ -6299,7 +6299,7 @@ export default function InspectorBridge() {
 
     // 🌐 اتصال WebSocket
     const connectWS = () => {
-      if (!WS_URL || WS_URL === "__BRIDGE_WS_URL__") return;
+      if (!WS_URL || !/^wss?:[/][/]/.test(WS_URL)) return;
       try {
         ws = new WebSocket(WS_URL);
         ws.onopen = () => { ws.send(JSON.stringify({ type: "register", role: "bridge" })); };
@@ -7700,12 +7700,15 @@ async def check_bridge_status(
                                 update_reasons = []
                                 # چک نسخه
                                 import re as _re
-                                version_match = _re.search(r'// Version:\s*([\d.]+)', content)
+                                version_match = _re.search(r'(?://|<!--)\s*Version:\s*([\d.]+)', content)
                                 current_version = version_match.group(1) if version_match else "1.0"
                                 if current_version != INSPECTOR_BRIDGE_VERSION:
                                     needs_update = True
                                     update_reasons.append(f"نسخه قدیمی ({current_version} → {INSPECTOR_BRIDGE_VERSION})")
                                 # چک باگ‌های شناخته شده
+                                if _re.search(r"""WS_URL\s*===\s*['"]wss?://""", content):
+                                    needs_update = True
+                                    update_reasons.append("نگهبانِ WS نشانی را با خودش مقایسه می‌کند ⇒ Bridge هرگز وصل نمی‌شود")
                                 if 'shouldSend' not in content:
                                     needs_update = True
                                     update_reasons.append("تابع shouldSend موجود نیست")
@@ -8268,7 +8271,7 @@ async def fix_all_bridges(
                                     found_bridge = True
                                     # چک نسخه
                                     import re as _re
-                                    version_match = _re.search(r'// Version:\s*([\d.]+)', content)
+                                    version_match = _re.search(r'(?://|<!--)\s*Version:\s*([\d.]+)', content)
                                     current_version = version_match.group(1) if version_match else "1.0"
 
                                     # چک مشکلات
@@ -8942,11 +8945,14 @@ async def websocket_bridge_hub(websocket: WebSocket, project_id: str):
         )
 
         # اعلام اتصال موفق
+        _other = "inspectors" if role == "bridge" else "bridges"
         await websocket.send_json({
             "type": "registered",
             "role": role,
             "project_id": project_id,
-            "client_id": client_id
+            "client_id": client_id,
+            # PM-INS-0019: an inspector that joins AFTER the bridge never got `peer_connected` ⇒ «منتظر Bridge» forever
+            "peers": len(_bridge_connections[project_id][_other]),
         })
 
         # اطلاع‌رسانی به طرف مقابل
@@ -19219,6 +19225,32 @@ _PROXY_STORAGE_SHIM = (
 )
 
 
+_BRIDGE_SELF_GUARD_RE = None
+
+
+def _heal_bridge_self_guard(text: str) -> str:
+    """PM-INS-0019 — bridges injected up to v2.4 had `WS_URL === '__BRIDGE_WS_URL__'` as their «not configured» guard;
+    injection's str.replace() rewrote that literal too, so the guard became `WS_URL === '<the real url>'` ⇒ always true
+    ⇒ the bridge returned before ever opening its WebSocket. In the owner-only preview we neutralise just the compared
+    literal (`=== 'wss://…/ws/bridge/…'` → `=== '__unset__'`); the assignment itself has no `===` and is untouched."""
+    global _BRIDGE_SELF_GUARD_RE
+    import re as _re
+    if _BRIDGE_SELF_GUARD_RE is None:
+        _BRIDGE_SELF_GUARD_RE = _re.compile(
+            r"""(===\s*)(['"])wss?://[^'"\s]+/api/render/ws/bridge/[^'"\s]+\2"""
+            r"""|(['"])wss?://[^'"\s]+/api/render/ws/bridge/[^'"\s]+\3(\s*===)"""
+        )
+    if "/api/render/ws/bridge/" not in text:
+        return text
+
+    def _sub(m):
+        if m.group(1) is not None:
+            return f"{m.group(1)}{m.group(2)}__unset__{m.group(2)}"
+        return f"{m.group(3)}__unset__{m.group(3)}{m.group(4)}"
+
+    return _BRIDGE_SELF_GUARD_RE.sub(_sub, text)
+
+
 def _inject_storage_shim(html: str) -> str:
     """The shim must run before ANY of the page's own scripts ⇒ first thing inside <head>."""
     import re as _re
@@ -19340,6 +19372,7 @@ async def inspector_page_proxy(
         else:
             html = f"<head>{monitor_script}</head>\n" + html
         html = _inject_storage_shim(html)
+        html = _heal_bridge_self_guard(html)
 
         # حذف هدرهایی که iframe را بلاک میکنند
         return FastAPIResponse(
@@ -19354,8 +19387,14 @@ async def inspector_page_proxy(
         )
 
     # 5. سایر انواع (JS, CSS, تصاویر) — عبور بدون تغییر (CSP sandbox هم، تا هیچ سندی از این مسیر same-origin نشود)
+    body = resp.content
+    if "javascript" in ct and b"/api/render/ws/bridge/" in body:
+        try:  # PM-INS-0019: the Next.js client-component bridge lives in a JS chunk
+            body = _heal_bridge_self_guard(body.decode("utf-8")).encode("utf-8")
+        except UnicodeDecodeError:
+            pass
     return FastAPIResponse(
-        content=resp.content,
+        content=body,
         status_code=resp.status_code,
         media_type=ct or "application/octet-stream",
         headers={"Content-Security-Policy": PROXY_SANDBOX_CSP},

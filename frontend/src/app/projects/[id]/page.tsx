@@ -657,6 +657,14 @@ export default function ProjectDetailPage() {
   } | null>(null);
 
   const inspectorIframeRef = useRef<HTMLIFrameElement>(null);
+  // PM-INS-0019: پیش‌نمایشِ ۵۷۰×۳۱۰ خیلی کوچک بود — حالتِ تمام‌صفحه (Esc برای خروج)
+  const [inspectorScreenFull, setInspectorScreenFull] = useState(false);
+  useEffect(() => {
+    if (!inspectorScreenFull) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setInspectorScreenFull(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [inspectorScreenFull]);
   const inspectorOverlayRef = useRef<HTMLDivElement>(null);
 
   // 🌐 WebSocket Bridge - ارتباط مستقیم با Bridge Script بدون وابستگی به iframe/postMessage
@@ -2608,6 +2616,8 @@ export default function ProjectDetailPage() {
 
             if (data.type === 'registered') {
               setBridgeWsConnected(true);
+              // PM-INS-0019: the bridge may have registered BEFORE us — the hub now reports how many are already there
+              if (typeof data.peers === 'number' && data.peers > 0) setBridgePeerConnected(true);
               console.log('🌐 Bridge WS: Registered as inspector');
               return;
             }
@@ -4534,8 +4544,12 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
         latest_version: data.latest_version
       }));
 
-      // 🔄 Auto-fix: اگر نسخه قدیمی بود، خودکار آپدیت کن
-      if (data.has_bridge && data.needs_update) {
+      // 🔄 PM-INS-0019: «آپدیتِ خودکار» در ریپوی پروژه commit می‌کرد بی‌آنکه مالک بداند — قرنطینه شد: فقط پیشنهاد می‌دهیم و
+      // آپدیت فقط با دکمه و پس از تأیید (updateBridgeToLatest). کدِ قبلی دست‌نخورده پشتِ این پرچم مانده است.
+      const BRIDGE_AUTO_UPDATE_QUARANTINED = true;
+      if (data.has_bridge && data.needs_update && BRIDGE_AUTO_UPDATE_QUARANTINED) {
+        addTransientMessage(`⚠️ Bridge قدیمی است (v${data.version} → v${data.latest_version}) — برای آپدیت، دکمهٔ «🔄 آپدیت» را بزنید (پیش از هر تغییر در ریپو تأیید می‌گیرد)`, 'info');
+      } else if (data.has_bridge && data.needs_update) {
         console.log(`🔄 Bridge outdated (v${data.version} → v${data.latest_version}), auto-updating...`);
         addTransientMessage(`🔄 Bridge قدیمی است - آپدیت خودکار به v${data.latest_version}...`, 'info');
         try {
@@ -4586,6 +4600,11 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
   // 🌉 تزریق یا حذف Bridge Script
   const toggleBridgeScript = async (customPath?: string) => {
     const isRemoving = inspectorBridgeStatus.has_bridge;
+    // PM-INS-0019: هر کاری که در ریپوی پروژه commit می‌کند پیش‌تأیید می‌گیرد و می‌گوید دقیقاً کدام فایل عوض می‌شود
+    const _file = customPath || inspectorBridgeStatus.file_path || 'فایلِ ورودیِ فرانت (index.html یا layout)';
+    if (typeof window !== 'undefined' && !window.confirm(isRemoving
+      ? `حذفِ اسکریپتِ Bridge از ریپوی پروژه\n\nفایلی که عوض می‌شود: ${_file}\nیک commit در ریپوی پروژه ساخته می‌شود و پس از دیپلوی، رصدِ کلیک/تایپ داخلِ پیش‌نمایش قطع می‌شود.\n\nادامه می‌دهید؟`
+      : `افزودنِ اسکریپتِ Bridge به ریپوی پروژه\n\nفایلی که عوض می‌شود: ${_file}\nیک commit در ریپوی پروژه ساخته می‌شود؛ پس از دیپلوی، کلیک/تایپ داخلِ پیش‌نمایش به چت می‌رسد.\n\nادامه می‌دهید؟`)) return;
     setInspectorBridgeStatus(prev => ({ ...prev, injecting: true, error: undefined }));
 
     try {
@@ -4716,6 +4735,9 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
 
   // 🔄 به‌روزرسانی مستقیم Bridge به آخرین نسخه (بدون نیاز به re-inject)
   const updateBridgeToLatest = async () => {
+    // PM-INS-0019: پیش‌تأیید + نامِ دقیقِ فایل
+    if (typeof window !== 'undefined' && !window.confirm(
+      `آپدیتِ اسکریپتِ Bridge در ریپوی پروژه به v${inspectorBridgeStatus.latest_version || 'آخر'}\n\nفایلی که عوض می‌شود: ${inspectorBridgeStatus.file_path || 'فایلِ فعلیِ Bridge'}\nیک commit در ریپوی پروژه ساخته می‌شود و پروژه دوباره دیپلوی می‌شود.\n\nادامه می‌دهید؟`)) return;
     setInspectorBridgeStatus(prev => ({ ...prev, injecting: true, error: undefined }));
     addTransientMessage('🔄 به‌روزرسانی Bridge به آخرین نسخه...', 'info');
 
@@ -14218,12 +14240,15 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                 حالا هر دو جمع می‌شوند و در عرضِ کم چت به زیرِ اسکرین می‌رود (flex-wrap). */}
             <div className="flex flex-row-reverse flex-wrap gap-4" style={{ minHeight: '520px' }}>
               {/* اسکرین سمت چپ (در RTL) - ابعاد 5.1" x 2.8" (نسبت 1.82:1 - افقی/landscape) - 1.5x بزرگتر */}
-              <div className="flex flex-col items-center" style={{ flex: '1 1 560px', maxWidth: '840px', minWidth: 0 }}>
-                <div className="bg-black rounded-2xl p-2 shadow-2xl w-full">
+              <div
+                className={inspectorScreenFull ? 'fixed inset-0 z-[60] bg-black/90 p-3 flex flex-col' : 'flex flex-col items-center'}
+                style={inspectorScreenFull ? undefined : { flex: '1 1 560px', maxWidth: '840px', minWidth: 0 }}
+              >
+                <div className={`bg-black rounded-2xl p-2 shadow-2xl w-full ${inspectorScreenFull ? 'flex-1 flex flex-col' : ''}`}>
                   {/* فریم دستگاه - افقی */}
                   <div
-                    className="bg-gray-900 rounded-xl overflow-hidden relative"
-                    style={{ aspectRatio: '1.82/1' }}
+                    className={`bg-gray-900 rounded-xl overflow-hidden relative ${inspectorScreenFull ? 'flex-1' : ''}`}
+                    style={inspectorScreenFull ? undefined : { aspectRatio: '1.82/1' }}
                   >
                     {/* صفحه نمایش */}
                     <div className="h-full w-full bg-gradient-to-br from-gray-800 to-gray-900 p-1 flex flex-col relative">
@@ -14282,6 +14307,20 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                                 className="text-[10px] text-gray-400 hover:text-white px-1 flex-shrink-0"
                                 title="بارگذاری مجدد"
                               >🔄</button>
+                              {/* PM-INS-0019: بزرگ‌کردن + پنجرهٔ جدا (ورود با گوگل/Firebase در origin ِ خودِ سایت کار می‌کند و Bridge از همان‌جا به چت وصل می‌شود) */}
+                              <button
+                                onClick={() => setInspectorScreenFull(v => !v)}
+                                className="text-[10px] text-gray-400 hover:text-white px-1 flex-shrink-0"
+                                title={inspectorScreenFull ? 'خروج از تمام‌صفحه (Esc)' : 'تمام‌صفحه'}
+                              >{inspectorScreenFull ? '🗗' : '⛶'}</button>
+                              <button
+                                onClick={() => {
+                                  const real = inspectorFrontendUrl || inspectorBaseUrl;
+                                  if (real) window.open(real, 'ai_creator_preview', 'noopener');
+                                }}
+                                className="text-[10px] text-gray-400 hover:text-white px-1 flex-shrink-0"
+                                title="باز کردنِ سایتِ واقعی در پنجرهٔ جدا — ورود با گوگل و داده‌های مرورگر آن‌جا کار می‌کند؛ اگر Bridge نصب باشد، کلیک/تایپ همان پنجره هم به چت می‌رسد"
+                              >↗</button>
                             </div>
                             <iframe
                               ref={inspectorIframeRef}
@@ -14694,6 +14733,11 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
 
                 {/* 🆕 دکمه رصد لاگ‌ها */}
                 {inspectorPowerOn && (
+                  // PM-INS-0019: وضعیت (برچسب) و عمل (دکمه) جدا
+                  <div className="mt-3 flex flex-col items-center">
+                  <span className={`text-[10px] ${inspectorActionTracking.enabled ? 'text-blue-600' : 'text-gray-500'}`}>
+                    وضعیتِ رصدِ لاگ: {inspectorActionTracking.enabled ? '🔴 فعال' : '⚪ خاموش'}
+                  </span>
                   <button
                     onClick={() => setInspectorActionTracking(prev => ({ ...prev, enabled: !prev.enabled }))}
                     className={`mt-3 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
@@ -14703,13 +14747,18 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                     }`}
                     title={inspectorActionTracking.enabled ? 'غیرفعال کردن رصد لاگ' : 'فعال کردن رصد لاگ'}
                   >
-                    {inspectorActionTracking.enabled ? '🔴 رصد فعال' : '⚪ رصد غیرفعال'}
+                    {inspectorActionTracking.enabled ? '⏸ خاموش کردنِ رصد' : '▶️ روشن کردنِ رصد'}
                   </button>
+                  </div>
                 )}
 
                 {/* 🌉 دکمه Bridge Script - رصد فعالیت داخل iframe */}
                 {inspectorPowerOn && (
                   <div className="mt-3 flex flex-col items-center">
+                    {/* PM-INS-0019: برچسبِ وضعیت جدا از دکمهٔ عمل */}
+                    <span className={`text-[10px] mb-0.5 ${inspectorBridgeStatus.has_bridge ? 'text-green-700' : 'text-gray-500'}`}>
+                      Bridge در ریپوی پروژه: {inspectorBridgeStatus.has_bridge ? `✅ نصب است${inspectorBridgeStatus.version ? ` (v${inspectorBridgeStatus.version})` : ''}` : '— نصب نیست'}
+                    </span>
                     <button
                       onClick={() => {
                         // اگر خطای عدم اتصال به GitHub داشت، دیالوگ باز شود
@@ -14738,16 +14787,16 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                       ) : inspectorBridgeStatus.injecting ? (
                         '⏳ در حال اعمال...'
                       ) : inspectorBridgeStatus.has_bridge ? (
-                        '🌉 Bridge فعال'
+                        '🗑 حذفِ Bridge از ریپو…'
                       ) : inspectorBridgeStatus.error?.includes('GitHub') ? (
                         '⚠️ اتصال GitHub'
                       ) : (
-                        '🔗 فعال‌سازی Bridge'
+                        '➕ نصبِ Bridge در ریپو…'
                       )}
                     </button>
                     <span className="text-[10px] text-gray-500 mt-1 text-center max-w-[90px]">
                       {inspectorBridgeStatus.has_bridge
-                        ? 'رصد کلیک/تایپ فعال'
+                        ? (bridgePeerConnected ? 'کلیک/تایپ به چت می‌رسد' : 'نصب است؛ هنوز از پیش‌نمایش وصل نشده')
                         : inspectorBridgeStatus.error?.includes('GitHub')
                         ? 'ابتدا GitHub را وصل کنید'
                         : 'برای رصد کامل فعال کنید'}
@@ -14766,6 +14815,15 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                         {bridgePeerConnected ? 'WS: متصل' : bridgeWsConnected ? 'WS: منتظر Bridge' : 'WS: در حال اتصال...'}
                       </div>
                     )}
+                    {/* PM-INS-0019: راهنمای کوتاه */}
+                    <details className="mt-1 max-w-[150px] text-[10px] text-gray-500">
+                      <summary className="cursor-pointer select-none">❔ این دکمه‌ها چه می‌کنند؟</summary>
+                      <ul className="mt-1 space-y-0.5 list-disc pr-3 leading-4">
+                        <li>«رصدِ لاگ» فقط در همین صفحه است؛ چیزی در ریپو عوض نمی‌شود.</li>
+                        <li>«نصب/حذف/آپدیتِ Bridge» یک commit در <b>ریپوی پروژه</b> می‌سازد — پیش از آن نامِ فایل را می‌پرسد.</li>
+                        <li>«WS: متصل» یعنی اسکریپتِ داخلِ پیش‌نمایش وصل است و کلیک/تایپ به چت می‌رسد.</li>
+                      </ul>
+                    </details>
                     {/* ⚠️ هشدار نسخه قدیمی */}
                     {inspectorBridgeStatus.has_bridge && inspectorBridgeStatus.needs_update && (
                       <div className="mt-1 p-1.5 bg-amber-50 border border-amber-200 rounded-lg max-w-[140px]">
