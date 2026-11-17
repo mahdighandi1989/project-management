@@ -5586,7 +5586,7 @@ INSPECTOR_BRIDGE_SCRIPT = '''
 
     // کلاس یا آیدی
     let identifier = el.id ? '#' + el.id :
-                     el.className ? '.' + el.className.split(' ')[0] : '';
+                     (typeof el.className === 'string' && el.className) ? '.' + el.className.split(' ')[0] : '';  /* PM-INS-0022: SVG className is an object — split() threw and lost every click on an icon */
 
     // ترجمه تگ‌های معروف به فارسی
     const tagLabels = {
@@ -19321,6 +19321,19 @@ def analyze_bridge_html(html: str) -> Dict[str, Any]:
     }
 
 
+def _rewrite_next_paths(text: str, asset_prefix: str) -> str:
+    """PM-INS-0022 — a Next.js app loads its chunks/CSS from the ABSOLUTE path «/_next/…» (webpack publicPath, the
+    App-Router flight data in inline scripts, CSS url()). Inside the preview that path is AI Creator's own /_next ⇒ the
+    wrong app's files (ChunkLoadError, ERR_BLOCKED_BY_ORB) and a blank preview (Detective-1, ALLIN1). Point every such
+    quoted / url() reference at this project's proxy path instead (which carries the preview ticket)."""
+    if "/_next/" not in text:
+        return text
+    p = asset_prefix.rstrip("/") + "/_next/"
+    for q in ('"', "'", '\\"', "`"):
+        text = text.replace(q + "/_next/", q + p)
+    return text.replace("url(/_next/", "url(" + p).replace("url('/_next/", "url('" + p).replace('url("/_next/', 'url("' + p)
+
+
 def _inject_preview_bridge(html: str, project_id: str) -> str:
     """PM-INS-0022 — a project whose own HTML carries NO bridge gets the current template (INSPECTOR_BRIDGE_SCRIPT,
     v{INSPECTOR_BRIDGE_VERSION}) in the preview response only: nothing is committed to its repo and its public site is
@@ -19508,7 +19521,9 @@ async def inspector_page_proxy(
         )
 
         # ساخت اسکریپت با مقادیر واقعی
-        monitor_script = _PROXY_MONITOR_SCRIPT_TEMPLATE.replace("__BASE__", base_url).replace("__PROXY__", proxy_prefix)
+        # PM-INS-0022: the page's own absolute fetch/XHR calls are routed through the proxy — WITH the ticket, since the
+        # sandboxed preview sends no cookie (they all came back 401)
+        monitor_script = _PROXY_MONITOR_SCRIPT_TEMPLATE.replace("__BASE__", base_url).replace("__PROXY__", asset_prefix)
         if "</head>" in html:
             html = html.replace("</head>", monitor_script + "</head>", 1)
         elif "<head>" in html:
@@ -19521,6 +19536,7 @@ async def inspector_page_proxy(
         html = _heal_bridge_self_guard(html)
         html = _enable_project_bridge(html, project_id)
         html = _inject_preview_bridge(html, project_id)
+        html = _rewrite_next_paths(html, asset_prefix)
 
         # حذف هدرهایی که iframe را بلاک میکنند
         return FastAPIResponse(
@@ -19536,6 +19552,13 @@ async def inspector_page_proxy(
 
     # 5. سایر انواع (JS, CSS, تصاویر) — عبور بدون تغییر (CSP sandbox هم، تا هیچ سندی از این مسیر same-origin نشود)
     body = resp.content
+    # PM-INS-0022: Next.js chunks / CSS reference «/_next/…» absolutely — keep them inside this project's preview
+    if ("javascript" in ct or "css" in ct) and b"/_next/" in body:
+        try:
+            _ap = f"/api/render/inspector/proxy/{project_id}" + (f"/{PREVIEW_PATH_MARK}{_pt}" if _pt else "")
+            body = _rewrite_next_paths(body.decode("utf-8"), _ap).encode("utf-8")
+        except UnicodeDecodeError:
+            pass
     if "javascript" in ct and b"/api/render/ws/bridge/" in body:
         try:  # PM-INS-0019: the Next.js client-component bridge lives in a JS chunk
             body = _heal_bridge_self_guard(body.decode("utf-8")).encode("utf-8")

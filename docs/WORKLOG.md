@@ -1183,3 +1183,14 @@
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · pytest
 
+## 2026-11-17 (۵۳) — PM-INS-0022 (ادامه): اپ‌های Next.js در پیش‌نمایش، کلیک روی SVG، fetch ِ صفحه با بلیت
+
+- **[VERIFY]** پس از e48848a: پاسخِ پروکسیِ ۵ پروژه (detective_1، language، allin1، lifemanager، project_management) همه Bridge ِ تزریق‌شده دارند؛ «WS: متصل»: Detective-1 ۶٫۱ ث، language ۶٫۶، ALLIN1 ۵٫۶.
+- **[FINDING]** (۱) Detective-1 و ALLIN1 (Next.js) سیاه/خالی: chunk ها و CSS از مسیرِ مطلقِ `/_next/static/…` ⇐ `/_next` ِ خودِ AI Creator (اپِ اشتباه) ⇒ ChunkLoadError و ERR_BLOCKED_BY_ORB.
+  (۲) language: کلیک روی آیکنِ SVG ⇐ `TypeError: el.className.split is not a function` در قالبِ Bridge ⇒ کلیک به چت نمی‌رسید. (۳) fetch/XHR ِ مطلقِ خودِ صفحه از پروکسی بی بلیت ⇒ ۴۰۱.
+- **[CHANGE]** `render_logs._rewrite_next_paths` (HTML و پاسخ‌های JS/CSS ِ پروکسی: `"/_next/`، `'/_next/`، `\"/_next/`، `url(/_next/` ⇐ مسیرِ پروکسیِ همان پروژه با بلیت)؛ قالبِ Bridge: className ِ غیرِرشته‌ای (SVG)؛
+  اسکریپتِ رصدِ پروکسی fetch/XHR ِ مطلق را به مسیرِ بلیت‌دار می‌برد. محدودیتِ آگاهانه: پروکسی فقط GET است (نوشتن روی بک‌اندِ پروژه‌ها از پیش‌نمایش نه)؛ ورودِ گوگلِ خودِ اپ‌ها در پیش‌نمایش ممکن نیست.
+- **[VERIFY]** +۳ تست؛ pytest ۸۹۹ سبز.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · مرورگرِ واقعی روی production + pytest
+

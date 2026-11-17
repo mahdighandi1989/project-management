@@ -27,3 +27,22 @@ def test_wired_into_the_proxy_and_the_diagnosis():
     assert "_inject_preview_bridge(html, project_id)" in inspect.getsource(RL.inspector_page_proxy)
     src = inspect.getsource(RL)
     assert 'result["bridge_source"] = "preview_injection"' in src
+
+
+def test_next_absolute_paths_stay_inside_the_project_preview():
+    ap = "/api/render/inspector/proxy/P/~pt~T"
+    js = 'r.p="/_next/";a=\'/_next/x.js\';b="\\"/_next/c.js\\"";u=url(/_next/m.woff)'
+    out = RL._rewrite_next_paths(js, ap)
+    assert '"/_next/' not in out and "'/_next/" not in out and "url(/_next/" not in out
+    assert out.count(ap + "/_next/") == 4
+    already = f'src="{ap}/_next/x.js"'
+    assert RL._rewrite_next_paths(already, ap) == already
+
+
+def test_svg_clicks_do_not_crash_the_bridge():
+    assert "el.className.split(' ')[0] : '';" not in RL.INSPECTOR_BRIDGE_SCRIPT.replace(
+        "(typeof el.className === 'string' && el.className) ? '.' + el.className.split(' ')[0] : '';", "")
+
+
+def test_page_fetches_go_through_the_ticketed_prefix():
+    assert '.replace("__PROXY__", asset_prefix)' in inspect.getsource(RL.inspector_page_proxy)
