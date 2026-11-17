@@ -5415,7 +5415,11 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
             // اگه فایل قبلاً تغییر داده شده، جایگزین کن
             const existingIdx = collectedActionFiles.findIndex((f: any) => f.path === file.path);
             if (existingIdx >= 0) {
-              collectedActionFiles[existingIdx] = file;
+              // (PM-INS-0027) a later step that only «mentions» the file (no content, no sections) must not wipe
+              // the content an earlier step wrote — that made the coordinator's one-line file commit nothing
+              const prevF: any = collectedActionFiles[existingIdx];
+              const hasBody = (x: any) => !!(x && ((typeof x.content === 'string' && x.content.trim()) || (x.sections && x.sections.length) || x.operation === 'delete'));
+              collectedActionFiles[existingIdx] = hasBody(file) || !hasBody(prevF) ? file : { ...file, ...prevF, operation: prevF.operation || file.operation };
             } else {
               collectedActionFiles.push(file);
             }

@@ -289,6 +289,14 @@ class GitHubPRService:
             slog.error("Create branch failed", exception=e)
             return {"success": False, "error": str(e)}
 
+    async def delete_branch(self, owner: str, repo: str, branch: str, token: str = None) -> Dict[str, Any]:
+        """(PM-INS-0027) Remove an inspector branch that got no commit. Only `inspector/…` branches — never anything else."""
+        if not (branch or "").startswith("inspector/"):
+            return {"success": False, "error": "only inspector/… branches are deleted"}
+        url = f"{self.GITHUB_API}/repos/{owner}/{repo}/git/refs/heads/{branch}"
+        res = await self._gh_request("DELETE", url, headers=self._get_headers(token))
+        return {"success": res["status"] in (204, 404, 422), "status": res["status"]}
+
     # =====================================
     # File Operations
     # =====================================

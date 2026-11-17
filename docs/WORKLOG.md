@@ -1446,3 +1446,15 @@
 - **[VERIFY]** `tests/test_pm_ins_0027.py` ‏(۲). سنجشِ production در ورودیِ بعد.
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · pytest + tsc
+
+## 2026-11-17 (۷۱) — PM-INS-0027: «اعمال» هیچ فایلی commit نکرد ⇒ ادغامِ مراحل و فایلِ خالی
+
+- **[VERIFY]** پس از 80f5b9fc در مرورگرِ واقعی، بازرس ویژهٔ project-management، DeepSeek Chat: **بی‌اسکنِ عمیق**، action_plan در ۳۳ ث — فقط `docs/COORDINATOR_TEST.md` (create).
+- **[FINDING]** «اعمال» ⇒ شاخهٔ `inspector/smart-fix-1794952526` ساخته شد و بعد «❌ هیچ فایلی commit نشد»، بی‌دلیل. درخواست به ۳ مرحله تجزیه شده بود (بررسی / نوشتن / شاخه+PR)؛ مرحلهٔ ۳ همان
+  فایل را **بی‌محتوا** دوباره آورد و در ادغامِ فرانت جای نسخهٔ مرحلهٔ ۲ را گرفت؛ سرور فایلِ بی‌محتوا را بی‌صدا رد می‌کرد و شاخهٔ خالی می‌ماند.
+- **[CHANGE]** enhance-prompt: عملیاتِ سادهٔ فایل (متنِ خودِ کاربر) مرحله‌بندی نمی‌شود؛ فرانت: در ادغامِ مراحل نسخهٔ بی‌محتوا جای نسخهٔ دارای محتوا را نمی‌گیرد؛ apply-action: فایلِ بی‌محتوا
+  با پیامِ صریح، و اگر هیچ چیز commit نشد شاخهٔ `inspector/…` ِ خالی پاک می‌شود (`GitHubPRService.delete_branch` فقط برای `inspector/…`).
+- **[TODO]** شاخهٔ خالیِ `inspector/smart-fix-1794952526` (از همین آزمون) روی project-management مانده — پاک‌کردنش با مالک.
+- **[VERIFY]** `tests/test_pm_ins_0027.py` ‏(۴).
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · مرورگرِ واقعی روی production + pytest

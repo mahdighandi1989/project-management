@@ -14876,6 +14876,15 @@ async def enhance_prompt_endpoint(request: EnhancePromptRequest, db: Session = D
                     "description": _m.group(2).strip(),
                 })
 
+        # (PM-INS-0027) «فایلِ X را بساز و این خط را بنویس» is ONE action — splitting it into «check / write / branch+PR»
+        # steps made the last step resend the file with empty content (nothing was committed)
+        try:
+            from ...services.inspector_intent_resolver import _is_simple_file_op as _sfo
+            if steps and _sfo(request.message or ""):
+                steps = []
+        except Exception:  # noqa: BLE001
+            pass
+
         # اگه مراحل پیدا شد، پرامپت پایه رو بدون بخش مراحل جدا کن
         base_prompt = enhanced
         if steps:
@@ -19074,6 +19083,11 @@ section‌های شکست‌خورده:
             operation = f.get("operation", "modify")
 
             if not file_path or not file_content:
+                # (PM-INS-0027) never silently: an empty create/modify used to vanish ⇒ «هیچ فایلی commit نشد»
+                yield sse("progress", {
+                    "step": "file_error",
+                    "message": f"⚠️ {file_path or '(بی‌مسیر)'}: محتوای فایل در action_plan خالی است — commit نشد",
+                })
                 continue
 
             yield sse("progress", {
@@ -19112,7 +19126,13 @@ section‌های شکست‌خورده:
             await asyncio.sleep(0.3)
 
         if not committed_files:
-            yield sse("error", {"message": "هیچ فایلی commit نشد"})
+            # (PM-INS-0027) do not leave an empty inspector/smart-fix-… branch behind
+            try:
+                await pr_svc.delete_branch(owner=owner, repo=repo, branch=branch_name, token=token)
+                _br_note = f" (شاخهٔ خالیِ {branch_name} پاک شد)"
+            except Exception:  # noqa: BLE001
+                _br_note = f" (شاخهٔ {branch_name} خالی ماند)"
+            yield sse("error", {"message": "هیچ فایلی commit نشد" + _br_note})
             yield sse("done", {"success": False})
             return
 
