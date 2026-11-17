@@ -1244,3 +1244,12 @@
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · pytest
 
+## 2026-11-17 (۵۹) — سنجشِ زندهٔ PM-INS-0023 روی production و جواب در برگه
+
+- **[VERIFY]** (۱) همان پرسشِ هویتی در چتِ بازرسِ quran: deepseek-chat ⇐ «DeepSeek Chat … API دیپ‌سیک با کلید API» (۲۳۸ توکن، پیش‌تر ۱۲٬۷۸۸)؛ gemini-2.5-flash ⇐ «Gemini 2.5 Flash … API ِ Google»
+  (۲۴۴)؛ cloud_code ⇐ «claude-sonnet-5-5 … اشتراک Claude (توکن OAuth)، نه کلید API». (۲) کلیک در language پیش از «WS: متصل» ⇐ Bridge ۱ کلیک فرستاد، چت دقیقاً ۱ خط؛ نسخهٔ صف‌شده
+  در «duplicate dropped» شمرده شد. (۳) «🖥 ضبطِ سمتِ سرور» روی quran: start ⇐ start-screencast ۲۰۰ ⇐ ۲ کلیک ⇐ پایان ⇐ پیش‌نمایشِ ضبط پس از ۶۵٫۶ ث (۱ keyframe، ۴ تعامل، پرامپتِ درست).
+  جواب: fixed + تصویر.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · مرورگرِ واقعی + API روی production
+
