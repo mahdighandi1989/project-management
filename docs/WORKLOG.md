@@ -1077,3 +1077,16 @@
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · pytest + next build
 
+
+## 2026-11-17 (۴۶) — ناظرِ خودکار، اجرای ۱۱: سنجشِ زندهٔ PM-INS-0018 + هشدارِ دیسک
+
+- **[FINDING]** برگهٔ PM-INS-0018 پس از دیپلوی ِ 104b998 روی production سنجیده شد: «🔍 تشخیص» با `preview_url` واقعی ⇒ `deployed_has_bridge: true`؛ کلیدِ «🩹 خوداصلاح» و
+  دکمه‌های سریع بالای چتِ پُر دیده شد؛ `self-heal/propose` با خطای آزمایشی فایل‌ها را از GitHub خواند و بی‌شاهد diff نساخت (`confidence: low`).
+- **[FINDING]** دیسکِ بک‌اند ۸۰٫۴٪ پر (۱۸۳ مگابایت آزاد؛ DB ۴۸۱ مگابایت، `tasks.json` ۱۲۷ مگابایت) ⇒ `docs/supervisor/OPEN_ITEMS.md` #۶.
+- **[FINDING]** کاهشِ منو (۱۱⇒۹) و دکمه‌های صفحه (۴۶۷⇒۴۳۴) در `inventory.py` از ادغامِ صفحه‌ها (ViewHub) است، نه حذفِ قابلیت؛ هیچ مسیرِ API کم نشده.
+- **[DECISION]** دادهٔ production حذف یا بایگانی نشد (خطِ قرمز)؛ تصمیمِ دیسک با مالک.
+- **[CHANGE]** فقط مستندات: RUNLOG (اجرای ۱۱)، OPEN_ITEMS (#۶)، runs.jsonl، INVENTORY؛ جوابِ برگهٔ ۱۸ (`fixed` با عکس). کدِ محصول دست نخورد.
+- **[VERIFY]** pytest ۸۷۸ قبول / ۴ skip؛ next build سبز.
+- **[REVERT]** همین کامیت را revert کنید (فقط مستندات).
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · pytest + next build

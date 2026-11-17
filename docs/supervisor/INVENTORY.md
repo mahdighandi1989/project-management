@@ -4,16 +4,16 @@
 > هر صفحه/دکمه/endpointی که بعداً اضافه شود، خودکار این‌جا ظاهر می‌شود؛ مختصاتِ دقیقِ
 > عنصرهای هر صفحه در برنامه است: «نظارت و سرکشی › نقشهٔ سامانه».
 
-تولید: 2026-11-15T07:37:35+00:00 · کامیت `fb72c82d29`
+تولید: 2026-11-17T00:44:39+00:00 · کامیت `104b9989c5`
 
 | سنجه | تعداد |
 |---|---|
-| صفحه‌ها | 16 |
+| صفحه‌ها | 17 |
 | آیتم‌های منو | 9 |
-| دکمه‌ها در صفحه‌ها / در کامپوننت‌ها | 439 / 165 |
-| ورودی‌ها | 313 |
-| مسیرهای API | 743 |
-| سرویس‌ها | 96 |
+| دکمه‌ها در صفحه‌ها / در کامپوننت‌ها | 434 / 212 |
+| ورودی‌ها | 320 |
+| مسیرهای API | 769 |
+| سرویس‌ها | 105 |
 | مدل‌ها | 13 |
 
 ## منوی کناری
@@ -27,28 +27,29 @@
 | `/creator` | موتور خالق |
 | `/knowledge-center` | مرکز دانش |
 | `/archive` | آرشیو |
-| `/models` | مدل‌ها |
-| `/settings` | تنظیمات |
+| `/handbook` | جزوه و دفتر کار |
+| `/settings` | مدل‌ها و تنظیمات |
 
 ## صفحه‌ها
 
 | مسیر | فایل | خط | دکمه | ورودی | زبانه |
 |---|---|---|---|---|---|
 | `/analysis` | `frontend/src/app/analysis/page.tsx` | 1079 | 7 | 2 | 5 |
-| `/archive` | `frontend/src/app/archive/page.tsx` | 754 | 7 | 4 | 0 |
+| `/archive` | `frontend/src/app/archive/page.tsx` | 900 | 12 | 4 | 0 |
 | `/creator` | `frontend/src/app/creator/page.tsx` | 1345 | 18 | 11 | 0 |
 | `/debate` | `frontend/src/app/debate/page.tsx` | 695 | 7 | 1 | 0 |
 | `/diagrams` | `frontend/src/app/diagrams/page.tsx` | 18 | 0 | 0 | 0 |
+| `/handbook` | `frontend/src/app/handbook/page.tsx` | 372 | 7 | 3 | 0 |
 | `/inspection` | `frontend/src/app/inspection/page.tsx` | 109 | 3 | 0 | 1 |
 | `/knowledge-center` | `frontend/src/app/knowledge-center/page.tsx` | 1051 | 17 | 13 | 0 |
 | `/model-profiles` | `frontend/src/app/model-profiles/page.tsx` | 814 | 6 | 2 | 3 |
-| `/models` | `frontend/src/app/models/page.tsx` | 1043 | 13 | 3 | 0 |
-| `/oversight` | `frontend/src/app/oversight/page.tsx` | 11138 | 121 | 86 | 0 |
-| `/` | `frontend/src/app/page.tsx` | 104 | 0 | 0 | 0 |
+| `/models` | `frontend/src/app/models/page.tsx` | 18 | 0 | 0 | 0 |
+| `/oversight` | `frontend/src/app/oversight/page.tsx` | 11427 | 122 | 81 | 0 |
+| `/` | `frontend/src/app/page.tsx` | 231 | 1 | 0 | 0 |
 | `/project/[id]` | `frontend/src/app/project/[id]/page.tsx` | 1599 | 21 | 2 | 0 |
-| `/projects/[id]` | `frontend/src/app/projects/[id]/page.tsx` | 18234 | 201 | 95 | 6 |
-| `/projects` | `frontend/src/app/projects/page.tsx` | 67 | 1 | 0 | 1 |
-| `/settings` | `frontend/src/app/settings/page.tsx` | 744 | 13 | 13 | 7 |
+| `/projects/[id]` | `frontend/src/app/projects/[id]/page.tsx` | 18802 | 209 | 95 | 11 |
+| `/projects` | `frontend/src/app/projects/page.tsx` | 23 | 0 | 0 | 0 |
+| `/settings` | `frontend/src/app/settings/page.tsx` | 24 | 0 | 0 | 0 |
 | `/users` | `frontend/src/app/users/page.tsx` | 80 | 4 | 0 | 0 |
 
 ## مسیرهای API
@@ -92,6 +93,7 @@
 | POST | `/api/auth/google` |
 | POST | `/api/auth/logout-all` |
 | GET | `/api/auth/me` |
+| POST | `/api/auth/preview-ticket` |
 | POST | `/api/auth/supervisor-session` |
 | GET | `/api/auth/users` |
 | PATCH | `/api/auth/users/{user_id}` |
@@ -146,6 +148,7 @@
 | POST | `/api/diagrams/mindmap` |
 | POST | `/api/diagrams/pie` |
 | GET | `/api/diagrams/projects` |
+| GET,POST | `/api/diagrams/saved` |
 | POST | `/api/diagrams/sequence` |
 | POST | `/api/diagrams/state` |
 | GET | `/api/diagrams/types` |
@@ -182,6 +185,7 @@
 | POST | `/api/github/check` |
 | POST | `/api/github/import` |
 | GET | `/api/github/imported` |
+| POST | `/api/github/imported-sync-all` |
 | DELETE,GET | `/api/github/imported/{project_id}` |
 | GET | `/api/github/imported/{project_id}/file` |
 | POST | `/api/github/imported/{project_id}/refresh` |
@@ -191,6 +195,13 @@
 | POST | `/api/github/parse-url` |
 | POST | `/api/github/pr/create` |
 | POST | `/api/github/pr/from-project/{project_id}` |
+| GET | `/api/handbook/changes` |
+| GET | `/api/handbook/doc/{slug}` |
+| GET | `/api/handbook/docs` |
+| GET | `/api/handbook/export` |
+| GET | `/api/handbook/recent` |
+| GET | `/api/handbook/repos` |
+| GET | `/api/handbook/search` |
 | GET,POST | `/api/inspection` |
 | GET,POST | `/api/inspection/` |
 | GET | `/api/inspection/binders` |
@@ -221,6 +232,13 @@
 | PATCH | `/api/inspection/{report_id}/notes/{note_id}` |
 | POST | `/api/inspection/{report_id}/status` |
 | DELETE,POST | `/api/inspection/{report_id}/urgent` |
+| GET | `/api/inspector-agent/models` |
+| GET,POST | `/api/inspector-agent/runs` |
+| GET | `/api/inspector-agent/runs/{run_id}` |
+| POST | `/api/inspector-agent/runs/{run_id}/cancel` |
+| POST | `/api/inspector-agent/runs/{run_id}/reply` |
+| GET | `/api/inspector-agent/runs/{run_id}/shots/{name}` |
+| GET | `/api/inspector-agent/snapshot` |
 | POST | `/api/knowledge-center/bootstrap` |
 | POST | `/api/knowledge-center/ensure/{watched_id}` |
 | GET | `/api/knowledge-center/entries` |
@@ -312,6 +330,8 @@
 | POST | `/api/oversight/codex/{watched_id}/refresh` |
 | GET,PUT | `/api/oversight/codex/{watched_id}/roadmap` |
 | PATCH | `/api/oversight/codex/{watched_id}/roadmap/items/{item_id}` |
+| GET | `/api/oversight/disk` |
+| POST | `/api/oversight/disk/janitor` |
 | GET | `/api/oversight/external-tasks` |
 | GET | `/api/oversight/external-tasks/summary` |
 | POST | `/api/oversight/external-tasks/{project_id}/{field_id}/verify-now` |
@@ -398,6 +418,7 @@
 | POST | `/api/oversight/watched/{watched_id}/audit-prompt-quality` |
 | POST | `/api/oversight/watched/{watched_id}/auth-recipe/invalidate` |
 | POST | `/api/oversight/watched/{watched_id}/auth-recipe/test` |
+| POST | `/api/oversight/watched/{watched_id}/autorun-now` |
 | POST | `/api/oversight/watched/{watched_id}/bulk-verify` |
 | GET | `/api/oversight/watched/{watched_id}/bulk-verify/eligible-count` |
 | GET | `/api/oversight/watched/{watched_id}/bulk-verify/status` |
@@ -416,6 +437,9 @@
 | POST | `/api/oversight/watched/{watched_id}/runtime/test-connection` |
 | GET,PATCH | `/api/oversight/watched/{watched_id}/verify-v6-config` |
 | GET,PATCH | `/api/oversight/watched/{watched_id}/view-prefs` |
+| GET | `/api/project-supervision/board` |
+| GET | `/api/project-supervision/feed` |
+| GET | `/api/project-supervision/repos` |
 | GET,POST | `/api/projects` |
 | GET | `/api/projects/active` |
 | GET | `/api/projects/debug/ai-status` |
@@ -438,6 +462,7 @@
 | GET | `/api/projects/{project_id}/debug/analysis-test` |
 | GET | `/api/projects/{project_id}/debug/files-content` |
 | POST | `/api/projects/{project_id}/debug/single-file-test` |
+| GET | `/api/projects/{project_id}/deploy/diagnose` |
 | GET | `/api/projects/{project_id}/deploy/list-services` |
 | GET | `/api/projects/{project_id}/deploy/saved-services` |
 | POST | `/api/projects/{project_id}/deploy/set-service-id` |
@@ -594,6 +619,7 @@
 | POST | `/api/recording/inspector/{session_id}/interactions` |
 | GET | `/api/recording/inspector/{session_id}/preview` |
 | POST | `/api/recording/inspector/{session_id}/regenerate-prompt` |
+| POST | `/api/recording/inspector/{session_id}/resume` |
 | POST | `/api/recording/inspector/{session_id}/start-screencast` |
 | GET | `/api/recording/inspector/{session_id}/status` |
 | POST | `/api/recording/inspector/{session_id}/stop` |
@@ -658,6 +684,7 @@
 | POST | `/api/render/inspector/selective-scan/{session_id}/cancel` |
 | GET | `/api/render/inspector/selective-scan/{session_id}/debug` |
 | GET | `/api/render/inspector/selective-scan/{session_id}/progress` |
+| POST | `/api/render/inspector/self-heal/propose` |
 | POST | `/api/render/inspector/session/create` |
 | POST | `/api/render/inspector/session/message` |
 | POST | `/api/render/inspector/session/{session_id}/apply-all` |

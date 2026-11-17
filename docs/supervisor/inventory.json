@@ -1,6 +1,6 @@
 {
- "generated_at": "2026-11-15T07:37:35+00:00",
- "commit": "fb72c82d290530e2cee7302ff3987e28bb2c135b",
+ "generated_at": "2026-11-17T00:44:39+00:00",
+ "commit": "104b9989c50e66736ec3ff07c083945e1cd594d4",
  "pages": [
   {
    "route": "/analysis",
@@ -18,9 +18,9 @@
    "route": "/archive",
    "label": "آرشیو",
    "file": "frontend/src/app/archive/page.tsx",
-   "lines": 754,
-   "buttons": 7,
-   "onclick": 9,
+   "lines": 900,
+   "buttons": 12,
+   "onclick": 16,
    "inputs": 4,
    "forms": 0,
    "links": 5,
@@ -63,6 +63,18 @@
    "tabs": 0
   },
   {
+   "route": "/handbook",
+   "label": "جزوه و دفتر کار",
+   "file": "frontend/src/app/handbook/page.tsx",
+   "lines": 372,
+   "buttons": 7,
+   "onclick": 9,
+   "inputs": 3,
+   "forms": 0,
+   "links": 7,
+   "tabs": 0
+  },
+  {
    "route": "/inspection",
    "label": "نظارت و سرکشی",
    "file": "frontend/src/app/inspection/page.tsx",
@@ -100,38 +112,38 @@
   },
   {
    "route": "/models",
-   "label": "مدل‌ها",
+   "label": "",
    "file": "frontend/src/app/models/page.tsx",
-   "lines": 1043,
-   "buttons": 13,
-   "onclick": 14,
-   "inputs": 3,
+   "lines": 18,
+   "buttons": 0,
+   "onclick": 0,
+   "inputs": 0,
    "forms": 0,
-   "links": 0,
+   "links": 1,
    "tabs": 0
   },
   {
    "route": "/oversight",
    "label": "اتاق فرمان",
    "file": "frontend/src/app/oversight/page.tsx",
-   "lines": 11138,
-   "buttons": 121,
-   "onclick": 127,
-   "inputs": 86,
+   "lines": 11427,
+   "buttons": 122,
+   "onclick": 128,
+   "inputs": 81,
    "forms": 0,
-   "links": 16,
+   "links": 17,
    "tabs": 0
   },
   {
    "route": "/",
    "label": "خانه",
    "file": "frontend/src/app/page.tsx",
-   "lines": 104,
-   "buttons": 0,
-   "onclick": 0,
+   "lines": 231,
+   "buttons": 1,
+   "onclick": 1,
    "inputs": 0,
    "forms": 0,
-   "links": 1,
+   "links": 6,
    "tabs": 0
   },
   {
@@ -150,37 +162,37 @@
    "route": "/projects/[id]",
    "label": "",
    "file": "frontend/src/app/projects/[id]/page.tsx",
-   "lines": 18234,
-   "buttons": 201,
-   "onclick": 228,
+   "lines": 18802,
+   "buttons": 209,
+   "onclick": 238,
    "inputs": 95,
    "forms": 0,
-   "links": 11,
-   "tabs": 6
+   "links": 12,
+   "tabs": 11
   },
   {
    "route": "/projects",
    "label": "پروژه‌ها و نمودارها",
    "file": "frontend/src/app/projects/page.tsx",
-   "lines": 67,
-   "buttons": 1,
-   "onclick": 1,
+   "lines": 23,
+   "buttons": 0,
+   "onclick": 0,
    "inputs": 0,
    "forms": 0,
    "links": 0,
-   "tabs": 1
+   "tabs": 0
   },
   {
    "route": "/settings",
-   "label": "تنظیمات",
+   "label": "مدل‌ها و تنظیمات",
    "file": "frontend/src/app/settings/page.tsx",
-   "lines": 744,
-   "buttons": 13,
-   "onclick": 13,
-   "inputs": 13,
+   "lines": 24,
+   "buttons": 0,
+   "onclick": 0,
+   "inputs": 0,
    "forms": 0,
-   "links": 4,
-   "tabs": 7
+   "links": 0,
+   "tabs": 0
   },
   {
    "route": "/users",
@@ -225,26 +237,32 @@
    "label": "آرشیو"
   },
   {
-   "href": "/models",
-   "label": "مدل‌ها"
+   "href": "/handbook",
+   "label": "جزوه و دفتر کار"
   },
   {
    "href": "/settings",
-   "label": "تنظیمات"
+   "label": "مدل‌ها و تنظیمات"
   }
  ],
  "components": [
   {
    "file": "frontend/src/components/AIUsagePanel.tsx",
-   "lines": 639,
+   "lines": 648,
    "buttons": 10,
    "inputs": 4
   },
   {
    "file": "frontend/src/components/AssistantChat.tsx",
-   "lines": 205,
+   "lines": 230,
    "buttons": 4,
    "inputs": 4
+  },
+  {
+   "file": "frontend/src/components/BrowserAgentPanel.tsx",
+   "lines": 258,
+   "buttons": 11,
+   "inputs": 7
   },
   {
    "file": "frontend/src/components/ExecutingPromptsPanel.tsx",
@@ -254,7 +272,7 @@
   },
   {
    "file": "frontend/src/components/ExtractedFilesPanel.tsx",
-   "lines": 314,
+   "lines": 326,
    "buttons": 2,
    "inputs": 1
   },
@@ -277,6 +295,12 @@
    "inputs": 0
   },
   {
+   "file": "frontend/src/components/GithubSyncBadge.tsx",
+   "lines": 77,
+   "buttons": 0,
+   "inputs": 0
+  },
+  {
    "file": "frontend/src/components/GlobalAnalysisProgress.tsx",
    "lines": 165,
    "buttons": 0,
@@ -284,7 +308,7 @@
   },
   {
    "file": "frontend/src/components/InspectorRecordingPanel.tsx",
-   "lines": 1306,
+   "lines": 1463,
    "buttons": 10,
    "inputs": 6
   },
@@ -296,9 +320,27 @@
   },
   {
    "file": "frontend/src/components/NotificationSettingsPanel.tsx",
-   "lines": 949,
+   "lines": 960,
    "buttons": 12,
    "inputs": 17
+  },
+  {
+   "file": "frontend/src/components/ProjectDiagramsPanel.tsx",
+   "lines": 167,
+   "buttons": 3,
+   "inputs": 0
+  },
+  {
+   "file": "frontend/src/components/ProjectSupervisionPanel.tsx",
+   "lines": 146,
+   "buttons": 1,
+   "inputs": 1
+  },
+  {
+   "file": "frontend/src/components/ProjectsEventFeed.tsx",
+   "lines": 88,
+   "buttons": 1,
+   "inputs": 1
   },
   {
    "file": "frontend/src/components/PromptManager.tsx",
@@ -308,15 +350,27 @@
   },
   {
    "file": "frontend/src/components/RenderLogsPanel.tsx",
-   "lines": 1832,
-   "buttons": 30,
+   "lines": 1862,
+   "buttons": 31,
    "inputs": 13
+  },
+  {
+   "file": "frontend/src/components/ServerScreen.tsx",
+   "lines": 62,
+   "buttons": 1,
+   "inputs": 0
   },
   {
    "file": "frontend/src/components/TaskFilePicker.tsx",
    "lines": 426,
    "buttons": 2,
    "inputs": 1
+  },
+  {
+   "file": "frontend/src/components/ViewHub.tsx",
+   "lines": 64,
+   "buttons": 1,
+   "inputs": 0
   },
   {
    "file": "frontend/src/components/help/HelpProvider.tsx",
@@ -326,8 +380,8 @@
   },
   {
    "file": "frontend/src/components/help/HelpSystem.tsx",
-   "lines": 467,
-   "buttons": 4,
+   "lines": 615,
+   "buttons": 5,
    "inputs": 1
   },
   {
@@ -362,15 +416,27 @@
   },
   {
    "file": "frontend/src/components/views/DiagramsView.tsx",
-   "lines": 782,
+   "lines": 789,
    "buttons": 12,
    "inputs": 5
   },
   {
+   "file": "frontend/src/components/views/ModelsView.tsx",
+   "lines": 1077,
+   "buttons": 13,
+   "inputs": 3
+  },
+  {
    "file": "frontend/src/components/views/ProjectsView.tsx",
-   "lines": 986,
-   "buttons": 17,
+   "lines": 1015,
+   "buttons": 18,
    "inputs": 5
+  },
+  {
+   "file": "frontend/src/components/views/SettingsView.tsx",
+   "lines": 775,
+   "buttons": 13,
+   "inputs": 13
   }
  ],
  "routes": [
@@ -811,6 +877,13 @@
    "path": "/api/diagrams/examples/{diagram_type}",
    "methods": [
     "GET"
+   ]
+  },
+  {
+   "path": "/api/diagrams/saved",
+   "methods": [
+    "GET",
+    "POST"
    ]
   },
   {
@@ -1435,6 +1508,12 @@
    ]
   },
   {
+   "path": "/api/recording/inspector/{session_id}/resume",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
    "path": "/api/recording/inspector/{session_id}/audio-chunk",
    "methods": [
     "POST"
@@ -1893,6 +1972,12 @@
    ]
   },
   {
+   "path": "/api/github/imported-sync-all",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
    "path": "/api/github/parse-url",
    "methods": [
     "POST"
@@ -2101,6 +2186,12 @@
    "path": "/api/projects/{project_id}/deploy/test",
    "methods": [
     "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/deploy/diagnose",
+   "methods": [
+    "GET"
    ]
   },
   {
@@ -3515,6 +3606,12 @@
    ]
   },
   {
+   "path": "/api/render/inspector/self-heal/propose",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
    "path": "/projects/{project_id}/security/scan-secrets",
    "methods": [
     "POST"
@@ -3921,6 +4018,12 @@
    ]
   },
   {
+   "path": "/api/auth/preview-ticket",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
    "path": "/api/inspection/whoami",
    "methods": [
     "GET"
@@ -4129,6 +4232,109 @@
    "path": "/api/assistant/conversations/{cid}",
    "methods": [
     "DELETE",
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/handbook/recent",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/handbook/changes",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/handbook/repos",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/handbook/docs",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/handbook/doc/{slug}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/handbook/search",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/handbook/export",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/inspector-agent/models",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/inspector-agent/runs",
+   "methods": [
+    "GET",
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspector-agent/runs/{run_id}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/inspector-agent/runs/{run_id}/reply",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspector-agent/runs/{run_id}/cancel",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspector-agent/runs/{run_id}/shots/{name}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/inspector-agent/snapshot",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/project-supervision/repos",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/project-supervision/feed",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/project-supervision/board",
+   "methods": [
     "GET"
    ]
   },
@@ -4536,6 +4742,12 @@
    ]
   },
   {
+   "path": "/api/oversight/watched/{watched_id}/autorun-now",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
    "path": "/api/oversight/tasks/bulk-approve",
    "methods": [
     "POST"
@@ -4822,6 +5034,18 @@
    ]
   },
   {
+   "path": "/api/oversight/disk",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/disk/janitor",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
    "path": "/api/projects/{project_id}/oversight-summary",
    "methods": [
     "GET"
@@ -4903,6 +5127,7 @@
   "audio_transcribe",
   "audio_transcription_service",
   "background_scheduler",
+  "browser_agent",
   "browser_automation",
   "capability_detector",
   "claude_runner_bootstrap",
@@ -4919,12 +5144,14 @@
   "deepseek_service",
   "deploy_service",
   "diagram_service",
+  "disk_janitor",
   "dynamic_config",
   "dynamic_diagram_service",
   "external_monitor",
   "external_project_connector",
   "gdrive",
   "gemini_service",
+  "github_autosync",
   "github_import",
   "github_pr_service",
   "github_storage",
@@ -4934,8 +5161,11 @@
   "inspection_media",
   "inspector_agent",
   "inspector_agent_service",
+  "inspector_code_tools",
+  "inspector_compact_prompt",
   "inspector_intent_resolver",
   "inspector_proposal_executor",
+  "inspector_quick_classify",
   "inspector_recording_finalize",
   "inspector_recording_multimodal",
   "inspector_recording_processor",
@@ -4971,6 +5201,7 @@
   "project_auto_setup",
   "project_health_analyzer",
   "project_service",
+  "project_supervision",
   "prompt_github_sync",
   "prompt_helper",
   "quick_approval_service",
@@ -4978,10 +5209,12 @@
   "render_service",
   "repo_docs",
   "report_validator",
+  "reports_archive",
   "runtime_executor",
   "scan_sections",
   "security_analyzer",
   "security_scanner",
+  "self_heal",
   "simple_creator",
   "smart_import",
   "smart_orchestrator",
@@ -5009,13 +5242,13 @@
  ],
  "errors": [],
  "totals": {
-  "pages": 16,
+  "pages": 17,
   "menu_items": 9,
-  "page_buttons": 439,
-  "component_buttons": 165,
-  "inputs": 313,
-  "routes": 743,
-  "services": 96,
+  "page_buttons": 434,
+  "component_buttons": 212,
+  "inputs": 320,
+  "routes": 769,
+  "services": 105,
   "models": 13
  }
 }
