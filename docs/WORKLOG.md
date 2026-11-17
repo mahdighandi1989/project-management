@@ -1272,3 +1272,13 @@
 - **[TODO]** `tasks.json` ِ ۱۲۷MB بزرگ‌ترین مصرف‌کنندهٔ شناخته‌شده است — پیشنهاد: بردنِ تسک‌های بایگانی‌شده (۶۱۵) به درایو با نسخهٔ سبک، مثلِ `reports_archive` (تصمیمِ مالک).
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · pytest + build + گزارشِ زندهٔ دیسک
+
+## 2026-11-17 (۶۱) — سنجشِ زندهٔ PM-INS-0024 روی production و جواب در برگه
+
+- **[VERIFY]** روی 02f9c21: کارتِ خانه «۱٬۳۷۹ — پیشنهادِ اسکن ۱٬۲۲۱ · در انتظار ۱۱۴ · منتظرِ بازبینی ۴۴» = خلاصهٔ اتاق فرمان. پنلِ دیسک: ۷۸٫۶٪، `database.db` ۴۸۵MB
+  (project_files ۱۳۱MB، render_logs ۹۷MB + ایندکس‌ها حدودِ ۷۲MB، ai_logs ۹۶MB، inspector_messages ۴۶MB)، `tasks.json` ۱۲۲MB، `oversight/verify_evidence` ۹۲MB. پیش‌نمایشِ پاک‌سازیِ فایلی خالی است
+  (هیچ کش/لاگِ فایلی/فایلِ کهنه‌ای نیست). جواب: partial — هر دو تصویر گرفته شد.
+- **[TODO]** تصمیمِ مالک: (الف) render_logs/ai_logs ِ قدیمی ⇐ درایو ⇐ حذفِ ردیف (VACUUM ۴۸۵MB جای موقت می‌خواهد، فقط ۱۹۲MB آزاد است)؛ (ب) تسک‌های بایگانی‌شده از `tasks.json` به درایو.
+  نکته: `RenderLogSettings.retention_hours` = ۴۸ ولی ۹۷MB لاگ مانده ⇒ باید بررسی شود که آیا پاک‌سازیِ دوره‌ایِ render_logs اجرا می‌شود.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · API و اسکرین‌شات روی production
