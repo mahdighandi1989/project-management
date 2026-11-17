@@ -487,6 +487,17 @@ def _format_related_files(related: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+# 🆕 (PM-INS-0025) — پروژهٔ تازه repo ندارد: یادداشتِ «بررسیِ خودکارِ repo / پیاده‌سازیِ قبلی» برای آن گمراه‌کننده بود.
+NEW_PROJECT_NOTE = """## ⚠️ یادداشت برای مدلِ سازنده — قبل از شروع بخوان
+
+این یک **پروژهٔ تازه** است (هنوز کدی وجود ندارد). پرامپت را سطر به سطر بخوان و همهٔ بندها را پیاده کن.
+
+- محدودیت‌های صریحِ کاربر (مثلاً «بدونِ بک‌اند»، «فقط HTML/CSS/JS»، زبان یا کتابخانهٔ مشخص) **قانون** است، نه پیشنهاد.
+- فقط فایل‌هایی را بساز که برای اجرای همین درخواست لازم‌اند؛ فایل/لایهٔ اضافه (سرور، دیتابیس، Docker) نساز مگر خواسته شده باشد.
+- همهٔ فایل‌ها باید با هم جور باشند: هر فایلی که import/export می‌شود واقعاً بارگذاری شود، و دستورِ تست واقعاً اجرا شود.
+- پیش از «تمام شد»، برنامه را اجرا کن (صفحه را باز کن، دکمه‌ها را بزن، تست‌ها را اجرا کن) و تا سبز شدن اصلاح کن."""
+
+
 def build_strong_prompt(
     *,
     title: str,
@@ -511,6 +522,7 @@ def build_strong_prompt(
     type_: str = "other",
     priority: str = "medium",
     estimate: str = "medium",
+    new_project: bool = False,
 ) -> str:
     """ساخت پرامپت اجرایی با ساختار استاندارد و عمق بالا برای ابزارهای کدنویس خارجی.
 
@@ -585,7 +597,7 @@ def build_strong_prompt(
         return "\n".join(rem_parts)
 
     # === ⚠️ DISCLAIMER (همیشه ابتدای پرامپت — قبل از هر چیز دیگر) ===
-    parts.append(EXECUTOR_DISCLAIMER)
+    parts.append(NEW_PROJECT_NOTE if new_project else EXECUTOR_DISCLAIMER)
 
     # === 📥 درخواست خام کاربر (verbatim — هرگز خلاصه نشود) ===
     # این بخش حیاتی است: تضمین می‌کند URL ها، آدرس‌ها، نام‌ها، context کامل
@@ -610,7 +622,7 @@ def build_strong_prompt(
             "_(file:line — symbol — snippet)_\n\n"
             f"{loc_lines}"
         )
-    else:
+    elif not new_project:
         parts.append(
             "## 📍 موقعیت دقیق در پروژه\n"
             "_(فایل‌های دقیق توسط مجری شناسایی شوند — هیچ موقعیت مشخصی استخراج نشد)_"

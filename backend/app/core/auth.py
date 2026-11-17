@@ -263,8 +263,22 @@ def preview_ticket_ok(ticket: str, project_id: str) -> bool:
     return hmac.compare_digest(sig, good)
 
 
+# PM-INS-0025 — the Creator Engine's live preview of a generated project (static files, sandboxed). Path ticket only,
+# bound to "creator:<project>" so it never opens an inspector proxy (and vice versa).
+CREATOR_PREVIEW_PREFIX = "/api/simple/preview/"
+
+
+def creator_preview_ok(path: str) -> bool:
+    project_id, _, rest = path[len(CREATOR_PREVIEW_PREFIX):].partition("/")
+    if not project_id or not rest.startswith(PREVIEW_PATH_MARK):
+        return False
+    return preview_ticket_ok(rest[len(PREVIEW_PATH_MARK):].split("/", 1)[0], "creator:" + project_id)
+
+
 def preview_allowed(path: str, method: str, headers: dict) -> bool:
     """A GET/HEAD under one project's proxy prefix carrying that project's valid ticket cookie."""
+    if method in ("GET", "HEAD") and path.startswith(CREATOR_PREVIEW_PREFIX):
+        return creator_preview_ok(path)
     if method not in ("GET", "HEAD") or not path.startswith(PREVIEW_PREFIX):
         return False
     project_id, _, rest = path[len(PREVIEW_PREFIX):].partition("/")

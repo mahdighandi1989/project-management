@@ -78,6 +78,9 @@ class Project:
     github_repo: Optional[str] = None
     github_repo_url: Optional[str] = None
     github_default_branch: Optional[str] = None
+    # 🆕 (PM-INS-0025) — قیدهای صریحِ کاربر و نتیجهٔ خودسنجیِ پس از ساخت (اجرای تست‌ها + مرورگرِ واقعی + دورهای اصلاح)
+    constraints: Dict[str, Any] = field(default_factory=dict)
+    selfcheck: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self):
         return {
@@ -96,6 +99,8 @@ class Project:
             "github_repo": self.github_repo,
             "github_repo_url": self.github_repo_url,
             "github_default_branch": self.github_default_branch,
+            "constraints": self.constraints,
+            "selfcheck": self.selfcheck,
         }
 
 
@@ -193,6 +198,8 @@ class SimpleProjectCreator:
                                 github_repo=data.get("github_repo"),
                                 github_repo_url=data.get("github_repo_url"),
                                 github_default_branch=data.get("github_default_branch"),
+                                constraints=data.get("constraints") or {},
+                                selfcheck=data.get("selfcheck") or {},
                             )
                             self.projects[project.id] = project
         except Exception as e:
@@ -206,8 +213,22 @@ class SimpleProjectCreator:
         technologies: List[str] = None,
         ai_generate: callable = None,
         selected_projects: Optional[List[Dict[str, Any]]] = None,
+        constraints: Optional[Dict[str, Any]] = None,
+        selfcheck: bool = True,
+        fix_rounds: int = 3,
     ) -> Project:
-        """ساخت پروژه جدید"""
+        """ساخت پروژه جدید.
+
+        (PM-INS-0025) قیدهای صریحِ کاربر (`constraints`، از `creator_selfcheck.detect_constraints`) قانون‌اند: فایل‌های
+        ممنوع ساخته نمی‌شوند. فایل‌ها به ترتیبِ وابستگی و هر کدام با دیدنِ فایل‌های قبلی نوشته می‌شوند. پس از ساخت،
+        پروژه واقعاً اجرا می‌شود (تست‌ها + مرورگر) و تا سبز شدن (حداکثر `fix_rounds` دور) اصلاح می‌شود.
+        """
+        from . import creator_selfcheck as SC
+        constraints = dict(constraints or {})
+        technologies = SC.clean_technologies(technologies or [], constraints)
+        static_web = SC.is_static_web(constraints, project_type, technologies)
+        if static_web and project_type in ("auto", "fullstack", "full-stack", "python", "fastapi", "nextjs", "react", ""):
+            project_type = "static-web"
 
         # ایجاد ID و مسیر
         project_id = f"proj_{uuid.uuid4().hex[:8]}"
@@ -222,6 +243,7 @@ class SimpleProjectCreator:
             project_type=project_type,
             technologies=technologies or [],
             selected_projects=list(selected_projects or []),
+            constraints={**constraints, "static_web": static_web},
         )
 
         self.projects[project_id] = project
@@ -248,12 +270,21 @@ class SimpleProjectCreator:
                 # مرحله 1: تولید ساختار
                 structure = await self._generate_structure(
                     name, description, project_type, technologies,
-                    _tracked_ai_generate,
+                    _tracked_ai_generate, rules=SC.structure_prompt_rules(constraints, static_web),
                 )
+                planned, dropped = SC.filter_planned_files(structure.get("files", []), constraints, static_web)
+                if static_web and len(planned) < 3:
+                    planned = SC.static_web_default_structure(name)["files"]
+                if dropped:
+                    structure["dropped_by_constraints"] = dropped
+                structure["files"] = planned
                 project.structure = structure
 
-                # مرحله 2: تولید هر فایل
-                files_to_generate = structure.get("files", [])
+                # مرحله 2: تولید هر فایل — به ترتیبِ وابستگی، هر فایل با دیدنِ فایل‌های قبلی
+                files_to_generate = SC.order_for_generation(planned)
+                planned_paths = [(f.get("path") if isinstance(f, dict) else str(f)) for f in files_to_generate]
+                written: Dict[str, str] = {}
+                rules = SC.structure_prompt_rules(constraints, static_web)
                 for file_info in files_to_generate:
                     file_path = file_info.get("path") if isinstance(file_info, dict) else file_info
                     file_desc = file_info.get("description", "") if isinstance(file_info, dict) else ""
@@ -262,7 +293,9 @@ class SimpleProjectCreator:
                     content = await self._generate_file(
                         name, description, project_type, file_path, file_desc,
                         _tracked_ai_generate,
+                        context=SC.context_for_file(written, planned_paths, file_path) + ("\n\n" + rules if rules else ""),
                     )
+                    written[file_path] = content
 
                     # ذخیره فایل
                     full_path = project_path / file_path
@@ -278,6 +311,11 @@ class SimpleProjectCreator:
                         generated_by=_last_used_model["id"],
                         generated_at=datetime.now().isoformat(),
                     ))
+
+                # مرحله 3: خودسنجی — اجرا، دیدن، اصلاح تا سبز
+                if selfcheck:
+                    await self.run_selfcheck(project, _tracked_ai_generate, max_rounds=fix_rounds,
+                                             model_ref=_last_used_model)
 
                 project.status = "created"
 
@@ -296,7 +334,8 @@ class SimpleProjectCreator:
         description: str,
         project_type: str,
         technologies: List[str],
-        ai_generate: callable
+        ai_generate: callable,
+        rules: str = "",
     ) -> Dict:
         """تولید ساختار پروژه با AI"""
 
@@ -318,22 +357,27 @@ class SimpleProjectCreator:
                 "برای feature های توصیف‌شده را در src/app/ ایجاد کن.\n"
             )
 
+        # (PM-INS-0025) the old example literally listed src/main.py + requirements.txt — weak models copied it into a
+        # «بدونِ بک‌اند» calculator. The example is now neutral and the user's constraints come first.
         prompt = f"""یک پروژه {project_type} با مشخصات زیر طراحی کن:
 
 نام: {name}
 توضیحات: {description}
-تکنولوژی‌ها: {', '.join(technologies or [])}
+تکنولوژی‌ها: {', '.join(technologies or []) or '(فقط آنچه لازم است)'}
 {type_guidance}
-خروجی باید JSON باشه با این فرمت:
+{rules}
+
+فقط فایل‌هایی را بیاور که برای اجرای همین درخواست لازم‌اند (فایلِ اضافه نساز). مسیرها باید با هم جور باشند.
+خروجی باید JSON باشه با این فرمت (مسیرها فقط نمونه‌اند):
 {{
-    "directories": ["src", "tests", "config"],
+    "directories": ["<پوشه>"],
     "files": [
-        {{"path": "src/main.py", "description": "فایل اصلی"}},
-        {{"path": "requirements.txt", "description": "وابستگی‌ها"}},
+        {{"path": "<مسیرِ فایل>", "description": "این فایل چه می‌کند و چه چیزی export/import می‌کند"}},
         {{"path": "README.md", "description": "مستندات"}}
     ],
-    "entry_point": "src/main.py",
-    "run_command": "python src/main.py"
+    "entry_point": "<فایلِ ورودی>",
+    "run_command": "<دستورِ اجرا>",
+    "test_command": "<دستورِ تست>"
 }}
 
 فقط JSON برگردون، بدون توضیح اضافی."""
@@ -493,13 +537,14 @@ class SimpleProjectCreator:
         file_desc: str,
         ai_generate: callable,
         max_output_tokens: int = 16384,  # 🆕 budget مدل
+        context: str = "",
     ) -> str:
         """تولید محتوای یک فایل با AI — با respect به token budget."""
         # 🆕 تخمین complexity → تصمیم one-shot vs chunks
         estimated = self._estimate_file_complexity(file_path, file_desc)
         # اگر تخمین > 70% max_output → chunking
         threshold = int(max_output_tokens * 0.7)
-        if estimated > threshold:
+        if estimated > threshold and not context:
             logger.info(
                 f"file {file_path}: estimated {estimated} > {threshold} → chunked generation"
             )
@@ -521,7 +566,10 @@ class SimpleProjectCreator:
 فایل: {file_path}
 توضیح فایل: {file_desc}
 
-کد کامل و قابل اجرا بنویس. فقط کد، بدون توضیح اضافی.
+{context}
+
+کد کامل و قابل اجرا بنویس — دقیقاً با همان مسیرها، نامِ exportها و id هایی که فایل‌های دیگر دارند/انتظار دارند.
+فقط محتوای همین یک فایل، بدون توضیح اضافی.
 اگه markdown نیاز نیست، ``` نذار."""
 
         response = await ai_generate(prompt)
@@ -533,6 +581,57 @@ class SimpleProjectCreator:
         content = sanitize_file_content(content, file_path)
 
         return content
+
+    def selfcheck_dir(self, project_id: str) -> Path:
+        """Screenshots of the self-check live OUTSIDE the project (the project gets no extra files)."""
+        d = self.workspace / "_selfcheck" / project_id
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    async def run_selfcheck(self, project: "Project", ai_generate: callable, *, max_rounds: int = 3,
+                            model_ref: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """(PM-INS-0025) Run what was built (tests + a real browser), fix until green, and keep project.files in sync."""
+        from . import creator_selfcheck as SC
+        root = self.workspace / project.id
+        cons = dict(project.constraints or {})
+        static_web = bool(cons.get("static_web")) or SC.is_static_web(cons, project.project_type, project.technologies)
+        if not (list(root.glob("*.html")) or list(root.glob("**/*.html")) or (root / "package.json").exists()):
+            project.selfcheck = {"skipped": "خودسنجیِ خودکار فعلاً برای اپ‌های وب/Node است (HTML یا package.json)",
+                                 "at": datetime.now().isoformat()}
+            return project.selfcheck
+        idx = {f.path: f for f in project.files if isinstance(f, ProjectFile)}
+
+        def _on_write(path: str, body: str) -> None:
+            pf = idx.get(path)
+            if pf is None:
+                pf = ProjectFile(path=path, language=self._detect_language(path))
+                project.files.append(pf)
+                idx[path] = pf
+            pf.content = body
+            pf.generated_by = (model_ref or {}).get("id") or pf.generated_by
+            pf.generated_at = datetime.now().isoformat()
+
+        try:
+            res = await SC.fix_loop(root, ai=ai_generate, description=project.description, constraints=cons,
+                                    static_web=static_web, max_rounds=max_rounds,
+                                    shot_dir=self.selfcheck_dir(project.id), on_write=_on_write,
+                                    steps=(project.selfcheck or {}).get("steps") or None)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("selfcheck failed")
+            res = {"green": False, "error": f"{type(e).__name__}: {str(e)[:300]}"}
+        # deterministic fixes touch files without the callback — re-read every planned file from disk
+        for pf in project.files:
+            if isinstance(pf, ProjectFile):
+                fp = root / pf.path
+                if fp.is_file():
+                    try:
+                        pf.content = fp.read_text(encoding="utf-8")
+                    except Exception:  # noqa: BLE001
+                        pass
+        res["at"] = datetime.now().isoformat()
+        project.selfcheck = res
+        await self._save_project_meta(project)
+        return res
 
     def _get_default_structure(self, project_type: str) -> Dict:
         """ساختار پیش‌فرض بر اساس نوع پروژه"""

@@ -55,6 +55,7 @@ def _build_meta_prompt(
 9. مدل‌های داده (data_models) — schemas اصلی (اگر مرتبط)
 10. الزامات غیرکارکردی (non_functional_requirements) — امنیت، performance، test
 11. هشدارها (warnings) — موارد مبهم/ناقص در idea که AI خودش حدس زد
+12. محدودیت‌های صریحِ کاربر (constraints) — هر قیدی که کاربر نوشته (مثلاً «بدون بک‌اند»، «فقط HTML/CSS/JS»، «بدون فریم‌ورک») **عیناً**
 
 # خروجی فقط JSON خام (بدون ```، بدون commentary)
 {{
@@ -72,13 +73,16 @@ def _build_meta_prompt(
     {{"name": "User", "fields": ["id: int", "email: str", "..."]}}
   ],
   "non_functional_requirements": ["JWT auth", "test coverage 80%", "..."],
-  "warnings": ["نکته‌ای که در idea مبهم بود..."]
+  "warnings": ["نکته‌ای که در idea مبهم بود..."],
+  "constraints": ["قیدِ صریحِ کاربر، عیناً"]
 }}
 
 # قواعد مهم
 - اگر `endpoints_or_routes` یا `data_models` برای این نوع پروژه نامرتبط است، آرایهٔ خالی `[]` بگذار
 - `warnings` همیشه باید موارد مبهم را ذکر کند — اگر چیزی واضح نبود، اضافه کن
-- `tech_stack` باید کامل باشد: framework + DB + auth + test + ...
+- `tech_stack` فقط آنچه لازم است: اگر کاربر قیدی گذاشته (مثلاً «بدون بک‌اند»)، هیچ framework/DB/auth ِ سمتِ سرور اضافه نکن؛
+  برای اپِ سادهٔ مرورگری HTML + CSS + JavaScript (ES modules) و تست با `node --test` کافی است
+- قیدهای صریحِ کاربر را هرگز نقض نکن و در `constraints` عیناً بیاور
 - زبان خروجی: فارسی برای توضیحات، انگلیسی برای نام فایل/کد
 - اگر idea مبهم بود، با حدس منطقی پر کن ولی در warnings بنویس
 """
@@ -241,6 +245,18 @@ async def idea_to_strong_prompt_for_creator(
     data_models = _safe_get_list(parsed, "data_models")
     non_func = _safe_get_list(parsed, "non_functional_requirements")
     warnings = _safe_get_list(parsed, "warnings")
+    # (PM-INS-0025) the user's explicit constraints are LAW — detected from their own words (not guessed) plus what the
+    # model copied; a «بدونِ بک‌اند» idea must not come back with FastAPI/DB/endpoints
+    from .creator_selfcheck import detect_constraints, clean_technologies
+    _cons = detect_constraints(idea)
+    constraints = [str(c) for c in _safe_get_list(parsed, "constraints") if c]
+    for ph in _cons.get("phrases") or []:
+        if not any(ph in c for c in constraints):
+            constraints.append(ph)
+    if _cons.get("no_backend"):
+        tech_stack = clean_technologies(tech_stack, _cons) or ["HTML", "CSS", "JavaScript (ES modules)", "node:test"]
+        endpoints, data_models = [], []
+        file_structure = [f for f in file_structure if not (isinstance(f, str) and f.endswith((".py", "requirements.txt")))]
 
     # ساخت full_prompt_text با build_strong_prompt (یکدست با سایر بخش‌ها)
     related_files: List[Dict[str, Any]] = []
@@ -273,6 +289,8 @@ async def idea_to_strong_prompt_for_creator(
                 extra_context_lines.append(f"- {dm}")
 
     description_full = structured_desc
+    if constraints:
+        description_full += "\n\n## ⛔ محدودیت‌های صریحِ کاربر (قانون — نقض نکن)\n" + "\n".join(f"- {c}" for c in constraints)
     if extra_context_lines:
         description_full += "\n" + "\n".join(extra_context_lines)
 
@@ -293,6 +311,7 @@ async def idea_to_strong_prompt_for_creator(
         type_="feature_request",
         priority="medium",
         estimate="medium",
+        new_project=True,
     )
 
     return {
@@ -306,6 +325,7 @@ async def idea_to_strong_prompt_for_creator(
         "endpoints_or_routes": endpoints,
         "data_models": data_models,
         "non_functional_requirements": non_func,
+        "constraints": constraints,
         "full_prompt_text": full_prompt_text,
         "model_used": model_used,
         "warnings": warnings,

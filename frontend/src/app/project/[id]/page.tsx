@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
+import CreatorSelfcheckPanel from '@/components/CreatorSelfcheckPanel';
 // ProjectHealthPanel در commit 3.3a حذف شد — به /oversight منتقل شد
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -626,6 +627,15 @@ export default function ProjectPage() {
             )}
           </div>
         )}
+
+        {/* (PM-INS-0025) خودسنجی (تست + مرورگر)، پیش‌نمایشِ زنده و zip */}
+        <CreatorSelfcheckPanel
+          projectId={projectId}
+          selfcheck={(project as any).selfcheck}
+          constraints={(project as any).constraints}
+          modelIds={auditModelIds}
+          onUpdated={loadProject}
+        />
 
         <div className="grid lg:grid-cols-4 gap-6">
           {/* لیست فایل‌ها */}

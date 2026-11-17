@@ -14,6 +14,8 @@ RUN apt-get update && apt-get install -y \
     # so iframe-mode recordings play inline in Telegram (not a static
     # sticker). Also used by oversight_extraction for av chunking.
     ffmpeg \
+    # 🧪 nodejs — the Creator Engine runs a generated project's own tests (`node --test`) before «ساخته شد» (PM-INS-0025)
+    nodejs \
     # Playwright dependencies
     libnss3 \
     libnspr4 \

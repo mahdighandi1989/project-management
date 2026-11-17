@@ -1314,3 +1314,22 @@
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · مرورگرِ واقعی + API روی production
 
+## 2026-11-17 (۶۳) — PM-INS-0025: موتور خالق — رعایتِ قیدها، خودسنجی (تست + مرورگر) و اصلاح تا سبز، پیش‌نمایشِ زنده و zip
+
+- **[OWNER]** (هماهنگ‌کننده، ۰۰:۰۶؛ مالک: «موتور خالق خیلی بی‌کیفیت است») پروژهٔ «test-calculator-coordinator» با DeepSeek: منطقِ calculator.js درست، ولی در مرورگر کار نمی‌کند
+  (اسکریپت‌ها بی type="module" با export، js/app.js اصلاً بار نمی‌شود)، package.json «type: commonjs» + jest ⇒ تست خطا، با «بدونِ بک‌اند» باز main.py/FastAPI/requirements.txt،
+  یادداشتِ «بررسیِ repo» در پرامپتِ مرحلهٔ ۱، و هیچ خودسنجی‌ای پیش از «ساخته شد». پذیرش: همان پروژه دوباره با DeepSeek؛ «2+3=» ⇒ 5 در مرورگر و `npm test` سبز.
+- **[FINDING]** `simple_creator._generate_structure` نمونهٔ JSON‌اش عیناً `src/main.py` و `requirements.txt` بود (مدلِ ضعیف کپی می‌کرد)؛ `_generate_file` هر فایل را **بی‌خبر از بقیه** می‌نوشت
+  (ریشهٔ ناهماهنگیِ HTML/JS)؛ قیدِ کاربر هیچ‌جا اعمال نمی‌شد؛ هیچ اجرایی پس از ساخت نبود؛ ایمیجِ بک‌اند Node نداشت؛ یادداشتِ repo از `EXECUTOR_DISCLAIMER` ِ مشترک می‌آمد.
+- **[CHANGE]** `services/creator_selfcheck.py` (تازه): `detect_constraints` (فقط عبارت‌های صریحِ خودِ کاربر — متنِ قالبِ پرامپت را نمی‌خواند)، قواعدِ ساختار و شکلِ ثابتِ اپِ مرورگری،
+  `filter_planned_files`، `order_for_generation` + `context_for_file`، `static_problems` + `deterministic_fixes` (type="module"، بارگذاریِ ورودیِ جامانده، package.json)، `run_tests` (اسکریپتِ تستِ
+  package.json با Node، بی‌نصب)، `run_browser` (Chromium روی سرورِ محلیِ ۱۲۷.۰.۰.۱: pageerror، 404، سناریوی کلیک/انتظار، عکس)، `plan_browser_steps`، `fix_loop` (تا ۳ دور؛ قالبِ
+  `=== FILE: … ===`). «اجرا نشد» ِ زیرساخت (`blocked`) سبز حساب نمی‌شود و به مدل هم داده نمی‌شود.
+  `simple_creator`: فیلدهای `constraints`/`selfcheck`، `run_selfcheck`، عکس‌ها در `_selfcheck/<id>` (پروژه فایلِ اضافه نمی‌گیرد). `simple_projects`: قیدها از `description` ِ خامِ کاربر
+  + `structured_prompt.constraints`، `selfcheck: true` (پیش‌فرض)، `POST /projects/{id}/selfcheck`، `GET …/selfcheck/screenshot`، `POST …/preview-url`، `GET /preview/{id}/~pt~…/…` (CSP sandbox،
+  nosniff، ACAO *)، `GET …/zip`. `core/auth`: `CREATOR_PREVIEW_PREFIX` با بلیتِ `creator:<id>`. `oversight_strong_prompt`: `NEW_PROJECT_NOTE` و `new_project=True`؛
+  `creator_idea_to_prompt`: فیلدِ `constraints`، حذفِ فناوری/endpoint ِ سرور با «بدونِ بک‌اند». `Dockerfile`: `nodejs`. فرانت: `components/CreatorSelfcheckPanel.tsx` در `/project/[id]`.
+- **[DECISION]** «npm test» بی npm: Debian ‏`npm` صدها بسته می‌کشد؛ اسکریپتِ تستِ package.json فقط وقتی `node …` است اجرا می‌شود (هیچ نصبی روی سرور) — برای همین اپِ مرورگری `node --test` می‌گیرد.
+- **[VERIFY]** `tests/test_creator_selfcheck.py` (۹، شاملِ مرورگرِ واقعی: ماشین‌حسابِ خراب ⇒ دورِ ۰ تست ۰/۱ و سناریو ۴/۵ ⇒ دورِ ۱ سبز ۵/۵). کلِ تست‌ها ۹۲۳ قبول. سنجشِ production در ورودیِ بعد.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · pytest + Chromium ِ محلی

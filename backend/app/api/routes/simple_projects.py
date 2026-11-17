@@ -42,6 +42,8 @@ class CreateProjectRequest(BaseModel):
     # ذخیره می‌شوند تا کاربر بعداً ببیند از کجا الهام گرفته. هر آیتم:
     # {project_id, project_path, is_selected}
     selected_projects: Optional[List[Dict[str, Any]]] = None
+    # (PM-INS-0025) پس از ساخت، پروژه اجرا (تست + مرورگر) و تا سبز شدن اصلاح شود
+    selfcheck: bool = True
 
 
 class IdeaToPromptRequest(BaseModel):
@@ -487,6 +489,14 @@ async def create_project(request: CreateProjectRequest):
             logger.warning(f"create_project: selected_projects normalize failed: {_e}")
 
     try:
+        # (PM-INS-0025) the user's explicit constraints — from THEIR words (the raw idea) and the «constraints» the
+        # step-1 model copied verbatim; never from the strong-prompt boilerplate
+        from ...services.creator_selfcheck import detect_constraints
+        _st_cons = (structured or {}).get("constraints") if isinstance(structured, dict) else None
+        constraints = detect_constraints(
+            request.description or "",
+            "\n".join(str(c) for c in (_st_cons or []) if c) if isinstance(_st_cons, list) else str(_st_cons or ""),
+        )
         project = await creator.create_project(
             name=request.name,
             description=description,
@@ -494,6 +504,8 @@ async def create_project(request: CreateProjectRequest):
             technologies=technologies,
             ai_generate=gen,
             selected_projects=normalized_selected,
+            constraints=constraints,
+            selfcheck=request.selfcheck,
         )
 
         return {
@@ -503,7 +515,10 @@ async def create_project(request: CreateProjectRequest):
             "detected_technologies": technologies if request.auto_detect_type else None,
             "model_ids_used": request.model_ids,
             "used_structured_prompt": bool(structured),
-            "message": f"پروژه {project.name} با {len(project.files)} فایل ساخته شد!",
+            "message": f"پروژه {project.name} با {len(project.files)} فایل ساخته شد!" + (
+                "" if not project.selfcheck or project.selfcheck.get("skipped") else
+                (" ✅ خودسنجی سبز (تست‌ها + مرورگر)" if project.selfcheck.get("green")
+                 else " ⚠️ خودسنجی هنوز ایراد دارد — گزارشِ خودسنجی را ببین")),
         }
 
     except HTTPException:
@@ -3239,3 +3254,121 @@ async def push_to_github(project_id: str, request: Optional[PushToGitHubRequest]
             + (f" — {len(failed)} خطا" if failed else "")
         ),
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# (PM-INS-0025) خودسنجی، پیش‌نمایشِ زنده و دانلودِ zip ِ پروژهٔ ساخته‌شده
+# ═══════════════════════════════════════════════════════════════════════
+
+class SelfcheckRequest(BaseModel):
+    model_ids: List[str] = []
+    fix: bool = True  # false = فقط اجرا و گزارش (بدونِ تغییرِ فایل)
+    max_rounds: int = 3
+
+
+def _creator_project_or_404(project_id: str):
+    from ...services.simple_creator import get_simple_creator
+    creator = get_simple_creator()
+    project = creator.get_project(project_id)
+    if not project or "/" in project_id or ".." in project_id:
+        raise HTTPException(status_code=404, detail="پروژه پیدا نشد")
+    return creator, project
+
+
+@router.post("/projects/{project_id}/selfcheck")
+async def rerun_selfcheck(project_id: str, request: SelfcheckRequest):
+    """اجرای دوبارهٔ خودسنجی (تست‌ها + مرورگرِ واقعی)؛ با fix=true تا سبز شدن اصلاح می‌کند (با مدل‌های انتخابی)."""
+    creator, project = _creator_project_or_404(project_id)
+    if request.fix and not request.model_ids:
+        raise HTTPException(status_code=400, detail="برای اصلاح حداقل یک مدل انتخاب کنید (یا fix=false)")
+    model_ref: Dict[str, str] = {"id": ""}
+
+    async def gen(prompt: str):
+        content, used = await ai_generate_with_meta(prompt, model_ids=request.model_ids, max_tokens=8000)
+        model_ref["id"] = str(used or "")
+        return content
+
+    async def no_model(prompt: str):  # fix=false: the scenario is reused, nothing is rewritten
+        raise RuntimeError("fix=false")
+
+    rounds = max(0, min(5, int(request.max_rounds))) if request.fix else 0
+    res = await creator.run_selfcheck(project, gen if request.model_ids else no_model, max_rounds=rounds,
+                                      model_ref=model_ref)
+    return {"success": True, "selfcheck": res, "project": project.to_dict()}
+
+
+@router.get("/projects/{project_id}/selfcheck/screenshot")
+async def selfcheck_screenshot(project_id: str):
+    """آخرین عکسِ مرورگر از خودسنجی (خارج از پوشهٔ پروژه نگه داشته می‌شود)."""
+    from fastapi.responses import FileResponse
+    creator, project = _creator_project_or_404(project_id)
+    d = creator.workspace / "_selfcheck" / project_id
+    shots = sorted(d.glob("selfcheck_*.png"), key=lambda p: p.stat().st_mtime) if d.exists() else []
+    if not shots:
+        raise HTTPException(status_code=404, detail="هنوز عکسی از خودسنجی نیست")
+    return FileResponse(str(shots[-1]), media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@router.post("/projects/{project_id}/preview-url")
+async def creator_preview_url(project_id: str):
+    """نشانیِ پیش‌نمایشِ زنده (۳۰ دقیقه، فقط همین پروژه، فقط GET) — iframe نمی‌تواند هدرِ ورود بفرستد."""
+    from ...core import auth as A
+    creator, project = _creator_project_or_404(project_id)
+    root = creator.workspace / project_id
+    entry = "index.html" if (root / "index.html").exists() else next(
+        (p.relative_to(root).as_posix() for p in sorted(root.rglob("*.html"))), "")
+    if not entry:
+        return {"success": False, "url": "", "reason": "این پروژه صفحهٔ HTML ندارد — پیش‌نمایش برای اپ‌های مرورگری است"}
+    t = A.preview_ticket("creator:" + project_id)
+    return {"success": True, "url": f"{A.CREATOR_PREVIEW_PREFIX}{project_id}/{A.PREVIEW_PATH_MARK}{t}/{entry}",
+            "entry": entry, "expires_in": A.PREVIEW_TTL}
+
+
+@router.get("/preview/{project_id}/{rest:path}")
+async def creator_preview_file(project_id: str, rest: str):
+    """فایل‌های ایستای پروژه برای پیش‌نمایش. sandbox (مبدأ opaque) — کدِ تولیدشده به API و کوکی‌ها دسترسی ندارد."""
+    import mimetypes
+    from fastapi.responses import Response
+    from ...core import auth as A
+    if not A.creator_preview_ok(f"{A.CREATOR_PREVIEW_PREFIX}{project_id}/{rest}"):
+        raise HTTPException(status_code=401, detail="بلیتِ پیش‌نمایش نامعتبر یا منقضی است")
+    creator, _project = _creator_project_or_404(project_id)
+    rel = rest.split("/", 1)[1] if "/" in rest else ""
+    rel = rel.split("?", 1)[0] or "index.html"
+    root = (creator.workspace / project_id).resolve()
+    f = (root / rel).resolve()
+    if f.is_dir():
+        f = f / "index.html"
+    if root not in f.parents or not f.is_file() or f.name == "project.json":
+        raise HTTPException(status_code=404, detail="فایل پیدا نشد")
+    ctype = {".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".html": "text/html",
+             ".json": "application/json", ".svg": "image/svg+xml"}.get(f.suffix.lower()) \
+        or mimetypes.guess_type(f.name)[0] or "application/octet-stream"
+    if ctype.startswith("text/") or ctype in ("application/json", "image/svg+xml"):
+        ctype += "; charset=utf-8"
+    return Response(content=f.read_bytes(), media_type=ctype.split(";")[0], headers={
+        "Content-Type": ctype,
+        "Content-Security-Policy": "sandbox allow-scripts allow-forms allow-modals allow-popups",
+        "Access-Control-Allow-Origin": "*",
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "no-store",
+    })
+
+
+@router.get("/projects/{project_id}/zip")
+async def download_project_zip(project_id: str):
+    """همهٔ فایل‌های پروژه در یک zip (بدونِ project.json ِ داخلی)."""
+    import io
+    import zipfile
+    from fastapi.responses import Response
+    creator, project = _creator_project_or_404(project_id)
+    root = creator.workspace / project_id
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for p in sorted(root.rglob("*")):
+            if p.is_file() and p.name != "project.json" and "node_modules" not in p.parts:
+                z.write(p, arcname=p.relative_to(root).as_posix())
+    import re as _re
+    fname = (_re.sub(r"[^A-Za-z0-9._-]+", "-", project.name or project_id).strip("-") or project_id) + ".zip"
+    return Response(content=buf.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{fname}"'})
