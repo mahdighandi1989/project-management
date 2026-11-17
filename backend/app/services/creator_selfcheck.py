@@ -951,7 +951,17 @@ async def fix_loop(root: Path, *, ai: AIGen, description: str, constraints: Dict
         restored, rep = best[1], best[3]
         if shot_dir and (shot_dir / f"selfcheck_{restored}.png").exists():
             shutil.copyfile(shot_dir / f"selfcheck_{restored}.png", shot_dir / f"selfcheck_{rounds[-1]['round'] + 1}.png")
-    return {"green": rep["green"], "rounds": rounds, "steps": steps, "restored_round": restored, "final": {
+    # the honest three-way verdict: green / everything that exists passes but the model rewrote tests that used to pass
+    # (cannot tell «wrong test fixed» from «test weakened» — the owner should look) / not working
+    t_fin = rep.get("tests") or {}
+    b_fin = rep.get("browser") or {}
+    only_lost = rep["problems"] and all("پیش‌تر قبول بود" in x for x in rep["problems"])
+    works = (bool(t_fin.get("ok")) or not t_fin.get("ran")) and (bool(b_fin.get("ok")) or not b_fin.get("ran")) \
+        and not rep.get("blocked")
+    verdict = "green" if rep["green"] else ("works_tests_rewritten" if (works and only_lost) else "not_green")
+    lost_n = len(base_passing - set(t_fin.get("passing_names") or [])) if base_passing else 0
+    return {"green": rep["green"], "verdict": verdict, "base_passing": len(base_passing), "lost_passing": lost_n,
+            "rounds": rounds, "steps": steps, "restored_round": restored, "final": {
         "static": rep["static"], "tests": {k: v for k, v in (rep.get("tests") or {}).items()
                                            if k not in ("output", "passing_names")},
         "tests_removed_failing": rep.get("tests_removed_failing"),

@@ -138,13 +138,22 @@ def last_real_runs(svc: Any, tasks: List[Any], watched: List[Any], names: Dict[s
     contradictory = [x.repo_full_name for x in watched
                      if getattr(x, "autonomy_level", "") == "auto" and getattr(x, "verify_only_mode", False)]
     at = t[0] if t else None
+    # tasks carry no run stamp from before the 2026-06 refactor ⇒ fall back to the project's «last run» (same batch)
+    src = "task" if at else ("project" if w else None)
+    if not at and w:
+        at = w[0]
     days = (now - at).days if at else None
-    line = ("آخرین اجرای واقعیِ یک تسک: " + (f"{at:%Y-%m-%d} ({days} روز پیش) — «{(t[1].title or '')[:60]}» در "
-                                           f"{names.get(t[1].watched_id, t[1].project_full_name)}" if at else "هرگز"))
+    if src == "task":
+        line = (f"آخرین اجرای واقعیِ یک تسک: {at:%Y-%m-%d} ({days} روز پیش) — «{(t[1].title or '')[:60]}» در "
+                f"{names.get(t[1].watched_id, t[1].project_full_name)}")
+    elif src == "project":
+        line = f"آخرین اجرای خودکارِ تسک‌ها: {at:%Y-%m-%d} ({days} روز پیش) در {w[1].repo_full_name}"
+    else:
+        line = "هیچ تسکی تا حالا خودکار اجرا نشده"
     line += ("؛ هیچ پروژه‌ای «اجرای خودکارِ کد» (Claude runner) ندارد ⇒ هیچ اصلاحِ کدی خودکار انجام نمی‌شود"
              if not runner_on else f"؛ اجرای خودکارِ کد روشن برای: {', '.join(runner_on)}")
     return {
-        "task_at": at.isoformat() if at else None, "task_days_ago": days,
+        "task_at": at.isoformat() if at else None, "task_days_ago": days, "source": src,
         "task_title": (t[1].title if t else None), "task_repo": (names.get(t[1].watched_id, t[1].project_full_name) if t else None),
         "project_run_at": w[0].isoformat() if w else None,
         "runner_on": runner_on, "allow_push_on": push_on,
