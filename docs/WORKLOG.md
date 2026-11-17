@@ -1213,3 +1213,13 @@
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · مرورگرِ واقعی روی production + pytest
 
+## 2026-11-17 (۵۶) — PM-INS-0022 (ادامه): حلقهٔ ورودِ Detective-1 در پیش‌نمایش
+
+- **[VERIFY]** پس از d28a0a7 پذیرش برقرار شد: «WS: متصل» Detective-1 ۶٫۲ ث، language ۵٫۱، ALLIN1 ۵٫۵؛ کلیک در چت ۰٫۳ ثانیه پس از کلیک برای هر سه («Sent message … click» از خودِ Bridge)؛
+  language صفحهٔ ورودِ خودش («لهجه لبنانی … ورود با گوگل») و ALLIN1 داشبورد/ورودِ خودش («Banking Ops | Dashboard | Customers …») را کامل نشان دادند.
+- **[FINDING]** Detective-1 سیاه می‌ماند: روترِ Next مسیر را `/api/render/inspector/proxy/…/login` می‌بیند، هیچ مسیری نمی‌خورد و نگهبانِ ورود دوباره به `login?next=<مسیرِ پروکسی>` می‌برد — حلقه.
+- **[CHANGE]** اسکریپتِ رصد برای صفحه‌های Next (`__STRIP__`): پیش از اسکریپت‌های اپ، نشانیِ دیدنی به مسیرِ خودِ اپ برمی‌گردد (`replaceState`)؛ درخواست‌ها همچنان از پروکسی؛ history برای Next پیشوند نمی‌گیرد.
+- **[VERIFY]** +۱ تست؛ pytest سبز.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-17 · مرورگرِ واقعی روی production + pytest
+

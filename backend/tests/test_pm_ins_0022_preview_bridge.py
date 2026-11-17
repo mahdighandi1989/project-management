@@ -52,3 +52,9 @@ def test_next_client_navigation_stays_in_the_preview():
     src = inspect.getsource(RL.inspector_page_proxy)
     assert '"rsc", "next-router-state-tree"' in src and '"x-component"' in src and '"text/plain"' in src
     assert "u instanceof URL" in RL._PROXY_MONITOR_SCRIPT_TEMPLATE and "pushState" in RL._PROXY_MONITOR_SCRIPT_TEMPLATE
+
+
+def test_next_pages_see_their_own_path():
+    t = RL._PROXY_MONITOR_SCRIPT_TEMPLATE
+    assert "STRIP='__STRIP__'==='1'" in t and "if(!STRIP)['pushState','replaceState']" in t
+    assert '.replace("__STRIP__", "1" if _is_next else "0")' in inspect.getsource(RL.inspector_page_proxy)

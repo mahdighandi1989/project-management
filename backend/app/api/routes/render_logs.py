@@ -19191,8 +19191,14 @@ _ساخته شده توسط بازرس ویژه (Inspector)_"""
 # __BASE__ و __PROXY__ در زمان inject جایگزین میشوند
 _PROXY_MONITOR_SCRIPT_TEMPLATE = """<script data-inspector-proxy="true">
 (function(){
-  var BASE='__BASE__', PROXY='__PROXY__';
+  var BASE='__BASE__', PROXY='__PROXY__', STRIP='__STRIP__'==='1';
   var _ps=history.pushState,_rs=history.replaceState;
+  /* PM-INS-0022: a Next.js router matches routes against location.pathname — under the proxy path no route matched and
+     an auth guard redirected to «/login?next=<proxy path>» in a loop (Detective-1). For Next pages the visible address is
+     set back to the app's own path before its scripts run; network requests still go through the proxy (below). */
+  if(STRIP&&location.pathname.indexOf(PROXY)===0){
+    try{_rs.call(history,history.state,'',(location.pathname.slice(PROXY.length)||'/')+location.search+location.hash);}catch(e){}
+  }
   function _r(){try{window.parent.postMessage({type:'proxy-url-change',href:location.href,path:location.pathname+location.search+location.hash},'*');}catch(e){}}
   history.pushState=function(){_ps.apply(this,arguments);_r();};
   history.replaceState=function(){_rs.apply(this,arguments);_r();};
@@ -19237,7 +19243,7 @@ _PROXY_MONITOR_SCRIPT_TEMPLATE = """<script data-inspector-proxy="true">
     return _fetch.call(this,url,opts);
   };
   /* client-side navigations (history API) stay under the proxy path, so a reload stays in the preview */
-  ['pushState','replaceState'].forEach(function(k){
+  if(!STRIP)['pushState','replaceState'].forEach(function(k){
     var o=history[k];
     history[k]=function(st,t,u){try{if(u!=null)u=_px(typeof u==='string'?u:(u instanceof URL?u:String(u)));}catch(e){}return o.call(this,st,t,u);};
   });
@@ -19552,7 +19558,9 @@ async def inspector_page_proxy(
         # ساخت اسکریپت با مقادیر واقعی
         # PM-INS-0022: the page's own absolute fetch/XHR calls are routed through the proxy — WITH the ticket, since the
         # sandboxed preview sends no cookie (they all came back 401)
-        monitor_script = _PROXY_MONITOR_SCRIPT_TEMPLATE.replace("__BASE__", base_url).replace("__PROXY__", asset_prefix)
+        _is_next = ("/_next/" in html) or ("__NEXT_DATA__" in html) or ("self.__next_f" in html)
+        monitor_script = (_PROXY_MONITOR_SCRIPT_TEMPLATE.replace("__BASE__", base_url).replace("__PROXY__", asset_prefix)
+                          .replace("__STRIP__", "1" if _is_next else "0"))
         if "</head>" in html:
             html = html.replace("</head>", monitor_script + "</head>", 1)
         elif "<head>" in html:
