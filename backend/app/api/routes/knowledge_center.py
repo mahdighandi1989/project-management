@@ -4,7 +4,9 @@ Endpoints:
   GET    /api/knowledge-center/entries        list + search/sort/filter/pagination
   GET    /api/knowledge-center/entries/{id}   single entry
   DELETE /api/knowledge-center/entries/{id}   delete (de-index + optionally repo)
-  POST   /api/knowledge-center/sync           pull from all watched repos
+  POST   /api/knowledge-center/sync           start background pull from all watched repos
+  GET    /api/knowledge-center/sync/status    progress + last result
+  GET    /api/knowledge-center/relevant       experiences matching a question
   POST   /api/knowledge-center/bootstrap      ensure folders exist on all watched
   POST   /api/knowledge-center/ensure/{wid}   ensure folder for one watched project
   POST   /api/knowledge-center/import         upload chat file → extract + merge
@@ -87,10 +89,32 @@ async def delete_entry(
 
 
 @router.post("/sync")
-async def sync_entries():
-    """Pull every experiences/*.md from every watched repo into the index."""
-    svc = get_knowledge_center_service()
-    return await svc.sync_from_projects()
+async def sync_entries(wait: bool = Query(False, description="true = block until done (old behaviour)")):
+    """Pull every experiences/*.md from every watched repo into the index.
+
+    PM-INS-0028: by default this STARTS a background job and returns at once
+    (``{"started": true, "state": "running", ...}``); poll ``GET /sync/status``
+    for progress and the final «N new, M updated, per project, when» result."""
+    if wait:
+        svc = get_knowledge_center_service()
+        return await svc.sync_from_projects()
+    from ...services.knowledge_center_service import start_sync_job
+    return {"ok": True, **start_sync_job()}
+
+
+@router.get("/sync/status")
+async def sync_job_status():
+    """Live progress of the running sync + the persisted result of the last one."""
+    from ...services.knowledge_center_service import sync_status
+    return sync_status()
+
+
+@router.get("/relevant")
+async def relevant_entries(q: str = Query(..., min_length=2), limit: int = Query(5, ge=1, le=20)):
+    """Which experiences the inspector/assistant would pick for this question (read-only, no usage recorded)."""
+    from ...services.knowledge_center_service import find_relevant_entries, usage_for
+    items = find_relevant_entries(q, limit=limit)
+    return {"items": [{**e, **usage_for(e["id"])} for e in items]}
 
 
 @router.post("/bootstrap")

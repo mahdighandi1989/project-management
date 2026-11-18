@@ -190,7 +190,19 @@ async def build_context(question: str, page: dict[str, Any], site_map: list[dict
     if commits:
         parts.append("## تازه‌ترین کامیت‌ها روی main\n"
                      + "\n".join(f"- {c['date'][:16]} {c['sha']} {c['message']}" for c in commits))
-    return {"text": "\n\n".join(parts), "sources": sources}
+    # PM-INS-0028 — relevant experiences from «مرکز دانش» (usage is recorded there)
+    exp_line = ""
+    try:
+        from .knowledge_center_service import experience_context
+
+        kc = await experience_context(question, "assistant", str(page.get("path") or ""))
+        if kc.get("block"):
+            parts.append(kc["block"])
+            exp_line = kc["line"]
+            sources.append(f"مرکز دانش ({len(kc['entries'])} تجربه)")
+    except Exception:  # noqa: BLE001
+        pass
+    return {"text": "\n\n".join(parts), "sources": sources, "experiences_line": exp_line}
 
 
 SYSTEM = """تو «دستیار» ِ برنامهٔ AI Creator Engine (پروژهٔ project-management) هستی: یک چتِ سیار که در همهٔ صفحه‌ها هست.
@@ -275,6 +287,10 @@ async def ask(message: str, history: list[dict[str, Any]], page: dict[str, Any],
                 return {"model_id": mid, "content": "", "error": str(e)[:300]}
         answers = list(await asyncio.gather(*(one(m) for m in chosen[:4])))
 
+    if ctx.get("experiences_line"):
+        for a in answers:
+            if a.get("content"):
+                a["content"] = a["content"].rstrip() + "\n\n" + ctx["experiences_line"]
     conv = save_turn(conversation_id, page, message, answers)
     return {"conversation_id": conv["id"], "answers": answers, "sources": ctx["sources"]}
 

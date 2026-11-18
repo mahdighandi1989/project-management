@@ -15209,11 +15209,17 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
         # (PM-INS-0006) a failing model falls through to the next usable one instead of ending the chat
         ai_manager = _FallbackAIManager(get_ai_manager(), db)
 
+        _kc_state = {"line": ""}  # PM-INS-0028 — «📚 تجربه‌های به‌کاررفته» appended to every answer
+
         def sse(event: str, data: dict) -> str:
             _pre = "".join(
                 f"event: progress\ndata: {json.dumps({'step': 'model_fallback', 'message': _n}, ensure_ascii=False)}\n\n"
                 for _n in ai_manager.drain_notes()
             )
+            if event == "response" and _kc_state["line"] and isinstance(data.get("content"), str) \
+                    and _kc_state["line"] not in data["content"]:
+                data = {**data, "content": data["content"].rstrip() + "\n\n" + _kc_state["line"],
+                        "experiences_used": _kc_state.get("ids") or []}
             return _pre + f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
         nonlocal primary_model  # 🆕 (فاز ۲) — اجازهٔ override به Claude برای کارهای کد/خطا
@@ -15524,6 +15530,18 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                 })
         except Exception as _cpe:
             slog.warning(f"[smart-chat] compact prompt skipped: {_cpe}")
+
+        # PM-INS-0028 — relevant experiences from «مرکز دانش» go into the prompt; their use is recorded
+        try:
+            from ...services.knowledge_center_service import experience_context as _kc_ctx
+            _kc = await _kc_ctx(request.message, "inspector", _proj_github)
+            if _kc.get("block"):
+                general_instructions_text = _kc["block"] + "\n\n" + general_instructions_text
+                _kc_state["line"] = _kc["line"]
+                _kc_state["ids"] = [e.get("id") for e in _kc["entries"]]
+                yield sse("progress", {"step": "experiences", "message": _kc["line"]})
+        except Exception as _kce:
+            slog.warning(f"[smart-chat] experiences skipped: {_kce}")
 
         # PM-INS-0023 — every inspector prompt states the real model + provider + route as a fact (final model, after routing)
         try:

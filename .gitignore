@@ -79,6 +79,7 @@ backend/storage/oversight/removed_watched.json
 backend/storage/oversight/ai_balance.json
 backend/storage/oversight/inspector_context/
 backend/storage/oversight/knowledge_center.json
+backend/storage/oversight/knowledge_center_usage.json
 backend/storage/oversight/uploads/
 backend/storage/oversight/watched_projects.json
 

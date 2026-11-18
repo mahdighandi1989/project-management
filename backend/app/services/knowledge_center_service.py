@@ -565,12 +565,17 @@ class KnowledgeCenterService:
         """Pull every experiences/*.md file from every watched repo into
         the index. Existing entries are updated, new ones added, missing
         ones marked stale (we don't auto-delete; user delete is explicit
-        per req #2)."""
+        per req #2).
+
+        PM-INS-0028: progress is published to ``_SYNC_STATE`` (polled by
+        ``GET /knowledge-center/sync/status``), a file whose git blob sha is
+        unchanged is NOT re-downloaded, and the per-project result + time is
+        persisted as ``index["last_sync"]``."""
         from .oversight_service import get_oversight_service, get_github_token
-        from .github_pr_service import get_github_pr_service
         svc = get_oversight_service()
         token = github_token or get_github_token()
         if not token:
+            _sync_progress(state="error", error="no_github_token", finished_at=now_iso())
             return {"ok": False, "error": "no_github_token"}
         index = _load_index()
         entries_by_key: Dict[str, Dict[str, Any]] = {
@@ -579,14 +584,22 @@ class KnowledgeCenterService:
         }
         added = 0
         updated = 0
-        for w in svc.watched:
+        unchanged = 0
+        watched = [w for w in svc.watched if "/" in (w.repo_full_name or "")]
+        per_project: List[Dict[str, Any]] = []
+        _sync_progress(projects_total=len(watched), projects_done=0, files_done=0,
+                       added=0, updated=0, unchanged=0, projects=per_project)
+        for w in watched:
             repo = w.repo_full_name
-            if "/" not in repo:
-                continue
             owner, name = repo.split("/", 1)
+            proj = {"repo": repo, "files": 0, "added": 0, "updated": 0, "unchanged": 0, "error": ""}
+            per_project.append(proj)
+            _sync_progress(current_project=repo)
             listing = await self._gh_list_directory(
                 owner, name, EXPERIENCES_FOLDER_NAME, token,
             )
+            if not listing:
+                proj["error"] = "پوشهٔ experiences/ نیست یا خوانده نشد"
             for item in (listing or []):
                 if not isinstance(item, dict):
                     continue
@@ -594,12 +607,20 @@ class KnowledgeCenterService:
                 if not name_f.endswith(".md") or name_f.lower() == "readme.md":
                     continue
                 path = item.get("path") or f"{EXPERIENCES_FOLDER_NAME}/{name_f}"
+                key = f"{repo}::{path}"
+                existing = entries_by_key.get(key)
+                git_sha = item.get("sha") or ""
+                proj["files"] += 1
+                if existing and git_sha and existing.get("git_sha") == git_sha and existing.get("content_hash"):
+                    existing["project_id"] = w.id
+                    unchanged += 1
+                    proj["unchanged"] += 1
+                    _sync_progress(files_done=_SYNC_STATE.get("files_done", 0) + 1, unchanged=unchanged)
+                    continue
                 body = await self._gh_get_file_content(
                     owner, name, path, token,
                 ) or ""
                 meta, content = _parse_frontmatter(body)
-                key = f"{repo}::{path}"
-                existing = entries_by_key.get(key)
                 size = len(body.encode("utf-8"))
                 ch = _hash(body)
                 tags = meta.get("tags") or []
@@ -633,6 +654,7 @@ class KnowledgeCenterService:
                     )
                 else:
                     user_confirmed = bool(raw_uc)
+                changed = bool(existing) and existing.get("content_hash") != ch
                 entry_data = {
                     "id": existing["id"] if existing else uuid.uuid4().hex,
                     "project_id": w.id,
@@ -645,11 +667,12 @@ class KnowledgeCenterService:
                     "source_origin": source.get("origin", ""),
                     "summary": summary,
                     "content_hash": ch,
+                    "git_sha": git_sha,
                     "size_bytes": size,
                     "created_at": (
                         meta.get("created_at") or (existing or {}).get("created_at") or now_iso()
                     ),
-                    "updated_at": now_iso() if (not existing or existing.get("content_hash") != ch) else existing["updated_at"],
+                    "updated_at": now_iso() if (not existing or changed) else existing["updated_at"],
                     "imported_at": meta.get("imported_at") or (existing or {}).get("imported_at", ""),
                     "merged_from": meta.get("merged_from") or [],
                     "generated_by": meta.get("generated_by") or (existing or {}).get("generated_by", ""),
@@ -659,17 +682,29 @@ class KnowledgeCenterService:
                 }
                 if existing:
                     existing.update(entry_data)
-                    if existing["content_hash"] != ch:
+                    if changed:
                         updated += 1
+                        proj["updated"] += 1
+                    else:
+                        unchanged += 1
+                        proj["unchanged"] += 1
                 else:
                     index.setdefault("entries", []).append(entry_data)
                     entries_by_key[key] = entry_data
                     added += 1
-        _save_index(index)
-        return {
-            "ok": True, "added": added, "updated": updated,
+                    proj["added"] += 1
+                _sync_progress(files_done=_SYNC_STATE.get("files_done", 0) + 1,
+                               added=added, updated=updated, unchanged=unchanged)
+            _sync_progress(projects_done=_SYNC_STATE.get("projects_done", 0) + 1)
+        result = {
+            "ok": True, "added": added, "updated": updated, "unchanged": unchanged,
             "total": len(index.get("entries", [])),
+            "projects": per_project,
+            "at": now_iso(),
         }
+        index["last_sync"] = {k: v for k, v in result.items() if k != "ok"}
+        _save_index(index)
+        return result
 
     @staticmethod
     def _title_from_filename(name: str) -> str:
@@ -769,7 +804,17 @@ class KnowledgeCenterService:
             r = x.get("resolution_status") or "unknown"
             all_resolutions[r] = all_resolutions.get(r, 0) + 1
 
+        _usage = _load_usage()["by_entry"]
+        page_items = [dict(x) for x in page_items]
+        for x in page_items:
+            u = _usage.get(x.get("id")) or {}
+            x["usage_count"] = int(u.get("count") or 0)
+            x["last_used_at"] = u.get("last_at") or ""
+            x["last_used_where"] = u.get("last_where") or ""
+            x["last_used_project"] = u.get("last_project") or ""
+
         return {
+            "last_sync": index.get("last_sync"),
             "items": page_items,
             "total": total,
             "page": page,
@@ -795,7 +840,7 @@ class KnowledgeCenterService:
         index = _load_index()
         for e in index.get("entries", []):
             if e.get("id") == entry_id:
-                return e
+                return {**e, **usage_for(entry_id)}
         return None
 
     # ─────────────────────────────────────────────────────────────────────
@@ -1787,6 +1832,214 @@ user_confirmed: {str(user_confirmed).lower()}
 
 
 # Singleton
+# ────────────────────────────────────────────────────────────────────────────
+# PM-INS-0028 — «🔄 سینک از repo» as a background job with visible progress.
+# A full sync is one GitHub list + one GET per changed file across every watched
+# repo (hundreds of requests); as one blocking POST it outlived the proxy timeout
+# and the page showed nothing. Now POST starts the job and returns at once; the
+# page polls the state below.
+# ────────────────────────────────────────────────────────────────────────────
+
+_SYNC_STATE: Dict[str, Any] = {"state": "idle"}
+_SYNC_TASK: Optional["asyncio.Task[Any]"] = None
+
+
+def _sync_progress(**kw: Any) -> None:
+    _SYNC_STATE.update(kw)
+
+
+def sync_status() -> Dict[str, Any]:
+    out = dict(_SYNC_STATE)
+    out["projects"] = [dict(p) for p in (_SYNC_STATE.get("projects") or [])]
+    out["last_sync"] = _load_index().get("last_sync")
+    return out
+
+
+async def _run_sync_job() -> None:
+    try:
+        res = await get_knowledge_center_service().sync_from_projects()
+        if res.get("ok"):
+            _sync_progress(state="done", finished_at=now_iso(), result=res, current_project="")
+        else:
+            _sync_progress(state="error", finished_at=now_iso(), error=res.get("error") or "unknown")
+    except Exception as e:  # noqa: BLE001
+        logger.exception("knowledge_center: sync job crashed")
+        _sync_progress(state="error", finished_at=now_iso(), error=str(e)[:300])
+
+
+def start_sync_job() -> Dict[str, Any]:
+    """Start a background sync unless one is running; returns the live state."""
+    global _SYNC_TASK
+    if _SYNC_STATE.get("state") == "running" and _SYNC_TASK is not None and not _SYNC_TASK.done():
+        return {"started": False, "already_running": True, **sync_status()}
+    _SYNC_STATE.clear()
+    _SYNC_STATE.update({
+        "state": "running", "started_at": now_iso(), "finished_at": "",
+        "projects_total": 0, "projects_done": 0, "files_done": 0,
+        "added": 0, "updated": 0, "unchanged": 0, "projects": [],
+        "current_project": "", "error": "",
+    })
+    _SYNC_TASK = asyncio.get_event_loop().create_task(_run_sync_job())
+    return {"started": True, "already_running": False, **sync_status()}
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# PM-INS-0028 — experiences are actually USED: retrieval + usage log.
+# The inspector (smart-chat) and the assistant ask for the experiences that
+# match the question; the matched ones go into the model's context and the
+# answer ends with «📚 تجربه‌های به‌کاررفته: …». Each injection is recorded in
+# USAGE_FILE (separate from the index so a long sync can't overwrite it), and
+# the catalog shows «استفاده‌شده N بار، آخرین بار …، در …».
+# ────────────────────────────────────────────────────────────────────────────
+
+USAGE_FILE: Path = STORAGE_DIR / "knowledge_center_usage.json"
+_usage_lock = threading.Lock()
+
+# Persian → English bridges, because most experience titles/tags are English.
+_SYNONYMS: Dict[str, List[str]] = {
+    "پراکسی": ["proxy"], "پروکسی": ["proxy"], "مرورگر": ["browser", "chromium", "headless"],
+    "playwright": ["chromium", "headless", "browser"], "کروم": ["chrome", "chromium"],
+    "گواهی": ["tls", "certificate", "ssl"], "ورود": ["login", "auth", "oauth"],
+    "دیپلوی": ["deploy", "render"], "تست": ["test", "testing", "pytest"],
+    "آپلود": ["upload"], "کش": ["cache"], "پایگاه": ["database", "db"],
+    "اسکرین‌شات": ["screenshot"], "رونویسی": ["transcription"], "زمان‌بندی": ["schedule", "cron", "routine"],
+}
+_STOP = {"the", "and", "for", "with", "that", "this", "from", "into", "است", "این", "که", "را", "با", "در",
+         "برای", "یک", "به", "از", "هم", "چه", "کجا", "چرا", "پشت", "پشتِ", "دارد", "کنم", "کند", "می"}
+
+
+def _query_terms(text: str) -> List[str]:
+    raw = re.findall(r"[A-Za-z][A-Za-z0-9_.+-]{2,}|[؀-ۿ‌]{3,}", (text or "").lower())
+    terms: List[str] = []
+    for t in raw:
+        t = t.strip("._-+‌")
+        if len(t) < 3 or t in _STOP:
+            continue
+        for x in [t] + _SYNONYMS.get(t, []):
+            if x not in terms:
+                terms.append(x)
+    return terms[:40]
+
+
+def find_relevant_entries(query: str, limit: int = 3, min_score: int = 4) -> List[Dict[str, Any]]:
+    """Rank indexed experiences against a free-text query (title/tags weigh most)."""
+    terms = _query_terms(query)
+    if not terms:
+        return []
+    scored: List[Tuple[int, Dict[str, Any]]] = []
+    for e in _load_index().get("entries", []):
+        title = (e.get("title") or "").lower()
+        tags = " ".join(e.get("tags") or []).lower()
+        canon = (e.get("topic_canonical") or "").lower().replace("-", " ")
+        summ = (e.get("summary") or "").lower()
+        score = 0
+        hit_terms = 0
+        for t in terms:
+            s = 3 * (t in title) + 3 * (t in tags) + 2 * (t in canon) + 1 * (t in summ)
+            if s:
+                hit_terms += 1
+                score += s
+        if hit_terms >= 2 or score >= 6:
+            scored.append((score, e))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [e for s, e in scored if s >= min_score][:limit]
+
+
+def _load_usage() -> Dict[str, Any]:
+    try:
+        if USAGE_FILE.exists():
+            data = json.loads(USAGE_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                data.setdefault("by_entry", {})
+                return data
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"knowledge_center: usage load failed: {e}")
+    return {"by_entry": {}}
+
+
+def record_usage(entry_ids: List[str], where: str, project: str = "", query: str = "") -> None:
+    if not entry_ids:
+        return
+    with _usage_lock:
+        data = _load_usage()
+        at = now_iso()
+        for eid in entry_ids:
+            u = data["by_entry"].setdefault(eid, {"count": 0, "recent": []})
+            u["count"] = int(u.get("count") or 0) + 1
+            u["last_at"], u["last_where"], u["last_project"] = at, where, project
+            u["recent"] = ([{"at": at, "where": where, "project": project, "query": (query or "")[:160]}]
+                           + list(u.get("recent") or []))[:10]
+        USAGE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        USAGE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def usage_for(entry_id: str) -> Dict[str, Any]:
+    u = _load_usage()["by_entry"].get(entry_id) or {}
+    return {
+        "usage_count": int(u.get("count") or 0),
+        "last_used_at": u.get("last_at") or "",
+        "last_used_where": u.get("last_where") or "",
+        "last_used_project": u.get("last_project") or "",
+        "usage_recent": u.get("recent") or [],
+    }
+
+
+WHERE_LABELS = {"inspector": "بازرس ویژه", "assistant": "دستیار", "oversight": "اسکنِ اتاق فرمان", "creator": "موتور خالق"}
+
+
+def used_line(entries: List[Dict[str, Any]]) -> str:
+    if not entries:
+        return ""
+    names = "، ".join(f"«{e.get('title')}» ({e.get('project_full_name') or '—'})" for e in entries)
+    return f"📚 تجربه‌های به‌کاررفته: {names}"
+
+
+async def experience_context(query: str, where: str, project: str = "", limit: int = 3,
+                             fetch_body: bool = True) -> Dict[str, Any]:
+    """Pick the experiences relevant to ``query``, record their use, and return
+    ``{"block": prompt text, "line": "📚 …", "entries": [...]}``. Never raises."""
+    try:
+        entries = find_relevant_entries(query, limit=limit)
+        if not entries:
+            return {"block": "", "line": "", "entries": []}
+        bodies: Dict[str, str] = {}
+        if fetch_body:
+            try:
+                from .oversight_service import get_github_token
+                token = get_github_token()
+            except Exception:  # noqa: BLE001
+                token = ""
+            if token:
+                async def _one(e: Dict[str, Any]) -> None:
+                    repo = e.get("project_full_name") or ""
+                    if "/" not in repo:
+                        return
+                    o, n = repo.split("/", 1)
+                    try:
+                        txt = await asyncio.wait_for(KnowledgeCenterService._gh_get_file_content(
+                            o, n, e.get("path") or "", token), timeout=8)
+                    except Exception:  # noqa: BLE001
+                        txt = None
+                    if txt:
+                        bodies[e["id"]] = _parse_frontmatter(txt)[1]
+                await asyncio.gather(*(_one(e) for e in entries[:2]))
+        parts = []
+        for e in entries:
+            body = bodies.get(e["id"]) or e.get("summary") or ""
+            if len(body) > 3000:
+                body = body[:3000] + "\n…"
+            parts.append(f"### {e.get('title')}\n(منبع: {e.get('project_full_name')}/{e.get('path')} — "
+                         f"تگ‌ها: {', '.join(e.get('tags') or [])})\n{body}")
+        block = ("# 📚 تجربه‌های مرتبط از «مرکز دانش» (درس‌های حل‌شده در پروژه‌های مالک)\n"
+                 "اگر به پرسش مربوط‌اند از آن‌ها استفاده کن و نامشان را ببر؛ اگر نه، نادیده بگیر.\n\n"
+                 + "\n\n".join(parts))
+        record_usage([e["id"] for e in entries], where, project, query)
+        return {"block": block, "line": used_line(entries), "entries": entries}
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"knowledge_center: experience_context failed: {e}")
+        return {"block": "", "line": "", "entries": []}
+
+
 _kc_instance: Optional[KnowledgeCenterService] = None
 _kc_lock = threading.Lock()
 

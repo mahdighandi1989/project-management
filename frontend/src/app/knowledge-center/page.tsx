@@ -24,7 +24,34 @@ interface Entry {
   resolution_status?: string;
   recurrence_count?: number;
   user_confirmed?: boolean;
+  usage_count?: number;
+  last_used_at?: string;
+  last_used_where?: string;
+  last_used_project?: string;
+  usage_recent?: { at: string; where: string; project: string; query: string }[];
 }
+
+interface SyncProject { repo: string; files: number; added: number; updated: number; unchanged: number; error?: string }
+interface SyncStatus {
+  state?: 'idle' | 'running' | 'done' | 'error';
+  started_at?: string;
+  finished_at?: string;
+  projects_total?: number;
+  projects_done?: number;
+  files_done?: number;
+  added?: number;
+  updated?: number;
+  unchanged?: number;
+  current_project?: string;
+  error?: string;
+  projects?: SyncProject[];
+  last_sync?: { at: string; added: number; updated: number; unchanged: number; total: number; projects: SyncProject[] } | null;
+}
+
+// PM-INS-0028 — where an experience was injected into a model's context
+const WHERE_FA: Record<string, string> = {
+  inspector: 'بازرس ویژه', assistant: 'دستیار', oversight: 'اسکنِ اتاق فرمان', creator: 'موتور خالق',
+};
 
 interface Facets {
   tags: [string, number][];
@@ -40,6 +67,7 @@ interface ListResponse {
   per_page: number;
   pages: number;
   facets: Facets;
+  last_sync?: SyncStatus['last_sync'];
 }
 
 interface Model {
@@ -75,6 +103,11 @@ export default function KnowledgeCenterPage() {
   });
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [settingsSaved, setSettingsSaved] = useState('');
+  // PM-INS-0028 — sync runs as a background job; the page polls its progress
+  // (no blocking alert(), and the button isn't disabled by the list's own loading).
+  const [sync, setSync] = useState<SyncStatus | null>(null);
+  const [syncOpen, setSyncOpen] = useState(false);
+  const [notice, setNotice] = useState('');
 
   // Load active models + persisted KC settings (so processing_model_ids
   // shows the user's saved selection, not hardcoded defaults)
@@ -140,16 +173,16 @@ export default function KnowledgeCenterPage() {
       );
       const j = await res.json();
       if (j?.ok) {
-        alert(
+        setNotice(
           `✅ پردازش انجام شد — ${j.processed || 0} پردازش، ${j.skipped || 0} skip ` +
           `(تغییری نداشتند). از ${j.total || 0} entry کل.`,
         );
         loadEntries();
       } else {
-        alert('❌ خطا: ' + (j?.detail || 'unknown'));
+        setNotice('❌ خطا: ' + (j?.detail || 'unknown'));
       }
     } catch (e: any) {
-      alert('خطا: ' + e?.message);
+      setNotice('❌ خطا: ' + e?.message);
     } finally {
       setLoading(false);
     }
@@ -194,27 +227,41 @@ export default function KnowledgeCenterPage() {
     setPage(1);
   }, [search, tagFilter, projectFilter, sourceFilter, resolutionFilter, sort]);
 
-  const syncFromRepos = async () => {
-    setLoading(true);
+  const pollSync = useCallback(async () => {
     try {
-      const res = await fetch(
-        `${API_BASE}/api/knowledge-center/sync`,
-        { method: 'POST' },
-      );
-      const j = await res.json();
-      if (j?.ok) {
-        alert(
-          `✅ سینک تمام شد — ${j.added || 0} اضافه، ${j.updated || 0} به‌روز، ` +
-          `${j.total || 0} کل`,
-        );
-        loadEntries();
-      } else {
-        alert('❌ سینک ناموفق: ' + (j?.error || 'unknown'));
-      }
+      const res = await fetch(`${API_BASE}/api/knowledge-center/sync/status`);
+      const j = (await res.json()) as SyncStatus;
+      if (!res.ok) throw new Error((j as any)?.detail || `HTTP ${res.status}`);
+      setSync(j);
+      return j;
     } catch (e: any) {
-      alert('خطا: ' + e?.message);
-    } finally {
-      setLoading(false);
+      setSync((prev) => ({ ...(prev || {}), state: 'error', error: 'وضعیتِ سینک خوانده نشد: ' + (e?.message || '') }));
+      return null;
+    }
+  }, []);
+
+  // last sync time on first load (and resume watching a sync started elsewhere)
+  useEffect(() => { pollSync(); }, [pollSync]);
+
+  useEffect(() => {
+    if (sync?.state !== 'running') return;
+    const t = setTimeout(async () => {
+      const j = await pollSync();
+      if (j && j.state !== 'running') loadEntries();
+    }, 1500);
+    return () => clearTimeout(t);
+  }, [sync, pollSync, loadEntries]);
+
+  const syncFromRepos = async () => {
+    setSyncOpen(true);
+    setSync((prev) => ({ ...(prev || {}), state: 'running', error: '', projects: [], files_done: 0, projects_done: 0 }));
+    try {
+      const res = await fetch(`${API_BASE}/api/knowledge-center/sync`, { method: 'POST' });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j?.detail || `HTTP ${res.status}`);
+      setSync(j as SyncStatus);
+    } catch (e: any) {
+      setSync((prev) => ({ ...(prev || {}), state: 'error', error: 'شروعِ سینک ناموفق: ' + (e?.message || '') }));
     }
   };
 
@@ -230,12 +277,12 @@ export default function KnowledgeCenterPage() {
         { method: 'POST' },
       );
       const j = await res.json();
-      alert(
+      setNotice(
         `✅ ${j.created || 0} پوشه ساخته شد، ${j.skipped || 0} skip ` +
         `(از قبل بود یا توکن نبود).`,
       );
     } catch (e: any) {
-      alert('خطا: ' + e?.message);
+      setNotice('❌ خطا: ' + e?.message);
     } finally {
       setLoading(false);
     }
@@ -266,6 +313,18 @@ export default function KnowledgeCenterPage() {
     } catch (e: any) {
       alert('خطا: ' + e?.message);
     }
+  };
+
+  // full record (with usage history) for the detail modal
+  const openEntry = async (entry: Entry) => {
+    setSelectedEntry(entry);
+    try {
+      const res = await fetch(`${API_BASE}/api/knowledge-center/entries/${entry.id}`);
+      if (res.ok) {
+        const full = await res.json();
+        setSelectedEntry((cur) => (cur && cur.id === entry.id ? { ...cur, ...full } : cur));
+      }
+    } catch { /* the list row is enough */ }
   };
 
   // Tag chip styling helper
@@ -314,10 +373,12 @@ export default function KnowledgeCenterPage() {
             </button>
             <button
               onClick={syncFromRepos}
-              disabled={loading}
+              disabled={sync?.state === 'running'}
+              data-testid="kc-sync"
               className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50"
+              title={sync?.last_sync?.at ? `آخرین سینک: ${new Date(sync.last_sync.at).toLocaleString('fa-IR')}` : 'هنوز سینکی ثبت نشده'}
             >
-              🔄 سینک از repo
+              {sync?.state === 'running' ? '⏳ در حال سینک…' : '🔄 سینک از repo'}
             </button>
             <button
               onClick={bootstrapFolders}
@@ -364,6 +425,29 @@ export default function KnowledgeCenterPage() {
               <div className="text-xs text-gray-400">صفحه</div>
               <div className="text-2xl font-bold">{page}/{data?.pages || 1}</div>
             </div>
+          </div>
+        )}
+
+        {/* PM-INS-0028 — sync progress + result */}
+        <SyncPanel
+          sync={sync}
+          open={syncOpen || sync?.state === 'running'}
+          onToggle={() => setSyncOpen((v) => !v)}
+          fmtDate={(s: string) => { try { return new Date(s).toLocaleString('fa-IR'); } catch { return s; } }}
+        />
+
+        {notice && (
+          <div className="bg-white/5 border border-white/10 rounded p-3 mb-4 text-sm flex items-start justify-between gap-2">
+            <span>{notice}</span>
+            <button onClick={() => setNotice('')} className="text-gray-400 hover:text-white text-xs">✕</button>
+          </div>
+        )}
+
+        {tagFilter && (
+          <div className="mb-3 text-sm flex items-center gap-2">
+            <span className="text-gray-400">فیلترِ تگ:</span>
+            <span className="px-2 py-0.5 bg-blue-500/30 text-blue-200 rounded">{tagFilter}</span>
+            <button onClick={() => setTagFilter('')} className="text-xs text-gray-400 hover:text-white">✕ برداشتن</button>
           </div>
         )}
 
@@ -464,7 +548,7 @@ export default function KnowledgeCenterPage() {
               <div
                 key={entry.id}
                 className="bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg p-4 cursor-pointer transition-all"
-                onClick={() => setSelectedEntry(entry)}
+                onClick={() => openEntry(entry)}
               >
                 <div className="flex items-start justify-between gap-2 mb-2">
                   <h3 className="font-bold text-sm flex-1">{entry.title}</h3>
@@ -491,13 +575,33 @@ export default function KnowledgeCenterPage() {
                     />
                   )}
                   {(entry.tags || []).slice(0, 4).map((t) => (
-                    <span
+                    <button
                       key={t}
-                      className="px-1.5 py-0.5 bg-blue-500/20 text-blue-300 rounded text-[10px]"
+                      type="button"
+                      data-testid="kc-tag-chip"
+                      title={`فقط تجربه‌های با تگِ «${t}»`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setTagFilter(t);
+                        window.scrollTo({ top: 0, behavior: 'smooth' });
+                      }}
+                      className={`px-1.5 py-0.5 rounded text-[10px] hover:bg-blue-500/40 ${
+                        t === tagFilter ? 'bg-blue-500/50 text-white' : 'bg-blue-500/20 text-blue-300'
+                      }`}
                     >
                       {t}
-                    </span>
+                    </button>
                   ))}
+                </div>
+                <div className="text-[10px] mb-1" data-testid="kc-usage">
+                  {entry.usage_count ? (
+                    <span className="text-emerald-300" title={entry.last_used_project || ''}>
+                      🧩 استفاده‌شده {entry.usage_count} بار — آخرین بار {fmtDate(entry.last_used_at || '')}
+                      {entry.last_used_where ? ` در ${WHERE_FA[entry.last_used_where] || entry.last_used_where}` : ''}
+                    </span>
+                  ) : (
+                    <span className="text-gray-500">هنوز در هیچ پاسخی به کار نرفته</span>
+                  )}
                 </div>
                 <div className="text-[10px] text-gray-500 flex items-center justify-between">
                   <span className="font-mono truncate">{entry.project_full_name || '—'}</span>
@@ -589,8 +693,32 @@ export default function KnowledgeCenterPage() {
               <div>
                 <span className="text-gray-400">تگ‌ها:</span>{' '}
                 {(selectedEntry.tags || []).map((t) => (
-                  <span key={t} className="ml-1 px-2 py-0.5 bg-blue-500/20 text-blue-300 rounded text-xs">{t}</span>
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => { setTagFilter(t); setSelectedEntry(null); }}
+                    className="ml-1 px-2 py-0.5 bg-blue-500/20 text-blue-300 hover:bg-blue-500/40 rounded text-xs"
+                  >
+                    {t}
+                  </button>
                 ))}
+              </div>
+              <div>
+                <span className="text-gray-400">استفاده:</span>{' '}
+                {selectedEntry.usage_count
+                  ? `${selectedEntry.usage_count} بار — آخرین بار ${fmtDate(selectedEntry.last_used_at || '')}`
+                  : 'هنوز در هیچ پاسخی به کار نرفته'}
+                {(selectedEntry.usage_recent || []).length > 0 && (
+                  <ul className="list-disc pr-5 text-xs text-gray-300 mt-1">
+                    {(selectedEntry.usage_recent || []).map((u, i) => (
+                      <li key={i}>
+                        {fmtDate(u.at)} — {WHERE_FA[u.where] || u.where}
+                        {u.project ? ` · ${u.project}` : ''}
+                        {u.query ? <span className="text-gray-500"> · «{u.query}»</span> : null}
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
               {selectedEntry.resolution_status && (
                 <div className="flex items-center gap-2">
@@ -1046,5 +1174,75 @@ function ResolutionBadge({
       {recurrence && recurrence > 1 ? ` ×${recurrence}` : ''}
       {confirmed ? ' ✓' : ''}
     </span>
+  );
+}
+
+// PM-INS-0028 — live progress of «🔄 سینک از repo» and its result per project.
+function SyncPanel({ sync, open, onToggle, fmtDate }: {
+  sync: SyncStatus | null; open: boolean; onToggle: () => void; fmtDate: (s: string) => string;
+}) {
+  if (!sync) return null;
+  const last = sync.last_sync;
+  const running = sync.state === 'running';
+  const total = sync.projects_total || 0;
+  const done = sync.projects_done || 0;
+  const pct = total ? Math.round((done / total) * 100) : running ? 5 : 100;
+  const projects = running || sync.state === 'done' ? (sync.projects || []) : (last?.projects || []);
+  return (
+    <div className="bg-white/5 border border-white/10 rounded-lg p-3 mb-4 text-sm" data-testid="kc-sync-panel">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div>
+          {running ? (
+            <span>⏳ سینک در حال اجرا — پروژهٔ {done + (total > done ? 1 : 0)} از {total || '؟'}
+              {sync.current_project ? <span className="font-mono text-gray-400"> ({sync.current_project})</span> : null}
+              {' '}· {sync.files_done || 0} فایل دیده شد</span>
+          ) : sync.state === 'error' ? (
+            <span className="text-red-300">❌ سینک ناموفق: {sync.error}</span>
+          ) : sync.state === 'done' && !total ? (
+            <span className="text-amber-300">⚠️ سینک اجرا شد ولی هیچ پروژهٔ تحت نظارتی (با مخزنِ GitHub) نبود — از اتاق فرمان پروژه اضافه کن.</span>
+          ) : sync.state === 'done' ? (
+            <span className="text-emerald-300">
+              ✅ سینک تمام شد — {sync.added || 0} تجربهٔ تازه، {sync.updated || 0} به‌روز، {sync.unchanged || 0} بی‌تغییر
+              {sync.finished_at ? ` · ${fmtDate(sync.finished_at)}` : ''}
+            </span>
+          ) : last ? (
+            <span className="text-gray-300">
+              آخرین سینک: {fmtDate(last.at)} — {last.added} تازه، {last.updated} به‌روز، {last.unchanged ?? 0} بی‌تغییر، {last.total} کل
+            </span>
+          ) : (
+            <span className="text-gray-400">هنوز سینکی ثبت نشده — «🔄 سینک از repo» را بزن.</span>
+          )}
+        </div>
+        {projects.length > 0 && (
+          <button onClick={onToggle} className="text-xs text-gray-400 hover:text-white">
+            {open ? 'بستنِ جزئیات' : 'جزئیاتِ هر پروژه'}
+          </button>
+        )}
+      </div>
+      {running && (
+        <div className="h-2 bg-black/40 rounded mt-2 overflow-hidden" role="progressbar" aria-valuenow={pct}>
+          <div className="h-full bg-blue-500 transition-all" style={{ width: `${pct}%` }} />
+        </div>
+      )}
+      {open && projects.length > 0 && (
+        <table className="w-full text-xs mt-3">
+          <thead className="text-gray-400">
+            <tr><th className="text-right">پروژه</th><th>فایل</th><th>تازه</th><th>به‌روز</th><th>بی‌تغییر</th><th className="text-right">یادداشت</th></tr>
+          </thead>
+          <tbody>
+            {projects.map((p) => (
+              <tr key={p.repo} className="border-t border-white/5">
+                <td className="font-mono py-1">{p.repo}</td>
+                <td className="text-center">{p.files}</td>
+                <td className="text-center text-emerald-300">{p.added}</td>
+                <td className="text-center text-amber-300">{p.updated}</td>
+                <td className="text-center text-gray-400">{p.unchanged}</td>
+                <td className="text-red-300">{p.error || ''}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
   );
 }
