@@ -1544,3 +1544,11 @@
 - **[CHANGE]** پرسشِ «فقط پاسخ» ⇒ دامنهٔ هدفمند و حداکثر ۶ فایل.
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-18 · مرورگرِ واقعی روی production
+
+## 2026-11-18 (۳) — PM-INS-0029: پذیرش روی production
+
+- **[VERIFY]** پس از 0e30c463، مرورگرِ واقعی، بازرس ویژهٔ Detective-1، DeepSeek Chat، همان پرسش: «💬 پرسش است (فقط پاسخ) — بی‌اسکنِ عمیق»، «نوع درخواست: سؤال»، **پاسخِ کامل در ۱۶ ث**
+  («پراکسی را صریح بده و فقط CA ِ همان پراکسی را با هش SPKI معتبر کن — نه ignore_https_errors») که با «📚 تجربه‌های به‌کاررفته: «Headless Chromium behind a TLS-inspecting egress proxy — pin the
+  proxy CA by SPKI» (Detective-1)، …» تمام شد؛ usage_count ِ همان تجربه ۱ ⇒ ۲ (inspector، Detective-1، ۰۳:۰۰:۳۰ UTC).
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-18 · مرورگرِ واقعی روی production
