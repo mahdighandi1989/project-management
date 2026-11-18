@@ -1580,3 +1580,14 @@
   (`/api/render/inspector/proxy/<id>[/~pt~…]/login?next=/…`). هشدارِ عکس: صفحهٔ ورودِ میزبانِ خودِ پروژه ⇒ «ℹ️ صفحهٔ ورودِ خودِ سایتِ پروژه است»، میزبانِ دیگر ⇒ «⚠️ … نشانی اشتباه است».
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-18 · مرورگرِ واقعی روی production
+
+## 2026-11-18 (۶) — PM-INS-0030: اصلاحِ تشخیص و پذیرش
+
+- **[FINDING]** (تصحیحِ ورودیِ ۵) بررسیِ درخواست‌های iframe: آخرین تغییرِ نشانی به `ai-creator-frontend…/login?next=…` **هیچ درخواستی ندارد** — `router.replace` ِ Next ِ Detective-1 است و
+  نشانیِ دیدنی طبقِ طراحیِ `__STRIP__` (PM-INS-0022) بی‌پیشوندِ پروکسی است. سندِ iframe خودِ Detective-1 است (عنوان «Detective-1 — دانشنامه…»، متن: صفحهٔ ورودِ Detective-1). پس پیش‌نمایش
+  درست بود؛ «📸 عکس» همین **نشانیِ دیدنی** را به سرور می‌داد و سرور `/login` ِ واقعیِ AI Creator را عکس می‌گرفت — همان که `_screenshot_target` درست کرد. middleware ِ 37087324 برای این مورد
+  لازم نبود؛ برای ناوبریِ واقعیِ `location.href` (درخواست با `sec-fetch-dest: iframe`) درست کار می‌کند (۳۰۷ به همان پروکسی) و بی‌ضرر نگه داشته شد. آزمونِ 🩹 هم در سندِ Detective-1 بود
+  (پیشنهاد `backend/detective/main.py` ِ Detective-1 را نشان داد).
+- **[VERIFY]** همان نشانیِ کارتِ هماهنگ‌کننده ⇒ `https://detective-1-frontend.onrender.com/` با «ℹ️ این صفحهٔ ورودِ خودِ سایتِ پروژه است …»، عنوان «Detective-1 — دانشنامه اطلاعاتی و شناسایی نفوذ».
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-18 · مرورگرِ واقعی + API روی production
