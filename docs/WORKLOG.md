@@ -1535,3 +1535,12 @@
 - **[VERIFY]** `tests/test_pm_ins_0029.py` ‏(۴)؛ کلِ تست‌ها ۹۵۳. سنجشِ production در ورودیِ بعد.
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-18 · pytest
+
+## 2026-11-18 (۲) — PM-INS-0029: پرسشِ «فقط پاسخ» ۵۰۰ فایل می‌خواند
+
+- **[VERIFY]** پس از 7e2f751c، مرورگرِ واقعی، بازرس ویژهٔ Detective-1، DeepSeek Chat: «💬 پرسش است (فقط پاسخ) — بی‌اسکنِ عمیق، پاسخِ مستقیم»، «نوع درخواست: سؤال»، «📚 تجربه‌های به‌کاررفته:
+  «Headless Chromium behind a TLS-inspecting egress proxy — pin the proxy CA by SPKI» (Detective-1) …»؛ usage_count آن تجربه ۰ ⇒ ۱ (inspector، Detective-1).
+- **[FINDING]** مسیرِ QUESTION سپس «🔄 پردازش دسته‌ای سؤال: ۵۰۰ فایل در ۴۶ دسته» را شروع کرد (`_detect_request_scope` روی پرسشِ خام FULL_PROJECT داد) ⇒ چند دقیقه، خلافِ «≤۶۰ ث».
+- **[CHANGE]** پرسشِ «فقط پاسخ» ⇒ دامنهٔ هدفمند و حداکثر ۶ فایل.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-18 · مرورگرِ واقعی روی production

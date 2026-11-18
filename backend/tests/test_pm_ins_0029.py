@@ -43,3 +43,10 @@ def test_creator_and_oversight_scan_read_experiences():
     assert 'experience_context as _kc_ctx' in c and '"creator"' in c and '"experiences_used"' in c
     o = inspect.getsource(O.OversightService.scan_project)
     assert 'experience_context as _kc_ctx' in o and '"oversight_scan"' in o
+
+
+def test_an_answer_only_question_never_reads_the_whole_project():
+    from app.api.routes import render_logs as R
+    src = inspect.getsource(R)
+    i = src.index("# (PM-INS-0029) «کوتاه بگو چه کنم؟ (فقط پاسخ)» read 500 files")
+    assert 'q_scope, q_dynamic_max = "TARGETED", 6' in src[i:i + 600]

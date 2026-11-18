@@ -16001,6 +16001,14 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
                             q_dynamic_max = 12  # مثل قبل
                         elif q_scope == "BROAD":
                             q_dynamic_max = min(q_dynamic_max, 40)
+                        # (PM-INS-0029) «کوتاه بگو چه کنم؟ (فقط پاسخ)» read 500 files in 46 batches (minutes) — an answer-only
+                        # question reads at most a handful of targeted files
+                        try:
+                            from ...services.inspector_quick_classify import is_answer_only as _ao_q
+                            if _ao_q((getattr(request, "original_message", None) or "") or request.message):
+                                q_scope, q_dynamic_max = "TARGETED", 6
+                        except Exception:  # noqa: BLE001
+                            pass
 
                         if q_scope == "FULL_PROJECT":
                             # سؤال درباره کل پروژه — همه فایل‌ها
