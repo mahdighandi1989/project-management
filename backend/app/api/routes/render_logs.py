@@ -19843,11 +19843,56 @@ async def inspector_page_proxy(
 # 📸 Screenshot & Visual Debug - عکس‌برداری و دیباگ بصری
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _screenshot_target(db: Session, project_id: str, url: str) -> tuple:
+    """(PM-INS-0030) The server's Playwright is NOT signed in to AI Creator: a proxy path
+    (/api/render/inspector/proxy/<project>/…) or any address on AI Creator's own host lands on «/login?next=…» and the
+    owner got a picture of our own sign-in page instead of Detective-1. Map such a URL to the project's REAL site (same
+    path) — returns (url, note)."""
+    from urllib.parse import urlsplit
+    u = (url or "").strip()
+    try:
+        parts = urlsplit(u)
+    except Exception:  # noqa: BLE001
+        return u, ""
+    path = parts.path or "/"
+    marker = "/api/render/inspector/proxy/"
+    own_hosts = {h for h in (
+        urlsplit(os.environ.get("FRONTEND_URL", "") or "").netloc,
+        urlsplit(os.environ.get("BACKEND_URL", "") or os.environ.get("RENDER_EXTERNAL_URL", "") or "").netloc,
+    ) if h}
+    on_our_host = bool(parts.netloc) and (parts.netloc in own_hosts or parts.netloc.startswith("ai-creator-"))
+    if marker not in path and not on_our_host and not u.startswith("/"):
+        return u, ""
+    real = resolve_preview_frontend_url(db, project_id)
+    if not real:
+        return u, "⚠️ نشانیِ واقعیِ سایتِ پروژه پیدا نشد — عکس از نشانیِ داده‌شده است"
+    rest = path
+    if marker in path:
+        rest = path.split(marker, 1)[1]
+        rest = "/" + (rest.split("/", 1)[1] if "/" in rest else "")
+        if rest.startswith("/~pt~"):  # path ticket of the preview
+            rest = "/" + (rest[5:].split("/", 1)[1] if "/" in rest[5:] else "")
+    elif path.startswith("/login"):
+        rest = "/"
+    q = ("?" + parts.query) if parts.query and not path.startswith("/login") else ""
+    return real.rstrip("/") + rest + q, f"🔀 نشانیِ پروکسی/AI Creator به سایتِ واقعیِ پروژه تبدیل شد: {real}"
+
+
+def _looks_like_login(info: dict) -> bool:
+    t = ((info or {}).get("title") or "").lower()
+    u = ((info or {}).get("url") or "").lower()
+    return ("/login" in u or "/signin" in u or "sign in" in t or "ورود" in t or "login" in t)
+
+
 @router.post("/inspector/screenshot")
 async def take_screenshot(request: ScreenshotRequest, db: Session = Depends(get_db)):
     """عکس‌برداری از صفحه پیش‌نمایش پروژه با استفاده از Playwright"""
     if not request.url:
         return {"success": False, "error": "آدرس صفحه مشخص نشده"}
+    _target, _target_note = _screenshot_target(db, request.project_id, request.url)
+    if _target != request.url:
+        # the DOM snapshot came from the proxied copy (asset paths point at the proxy) — take the real site itself
+        request.url, request.html_content = _target, None
     try:
         from ...services.browser_automation import BrowserSession, PLAYWRIGHT_AVAILABLE
         if not PLAYWRIGHT_AVAILABLE:
@@ -19886,9 +19931,14 @@ async def take_screenshot(request: ScreenshotRequest, db: Session = Depends(get_
         screenshot_b64 = await session.take_screenshot()
         page_info = await session.get_page_info()
         await session.close()
+        _warn = ""
+        if _looks_like_login(page_info):
+            _warn = (f"⚠️ عکس یک صفحهٔ ورود است ({page_info.get('url')}) — سایت پیش از نمایش ورود می‌خواهد، یا نشانی اشتباه "
+                     "است؛ این عکس صفحهٔ واقعیِ پروژه نیست")
         return {
             "success": True, "screenshot": screenshot_b64,
-            "page_info": page_info, "timestamp": datetime.now().isoformat()
+            "page_info": page_info, "timestamp": datetime.now().isoformat(),
+            "target_url": request.url, "target_note": _target_note, "login_warning": _warn,
         }
     except Exception as e:
         return {"success": False, "error": f"خطا در عکس‌برداری: {str(e)[:200]}"}

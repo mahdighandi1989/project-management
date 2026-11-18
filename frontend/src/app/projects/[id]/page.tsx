@@ -6924,7 +6924,17 @@ ${baseContext}${baseContext.length >= 500 ? '...' : ''}
         // 📦 Snapshot current logs and URLs at capture time
         // اولویت: URL خوانده شده از iframe (تبدیل شده از proxy) → بعد page_info از Playwright
         const _playwrightUrl = data.page_info?.url || '';
-        const capturePageUrl = _currentPageUrl || _playwrightUrl;
+        // (PM-INS-0030) the server maps a proxy / AI Creator address to the project's real site — use what it really shot
+        const capturePageUrl = data.target_url || _currentPageUrl || _playwrightUrl;
+        if (data.target_note || data.login_warning) {
+          setInspectorChatMessages(prev => [...prev, {
+            id: `shot_note_${Date.now()}`,
+            role: 'system' as const,
+            content: [data.target_note, data.login_warning].filter(Boolean).join('\n')
+              + (data.page_info?.title ? `\n📄 عنوانِ صفحهٔ عکس: «${data.page_info.title}»` : ''),
+            timestamp: new Date(),
+          }]);
+        }
         const captureConsoleLogs = [...importedProjectConsoleLogs].slice(-50).map(l => ({
           level: l.level, message: l.message, timestamp: l.timestamp, source: l.source
         }));
@@ -14602,7 +14612,8 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                             </div>
 
                             {/* 📋 پنل لاگ‌های کنسول پروژه ایمپورت شده */}
-                            {showImportedConsoleLogs && importedProjectConsoleLogs.length > 0 && (
+                            {/* (PM-INS-0030) opens with 0 logs too — it used to do nothing, so the button looked broken */}
+                            {showImportedConsoleLogs && (
                               <div className="absolute bottom-0 left-0 right-0 z-40 max-h-[40%] bg-gray-900/95 backdrop-blur border-t border-gray-700 overflow-auto" dir="ltr">
                                 <div className="sticky top-0 bg-gray-900 px-3 py-1.5 flex items-center justify-between border-b border-gray-700">
                                   <span className="text-[10px] text-gray-400 font-mono">📋 Console Logs (پروژه ایمپورت شده) - {importedProjectConsoleLogs.length} لاگ</span>
@@ -14612,6 +14623,12 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                                   </div>
                                 </div>
                                 <div className="p-2 font-mono text-[10px] space-y-0.5">
+                                  {importedProjectConsoleLogs.length === 0 && (
+                                    <div className="text-gray-400 px-2 py-2" dir="rtl" data-testid="console-empty">
+                                      هنوز لاگی از صفحهٔ پروژه نیامده. لاگ‌های console و خطاهای JS ِ همین پیش‌نمایش از طریقِ Bridge می‌آیند —
+                                      پیش‌نمایش را روشن کنید و منتظرِ «WS: متصل» بمانید؛ هر console.log/warn/error ِ صفحه این‌جا (و خطاها در 🩹 خوداصلاح) دیده می‌شود.
+                                    </div>
+                                  )}
                                   {importedProjectConsoleLogs.slice(-100).map(log => (
                                     <div key={log.id} className={`px-2 py-0.5 rounded ${
                                       log.level === 'error' ? 'text-red-400 bg-red-900/20' :

@@ -1552,3 +1552,17 @@
   proxy CA by SPKI» (Detective-1)، …» تمام شد؛ usage_count ِ همان تجربه ۱ ⇒ ۲ (inspector، Detective-1، ۰۳:۰۰:۳۰ UTC).
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-18 · مرورگرِ واقعی روی production
+
+## 2026-11-18 (۴) — PM-INS-0030: «📸 عکس» از صفحهٔ ورودِ خودِ AI Creator؛ پنجرهٔ کنسول با ۰ لاگ باز نمی‌شد
+
+- **[OWNER]** (هماهنگ‌کننده، ۰۷:۴۵ دبی) ۰۰۲۸ و ۰۰۲۹ تأیید شد (پرسشِ Playwright ⇒ ۵۶ ث، بی‌اسکن، با 📚). PM-INS-0030: «📸 عکس» ِ بازرس در Detective-1 عکسِ
+  `ai-creator-frontend…/login?next=/api/render/inspector/proxy/gh_mahdighandi1989_detective_1` گرفت؛ پذیرش: روی Detective-1، quran و language عکسِ صفحهٔ اولِ خودِ سایت؛ و بگو 📥/📋/«📋 کنسول» چه
+  نشان می‌دهند و 🩹 خوداصلاح را با خطای واقعی بیازما.
+- **[FINDING]** `/inspector/screenshot` هر نشانیِ فرستاده‌شده را بی‌بررسی به Playwright ِ سرور می‌داد؛ از وقتی iframe sandbox است (PM-INS-0015) فرانت نشانی/DOM ِ iframe را نمی‌تواند بخواند و نشانیِ
+  پروکسی (روی دامنهٔ AI Creator) فرستاده شد ⇒ Playwright ِ بی‌ورود ⇒ «/login». پنجرهٔ «📋 کنسول» فقط وقتی لاگ > ۰ بود رندر می‌شد ⇒ با ۰ لاگ کلیک بی‌اثر بود.
+- **[CHANGE]** `_screenshot_target`: نشانیِ پروکسی (`/api/render/inspector/proxy/<id>/…`، با یا بی `~pt~`)، نشانیِ نسبی یا هر نشانی روی میزبانِ خودِ AI Creator ⇒ سایتِ واقعیِ پروژه
+  (`resolve_preview_frontend_url`) با همان مسیر، DOM ِ پروکسی کنار گذاشته می‌شود؛ `_looks_like_login` ⇒ `login_warning`؛ پاسخ `target_url`/`target_note`. فرانت: یادداشت/هشدار + عنوانِ صفحهٔ عکس در
+  چت، نشانیِ واقعی در کارت. «📋 کنسول» با ۰ لاگ هم باز می‌شود و توضیح می‌دهد لاگ‌ها از کجا می‌آیند.
+- **[VERIFY]** `tests/test_pm_ins_0030.py` ‏(۲). سنجشِ production در ورودیِ بعد.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-18 · pytest + tsc
