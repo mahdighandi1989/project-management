@@ -8753,6 +8753,20 @@ AC = «طراحی شیک‌تر باشد»:
 4. حداکثر ۸ نیاز مهم. کیفیت > کمیت.
 """
 
+        # (PM-INS-0029) the owner's solved lessons («مرکز دانش») inform the periodic scan too — summaries only (the scan
+        # prompt is large already); their use is recorded like the inspector's
+        _scan_kc_line = ""
+        try:
+            from .knowledge_center_service import experience_context as _kc_ctx
+            _kc = await _kc_ctx(f"{watched.repo_full_name} {(watched.user_notes or '')[:1500]}", "oversight_scan",
+                                watched.repo_full_name or "", limit=3, fetch_body=False)
+            if _kc.get("block"):
+                scan_prompt += "\n\n" + _kc["block"]
+                _scan_kc_line = _kc["line"]
+                logger.info(f"[scan] {watched.repo_full_name}: {_scan_kc_line}")
+        except Exception as _kce:  # noqa: BLE001
+            logger.warning(f"[scan] experiences skipped: {_kce}")
+
         try:
             response = await self._ai_generate(
                 scan_prompt, model_id=model_id, max_tokens=2500, temperature=0.3

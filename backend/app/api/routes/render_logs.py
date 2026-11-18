@@ -11928,10 +11928,10 @@ def _apply_quick_question_override(request: "SmartChatRequest") -> bool:
     if not raw or request.reply_to or raw == (request.message or "").strip():
         return False
     try:
-        from ...services.inspector_quick_classify import is_simple_info_question
+        from ...services.inspector_quick_classify import is_simple_info_question, is_answer_only
     except Exception:
         return False
-    if is_simple_info_question(raw):
+    if is_simple_info_question(raw) or is_answer_only(raw):  # (PM-INS-0029) «فقط پاسخ» / «چه کنم؟» too
         request.message = raw
         return True
     return False
@@ -15015,6 +15015,7 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
     # outer گرفته می‌شود و fallback به smart-chat معمولی انجام می‌گیرد.
     class _SkipIntentPath(Exception):
         pass
+    _intent_note = {"msg": ""}  # (PM-INS-0029) why no scan — said in the chat as the first progress line
     try:
         if _selective_scan_disabled:
             raise _SkipIntentPath()
@@ -15043,9 +15044,14 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
         # run on the STRUCTURED text (enhanced prompt — full of «بررسی/review»), so the coordinator's one-line request
         # became a deep scan whose scope matched no file (the file did not exist yet) and was silently aborted.
         from ...services.inspector_intent_resolver import _is_simple_file_op as _simple_op
+        from ...services.inspector_quick_classify import is_answer_only as _answer_only
         _orig_msg = (getattr(request, "original_message", None) or "").strip()
         if _simple_op(_orig_msg or request.message):
             slog.info("[smart-chat] simple file op (by the user's own words) — no scan, direct to action_plan")
+            raise _SkipIntentPath()
+        # (PM-INS-0029) a question that wants only an answer never starts a deep scan
+        if _answer_only(_orig_msg or request.message):
+            _intent_note["msg"] = "💬 پرسش است (فقط پاسخ) — بی‌اسکنِ عمیق، پاسخِ مستقیم"
             raise _SkipIntentPath()
         intent = resolve_intent_from_chat_context(
             user_message=request.message,
@@ -15060,6 +15066,11 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
             chat_history=_hist_for_intent or None,
         )
 
+        # (PM-INS-0029) a scan with NO path and NO section for a question has nothing to look at — answer directly
+        if intent.should_scan and not (intent.custom_paths or intent.selected_sections) \
+                and (_orig_msg or request.message).strip().rstrip(" ).»").endswith(("?", "؟")):
+            _intent_note["msg"] = ("ℹ️ اسکنِ عمیق لازم نبود (۰ مسیر برای یک پرسش) — لغو شد؛ پاسخِ مستقیم")
+            raise _SkipIntentPath()
         if intent.should_scan:
             sess_id = get_or_create_active_session_for_project(request.project_id)
             if sess_id and not is_scan_active_for_session(sess_id):
@@ -15210,6 +15221,8 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
         ai_manager = _FallbackAIManager(get_ai_manager(), db)
 
         _kc_state = {"line": ""}  # PM-INS-0028 — «📚 تجربه‌های به‌کاررفته» appended to every answer
+        if _intent_note["msg"]:
+            yield f"event: progress\ndata: {json.dumps({'step': 'no_scan', 'message': _intent_note['msg']}, ensure_ascii=False)}\n\n"
 
         def sse(event: str, data: dict) -> str:
             _pre = "".join(
@@ -15432,7 +15445,10 @@ async def smart_chat(request: SmartChatRequest, db: Session = Depends(get_db)):
         _quick_question = False
         try:
             from ...services.inspector_quick_classify import is_simple_info_question
-            _quick_question = (not request.reply_to) and is_simple_info_question(request.message)
+            from ...services.inspector_quick_classify import is_answer_only as _ao
+            _quick_question = (not request.reply_to) and (
+                is_simple_info_question(request.message) or _ao(request.message)
+                or _ao((getattr(request, "original_message", None) or "")))
         except Exception as _qe:
             slog.warning(f"[smart-chat] quick classify skipped: {_qe}")
         if _quick_question:

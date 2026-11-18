@@ -207,6 +207,15 @@ async def idea_to_strong_prompt_for_creator(
     meta_prompt = _build_meta_prompt(
         idea=idea, name=name, project_type=project_type, technologies=techs,
     )
+    # (PM-INS-0029) the creator engine reads the owner's solved lessons («مرکز دانش») as well
+    _kc = {"block": "", "line": "", "entries": []}
+    try:
+        from .knowledge_center_service import experience_context as _kc_ctx
+        _kc = await _kc_ctx(f"{name} {idea}", "creator", "", limit=3, fetch_body=False)
+        if _kc.get("block"):
+            meta_prompt += "\n\n" + _kc["block"]
+    except Exception:  # noqa: BLE001
+        pass
 
     # call AI با fallback (ai_generate خودش chain را handle می‌کند)
     raw_response = ""
@@ -326,7 +335,8 @@ async def idea_to_strong_prompt_for_creator(
         "data_models": data_models,
         "non_functional_requirements": non_func,
         "constraints": constraints,
-        "full_prompt_text": full_prompt_text,
+        "full_prompt_text": full_prompt_text + (("\n\n" + _kc["block"] + "\n\n" + _kc["line"]) if _kc.get("block") else ""),
+        "experiences_used": _kc.get("line") or "",
         "model_used": model_used,
         "warnings": warnings,
         "raw_idea": idea.strip(),

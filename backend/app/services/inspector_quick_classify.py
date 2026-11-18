@@ -41,3 +41,32 @@ def is_simple_info_question(message: str) -> bool:
         return False
     asks = text.endswith(("?", "؟")) or any(m in low for m in _QUESTION_MARKERS)
     return asks
+
+
+# (PM-INS-0029) «کوتاه بگو چه کنم؟ (فقط پاسخ، تغییر فایل نه)» — a how-to question that NAMES a problem («کار نمی‌کند»،
+# «خطای ERR_…») is still a question. It went to a deep scan (semantic_only_vague, 0 paths) and no answer came for minutes.
+_ANSWER_ONLY = (
+    "فقط پاسخ", "فقط جواب", "فقط توضیح", "فقط بگو", "تغییر فایل نه", "فایل را تغییر نده", "فایلی را تغییر نده",
+    "بدون تغییر فایل", "بدونِ تغییرِ فایل", "بدون تغییر کد", "کدی تغییر نده", "چیزی تغییر نده", "دست نزن",
+    "just answer", "only answer", "answer only", "no file change", "no code change", "don't change", "do not change",
+    "without changing",
+)
+_HOWTO = ("چه کنم", "چکار کنم", "چی کار کنم", "چیکار کنم", "چه باید کرد", "چطور", "چگونه", "راه حل چیست", "راه‌حل چیست",
+          "چه کار کنم", "how do i", "how can i", "what should i", "how to ")
+_CHANGE_ASK = ("درست کن", "درستش کن", "اصلاح کن", "اعمال کن", "بساز", "بنویس", "اضافه کن", "حذف کن", "عوض کن",
+               "تغییر بده", "پیاده کن", "پیاده‌سازی کن", "commit", "push", " pr", "fix it", "implement", "create ", "add ",
+               "change the", "update the")
+
+
+def is_answer_only(message: str) -> bool:
+    """True ⇒ the user wants a TEXT answer: an explicit «فقط پاسخ / تغییر فایل نه», or a short how-to question
+    («چه کنم؟», «چطور …؟») that asks for no change. Never a scan, never an action_plan."""
+    text = (message or "").strip()
+    if not text or len(text) > 600:
+        return False
+    low = text.lower()
+    if any(m in low for m in _ANSWER_ONLY):
+        return True
+    if any(c in low for c in _CHANGE_ASK):
+        return False
+    return text.rstrip(" ).»").endswith(("?", "؟")) and any(h in low for h in _HOWTO)
