@@ -90,7 +90,8 @@ def matches(call: str, pats: list[Route], method: str = "") -> bool:
 #: verified by hand (2026-11-15) — comments, `${…}` expressions the regex cannot resolve, a WebSocket; not calls
 KNOWN_FALSE = {"/api/...", "/api/auth/", "/api/handbook/*", "/api/inspector-agent",
                "/api/oversight/repos${forceRefresh", "/api/oversight/runtime/backfill-ac-classification${force",
-               "/api/oversight/watched/${w.id}/claude-runner/${path}", "/api/render/ws/bridge/${projectId}"}
+               "/api/oversight/watched/${w.id}/claude-runner/${path}", "/api/render/ws/bridge/${projectId}",
+               "/api/render/inspector/proxy/"}  # (PM-INS-0030) the proxy PREFIX in frontend/src/middleware.ts, not a call
 
 
 def main(argv: list[str]) -> int:

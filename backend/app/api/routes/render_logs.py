@@ -19933,8 +19933,15 @@ async def take_screenshot(request: ScreenshotRequest, db: Session = Depends(get_
         await session.close()
         _warn = ""
         if _looks_like_login(page_info):
-            _warn = (f"⚠️ عکس یک صفحهٔ ورود است ({page_info.get('url')}) — سایت پیش از نمایش ورود می‌خواهد، یا نشانی اشتباه "
-                     "است؛ این عکس صفحهٔ واقعیِ پروژه نیست")
+            from urllib.parse import urlsplit as _us
+            _shot_host = _us(page_info.get("url") or "").netloc
+            if _shot_host and _shot_host == _us(request.url).netloc:
+                # the project's OWN sign-in page (Detective-1 is behind Google sign-in) — real, but not the inner pages
+                _warn = (f"ℹ️ این صفحهٔ ورودِ خودِ سایتِ پروژه است ({page_info.get('url')}) — سایت پیش از نمایشِ صفحه‌های داخلی "
+                         "ورود می‌خواهد؛ Playwright ِ سرور واردِ آن نشده است")
+            else:
+                _warn = (f"⚠️ عکس یک صفحهٔ ورود است ({page_info.get('url')}) که از سایتِ پروژه نیست — نشانی اشتباه است؛ "
+                         "این عکس صفحهٔ پروژه نیست")
         return {
             "success": True, "screenshot": screenshot_b64,
             "page_info": page_info, "timestamp": datetime.now().isoformat(),

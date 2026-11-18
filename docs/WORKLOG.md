@@ -1566,3 +1566,17 @@
 - **[VERIFY]** `tests/test_pm_ins_0030.py` ‏(۲). سنجشِ production در ورودیِ بعد.
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-18 · pytest + tsc
+
+## 2026-11-18 (۵) — PM-INS-0030: ریشهٔ واقعی — راهنمای ورودِ پروژه از پروکسی بیرون می‌زد
+
+- **[VERIFY]** پس از 54268be8: API ِ `/inspector/screenshot` با نشانیِ پروکسی ⇒ Detective-1 «Detective-1 — دانشنامه اطلاعاتی و شناسایی نفوذ» (صفحهٔ ورودِ خودِ Detective-1)، quran «مرکز دادهٔ قرآن —
+  نسخهٔ وب» (روی صفحه «مرکز حفظ قرآن»)، language «آموزش لهجه لبنانی». مرورگرِ واقعی، Detective-1: WS در ۵٫۳ ث؛ «📸 عکس» ⇒ یادداشتِ نشانیِ واقعی + عنوان در ۷ ث؛ «📋 کنسول» با ۰ لاگ باز شد
+  (توضیح)؛ «📋 سشن‌های آرشیو» فهرست را نشان داد (auto-verify ها، «🔍 Scan … Phase 5»)؛ 🩹 خوداصلاح با خطای JS ِ واقعی (`Cannot read properties of undefined (reading 'apiBase')`) ⇒ پیشنهادِ اصلاح
+  با علت، فایل و diff در ۳۲ ث.
+- **[FINDING]** خودِ iframe ِ پیش‌نمایش روی `ai-creator-frontend…/login?next=/api/render/inspector/proxy/gh_…_detective_1` بود: راهنمای ورودِ Detective-1 با `location.href = "/login?next=" +
+  pathname` (نسبی) از پیشوندِ پروکسی بیرون می‌زد و AI Creator (که صفحهٔ /login ندارد) دیوارِ ورودِ خودش را نشان می‌داد. `history`/`fetch` در پروکسی بازنویسی می‌شوند ولی `location.href` قابلِ وصله
+  نیست. (خطای آزمونیِ 🩹 هم در همین صفحه اجرا شد، نه در Detective-1.) هشدارِ «این عکس صفحهٔ پروژه نیست» برای صفحهٔ ورودِ **خودِ** پروژه نادرست بود.
+- **[CHANGE]** `frontend/src/middleware.ts`: ناوبریِ iframe (`sec-fetch-dest: iframe`) به مسیرِ غیر-API که `next/redirect/returnTo/callbackUrl` اش به پروکسی اشاره می‌کند ⇒ ۳۰۷ به همان پروکسی
+  (`/api/render/inspector/proxy/<id>[/~pt~…]/login?next=/…`). هشدارِ عکس: صفحهٔ ورودِ میزبانِ خودِ پروژه ⇒ «ℹ️ صفحهٔ ورودِ خودِ سایتِ پروژه است»، میزبانِ دیگر ⇒ «⚠️ … نشانی اشتباه است».
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-18 · مرورگرِ واقعی روی production
