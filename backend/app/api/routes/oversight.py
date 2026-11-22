@@ -4681,6 +4681,10 @@ async def disk_report():
     from ...services import disk_janitor
     rep = await asyncio.to_thread(disk_janitor.report)
     rep["alert"] = disk_janitor.needs_alert(rep)
+    try:  # (PM-INS-0032) can a VACUUM give the free pages back now
+        rep["vacuum_plan"] = await asyncio.to_thread(disk_janitor.vacuum_plan, rep)
+    except Exception as e:  # noqa: BLE001
+        rep["vacuum_plan"] = {"possible": False, "reason": f"{type(e).__name__}: {str(e)[:120]}"}
     return rep
 
 
@@ -4707,4 +4711,48 @@ async def disk_cleanup(body: dict):
 async def disk_janitor_run():
     from ...services import disk_janitor
     return await disk_janitor.run_all()
+
+
+# (PM-INS-0032, 2026-11-22) «دیسک دوباره دارد پر می‌شود» — compact gauge for the coordinator and both pages,
+# guarded VACUUM (backup to Drive first), and in-app search of what went to Drive.
+@router.get("/disk/status")
+async def disk_status():
+    """%, free, level (ok/warn ≥80/critical ≥85), biggest consumers, reclaimable pages in database.db, growth."""
+    import asyncio
+    from ...services import disk_janitor
+    return await asyncio.to_thread(disk_janitor.status)
+
+
+@router.get("/disk/vacuum")
+async def disk_vacuum_plan():
+    """Can a VACUUM run now, and what would it give back — nothing changes."""
+    import asyncio
+    from ...services import disk_janitor
+    return await asyncio.to_thread(disk_janitor.vacuum_plan)
+
+
+@router.post("/disk/vacuum")
+async def disk_vacuum(body: dict):
+    """Backup to Drive (confirmed) → VACUUM → WAL truncate, in the background; only when the free-space guard allows."""
+    import asyncio
+    from ...services import disk_janitor
+    if not body.get("confirm"):
+        raise HTTPException(status_code=400, detail="confirm: true لازم است")
+    return await asyncio.to_thread(disk_janitor.vacuum_start, True)
+
+
+@router.get("/disk/archives")
+async def disk_archives(q: str = "", kind: str = "", limit: int = 100):
+    """What the janitor moved to Drive («بایگانیِ سرور/<kind>»), searchable by name/content."""
+    import asyncio
+    from ...core.database import SessionLocal
+    from ...services import disk_janitor
+
+    def _run():
+        db = SessionLocal()
+        try:
+            return disk_janitor.drive_archives(db, q=q.strip()[:100], kind=kind.strip()[:40], limit=max(1, min(limit, 200)))
+        finally:
+            db.close()
+    return await asyncio.to_thread(_run)
 

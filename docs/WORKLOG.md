@@ -1616,3 +1616,26 @@
   برای ماندگاریِ نشست پس از ری‌استارت، signing key باید پایدار باشد (`SECRET_KEY` یا فایلِ کنارِ پایگاه‌داده — هر دو هست).
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-22 · pytest + next build + Chromium ِ واقعیِ محلی روی سایتِ Detective-1
+
+## 2026-11-22 (۲) — فوری PM-INS-0032: «دیسک دوباره دارد پر می‌شود» — اندازه‌گیری، ریشهٔ رشد، نشانگرِ دائمی
+
+- **[OWNER]** (هماهنگ‌کننده، ۲۱:۳۳ دبی ۲۲ نوامبر، پیگیریِ برگهٔ ۲۴ «الف») (۱) درصد/حجمِ دیسک و سهمِ هر بخش، و چه چیزی از ۱۸ نوامبر رشد کرده؛ (۲) ریشهٔ رشد را با روشِ ۲۴
+  (بایگانی به درایو + جست‌وجو در اپ، هیچ دادهٔ واقعی بی‌بایگانی پاک نشود) ببند و VACUUM ِ امن را بسنج؛ (۳) نشانگرِ دائمی در «فضای ذخیره‌سازی» و اتاق فرمان + هشدارِ بالای ۸۰٪ + یک GET.
+- **[FINDING]** زنده (`/api/oversight/disk`، ۲۲-۱۱ ~۲۱:۰۰ UTC): ۸۰٫۳٪، ۱۸۴MB آزاد از ۹۷۳MB. `database.db` ۵۰۸MB ولی جدول‌ها روی‌هم ~۲۳۰MB (project_files ۱۳۸، inspector_messages ۴۹،
+  projects ۱۳) ⇒ ~۲۸۰MB صفحهٔ خالی از حذفِ لاگ‌های برگهٔ ۲۴ که فقط VACUUM به دیسک برمی‌گرداند. `tasks.json` ۱۳۶MB، `verify_evidence` ۹۸MB، `reports.json` ۱۸MB، WAL ۸٫۷MB.
+  رشد از ۱۷/۱۸ نوامبر (عددهای WORKLOG ۱۷-۱۱ (۶۱)/(۶۲)): آزاد ۲۰۹ ⇐ ۱۸۴MB (−۲۵MB): tasks.json ۱۲۲ ⇐ ۱۳۶ (+۱۴)، verify_evidence ۹۲ ⇐ ۹۸ (+۶)، WAL ۰ ⇐ ۸٫۷ (+۹)، reports.json ۱۷ ⇐ ۱۸ (+۱)؛
+  رشدِ جدول‌ها (project_files +۷، inspector_messages +۳) داخلِ صفحه‌های خالیِ پایگاه‌داده رفت و دیسک را پر نکرد. نکتهٔ پنهان: `tasks.json` هر بار با نسخهٔ موقتِ کامل (`.tmp`) بازنویسی
+  می‌شود ⇒ وقتی آزاد < ~۱۳۶MB شود، نوشتنِ تسک‌ها شکست می‌خورد. `verify_evidence` هیچ‌وقت از دیسک بیرون نمی‌رفت (فقط «۵ اجرای آخرِ هر تسک»). درصد/ریز در API بود
+  (`/api/oversight/disk`) ولی هماهنگ‌کننده آن را نمی‌شناخت و هیچ نشانگرِ همیشه‌پیدایی نبود.
+- **[CHANGE]** `services/disk_janitor.py`: `db_space` (page/freelist، WAL، journal_mode)، `consumers` (گروه‌های خودِ مالک + «سایر»)، `record_snapshot`/`growth` (هر ≥۶ ساعت یک عکس در
+  `storage/disk_history.json`، حداکثر ۱۲۰)، `status` (فشرده: ٪، آزاد، سطحِ ok/warn≥۸۰/critical≥۸۵، ۶ بزرگ‌ترین، قابلِ بازگشت، رشد، طرحِ VACUUM)، `vacuum_plan` (فضای لازم = دادهٔ زنده×۱٫۱ در WAL
+  + tasks.json + ۶۴MB، و اگر /tmp روی همان دیسک است + دادهٔ زنده)، `vacuum_start`/`_vacuum_worker` (`VACUUM INTO /tmp` ⇐ gzip ⇐ درایو «بایگانیِ سرور/database_backups» با تأیید ⇐ دوباره
+  نگهبان ⇐ `VACUUM` + `wal_checkpoint(TRUNCATE)`؛ شکست = SQLite برمی‌گرداند)، `drive_archives` (جست‌وجوی نام/متن در «بایگانیِ سرور/<نوع>»). هدفِ تازهٔ پاک‌کن: `oversight/verify_evidence`
+  (هر پوشهٔ تسک ِ ۷روز دست‌نخورده ⇐ tar.gz در درایو ⇐ حذف؛ درایو وصل نباشد هیچ). مسیرها: `GET /api/oversight/disk/status`، `GET|POST /api/oversight/disk/vacuum` (POST فقط با confirm)،
+  `GET /api/oversight/disk/archives?q=&kind=`؛ `/disk` حالا `vacuum_plan` هم دارد. فرانت: `components/DiskGauge.tsx` (هر ۵ دقیقه تازه) در `inspection/Panels.tsx › StoragePanel` و بالای
+  `DiskPanel`؛ `DiskPanel`: جدولِ «سهمِ هر بخش» با ستونِ رشد، کارتِ VACUUM (دکمه فقط وقتی نگهبان اجازه دهد)، جست‌وجوی بایگانی‌های درایو. هیچ قابلیتی حذف نشد.
+- **[DECISION]** VACUUM خودکار اجرا نمی‌شود — فقط با دکمه/confirm و نگهبانِ فضا؛ با ۱۸۴MB آزاد الان ممکن نیست (حدودِ ۴۵۰MB لازم). «ب» ِ برگهٔ ۲۴ (تسک‌های بایگانی‌شدهٔ tasks.json به درایو)
+  که مالک آن زمان رد کرد، دست نخورد؛ چون tasks.json بزرگ‌ترین رشد است، به تصمیمِ مالک سپرده شد.
+- **[VERIFY]** `tests/test_pm_ins_0032_disk_gauge.py` (۸) + `test_disk_janitor.py`؛ کلِ بک‌اند ۹۶۸ سبز؛ `next build` سبز؛ `check_frontend_api` ۰ ناهم‌خوان. سنجشِ production در بخشِ بعد.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-22 · API ِ production + pytest + next build

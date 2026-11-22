@@ -6,6 +6,7 @@ import { errorText, inspectionApi, type Schedule, type StorageStatus } from '@/l
 import { everyText, humanGap, localClock } from '@/lib/inspection/nextRound'
 import { toast } from '@/lib/inspection/toast'
 import { fa } from './Board'
+import DiskGauge from '@/components/DiskGauge'
 
 // ---------------------------------------------------------------------------
 // archive
@@ -133,6 +134,8 @@ export function StoragePanel() {
 
   return (
     <div dir="rtl" className="space-y-3">
+      {/* PM-INS-0032 — permanent disk gauge (%, free, biggest consumers, warning past 80%) */}
+      <DiskGauge />
       <p className="text-xs text-gray-500 dark:text-gray-400">
         فایل‌ها و اسکرین‌شات‌های «نظارت و سرکشی» روی سرور نگه داشته نمی‌شوند: فقط تا وقتی در راه‌اند موقتاً روی دیسک‌اند،
         بعد با رفرنسِ مشخص (مثلِ <span dir="ltr">PM-INS-0007-F01</span>) به پوشهٔ همین پروژه در گوگل درایو منتقل و لینک
