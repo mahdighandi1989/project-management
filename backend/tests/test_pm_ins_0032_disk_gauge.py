@@ -113,3 +113,18 @@ def test_report_carries_the_new_parts(tmp_path, monkeypatch):
     rep = J.report(tmp_path)
     assert "consumers" in rep and "history" in rep and "growth" in rep and rep["db_space"]["free_bytes"] == 1
     assert (tmp_path / J.HISTORY_FILE).is_file()
+
+
+def test_a_second_run_while_one_is_running_does_nothing(tmp_path):
+    assert J._RUN_LOCK.acquire(blocking=False)
+    try:
+        r = J.run(db=object(), root=tmp_path)
+    finally:
+        J._RUN_LOCK.release()
+    assert r["busy"] is True and r["archived"] == 0 and r["errors"] == []
+
+
+def test_alert_does_not_claim_drive_is_off_before_any_run():
+    assert "درایو" not in J.needs_alert({"percent": 81.0, "last_run": None})
+    assert "درایو" not in J.needs_alert({"percent": 81.0, "last_run": {"drive": True}})
+    assert "درایو وصل نیست" in J.needs_alert({"percent": 81.0, "last_run": {"drive": False}})

@@ -1639,3 +1639,15 @@
 - **[VERIFY]** `tests/test_pm_ins_0032_disk_gauge.py` (۸) + `test_disk_janitor.py`؛ کلِ بک‌اند ۹۶۸ سبز؛ `next build` سبز؛ `check_frontend_api` ۰ ناهم‌خوان. سنجشِ production در بخشِ بعد.
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-22 · API ِ production + pytest + next build
+
+## 2026-11-22 (۳) — PM-INS-0032: سنجشِ production پس از 65e351f + قفلِ پاک‌کن و هشدارِ نادرستِ «درایو وصل نیست»
+
+- **[VERIFY]** `GET /api/oversight/disk/status` زنده: ۸۰٫۲٪، آزاد ۱۷۷MiB، level=warn، بزرگ‌ترین‌ها: database.db ۵۰۸MB (خالیِ داخلش ۲۸۳٫۵MB)، tasks.json ۱۳۶MB، verify_evidence ۹۷MB،
+  reports.json ۱۸MB، اسکن/ساختار ۱۳MB، WAL ۸٫۸MB. طرحِ VACUUM: بعد از آن پایگاه‌داده ۲۲۵MB می‌شد، ولی ۴۲۹MB آزاد لازم است ⇒ `possible=false` (درست؛ اجرا نشد).
+- **[FINDING]** (۱) هشدار پس از هر ری‌استارت «گوگل درایو وصل نیست» می‌گفت، فقط چون هنوز هیچ دورِ پاک‌کن اجرا نشده بود (`last_run=None`) — درایو وصل است. (۲) پاک‌کنِ زمان‌بندی‌شدهٔ
+  آغازِ سرور و اجرای دستیِ من هم‌زمان روی verify_evidence راه افتادند؛ دومی به پوشه‌هایی رسید که اولی تازه به درایو برده بود ⇒ صدها خطای «No such file». هیچ داده‌ای گم نشد (اول درایو، بعد حذف).
+  بایگانیِ verify_evidence در جریان است (۹۷ ⇐ ۹۴MB در چند دقیقهٔ اول؛ پوشه‌به‌پوشه به درایو).
+- **[CHANGE]** `disk_janitor.run`: قفلِ غیرمسدودکننده — دورِ دوم در حینِ اجرای اولی `busy` برمی‌گرداند و `_last` را دست نمی‌زند؛ `_size` داخلِ try. `needs_alert`: «درایو وصل نیست» فقط وقتی
+  یک دورِ واقعی `drive=False` دیده باشد. دو تست.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-22 · API ِ production + pytest

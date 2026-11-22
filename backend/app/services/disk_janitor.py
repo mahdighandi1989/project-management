@@ -133,8 +133,22 @@ async def drop_extraction_caches() -> int:
     return freed
 
 
+_RUN_LOCK = __import__("threading").Lock()
+
+
 def run(db=None, root: Optional[Path] = None, min_age_days: Optional[float] = None) -> Dict[str, Any]:
-    """Archive-then-remove old artifacts. Returns what was done (also kept for `report()`)."""
+    """Archive-then-remove old artifacts. Returns what was done (also kept for `report()`).
+    (PM-INS-0032) one pass at a time — a manual run racing the scheduled one hit folders the other had just moved."""
+    if not _RUN_LOCK.acquire(blocking=False):
+        return {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "archived": 0, "freed": 0,
+                "errors": [], "busy": True, "drive": (_last or {}).get("drive"), "kept_without_drive": 0}
+    try:
+        return _run(db, root, min_age_days)
+    finally:
+        _RUN_LOCK.release()
+
+
+def _run(db=None, root: Optional[Path] = None, min_age_days: Optional[float] = None) -> Dict[str, Any]:
     root = root or STORAGE_ROOT
     age = MIN_AGE_DAYS if min_age_days is None else min_age_days
     result: Dict[str, Any] = {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "archived": 0, "freed": 0,
@@ -165,8 +179,8 @@ def run(db=None, root: Optional[Path] = None, min_age_days: Optional[float] = No
                 if not result["drive"]:
                     result["kept_without_drive"] += 1
                     continue
-                size = _size(item)
                 try:
+                    size = _size(item)
                     if _archive_item(db, kind, item):
                         shutil.rmtree(item) if item.is_dir() else item.unlink()
                         result["archived"] += 1
@@ -424,7 +438,10 @@ def telegram_alert(rep: Dict[str, Any]) -> Optional[str]:
 def needs_alert(rep: Dict[str, Any]) -> Optional[str]:
     pct = rep.get("percent")
     if pct is not None and pct >= ALERT_PERCENT:
-        return f"دیسکِ سرور {pct}% پر است" + ("" if (rep.get("last_run") or {}).get("drive") else " و گوگل درایو وصل نیست — بایگانی ممکن نیست")
+        # (PM-INS-0032) «درایو وصل نیست» only when a janitor run actually found it so — not just because none ran yet
+        lr = rep.get("last_run")
+        return f"دیسکِ سرور {pct}% پر است" + (" و گوگل درایو وصل نیست — بایگانی ممکن نیست"
+                                               if lr and lr.get("drive") is False else "")
     if rep.get("last_write_error"):
         return f"نوشتنِ دادهٔ اتاق فرمان شکست خورد: {rep['last_write_error']}"
     return None
