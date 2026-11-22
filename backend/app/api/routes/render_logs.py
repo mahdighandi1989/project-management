@@ -19902,6 +19902,11 @@ async def take_screenshot(request: ScreenshotRequest, db: Session = Depends(get_
             url=request.url
         )
         session.viewport = {"width": request.viewport_width, "height": request.viewport_height}
+        _signed_in = False
+        if not request.html_content:
+            from ...services import manual_login as _ML
+            session.storage_state = _ML.state_for_url(request.url)  # PM-INS-0031: 🔐 one-time sign-in
+            _signed_in = bool(session.storage_state)
 
         # 🔀 اگر DOM snapshot ارسال شده → رندر HTML فعلی بجای navigation به URL
         if request.html_content:
@@ -19938,7 +19943,8 @@ async def take_screenshot(request: ScreenshotRequest, db: Session = Depends(get_
             if _shot_host and _shot_host == _us(request.url).netloc:
                 # the project's OWN sign-in page (Detective-1 is behind Google sign-in) — real, but not the inner pages
                 _warn = (f"ℹ️ این صفحهٔ ورودِ خودِ سایتِ پروژه است ({page_info.get('url')}) — سایت پیش از نمایشِ صفحه‌های داخلی "
-                         "ورود می‌خواهد؛ Playwright ِ سرور واردِ آن نشده است")
+                         "ورود می‌خواهد؛ " + ("ورودِ ذخیره‌شده منقضی یا نامعتبر شده — دوباره «🔐 ورودِ یک‌باره» بزنید"
+                                             if _signed_in else "یک بار «🔐 ورودِ یک‌باره» را بزنید تا 📸 و عامل با حسابِ شما وارد شوند"))
             else:
                 _warn = (f"⚠️ عکس یک صفحهٔ ورود است ({page_info.get('url')}) که از سایتِ پروژه نیست — نشانی اشتباه است؛ "
                          "این عکس صفحهٔ پروژه نیست")
@@ -19946,6 +19952,7 @@ async def take_screenshot(request: ScreenshotRequest, db: Session = Depends(get_
             "success": True, "screenshot": screenshot_b64,
             "page_info": page_info, "timestamp": datetime.now().isoformat(),
             "target_url": request.url, "target_note": _target_note, "login_warning": _warn,
+            "signed_in": _signed_in,
         }
     except Exception as e:
         return {"success": False, "error": f"خطا در عکس‌برداری: {str(e)[:200]}"}

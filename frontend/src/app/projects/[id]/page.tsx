@@ -7,6 +7,8 @@ import { useParams, useSearchParams } from 'next/navigation';
 import PromptManager from '@/components/PromptManager';
 import ServerScreen from '@/components/ServerScreen';
 import BrowserAgentPanel from '@/components/BrowserAgentPanel';
+import InspectorLoginPanel from '@/components/InspectorLoginPanel';  // PM-INS-0031 🔐 ورودِ یک‌باره
+import InspectorGuide from '@/components/InspectorGuide';  // PM-INS-0031 🧭 از این‌جا شروع کن
 import { ensurePreviewTicket, getPreviewTicket } from '@/lib/previewTicket';
 import ExecutingPromptsPanel from '@/components/ExecutingPromptsPanel';
 import InspectorRecordingPanel from '@/components/InspectorRecordingPanel';  // 🆕 🎬 ضبط بازرس ویژه دوحالته (A + B)
@@ -14409,6 +14411,9 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
               )}
             </div>
 
+            {/* PM-INS-0031: راهنمای همیشه‌پیدا — «از این‌جا شروع کن» + یک جمله برای هر دکمه */}
+            <InspectorGuide />
+
             {/* محتوای اصلی - اسکرین و چت */}
             {/* (2026-11-15, PM-INS-0002) واکنش‌گرا: قبلاً 840px + 380px ثابت بود و در ۱۳۶۰px کنارِ منوی کناری چت بریده می‌شد؛
                 حالا هر دو جمع می‌شوند و در عرضِ کم چت به زیرِ اسکرین می‌رود (flex-wrap). */}
@@ -14422,7 +14427,8 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                   {/* فریم دستگاه - افقی */}
                   <div
                     className={`bg-gray-900 rounded-xl overflow-hidden relative ${inspectorScreenFull ? 'flex-1' : ''}`}
-                    style={inspectorScreenFull ? undefined : { aspectRatio: '1.82/1' }}
+                    // PM-INS-0031: در پنجرهٔ باریک نسبتِ 1.82 فقط ~۲۰۰px ارتفاع می‌داد — حداقلِ ارتفاع ⇒ قابلِ استفاده
+                    style={inspectorScreenFull ? undefined : { aspectRatio: '1.82/1', minHeight: 'min(70vh, 520px)' }}
                   >
                     {/* صفحه نمایش */}
                     <div className="h-full w-full bg-gradient-to-br from-gray-800 to-gray-900 p-1 flex flex-col relative">
@@ -14486,7 +14492,7 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                                 onClick={() => setInspectorScreenFull(v => !v)}
                                 className="text-[10px] text-gray-400 hover:text-white px-1 flex-shrink-0"
                                 title={inspectorScreenFull ? 'خروج از تمام‌صفحه (Esc)' : 'تمام‌صفحه'}
-                              >{inspectorScreenFull ? '🗗' : '⛶'}</button>
+                              >{inspectorScreenFull ? '🗗 کوچک' : '⛶ بزرگ'}</button>
                               <button
                                 onClick={() => {
                                   const real = inspectorFrontendUrl || inspectorBaseUrl;
@@ -14912,6 +14918,19 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                 <span className={`text-xs mt-1 ${inspectorPowerOn ? 'text-green-600' : 'text-gray-500'}`}>
                   {inspectorLoading ? 'در حال اتصال...' : inspectorPowerOn ? 'روشن' : 'خاموش'}
                 </span>
+                <span className="text-[10px] text-gray-500 text-center max-w-[170px] leading-4">
+                  {inspectorPowerOn ? 'سایتِ پروژه در اسکرین است؛ گامِ بعد: ورود' : 'گامِ ۱: بزنید تا سایتِ پروژه در اسکرین بیاید'}
+                </span>
+
+                {/* PM-INS-0031 🔐 ورودِ یک‌باره — مرورگرِ زندهٔ سرور، نشستِ رمزنگاری‌شده برای 📸/عامل */}
+                {inspectorPowerOn && projectId && (
+                  <div className="mt-3">
+                    <InspectorLoginPanel
+                      projectId={projectId}
+                      onStatus={(msg) => setInspectorChatMessages(prev => [...prev, { id: `login_${Date.now()}`, role: 'system' as const, content: msg, timestamp: new Date() }])}
+                    />
+                  </div>
+                )}
 
                 {/* 🆕 دکمه رصد لاگ‌ها */}
                 {inspectorPowerOn && (

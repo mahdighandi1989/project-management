@@ -647,6 +647,14 @@ async def login_state_for(url: str) -> tuple[Optional[dict], str]:
     except Exception:  # noqa: BLE001
         return None, ""
     host = host_of(url)
+    try:  # PM-INS-0031: the owner's own one-time sign-in (🔐) wins over a recipe
+        from . import manual_login as ML
+
+        _st = ML.state_for_url(url)
+        if _st:
+            return _st, "🔐 با ورودِ یک‌بارهٔ خودِ شما (ذخیرهٔ رمزنگاری‌شده) وارد شد"
+    except Exception:  # noqa: BLE001
+        pass
     for w in get_oversight_service().watched:
         fe = getattr(w, "frontend_base_url", None) or ""
         if fe and host_of(fe) == host and getattr(w, "runtime_auth_recipe", None):

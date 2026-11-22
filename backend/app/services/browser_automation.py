@@ -57,6 +57,7 @@ class BrowserSession:
         self.viewport = {"width": 1280, "height": 720}
         self.action_log: List[Dict] = []
         self._element_handles: List = []  # 🆕 برای کلیک مستقیم روی المان
+        self.storage_state: Optional[Dict] = None  # PM-INS-0031: the owner's saved one-time sign-in
 
     async def _start_browser_only(self):
         """فقط مرورگر را باز کن (بدون ناوبری به URL) — برای set_content"""
@@ -68,7 +69,8 @@ class BrowserSession:
         )
         self.context = await self.browser.new_context(
             viewport=self.viewport,
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            **({"storage_state": self.storage_state} if self.storage_state else {}),
         )
         self.page = await self.context.new_page()
         return self

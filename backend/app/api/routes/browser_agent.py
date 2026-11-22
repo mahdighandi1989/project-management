@@ -164,7 +164,11 @@ async def snapshot(url: str = Query(..., min_length=8, max_length=2000), width: 
         browser = await get_browser_pool().get_browser()
         if browser is None:
             raise HTTPException(503, "Chromium ِ سرور در دسترس نیست")
-        ctx = await browser.new_context(viewport={"width": width, "height": int(width * 0.625)}, locale="fa-IR")
+        from ...services import manual_login as ML
+
+        _st = ML.state_for_url(url)  # PM-INS-0031: the owner's one-time sign-in for this site, if saved
+        ctx = await browser.new_context(viewport={"width": width, "height": int(width * 0.625)}, locale="fa-IR",
+                                        **({"storage_state": _st} if _st else {}))
         try:
             page = await ctx.new_page()
             try:
@@ -177,3 +181,119 @@ async def snapshot(url: str = Query(..., min_length=8, max_length=2000), width: 
             return Response(jpg, media_type="image/jpeg", headers={"Cache-Control": "no-store", "X-Final-Url": page.url})
         finally:
             await ctx.close()
+
+
+# ── PM-INS-0031 «🔐 ورودِ یک‌باره» — live server browser the owner signs in with, once per site ─────────────────
+
+class LoginStartIn(BaseModel):
+    project_id: Optional[str] = None
+    url: Optional[str] = Field(None, max_length=2000)
+
+
+class LoginActIn(BaseModel):
+    kind: str = Field(..., pattern=r"^(click|type|key|scroll|back|goto)$")
+    x: float = 0
+    y: float = 0
+    text: str = Field("", max_length=500)
+    key: str = Field("", max_length=20)
+    dy: float = 0
+    url: str = Field("", max_length=2000)
+
+
+def _login_url(body_url: Optional[str], project_id: Optional[str]) -> str:
+    url = (body_url or "").strip()
+    if not url and project_id:
+        from ...core.database import SessionLocal
+        from .render_logs import resolve_preview_frontend_url
+
+        db = SessionLocal()
+        try:
+            url = resolve_preview_frontend_url(db, project_id) or ""
+        finally:
+            db.close()
+    if not re.match(r"^https?://", url):
+        raise HTTPException(400, "نشانیِ سایتِ واقعیِ پروژه پیدا نشد — اول پیش‌نمایش را «روشن» کنید")
+    return url
+
+
+def _live(sid: str):
+    from ...services import manual_login as ML
+
+    s = ML.get(sid)
+    if s is None:
+        raise HTTPException(404, "این پنجرهٔ ورود بسته شده (۱۰ دقیقه بی‌کاری) — دوباره «🔐 ورودِ یک‌باره» بزنید")
+    return s
+
+
+@router.get("/login/status")
+async def login_status(project_id: Optional[str] = None, url: Optional[str] = None) -> Dict[str, Any]:
+    from ...services import manual_login as ML
+
+    try:
+        u = _login_url(url, project_id)
+    except HTTPException:
+        return {"url": "", "saved": None}
+    return {"url": u, "host": ML.host_of(u), "saved": ML.status_for(ML.host_of(u))}
+
+
+@router.post("/login/start")
+async def login_start(body: LoginStartIn) -> Dict[str, Any]:
+    from ...services import manual_login as ML
+
+    u = _login_url(body.url, body.project_id)
+    try:
+        s = await ML.start(u)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(503, f"مرورگرِ سرور باز نشد: {str(e).splitlines()[0][:160]}")
+    return {"session_id": s.id, "url": u, "host": s.host, "viewport": ML.VIEWPORT}
+
+
+@router.get("/login/{sid}/frame")
+async def login_frame(sid: str) -> Dict[str, Any]:
+    from ...services import manual_login as ML
+
+    try:
+        return await ML.frame(_live(sid))
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e).splitlines()[0][:160]}
+
+
+@router.post("/login/{sid}/act")
+async def login_act(sid: str, body: LoginActIn) -> Dict[str, Any]:
+    from ...services import manual_login as ML
+
+    try:
+        err = await ML.act(_live(sid), body.kind, x=body.x, y=body.y, text=body.text, key=body.key, dy=body.dy,
+                           url=body.url)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        err = str(e).splitlines()[0][:160]
+    return {"ok": not err, "error": err}
+
+
+@router.post("/login/{sid}/save")
+async def login_save(sid: str) -> Dict[str, Any]:
+    from ...services import manual_login as ML
+
+    meta = await ML.finish(_live(sid))
+    return {"ok": True, "saved": meta}
+
+
+@router.post("/login/{sid}/cancel")
+async def login_cancel(sid: str) -> Dict[str, Any]:
+    from ...services import manual_login as ML
+
+    s = ML.get(sid)
+    if s:
+        await ML.cancel(s)
+    return {"ok": True}
+
+
+@router.post("/login/forget")
+async def login_forget(body: LoginStartIn) -> Dict[str, Any]:
+    from ...services import manual_login as ML
+
+    return {"ok": ML.forget(ML.host_of(_login_url(body.url, body.project_id)))}
