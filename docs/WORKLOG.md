@@ -1651,3 +1651,13 @@
   یک دورِ واقعی `drive=False` دیده باشد. دو تست.
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-22 · API ِ production + pytest
+
+## 2026-11-22 (۴) — PM-INS-0032: ۵۰۰ ِ گذرای گزارشِ دیسک هنگامِ بایگانیِ verify_evidence
+
+- **[FINDING]** یک بار `GET /api/oversight/disk/status` ۵۰۰ داد: `report()` حجمِ پوشهٔ verify_evidence (حالا هدفِ پاک‌کن) را می‌شمرد و پاک‌کن هم‌زمان پوشه‌ها را پس از آپلود به درایو برمی‌داشت ⇒
+  `_size` روی فایلِ ناپدیدشده `FileNotFoundError` می‌داد (همان خطای قدیمی برای scan_v5 هم ممکن بود، فقط کم پیش می‌آمد).
+- **[CHANGE]** `disk_janitor._size`: فایلِ ناپدیدشده ۰ حساب می‌شود؛ شمارشِ اقلامِ `kinds` در try. یک تست.
+- **[VERIFY]** پس از 16a57c2: ۸۰٫۲٪ ⇐ ۷۸٫۰٪، verify_evidence ۹۷ ⇐ ۷۸٫۵MB و در حالِ کاهش، هشدارِ نادرستِ «درایو وصل نیست» رفت؛ پنلِ `/oversight#disk` با نشانگر، «سهمِ هر بخش»، کارتِ VACUUM و جست‌وجو
+  در مرورگرِ واقعی بی‌خطای صفحه.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-22 · API ِ production + مرورگرِ واقعی + pytest

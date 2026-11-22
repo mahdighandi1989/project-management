@@ -46,9 +46,26 @@ _last: Dict[str, Any] = {}
 
 
 def _size(p: Path) -> int:
-    if p.is_file():
-        return p.stat().st_size
-    return sum(f.stat().st_size for f in p.rglob("*") if f.is_file()) if p.is_dir() else 0
+    """Bytes of a file or a whole folder. (PM-INS-0032) files may vanish while we count (the janitor moves folders to
+    Drive while the report is read) — a vanished file counts 0 instead of failing the whole report with a 500."""
+    try:
+        if p.is_file():
+            return p.stat().st_size
+        if not p.is_dir():
+            return 0
+    except OSError:
+        return 0
+    total = 0
+    try:
+        for f in p.rglob("*"):
+            try:
+                if f.is_file():
+                    total += f.stat().st_size
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return total
 
 
 def _old(p: Path, min_age_days: float) -> bool:
@@ -69,7 +86,11 @@ def report(root: Optional[Path] = None) -> Dict[str, Any]:
         pass
     for kind, rel, _ in TARGETS:
         d = root / rel
-        out["kinds"][kind] = {"bytes": _size(d), "items": len(list(d.iterdir())) if d.is_dir() else 0}
+        try:
+            items = len(list(d.iterdir())) if d.is_dir() else 0
+        except OSError:
+            items = 0
+        out["kinds"][kind] = {"bytes": _size(d), "items": items}
     out["json_stores"] = {f.name: f.stat().st_size for f in sorted((root / "oversight").glob("*.json"))} \
         if (root / "oversight").is_dir() else {}
     out["last_run"] = _last or None

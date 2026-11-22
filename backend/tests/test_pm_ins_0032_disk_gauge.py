@@ -128,3 +128,20 @@ def test_alert_does_not_claim_drive_is_off_before_any_run():
     assert "درایو" not in J.needs_alert({"percent": 81.0, "last_run": None})
     assert "درایو" not in J.needs_alert({"percent": 81.0, "last_run": {"drive": True}})
     assert "درایو وصل نیست" in J.needs_alert({"percent": 81.0, "last_run": {"drive": False}})
+
+
+def test_size_survives_files_vanishing_mid_count(tmp_path, monkeypatch):
+    d = tmp_path / "v"
+    d.mkdir()
+    for i in range(3):
+        (d / f"{i}.png").write_bytes(b"x" * 10)
+    real_stat = Path.stat
+    gone = d / "1.png"
+
+    def flaky(self, *a, **k):
+        if self == gone and not a and not k.get("follow_symlinks", True) is False and getattr(flaky, "armed", False):
+            raise FileNotFoundError(str(self))
+        return real_stat(self, *a, **k)
+    flaky.armed = True
+    monkeypatch.setattr(Path, "stat", flaky)
+    assert J._size(d) == 20
