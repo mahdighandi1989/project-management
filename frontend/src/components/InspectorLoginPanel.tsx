@@ -17,6 +17,17 @@ const BASE = `${API_BASE}/api/inspector-agent`;
 interface Saved { source?: string; host: string; saved_at: string; expires_at: string; cookies: number; origins: number; final_url: string; title: string; expired?: boolean }
 interface Frame { ok: boolean; image?: string; url?: string; title?: string; tabs?: number; viewport?: { width: number; height: number }; error?: string }
 
+// PM-INS-0035 — Google refuses sign-in in an automated (server) browser: accounts.google.com/…/signin/rejected
+// («ورود شما به سیستم ممکن نیست — این مرورگر ممکن است ایمن نباشد»). That is Google's security policy and is NOT
+// worked around here; the panel recognises the page and hands over to «📥 از کرومِ من» in one click.
+export function googleSigninState(url?: string): 'rejected' | 'google' | null {
+  if (!url) return null;
+  let u: URL;
+  try { u = new URL(url); } catch { return null; }
+  if (u.hostname !== 'accounts.google.com') return null;
+  return /\/signin\/rejected\b/.test(u.pathname) ? 'rejected' : 'google';
+}
+
 const KEYS: [string, string][] = [['Enter', '⏎ Enter'], ['Tab', '⇥ Tab'], ['Backspace', '⌫ پاک'], ['Escape', 'Esc']];
 
 export default function InspectorLoginPanel({ projectId, onStatus }: { projectId: string; onStatus?: (msg: string) => void }) {
@@ -137,7 +148,11 @@ export default function InspectorLoginPanel({ projectId, onStatus }: { projectId
     act({ kind: 'click', x: ((e.clientX - rc.left) / rc.width) * vp.width, y: ((e.clientY - rc.top) / rc.height) * vp.height });
   };
 
+  // PM-INS-0035: close the live window and open the Chrome-import steps directly
+  const switchToChrome = async () => { await cancel(); await startImport(); };
+
   const okSaved = saved && !saved.expired;
+  const gState = sid ? googleSigninState(frame?.url) : null;
   return (
     <>
       <div className="flex flex-col items-center">
@@ -145,7 +160,7 @@ export default function InspectorLoginPanel({ projectId, onStatus }: { projectId
           onClick={start}
           disabled={busy || !projectId}
           className={`px-3 py-1.5 rounded-lg text-xs font-medium text-white transition-all disabled:opacity-50 ${okSaved ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-amber-600 hover:bg-amber-700'}`}
-          title="یک مرورگرِ زنده روی سرور، روی سایتِ واقعیِ پروژه، باز می‌شود؛ خودتان وارد شوید و «ذخیره» بزنید"
+          title="یک مرورگرِ زنده روی سرور، روی سایتِ واقعیِ پروژه، باز می‌شود؛ خودتان وارد شوید و «ذخیره» بزنید. سایتی که با گوگل وارد می‌شود: گوگل این مرورگر را رد می‌کند ⇒ 📥 از کرومِ من"
         >
           {busy && !sid ? '⏳ باز کردن…' : okSaved ? '🔐 ورود ذخیره است — دوباره' : '🔐 ورودِ یک‌باره'}
         </button>
@@ -216,6 +231,25 @@ export default function InspectorLoginPanel({ projectId, onStatus }: { projectId
             <b className="text-sm">🔐 ورودِ یک‌باره</b>
             <span className="text-gray-300">روی تصویر کلیک کنید مثلِ صفحهٔ واقعی؛ برای تایپ، متن را در کادرِ پایین بنویسید و «بفرست». وقتی وارد شدید «✅ وارد شدم — ذخیره».</span>
           </div>
+          {gState === 'rejected' && (
+            <div className="mb-2 rounded-lg border-2 border-amber-400 bg-amber-50 text-amber-900 p-3 text-sm leading-6" role="alert">
+              <b>⛔ گوگل ورود در مرورگرِ سرور را رد کرد</b> — «این مرورگر ممکن است ایمن نباشد». این قانونِ امنیتیِ خودِ گوگل برای مرورگرهای
+              خودکار است و از این‌جا (با «دوباره امتحان کنید» یا هر کلیکِ دیگری) درست نمی‌شود. راهِ کارکننده: نشستِ ورود را از
+              <b> کرومِ خودتان</b> بیاورید — همان‌جا که الان وارد هستید.
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button onClick={switchToChrome} disabled={busy} className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold disabled:opacity-50">
+                  📥 برو به «از کرومِ من» (این پنجره بسته می‌شود)
+                </button>
+                <button onClick={cancel} className="px-3 py-1.5 rounded-lg bg-gray-200 text-gray-800 text-xs">انصراف</button>
+              </div>
+            </div>
+          )}
+          {gState === 'google' && (
+            <div className="mb-2 rounded bg-indigo-900/60 text-indigo-100 px-2 py-1 text-[11px]">
+              ℹ️ اگر گوگل «این مرورگر ایمن نیست» گفت، این‌جا ادامه ندهید —{' '}
+              <button onClick={switchToChrome} disabled={busy} className="underline font-bold">📥 از کرومِ من</button> را بزنید.
+            </div>
+          )}
           <div className="text-[11px] text-gray-300 mb-1 truncate" dir="ltr">{frame?.url || site} {frame?.tabs && frame.tabs > 1 ? ` · ${frame.tabs} tabs (showing newest — e.g. Google sign-in popup)` : ''}</div>
           <div className="flex-1 min-h-0 flex items-center justify-center bg-gray-900 rounded-lg overflow-auto">
             {frame?.image
