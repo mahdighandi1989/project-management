@@ -85,9 +85,9 @@ def _file(host: str) -> Path:
     return _store_dir() / (hashlib.sha256(host.encode("utf-8")).hexdigest()[:24] + ".json")
 
 
-def save_state(host: str, state: dict, *, final_url: str = "", title: str = "") -> dict:
+def save_state(host: str, state: dict, *, final_url: str = "", title: str = "", source: str = "live") -> dict:
     now = datetime.now(timezone.utc)
-    meta = {
+    meta = {"source": source,
         "host": host, "saved_at": now.isoformat(), "expires_at": (now + timedelta(days=STATE_TTL_DAYS)).isoformat(),
         "cookies": len(state.get("cookies") or []), "origins": len(state.get("origins") or []),
         "final_url": final_url[:300], "title": title[:200],
@@ -125,6 +125,24 @@ def state_for_url(url: str) -> Optional[dict]:
         return decrypt(d.get("blob") or "")
     except Exception:  # noqa: BLE001
         return None
+
+
+def list_saved() -> list[dict]:
+    """Every saved sign-in (metadata only, never the blob) — for the per-site table with expiry and 🗑."""
+    out = []
+    for p in sorted(_store_dir().glob("*.json")):
+        if p.name == TICKETS_FILE:
+            continue
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(d, dict) or not d.get("host"):
+            continue
+        st = status_for(d["host"])
+        if st:
+            out.append(st)
+    return out
 
 
 def forget(host: str) -> bool:
@@ -279,3 +297,146 @@ async def finish(s: Live) -> dict:
 
 async def cancel(s: Live) -> None:
     await _close(s)
+
+
+
+# ── PM-INS-0033 «📥 انتقالِ ورود از کرومِ خودِ مالک» ────────────────────────────────
+# Google refuses sign-in inside the server's headless Chromium («این مرورگر امن نیست»). So the owner — already signed
+# in to the site in their own Chrome — clicks a one-site bookmarklet there. It reads only what the site's own page can
+# read (localStorage, IndexedDB — Firebase keeps its user there — and non-HttpOnly cookies) and form-POSTs it, with a
+# one-time ticket, straight to this server; it is encrypted at once with the same per-host store (14 days, 🗑 one click).
+# Nothing is logged, nothing is put in a URL, the ticket is single-use, bound to ONE host and dies after 15 minutes.
+
+TICKETS_FILE = "_import_tickets.json"
+IMPORT_TICKET_TTL_S = 15 * 60
+IMPORT_MAX_BYTES = 6 * 1024 * 1024
+
+
+def _tickets_path() -> Path:
+    return _store_dir() / TICKETS_FILE
+
+
+def _load_tickets() -> dict:
+    try:
+        d = json.loads(_tickets_path().read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _write_tickets(d: dict) -> None:
+    now = time.time()
+    d = {k: v for k, v in d.items() if isinstance(v, dict) and v.get("exp", 0) > now}
+    _tickets_path().write_text(json.dumps(d), encoding="utf-8")
+
+
+def issue_import_ticket(host: str) -> dict:
+    """A single-use ticket for ONE site. Only its hash is stored."""
+    import secrets
+
+    tok = "imp_" + secrets.token_urlsafe(24)
+    d = _load_tickets()
+    exp = time.time() + IMPORT_TICKET_TTL_S
+    d[hashlib.sha256(tok.encode()).hexdigest()] = {"host": host, "exp": exp}
+    _write_tickets(d)
+    return {"token": tok, "host": host,
+            "expires_at": datetime.fromtimestamp(exp, timezone.utc).isoformat()}
+
+
+def consume_import_ticket(tok: str) -> Optional[str]:
+    """The ticket's host, once — or None (unknown, used, or expired)."""
+    if not tok or not tok.startswith("imp_"):
+        return None
+    d = _load_tickets()
+    t = d.pop(hashlib.sha256(tok.encode()).hexdigest(), None)
+    _write_tickets(d)
+    if not t or t.get("exp", 0) < time.time():
+        return None
+    return t.get("host") or None
+
+
+def _cookies_from_document(raw: str, host: str, secure: bool) -> list[dict]:
+    exp = time.time() + STATE_TTL_DAYS * 86400
+    out = []
+    for part in (raw or "").split(";"):
+        if "=" not in part:
+            continue
+        name, value = part.split("=", 1)
+        name = name.strip()
+        if not name or len(name) > 256 or len(value) > 8192:
+            continue
+        out.append({"name": name, "value": value.strip(), "domain": host, "path": "/", "expires": exp,
+                    "httpOnly": False, "secure": secure, "sameSite": "Lax"})
+    return out[:200]
+
+
+def _clean_idb(dbs: Any) -> list[dict]:
+    """Keep only the shape Playwright's storage_state(indexed_db) restores (verified against 1.65)."""
+    out = []
+    for db in (dbs if isinstance(dbs, list) else [])[:50]:
+        if not isinstance(db, dict) or not isinstance(db.get("name"), str):
+            continue
+        stores = []
+        for st in (db.get("stores") or [])[:100]:
+            if not isinstance(st, dict) or not isinstance(st.get("name"), str):
+                continue
+            kp = st.get("keyPath")
+            rec_out = []
+            for r in (st.get("records") or [])[:5000]:
+                if not isinstance(r, dict) or "value" not in r:
+                    continue
+                rr = {"value": r["value"]}
+                if kp is None and "key" in r:
+                    rr["key"] = r["key"]
+                rec_out.append(rr)
+            s2 = {"name": st["name"], "autoIncrement": bool(st.get("autoIncrement")), "records": rec_out,
+                  "indexes": [{"name": i.get("name"), "keyPath": i.get("keyPath"), "multiEntry": bool(i.get("multiEntry")),
+                               "unique": bool(i.get("unique"))}
+                              for i in (st.get("indexes") or []) if isinstance(i, dict) and isinstance(i.get("name"), str)
+                              and isinstance(i.get("keyPath"), str)]}
+            if isinstance(kp, str):
+                s2["keyPath"] = kp
+            elif isinstance(kp, list) and all(isinstance(x, str) for x in kp):
+                s2["keyPathArray"] = kp
+            stores.append(s2)
+        out.append({"name": db["name"], "version": int(db.get("version") or 1), "stores": stores})
+    return out
+
+
+def state_from_browser(dump: dict, host: str) -> dict:
+    """Turn the bookmarklet's dump into a Playwright storage_state. Raises ValueError on anything off."""
+    if not isinstance(dump, dict):
+        raise ValueError("دادهٔ نامعتبر")
+    origin = str(dump.get("origin") or "")
+    if host_of(origin) != host:
+        raise ValueError("این بلیت برای سایتِ دیگری است — بوک‌مارکِ همان سایت را بزنید")
+    secure = origin.startswith("https://")
+    ls = dump.get("localStorage") or {}
+    ls_list = [{"name": str(k), "value": str(v)} for k, v in (ls.items() if isinstance(ls, dict) else [])][:2000]
+    org = {"origin": origin.rstrip("/"), "localStorage": ls_list}
+    idb = _clean_idb(dump.get("indexedDB"))
+    if idb:
+        org["indexedDB"] = idb
+    return {"cookies": _cookies_from_document(str(dump.get("cookie") or ""), host, secure), "origins": [org]}
+
+
+def import_from_browser(tok: str, payload: str) -> dict:
+    """Ticket → host, payload → encrypted state. Returns the saved meta. Raises ValueError (Persian) on failure."""
+    if len(payload or "") > IMPORT_MAX_BYTES:
+        raise ValueError("داده بیش از ۶ مگابایت است")
+    host = consume_import_ticket(tok)
+    if not host:
+        raise ValueError("بلیت نامعتبر، مصرف‌شده یا منقضی است (۱۵ دقیقه) — در AI Creator دوباره «📥 از کرومِ من» بزنید")
+    try:
+        dump = json.loads(payload)
+    except Exception:  # noqa: BLE001
+        raise ValueError("دادهٔ رسیده خوانده نشد") from None
+    state = state_from_browser(dump, host)
+    org = state["origins"][0]
+    if not state["cookies"] and not org["localStorage"] and not org.get("indexedDB"):
+        raise ValueError("در این صفحه هیچ نشستی پیدا نشد — مطمئن شوید در همین زبانه وارد سایت هستید")
+    meta = save_state(host, state, final_url=str(dump.get("href") or "")[:300], title=str(dump.get("title") or "")[:200],
+                      source="chrome")
+    meta["indexed_db"] = sum(len(s.get("records") or []) for d in org.get("indexedDB") or [] for s in d["stores"])
+    meta["local_storage"] = len(org["localStorage"])
+    return meta

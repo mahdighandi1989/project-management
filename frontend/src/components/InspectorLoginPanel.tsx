@@ -9,11 +9,12 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { buildImportBookmarklet } from '@/lib/chromeImportBookmarklet';  // PM-INS-0033 📥 از کرومِ من
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 const BASE = `${API_BASE}/api/inspector-agent`;
 
-interface Saved { host: string; saved_at: string; expires_at: string; cookies: number; origins: number; final_url: string; title: string; expired?: boolean }
+interface Saved { source?: string; host: string; saved_at: string; expires_at: string; cookies: number; origins: number; final_url: string; title: string; expired?: boolean }
 interface Frame { ok: boolean; image?: string; url?: string; title?: string; tabs?: number; viewport?: { width: number; height: number }; error?: string }
 
 const KEYS: [string, string][] = [['Enter', '⏎ Enter'], ['Tab', '⇥ Tab'], ['Backspace', '⌫ پاک'], ['Escape', 'Esc']];
@@ -27,6 +28,13 @@ export default function InspectorLoginPanel({ projectId, onStatus }: { projectId
   const [err, setErr] = useState('');
   const [text, setText] = useState('');
   const imgRef = useRef<HTMLImageElement>(null);
+  // PM-INS-0033 — «📥 از کرومِ من»: Google refuses sign-in in the server's headless browser, so the session comes from
+  // the owner's own Chrome via a one-site bookmarklet (single-use 15-min ticket; encrypted at once on the server).
+  const [imp, setImp] = useState<{ href: string; host: string; expires_at: string } | null>(null);
+  const [allSaved, setAllSaved] = useState<Saved[]>([]);
+  const [copied, setCopied] = useState(false);
+  const bmRef = useRef<HTMLAnchorElement>(null);
+  useEffect(() => { if (bmRef.current && imp) bmRef.current.setAttribute('href', imp.href); }, [imp]);
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadStatus = useCallback(async () => {
@@ -40,6 +48,29 @@ export default function InspectorLoginPanel({ projectId, onStatus }: { projectId
   }, [projectId]);
 
   useEffect(() => { loadStatus(); }, [loadStatus]);
+
+  const loadAll = useCallback(async () => {
+    try { const r = await fetch(`${BASE}/login/saved`); const d = await r.json(); setAllSaved(d.saved || []); } catch { /* keep */ }
+  }, []);
+
+  const startImport = async () => {
+    setBusy(true); setErr(''); setCopied(false);
+    try {
+      const r = await fetch(`${BASE}/login/import-ticket`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ project_id: projectId }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      setImp({ href: buildImportBookmarklet(d.token, `${API_BASE}${d.import_path}`, d.host), host: d.host, expires_at: d.expires_at });
+      loadAll();
+    } catch (e: any) { setErr(e?.message || String(e)); } finally { setBusy(false); }
+  };
+
+  const closeImport = () => { setImp(null); loadStatus(); loadAll(); };
+
+  const forgetHost = async (host: string) => {
+    if (!window.confirm(`ورودِ ذخیره‌شدهٔ «${host}» پاک شود؟`)) return;
+    await fetch(`${BASE}/login/forget`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: `https://${host}/` }) });
+    loadStatus(); loadAll();
+  };
 
   const poll = useCallback(async (id: string) => {
     try {
@@ -124,9 +155,60 @@ export default function InspectorLoginPanel({ projectId, onStatus }: { projectId
             : saved?.expired ? 'ورودِ قبلی منقضی شد — دوباره وارد شوید'
             : 'یک بار با حسابِ خودتان وارد شوید تا 📸 و عامل صفحه‌های داخلی را ببینند'}
         </span>
+        <button
+          onClick={startImport}
+          disabled={busy || !projectId}
+          className="mt-1 px-3 py-1 rounded-lg text-[11px] font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
+          title="اگر گوگل در مرورگرِ سرور «این مرورگر امن نیست» گفت: نشستِ ورود را از کرومِ خودتان (که آن‌جا وارد هستید) با یک کلیک بیاورید"
+        >📥 از کرومِ من</button>
         {saved && <button onClick={forget} className="text-[10px] text-red-500 hover:underline mt-0.5">🗑 فراموش کن</button>}
         {err && !sid && <span className="text-[10px] text-red-500 mt-0.5 max-w-[170px] text-center">{err}</span>}
       </div>
+
+      {imp && (
+        <div className="fixed inset-0 z-[80] bg-black/70 flex items-center justify-center p-3" dir="rtl" onClick={closeImport}>
+          <div className="bg-white dark:bg-gray-900 rounded-xl max-w-xl w-full p-4 text-sm max-h-[90vh] overflow-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-2">
+              <b>📥 انتقالِ ورود از کرومِ خودتان — <span dir="ltr">{imp.host}</span></b>
+              <button onClick={closeImport} className="text-gray-500 text-lg leading-none">×</button>
+            </div>
+            <ol className="list-decimal pr-5 space-y-1.5 leading-6 text-gray-700 dark:text-gray-200">
+              <li>دکمهٔ آبیِ زیر را با موس به <b>نوارِ بوک‌مارکِ کروم</b> بکشید (یا «📋 کپی» و یک بوک‌مارکِ تازه با همین نشانی بسازید).</li>
+              <li>در یک زبانهٔ دیگر <b dir="ltr">{imp.host}</b> را باز کنید — جایی که <b>الان وارد هستید</b>.</li>
+              <li>روی همان بوک‌مارک <b>یک کلیک</b> کنید. زبانهٔ تازه‌ای «✅ ورود منتقل شد» نشان می‌دهد. تمام — این پنجره را ببندید و 📸 یا 🖱 عامل بزنید.</li>
+            </ol>
+            <div className="flex flex-wrap items-center gap-2 my-3">
+              <a ref={bmRef} href="#" onClick={(e) => { e.preventDefault(); alert('این را به نوارِ بوک‌مارک بکشید؛ این‌جا کلیک نکنید.'); }}
+                className="px-3 py-2 rounded-lg bg-blue-600 text-white font-bold cursor-move" draggable>
+                📥 ورود به AI Creator — {imp.host}
+              </a>
+              <button onClick={async () => { try { await navigator.clipboard.writeText(imp.href); setCopied(true); } catch { setErr('کپی نشد'); } }}
+                className="px-2 py-1.5 rounded bg-gray-200 dark:bg-gray-700 text-xs">{copied ? '✓ کپی شد' : '📋 کپی'}</button>
+            </div>
+            <div className="text-[11px] text-gray-500 leading-5">
+              این بوک‌مارک فقط روی همین سایت کار می‌کند، فقط <b>یک بار</b>، و تا {new Date(imp.expires_at).toLocaleTimeString('fa-IR')} (۱۵ دقیقه).
+              فقط چیزی را می‌خواند که خودِ سایت می‌تواند بخواند (localStorage، IndexedDB، کوکی‌های غیرِ HttpOnly) — رمز یا کوکی‌های گوگل را نه —
+              و مستقیم به سرور می‌فرستد؛ آن‌جا بی‌درنگ رمزنگاری (AES-GCM) و جدا برای هر سایت تا ۱۴ روز نگه داشته می‌شود. در لاگ، نشانی یا صفحه چیزی از آن نمی‌ماند.
+            </div>
+            {allSaved.length > 0 && (
+              <table className="w-full mt-3 text-[11px] border-t">
+                <thead><tr className="text-gray-500"><th className="text-right py-1">سایت</th><th className="text-right">از</th><th className="text-right">اعتبار تا</th><th></th></tr></thead>
+                <tbody>
+                  {allSaved.map((x) => (
+                    <tr key={x.host} className="border-t">
+                      <td className="py-1" dir="ltr">{x.host}</td>
+                      <td>{x.source === 'chrome' ? '📥 کروم' : '🔐 زنده'}</td>
+                      <td className={x.expired ? 'text-red-500' : ''}>{x.expired ? 'منقضی' : new Date(x.expires_at).toLocaleDateString('fa-IR')}</td>
+                      <td><button onClick={() => forgetHost(x.host)} className="text-red-500 hover:underline">🗑 حذف</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            {err && <div className="text-red-500 text-xs mt-2">{err}</div>}
+          </div>
+        </div>
+      )}
 
       {sid && (
         <div className="fixed inset-0 z-[80] bg-black/85 flex flex-col p-2 sm:p-4" dir="rtl">

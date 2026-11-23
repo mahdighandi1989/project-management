@@ -51,6 +51,9 @@ PUBLIC = (
     "/api/auth/google",
     "/api/auth/supervisor-session",
     "/api/notifications/telegram/webhook",
+    # PM-INS-0033: posted from the project's own site in the owner's Chrome (no AI Creator session there);
+    # the credential is a single-use, 15-minute ticket bound to ONE host (services/manual_login.consume_import_ticket).
+    "/api/inspector-agent/login/import",
 )
 
 

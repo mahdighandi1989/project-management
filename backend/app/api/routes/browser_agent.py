@@ -8,10 +8,14 @@ import re
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
 from ...services import browser_agent as BA
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/inspector-agent", tags=["Inspector browser agent"])
 _TASKS: set = set()  # keep references so runs are not garbage-collected mid-flight
@@ -229,6 +233,7 @@ def _live(sid: str):
 async def login_status(project_id: Optional[str] = None, url: Optional[str] = None) -> Dict[str, Any]:
     from ...services import manual_login as ML
 
+    await ML.reap()  # PM-INS-0033: close a forgotten live browser early (Render RAM)
     try:
         u = _login_url(url, project_id)
     except HTTPException:
@@ -297,3 +302,69 @@ async def login_forget(body: LoginStartIn) -> Dict[str, Any]:
     from ...services import manual_login as ML
 
     return {"ok": ML.forget(ML.host_of(_login_url(body.url, body.project_id)))}
+
+
+# ── PM-INS-0033 «📥 انتقالِ ورود از کرومِ خودِ مالک» — one-site bookmarklet + single-use ticket ─────────────────────
+
+@router.get("/login/saved")
+async def login_saved() -> Dict[str, Any]:
+    """Every saved sign-in (metadata only) — the per-site table: source, expiry, 🗑."""
+    from ...services import manual_login as ML
+
+    await ML.reap()  # also close a forgotten live browser (Render RAM — PM-INS-0033 503 at 23:05)
+    return {"saved": ML.list_saved(), "ttl_days": ML.STATE_TTL_DAYS}
+
+
+@router.post("/login/import-ticket")
+async def login_import_ticket(body: LoginStartIn) -> Dict[str, Any]:
+    """A single-use, 15-minute ticket bound to ONE site; the page turns it into that site's bookmarklet."""
+    from ...services import manual_login as ML
+
+    u = _login_url(body.url, body.project_id)
+    host = ML.host_of(u)
+    if not host:
+        raise HTTPException(400, "میزبانِ سایت پیدا نشد")
+    t = ML.issue_import_ticket(host)
+    return {**t, "url": u, "ttl_s": ML.IMPORT_TICKET_TTL_S, "import_path": "/api/inspector-agent/login/import"}
+
+
+def _import_page(ok: bool, msg: str) -> HTMLResponse:
+    import html as _h
+
+    color = "#059669" if ok else "#dc2626"
+    body = (f'<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" '
+            f'content="width=device-width,initial-scale=1"><title>انتقالِ ورود</title></head>'
+            f'<body style="font-family:Tahoma,sans-serif;background:#f8fafc;padding:24px">'
+            f'<div style="max-width:560px;margin:auto;background:#fff;border:2px solid {color};border-radius:12px;padding:20px">'
+            f'<h2 style="color:{color};margin-top:0">{"✅ ورود منتقل شد" if ok else "❌ انتقال انجام نشد"}</h2>'
+            f'<p style="line-height:1.9">{_h.escape(msg)}</p>'
+            f'<p style="color:#64748b;font-size:13px">این زبانه را ببندید. در AI Creator «📸 عکس» یا «🖱 عامل» را بزنید تا صفحهٔ داخلی دیده شود.</p>'
+            f'</div></body></html>')
+    return HTMLResponse(body, status_code=200 if ok else 400,
+                        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
+
+@router.post("/login/import")
+async def login_import(request: Request):
+    """PUBLIC (registered in core/auth.PUBLIC): reached from the project's own site in the owner's Chrome, so it carries
+    no AI Creator session — the single-use host-bound ticket is the credential. Fields are read by hand (no 422 echo)
+    and never logged."""
+    from ...services import manual_login as ML
+
+    try:
+        form = await request.form()
+        tok = str(form.get("t") or "")
+        payload = str(form.get("d") or "")
+    except Exception:  # noqa: BLE001
+        return _import_page(False, "فرم خوانده نشد")
+    try:
+        meta = ML.import_from_browser(tok, payload)
+    except ValueError as e:
+        return _import_page(False, str(e))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("login import failed: %s", type(e).__name__)  # type only — never the value
+        return _import_page(False, "خطای سرور در ذخیره")
+    return _import_page(True, (
+        f"نشستِ «{meta['host']}» رمزنگاری‌شده روی سرور ذخیره شد: {meta['local_storage']} کلیدِ localStorage، "
+        f"{meta['indexed_db']} رکوردِ IndexedDB، {meta['cookies']} کوکی. اعتبار تا {meta['expires_at'][:10]} "
+        f"(حذفِ یک‌کلیکی: 🗑 در «🔐 ورود»)."))
