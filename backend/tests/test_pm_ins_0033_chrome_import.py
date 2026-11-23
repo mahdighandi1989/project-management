@@ -81,3 +81,18 @@ def test_import_route_is_public_but_ticket_guarded(tmp_path, monkeypatch):
     # the ticket and the saved list stay behind the wall
     assert c.post("/api/inspector-agent/login/import-ticket", json={"url": f"https://{HOST}/"}).status_code == 401
     assert c.get("/api/inspector-agent/login/saved").status_code == 401
+
+
+def test_import_receiver_page_is_public_and_carries_no_data(tmp_path, monkeypatch):
+    """PM-INS-0036 round 2: the project's CSP (form-action 'self') blocks a form POST from its page, so the bookmarklet
+    opens this GET page and hands the dump over by postMessage. It used to answer 405 «Method Not Allowed»."""
+    from app.main import app
+
+    monkeypatch.setenv("MANUAL_LOGIN_DIR", str(tmp_path))
+    monkeypatch.setenv("ADMIN_EMAILS", "owner@example.com")  # wall on
+    monkeypatch.setenv("AUTH_DISABLED", "0")
+    r = TestClient(app).get("/api/inspector-agent/login/import")
+    assert r.status_code == 200 and "text/html" in r.headers["content-type"]
+    assert r.headers.get("cache-control") == "no-store"
+    assert "postMessage" in r.text and "ev.source!==op" in r.text and "d.origin=ev.origin" in r.text
+    assert "cross-origin-opener-policy" not in {k.lower() for k in r.headers}  # would cut window.opener

@@ -344,6 +344,39 @@ def _import_page(ok: bool, msg: str) -> HTMLResponse:
                         headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
 
+# PM-INS-0036 (دورِ ۲): سایتِ پروژه با CSP ِ `form-action 'self'` / `connect-src 'self'` جلوی فرم و fetch ِ بوک‌مارک به
+# این سرور را می‌گیرد (Detective-1 همین را دارد) ⇒ زبانهٔ تازه با GET باز می‌شد و «Method Not Allowed» می‌داد.
+# حالا بوک‌مارک همین صفحه را با window.open باز می‌کند (CSP جلوی ناوبری را نمی‌گیرد) و داده را با postMessage
+# می‌دهد؛ این صفحه خودش (هم‌مبدأ) POST می‌کند. origin را مرورگر گواهی می‌کند (event.origin)، نه خودِ داده.
+_IMPORT_RECEIVER = """<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>انتقالِ ورود</title></head>
+<body style="font-family:Tahoma,sans-serif;background:#f8fafc;padding:24px">
+<div style="max-width:560px;margin:auto;background:#fff;border:2px solid #6366f1;border-radius:12px;padding:20px">
+<h2 style="color:#4f46e5;margin-top:0">📥 انتقالِ ورود</h2><p id="m" style="line-height:1.9">⏳ در حالِ گرفتنِ ورود از سایت…</p></div>
+<script>(function(){
+var m=document.getElementById('m'),done=false,op=window.opener;
+if(!op){m.innerHTML='این نشانی به‌تنهایی کاری نمی‌کند (و اگر با یک بوک‌مارکِ قدیمی به این‌جا رسیدید: آن بوک‌مارک دیگر کار نمی‌کند).<br><br><b>چه کنم؟</b> بوک‌مارکِ قدیمیِ «📥 ورود به AI Creator» را از نوارِ کروم حذف کنید (راست‌کلیک ⇐ Delete)، در AI Creator دوباره «📥 از کرومِ من» را بزنید و دکمهٔ آبیِ تازه را به نوار بکشید.';return}
+var iv=setInterval(function(){if(!done){try{op.postMessage({pmImport:'ready'},'*')}catch(e){}}},300);
+window.addEventListener('message',function(ev){
+if(done||ev.source!==op||!ev.data||ev.data.pmImport!=='data')return;
+done=true;clearInterval(iv);var d;
+try{d=JSON.parse(ev.data.d);d.origin=ev.origin}catch(e){m.textContent='❌ دادهٔ رسیده خوانده نشد';return}
+m.textContent='⏳ در حالِ ذخیرهٔ رمزنگاری‌شده روی سرور…';
+fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},
+body:new URLSearchParams({t:String(ev.data.t||''),d:JSON.stringify(d)}).toString()})
+.then(function(r){return r.text()}).then(function(h){document.open();document.write(h);document.close()})
+.catch(function(e){m.textContent='❌ ارسال به سرور نشد: '+e+' — دوباره روی بوک‌مارک بزنید'})});
+setTimeout(function(){if(!done){clearInterval(iv);m.textContent='❌ داده‌ای از سایت نرسید. این زبانه را ببندید، به زبانهٔ سایت برگردید و دوباره روی بوک‌مارک کلیک کنید.'}},90000);
+})();</script></body></html>"""
+
+
+@router.get("/login/import")
+async def login_import_receiver() -> HTMLResponse:
+    """PUBLIC static page (no data, no secret): receives the bookmarklet's dump by postMessage from the tab that opened
+    it and POSTs it same-origin to the route below. Opened directly (or by an old bookmark) it explains what to do."""
+    return HTMLResponse(_IMPORT_RECEIVER, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
+
 @router.post("/login/import")
 async def login_import(request: Request):
     """PUBLIC (registered in core/auth.PUBLIC): reached from the project's own site in the owner's Chrome, so it carries

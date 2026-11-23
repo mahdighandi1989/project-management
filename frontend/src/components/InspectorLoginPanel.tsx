@@ -173,6 +173,11 @@ export default function InspectorLoginPanel({ projectId, onStatus }: { projectId
   return (
     <>
       <div className="flex flex-col items-center">
+        {/* PM-INS-0036 (دورِ ۲): «هم ورودِ یک‌باره هم از کروم… قاتی کردم» — دو راه، با نام و کاربردِ روشن */}
+        <span className="text-[10px] font-bold text-gray-600 dark:text-gray-300 mb-1 text-center max-w-[170px] leading-4">
+          ورود به سایتِ پروژه — فقط <u>یکی</u> از این دو راه لازم است:
+        </span>
+        <span className="text-[10px] text-amber-700 dark:text-amber-400 text-center max-w-[170px] leading-4">راهِ ۱ — سایتی که با ایمیل و رمز وارد می‌شوید</span>
         <button
           onClick={start}
           disabled={busy || !projectId}
@@ -187,16 +192,17 @@ export default function InspectorLoginPanel({ projectId, onStatus }: { projectId
             : saved?.expired ? 'ورودِ قبلی منقضی شد — دوباره وارد شوید'
             : 'یک بار با حسابِ خودتان وارد شوید تا 📸 و عامل صفحه‌های داخلی را ببینند'}
         </span>
+        <span className="text-[10px] text-indigo-700 dark:text-indigo-400 text-center max-w-[170px] leading-4 mt-2">راهِ ۲ — سایتی که با <b>گوگل</b> وارد می‌شوید (راهِ ۱ آن‌جا کار نمی‌کند)</span>
         <button
           onClick={startImport}
           disabled={busy || !projectId}
-          className="mt-1 px-3 py-1 rounded-lg text-[11px] font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
+          className="mt-0.5 px-3 py-1 rounded-lg text-[11px] font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
           title="اگر گوگل در مرورگرِ سرور «این مرورگر امن نیست» گفت: نشستِ ورود را از کرومِ خودتان (که آن‌جا وارد هستید) با یک کلیک بیاورید"
         >📥 از کرومِ من</button>
         {saved && <button onClick={forget} className="text-[10px] text-red-500 hover:underline mt-0.5">🗑 فراموش کن</button>}
         {err && !sid && !imp && <span className="text-[10px] text-red-500 mt-0.5 max-w-[170px] text-center">🔐 {err}</span>}
         <span className="text-[10px] text-gray-500 mt-0.5 max-w-[170px] text-center leading-4">
-          📥 = اگر با گوگل وارد می‌شوید: ورود را از کرومِ خودتان بیاورید — بزنید، راهنمای گام‌به‌گام باز می‌شود
+          📥 را بزنید: راهنمای گام‌به‌گام باز می‌شود و خودش می‌گوید «✅ ورود رسید»
         </span>
       </div>
 
@@ -212,6 +218,11 @@ export default function InspectorLoginPanel({ projectId, onStatus }: { projectId
               گوگل اجازه نمی‌دهد در مرورگرِ سرور وارد شوید. پس ورودی را که <b>همین الان در کرومِ خودتان</b> دارید با یک
               «دکمهٔ بوک‌مارک» به این‌جا می‌آوریم. فقط یک بار برای این سایت، حدودِ یک دقیقه.
             </p>
+            <div className="rounded-lg border border-amber-300 bg-amber-50 text-amber-900 p-2.5 mb-2 text-xs leading-5" role="note">
+              <b>⚠ اگر از قبل دکمهٔ «📥 ورود به AI Creator» در نوارِ بوک‌مارکِ کروم دارید، اول حذفش کنید</b> (رویش راست‌کلیک ⇐ Delete / حذف).
+              آن دکمهٔ قدیمی دیگر کار نمی‌کند — صفحهٔ سفیدِ «Method Not Allowed» از همان بود (ایراد از ما بود و رفع شد). هر دکمه فقط <b>یک بار</b> و
+              تا ۱۵ دقیقه کار می‌کند؛ هر بار که این پنجره را باز می‌کنید دکمهٔ آبیِ <b>تازهٔ</b> همین‌جا را به نوار بکشید.
+            </div>
             <div className="space-y-2">
               <div className="rounded-lg border border-gray-200 dark:border-gray-700 p-2.5">
                 <b>گامِ ۱ — نوارِ بوک‌مارکِ کروم را نمایان کنید.</b>
@@ -251,7 +262,8 @@ export default function InspectorLoginPanel({ projectId, onStatus }: { projectId
               </div>
               <div className="rounded-lg border border-gray-200 dark:border-gray-700 p-2.5">
                 <b>گامِ ۴ — در همان زبانهٔ سایت، روی بوک‌مارکِ «📥 ورود به AI Creator» در نوار یک بار کلیک کنید.</b>
-                <div className="text-gray-600 dark:text-gray-300 text-xs leading-5 mt-1">زبانهٔ تازه‌ای «✅ ورود منتقل شد» نشان می‌دهد. به این‌جا برگردید — همین پنجره خودش خبر می‌دهد:</div>
+                <div className="text-gray-600 dark:text-gray-300 text-xs leading-5 mt-1">یک زبانهٔ تازه باز می‌شود و پس از چند ثانیه «✅ ورود منتقل شد» نشان می‌دهد. اگر کروم نوشت «Pop-up blocked»، روی همان نشان بزنید،
+                  «Always allow» را انتخاب کنید و دوباره روی بوک‌مارک کلیک کنید. بعد به این‌جا برگردید — همین پنجره خودش خبر می‌دهد:</div>
               </div>
             </div>
             <div className={`mt-3 rounded-lg p-2.5 text-sm font-medium ${arrived ? 'bg-emerald-50 text-emerald-800 border border-emerald-300' : 'bg-amber-50 text-amber-800 border border-amber-200'}`} role="status">
