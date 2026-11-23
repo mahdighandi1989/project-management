@@ -14428,7 +14428,9 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                   <div
                     className={`bg-gray-900 rounded-xl overflow-hidden relative ${inspectorScreenFull ? 'flex-1' : ''}`}
                     // PM-INS-0031: در پنجرهٔ باریک نسبتِ 1.82 فقط ~۲۰۰px ارتفاع می‌داد — حداقلِ ارتفاع ⇒ قابلِ استفاده
-                    style={inspectorScreenFull ? undefined : { aspectRatio: '1.82/1', minHeight: 'min(70vh, 520px)' }}
+                    // PM-INS-0034: بدونِ عرضِ صریح، مرورگر minHeight را از راهِ aspect-ratio به حداقلِ عرض تبدیل می‌کرد
+                    // (۴۴۸×۱.۸۲≈۸۱۶px در ستونِ ~۷۰۰px) و اسکرین از قابِ سیاه بیرون می‌زد — width:100% ⇒ عرض از ستون، ارتفاع از نسبت.
+                    style={inspectorScreenFull ? undefined : { width: '100%', maxWidth: '100%', aspectRatio: '1.82/1', minHeight: 'min(70vh, 520px)' }}
                   >
                     {/* صفحه نمایش */}
                     <div className="h-full w-full bg-gradient-to-br from-gray-800 to-gray-900 p-1 flex flex-col relative">
