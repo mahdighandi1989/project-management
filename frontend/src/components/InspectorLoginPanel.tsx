@@ -44,6 +44,9 @@ export default function InspectorLoginPanel({ projectId, onStatus }: { projectId
   const [imp, setImp] = useState<{ href: string; host: string; expires_at: string } | null>(null);
   const [allSaved, setAllSaved] = useState<Saved[]>([]);
   const [copied, setCopied] = useState(false);
+  // PM-INS-0036: the dialog itself confirms arrival — poll /login/status while it is open and compare saved_at
+  const [impBase, setImpBase] = useState<string | null>(null);
+  const [arrived, setArrived] = useState<Saved | null>(null);
   const bmRef = useRef<HTMLAnchorElement>(null);
   useEffect(() => { if (bmRef.current && imp) bmRef.current.setAttribute('href', imp.href); }, [imp]);
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -65,7 +68,8 @@ export default function InspectorLoginPanel({ projectId, onStatus }: { projectId
   }, []);
 
   const startImport = async () => {
-    setBusy(true); setErr(''); setCopied(false);
+    setBusy(true); setErr(''); setCopied(false); setArrived(null);
+    setImpBase(saved?.saved_at || '');
     try {
       const r = await fetch(`${BASE}/login/import-ticket`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ project_id: projectId }) });
       const d = await r.json();
@@ -75,7 +79,20 @@ export default function InspectorLoginPanel({ projectId, onStatus }: { projectId
     } catch (e: any) { setErr(e?.message || String(e)); } finally { setBusy(false); }
   };
 
-  const closeImport = () => { setImp(null); loadStatus(); loadAll(); };
+  const closeImport = () => { setImp(null); setArrived(null); loadStatus(); loadAll(); };
+
+  useEffect(() => {
+    if (!imp || arrived || impBase === null) return;
+    const t = setInterval(async () => {
+      try {
+        const r = await fetch(`${BASE}/login/status?project_id=${encodeURIComponent(projectId)}`);
+        const d = await r.json();
+        const s2: Saved | null = d.saved || null;
+        if (s2 && s2.saved_at && s2.saved_at !== impBase) { setArrived(s2); setSaved(s2); loadAll(); }
+      } catch { /* keep polling */ }
+    }, 3000);
+    return () => clearInterval(t);
+  }, [imp, arrived, impBase, projectId, loadAll]);
 
   const forgetHost = async (host: string) => {
     if (!window.confirm(`ورودِ ذخیره‌شدهٔ «${host}» پاک شود؟`)) return;
@@ -177,7 +194,10 @@ export default function InspectorLoginPanel({ projectId, onStatus }: { projectId
           title="اگر گوگل در مرورگرِ سرور «این مرورگر امن نیست» گفت: نشستِ ورود را از کرومِ خودتان (که آن‌جا وارد هستید) با یک کلیک بیاورید"
         >📥 از کرومِ من</button>
         {saved && <button onClick={forget} className="text-[10px] text-red-500 hover:underline mt-0.5">🗑 فراموش کن</button>}
-        {err && !sid && <span className="text-[10px] text-red-500 mt-0.5 max-w-[170px] text-center">{err}</span>}
+        {err && !sid && !imp && <span className="text-[10px] text-red-500 mt-0.5 max-w-[170px] text-center">🔐 {err}</span>}
+        <span className="text-[10px] text-gray-500 mt-0.5 max-w-[170px] text-center leading-4">
+          📥 = اگر با گوگل وارد می‌شوید: ورود را از کرومِ خودتان بیاورید — بزنید، راهنمای گام‌به‌گام باز می‌شود
+        </span>
       </div>
 
       {imp && (
@@ -187,21 +207,60 @@ export default function InspectorLoginPanel({ projectId, onStatus }: { projectId
               <b>📥 انتقالِ ورود از کرومِ خودتان — <span dir="ltr">{imp.host}</span></b>
               <button onClick={closeImport} className="text-gray-500 text-lg leading-none">×</button>
             </div>
-            <ol className="list-decimal pr-5 space-y-1.5 leading-6 text-gray-700 dark:text-gray-200">
-              <li>دکمهٔ آبیِ زیر را با موس به <b>نوارِ بوک‌مارکِ کروم</b> بکشید (یا «📋 کپی» و یک بوک‌مارکِ تازه با همین نشانی بسازید).</li>
-              <li>در یک زبانهٔ دیگر <b dir="ltr">{imp.host}</b> را باز کنید — جایی که <b>الان وارد هستید</b>.</li>
-              <li>روی همان بوک‌مارک <b>یک کلیک</b> کنید. زبانهٔ تازه‌ای «✅ ورود منتقل شد» نشان می‌دهد. تمام — این پنجره را ببندید و 📸 یا 🖱 عامل بزنید.</li>
-            </ol>
-            <div className="flex flex-wrap items-center gap-2 my-3">
-              <a ref={bmRef} href="#" onClick={(e) => { e.preventDefault(); alert('این را به نوارِ بوک‌مارک بکشید؛ این‌جا کلیک نکنید.'); }}
-                className="px-3 py-2 rounded-lg bg-blue-600 text-white font-bold cursor-move" draggable>
-                📥 ورود به AI Creator — {imp.host}
-              </a>
-              <button onClick={async () => { try { await navigator.clipboard.writeText(imp.href); setCopied(true); } catch { setErr('کپی نشد'); } }}
-                className="px-2 py-1.5 rounded bg-gray-200 dark:bg-gray-700 text-xs">{copied ? '✓ کپی شد' : '📋 کپی'}</button>
+            {/* PM-INS-0036: «نمی‌دانم چطور استفاده کنم» — گام‌های ساده و جدا، راهِ بی‌کشیدن، و تأییدِ زنده در همین پنجره */}
+            <p className="text-gray-700 dark:text-gray-200 leading-6 mb-3">
+              گوگل اجازه نمی‌دهد در مرورگرِ سرور وارد شوید. پس ورودی را که <b>همین الان در کرومِ خودتان</b> دارید با یک
+              «دکمهٔ بوک‌مارک» به این‌جا می‌آوریم. فقط یک بار برای این سایت، حدودِ یک دقیقه.
+            </p>
+            <div className="space-y-2">
+              <div className="rounded-lg border border-gray-200 dark:border-gray-700 p-2.5">
+                <b>گامِ ۱ — نوارِ بوک‌مارکِ کروم را نمایان کنید.</b>
+                <div className="text-gray-600 dark:text-gray-300 text-xs leading-5 mt-1">
+                  کلیدهای <kbd className="px-1 rounded bg-gray-100 dark:bg-gray-800 border" dir="ltr">Ctrl + Shift + B</kbd> را با هم بزنید
+                  (مک: <kbd className="px-1 rounded bg-gray-100 dark:bg-gray-800 border" dir="ltr">⌘ + Shift + B</kbd>). یک نوارِ باریک زیرِ نوارِ نشانیِ کروم ظاهر می‌شود.
+                  اگر از قبل پیداست، این گام را رد کنید.
+                </div>
+              </div>
+              <div className="rounded-lg border border-gray-200 dark:border-gray-700 p-2.5">
+                <b>گامِ ۲ — دکمهٔ آبی را با موس بگیرید و روی همان نوار بکشید و رها کنید.</b>
+                <div className="text-gray-600 dark:text-gray-300 text-xs leading-5 mt-1">رویش کلیک نکنید — باید <b>کشیده</b> شود. پس از رها کردن، دکمه‌ای با همین نام در نوار می‌بینید.</div>
+                <div className="flex flex-wrap items-center gap-2 my-2">
+                  <a ref={bmRef} href="#" onClick={(e) => { e.preventDefault(); alert('کلیک نکنید: دکمه را با موس بگیرید و روی نوارِ بوک‌مارکِ کروم (زیرِ نوارِ نشانی) بکشید و رها کنید. اگر نشد، «راهِ بی‌کشیدن» را باز کنید.'); }}
+                    className="px-3 py-2 rounded-lg bg-blue-600 text-white font-bold cursor-move" draggable>
+                    📥 ورود به AI Creator — {imp.host}
+                  </a>
+                </div>
+                <details className="text-xs text-gray-600 dark:text-gray-300 leading-5">
+                  <summary className="cursor-pointer text-indigo-600">کشیدن نشد؟ راهِ بی‌کشیدن</summary>
+                  <ol className="list-decimal pr-5 mt-1 space-y-0.5">
+                    <li>
+                      <button onClick={async () => { try { await navigator.clipboard.writeText(imp.href); setCopied(true); } catch { setErr('کپی نشد'); } }}
+                        className="px-2 py-0.5 rounded bg-gray-200 dark:bg-gray-700">{copied ? '✓ کپی شد' : '📋 کپی'}</button> را بزنید.
+                    </li>
+                    <li>روی نوارِ بوک‌مارک <b>راست‌کلیک</b> ⇐ «افزودنِ صفحه…» (Add page…).</li>
+                    <li>نام: هر چیزی (مثلاً «ورود AI»)؛ در جای نشانی (URL) <kbd dir="ltr">Ctrl + V</kbd> ⇐ «ذخیره».</li>
+                  </ol>
+                </details>
+              </div>
+              <div className="rounded-lg border border-gray-200 dark:border-gray-700 p-2.5">
+                <b>گامِ ۳ — سایت را در کروم باز کنید و مطمئن شوید وارد هستید.</b>
+                <div className="text-xs leading-5 mt-1">
+                  <a href={`https://${imp.host}/`} target="_blank" rel="noopener noreferrer" className="text-indigo-600 underline" dir="ltr">↗ باز کردنِ {imp.host}</a>
+                  <span className="text-gray-600 dark:text-gray-300"> — اگر صفحهٔ ورود دیدید، همان‌جا معمولی (با گوگل) وارد شوید؛ آن‌جا کرومِ خودتان است و گوگل ردش نمی‌کند.</span>
+                </div>
+              </div>
+              <div className="rounded-lg border border-gray-200 dark:border-gray-700 p-2.5">
+                <b>گامِ ۴ — در همان زبانهٔ سایت، روی بوک‌مارکِ «📥 ورود به AI Creator» در نوار یک بار کلیک کنید.</b>
+                <div className="text-gray-600 dark:text-gray-300 text-xs leading-5 mt-1">زبانهٔ تازه‌ای «✅ ورود منتقل شد» نشان می‌دهد. به این‌جا برگردید — همین پنجره خودش خبر می‌دهد:</div>
+              </div>
             </div>
-            <div className="text-[11px] text-gray-500 leading-5">
-              این بوک‌مارک فقط روی همین سایت کار می‌کند، فقط <b>یک بار</b>، و تا {new Date(imp.expires_at).toLocaleTimeString('fa-IR')} (۱۵ دقیقه).
+            <div className={`mt-3 rounded-lg p-2.5 text-sm font-medium ${arrived ? 'bg-emerald-50 text-emerald-800 border border-emerald-300' : 'bg-amber-50 text-amber-800 border border-amber-200'}`} role="status">
+              {arrived
+                ? <>✅ ورود رسید — {arrived.host} ({arrived.cookies} کوکی، {arrived.origins} origin). این پنجره را ببندید و «📸 عکس» یا «🖱 عامل» را بزنید.</>
+                : <>⏳ منتظرِ کلیکِ شما روی بوک‌مارک در سایت… (این بوک‌مارک تا {new Date(imp.expires_at).toLocaleTimeString('fa-IR')} و فقط یک بار کار می‌کند)</>}
+            </div>
+            <div className="text-[11px] text-gray-500 leading-5 mt-2">
+              امنیت: بوک‌مارک فقط روی همین سایت کار می‌کند، فقط <b>یک بار</b>، تا ۱۵ دقیقه.
               فقط چیزی را می‌خواند که خودِ سایت می‌تواند بخواند (localStorage، IndexedDB، کوکی‌های غیرِ HttpOnly) — رمز یا کوکی‌های گوگل را نه —
               و مستقیم به سرور می‌فرستد؛ آن‌جا بی‌درنگ رمزنگاری (AES-GCM) و جدا برای هر سایت تا ۱۴ روز نگه داشته می‌شود. در لاگ، نشانی یا صفحه چیزی از آن نمی‌ماند.
             </div>
