@@ -6,6 +6,10 @@
  * A server-side Chromium does the task step by step; every step (what the model saw and thought, the action, the
  * result, a screenshot) is shown live here and kept as a run log. Clicks that may submit/pay/delete and typing into
  * password fields wait for «اجازه»; other sites than the allowed ones are blocked on the server.
+ *
+ * PM-INS-0038: every finished run shows an evidence line (page, sign-in state, the exact text the answer was read
+ * from); an empty/zero reading on a signed-out / blocked / still-loading page ends as «نتیجهٔ نامطمئن», not as a fact.
+ * Typing in a search/filter box no longer asks for permission.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -19,12 +23,13 @@ interface Step { n: number; url: string; title: string; elements: number; though
 interface Run {
   id: string; task: string; start_url: string; status: string; summary: string; model_id: string;
   allowed_hosts: string[]; steps: Step[]; pending?: { kind: 'confirm' | 'answer'; text: string } | null;
+  evidence?: { line: string; quote_verified?: boolean } | null; reliable?: boolean | null; login_note?: string;
 }
 
 const LIVE = new Set(['starting', 'running', 'waiting_confirm', 'waiting_answer']);
 const STATUS_FA: Record<string, string> = {
   starting: 'در حالِ شروع', running: 'در حالِ کار', waiting_confirm: 'منتظرِ اجازهٔ شما', waiting_answer: 'منتظرِ پاسخِ شما',
-  done: 'انجام شد', failed: 'ناموفق', stopped: 'متوقف شد', stuck: 'گیر کرد',
+  done: 'انجام شد', unreliable: '⚠️ نتیجهٔ نامطمئن', failed: 'ناموفق', stopped: 'متوقف شد', stuck: 'گیر کرد',
 };
 
 function actionText(a: Record<string, any>): string {
@@ -46,7 +51,8 @@ function actionText(a: Record<string, any>): string {
 
 function toMarkdown(run: Run): string {
   const lines = [`# اجرای عاملِ مرورگر ${run.id}`, '', `- کار: ${run.task}`, `- شروع: ${run.start_url}`, `- مدل: ${run.model_id}`,
-    `- وضعیت: ${STATUS_FA[run.status] || run.status}`, `- نتیجه: ${run.summary}`, '', '## گام‌ها', ''];
+    `- وضعیت: ${STATUS_FA[run.status] || run.status}`, `- نتیجه: ${run.summary}`,
+    ...(run.evidence?.line ? [`- ${run.evidence.line}`] : []), ...(run.login_note ? [`- ورود: ${run.login_note}`] : []), '', '## گام‌ها', ''];
   run.steps.forEach((s) => lines.push(`${s.n}. ${s.ok ? '✅' : '❌'} ${actionText(s.action)} — ${s.result}${s.thought ? `  \n   _${s.thought}_` : ''}  \n   ${s.url}`));
   return lines.join('\n');
 }
@@ -145,7 +151,7 @@ export default function BrowserAgentPanel({ projectId, defaultUrl, onSendToChat 
             <div className="flex items-center justify-between px-5 py-3 border-b dark:border-gray-700">
               <div>
                 <h2 className="font-bold dark:text-white">🖱 عاملِ مرورگر — کار روی سایت مثلِ کاربر</h2>
-                <p className="text-xs text-gray-500">هر گام ثبت می‌شود (دید، فکر، کار، نتیجه، عکس). ثبت/ارسال/حذف/پرداخت و رمز منتظرِ اجازهٔ شماست؛ سایت‌های غیرمجاز روی سرور مسدودند.</p>
+                <p className="text-xs text-gray-500">هر گام ثبت می‌شود (دید، فکر، کار، نتیجه، عکس). جستجو و فیلتر بی‌اجازه انجام می‌شود؛ ثبت/ارسال/حذف/پرداخت و رمز منتظرِ اجازهٔ شماست؛ سایت‌های غیرمجاز روی سرور مسدودند. هر پایان یک خطِ «شواهد» دارد و اگر صفحه واردنشده یا بی‌داده باشد نتیجه «نامطمئن» گزارش می‌شود، نه «۰».</p>
               </div>
               <button onClick={() => setOpen(false)} className="text-xl px-2 dark:text-white">✕</button>
             </div>
@@ -222,7 +228,11 @@ export default function BrowserAgentPanel({ projectId, defaultUrl, onSendToChat 
                   )}
                   {!live && (
                     <div className="mt-3 text-sm">
-                      <div className="font-bold dark:text-white">نتیجه: <span className="font-normal">{run.summary || '—'}</span></div>
+                      <div data-agent-result={run.status} className={`font-bold dark:text-white ${run.status === 'unreliable' ? 'rounded-lg border-2 border-amber-400 bg-amber-50 dark:bg-amber-900/20 p-2' : ''}`}>نتیجه: <span className="font-normal">{run.summary || '—'}</span></div>
+                      {run.evidence?.line && (
+                        <div data-agent-evidence className="mt-1 text-xs text-gray-600 dark:text-gray-300 break-words">🔎 {run.evidence.line}</div>
+                      )}
+                      {run.login_note && <div className="mt-1 text-[11px] text-gray-500">{run.login_note}</div>}
                       <div className="flex gap-2 mt-2 flex-wrap">
                         {onSendToChat && <button onClick={() => { onSendToChat(toMarkdown(run)); setOpen(false); }} className="px-3 py-1 rounded bg-blue-600 text-white text-xs">💬 گزارش به چتِ بازرس</button>}
                         <button onClick={download} className="px-3 py-1 rounded bg-gray-200 dark:bg-gray-700 dark:text-white text-xs">⬇️ گزارش (.md)</button>

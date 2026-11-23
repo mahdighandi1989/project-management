@@ -90,10 +90,11 @@ async def start(body: RunIn, request: Request) -> Dict[str, Any]:
         if _own is not None:
             state, login_note = _own, "🔑 با نشستِ واردشدهٔ خودِ شما (همین مرورگر) وارد شد — Auth Recipe لازم نشد"
         elif not login_note:
-            login_note = ("⚠️ برای این سایت Auth Recipe ای در «اتاق فرمان» نیست — عامل بدونِ ورود شروع کرد؛ "
-                          "اگر صفحه ورود خواست، Recipe را در کارتِ همان پروژه بگذارید")
+            login_note = ("⚠️ برای این سایت نه ورودِ ذخیره‌شده‌ای هست (🔐 ورودِ یک‌باره / 📥 از کرومِ من) نه Auth Recipe — عامل "
+                          "بدونِ ورود شروع کرد؛ اگر صفحه بی‌ورود داده نشان ندهد، نتیجه «نامطمئن» گزارش می‌شود نه «۰»")
     if login_note:
         run.summary = login_note
+        run.login_note = login_note
     t = asyncio.create_task(BA.run_agent(run, model, vision=BA.model_supports_vision(model_id), max_steps=body.max_steps,
                                          storage_state=state))
     _TASKS.add(t)
