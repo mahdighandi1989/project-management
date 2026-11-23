@@ -778,6 +778,7 @@ export default function ProjectDetailPage() {
       files_with_bridge?: Array<{path: string; has_bridge: boolean}>;
       html_files?: string[];
       preview_url?: string;
+    bridge_source?: string | null;  // PM-INS-0037
     };
   }>({ loading: false });
 
@@ -2752,9 +2753,15 @@ export default function ProjectDetailPage() {
   }, [inspectorPowerOn, projectId, activeTab, handleBridgeEvent, showBridgeTransient]);
 
   // 🌉 بررسی وضعیت Bridge وقتی Inspector روشن می‌شود
+  // PM-INS-0037: و هر ۲ دقیقه دوباره — اگر نصبِ ریپو از بین رفت، دکمه خودش برمی‌گردد (اتصالِ زنده با WS لحظه‌ای است)
+  const [bridgeGraceOver, setBridgeGraceOver] = useState(false);
   useEffect(() => {
     if (inspectorPowerOn && projectId && activeTab === 'inspector') {
       checkBridgeStatus();
+      setBridgeGraceOver(false);
+      const grace = setTimeout(() => setBridgeGraceOver(true), 25000);
+      const every = setInterval(() => { if (!document.hidden) checkBridgeStatus(); }, 120000);
+      return () => { clearTimeout(grace); clearInterval(every); };
     }
   }, [inspectorPowerOn, projectId, activeTab]);
 
@@ -4880,22 +4887,24 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
   };
 
   // 🆕 شروع رصد لاگ‌های بک‌اند برای خطا
+  // PM-INS-0037: interval فقط مقدارهای لحظهٔ شروع را می‌دید (closure ِ کهنه) — لاگ‌های تازه هرگز بررسی نمی‌شدند و
+  // یک خطای قدیمی می‌توانست هر ۲ ثانیه دوباره گزارش شود. حالا از ref ِ زنده می‌خواند و هر خطا را یک بار گزارش می‌کند.
   const startBackendLogMonitoring = () => {
     // این interval لاگ‌های بک‌اند را رصد می‌کند
     const interval = setInterval(async () => {
-      if (!inspectorPowerOn || !inspectorActionTracking.enabled) {
+      if (!inspectorLiveRef.current.powerOn || !inspectorLiveRef.current.tracking) {
         clearInterval(interval);
         return;
       }
 
       try {
         // چک کردن لاگ‌های جدید برای خطا
-        const recentLogs = inspectorBackendLogs.slice(0, 5);
-        const hasError = recentLogs.some(log => log.level === 'error');
+        const recentLogs = inspectorLiveRef.current.logs.slice(0, 5);
+        const errorLog = recentLogs.find(log => log.level === 'error');
 
-        if (hasError && !inspectorPaused) {
-          const errorLog = recentLogs.find(log => log.level === 'error');
-          if (errorLog) {
+        if (errorLog && !inspectorLiveRef.current.paused && inspectorLiveRef.current.lastErrorId !== errorLog.id) {
+          inspectorLiveRef.current.lastErrorId = errorLog.id;
+          {
             handleInspectorError({
               message: errorLog.message || 'خطای ناشناخته',
               log_details: JSON.stringify(errorLog)
@@ -4909,6 +4918,14 @@ ${analysis.suggested_fix || 'بررسی فایل‌های فوق'}
 
     return () => clearInterval(interval);
   };
+
+  // PM-INS-0037: مقدارهای زنده برای interval ِ رصد (بدونِ ref، interval فقط لحظهٔ شروع را می‌دید)
+  const inspectorLiveRef = useRef<{ powerOn: boolean; tracking: boolean; paused: boolean; logs: typeof inspectorBackendLogs; lastErrorId: string | null }>(
+    { powerOn: false, tracking: true, paused: false, logs: [], lastErrorId: null });
+  inspectorLiveRef.current.powerOn = inspectorPowerOn;
+  inspectorLiveRef.current.tracking = inspectorActionTracking.enabled;
+  inspectorLiveRef.current.paused = inspectorPaused;
+  inspectorLiveRef.current.logs = inspectorBackendLogs;
 
   // Effect برای شروع رصد وقتی inspector روشن می‌شود
   useEffect(() => {
@@ -14958,53 +14975,111 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                 {/* 🌉 دکمه Bridge Script - رصد فعالیت داخل iframe */}
                 {inspectorPowerOn && (
                   <div className="mt-3 flex flex-col items-center">
-                    {/* PM-INS-0019: برچسبِ وضعیت جدا از دکمهٔ عمل */}
-                    <span className={`text-[10px] mb-0.5 ${inspectorBridgeStatus.has_bridge ? 'text-green-700' : 'text-gray-500'}`}>
-                      Bridge در ریپوی پروژه: {inspectorBridgeStatus.has_bridge ? `✅ نصب است${inspectorBridgeStatus.version ? ` (v${inspectorBridgeStatus.version})` : ''}` : '— نصب نیست'}
-                    </span>
-                    <button
-                      onClick={() => {
-                        // اگر خطای عدم اتصال به GitHub داشت، دیالوگ باز شود
-                        if (inspectorBridgeStatus.error?.includes('GitHub متصل نیست')) {
-                          setShowGitHubPathDialog(true);
-                        } else {
-                          toggleBridgeScript();
-                        }
-                      }}
-                      disabled={inspectorBridgeStatus.checking || inspectorBridgeStatus.injecting}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                        inspectorBridgeStatus.has_bridge
-                          ? 'bg-green-500 text-white hover:bg-green-600'
-                          : inspectorBridgeStatus.error?.includes('GitHub')
-                          ? 'bg-yellow-500 text-white hover:bg-yellow-600'
-                          : 'bg-orange-500 text-white hover:bg-orange-600'
-                      } ${(inspectorBridgeStatus.checking || inspectorBridgeStatus.injecting) ? 'opacity-50 cursor-wait' : ''}`}
-                      title={inspectorBridgeStatus.has_bridge
-                        ? 'حذف اسکریپت رصد از پروژه'
-                        : inspectorBridgeStatus.error?.includes('GitHub')
-                        ? 'اتصال به GitHub'
-                        : 'فعال‌سازی رصد کلیک/تایپ داخل پروژه'}
-                    >
-                      {inspectorBridgeStatus.checking ? (
-                        '⏳ بررسی...'
-                      ) : inspectorBridgeStatus.injecting ? (
-                        '⏳ در حال اعمال...'
-                      ) : inspectorBridgeStatus.has_bridge ? (
-                        '🗑 حذفِ Bridge از ریپو…'
-                      ) : inspectorBridgeStatus.error?.includes('GitHub') ? (
-                        '⚠️ اتصال GitHub'
-                      ) : (
-                        '➕ نصبِ Bridge در ریپو…'
-                      )}
-                    </button>
-                    <span className="text-[10px] text-gray-500 mt-1 text-center max-w-[90px]">
-                      {inspectorBridgeStatus.has_bridge
-                        ? (bridgePeerConnected ? 'کلیک/تایپ به چت می‌رسد' : 'نصب است؛ هنوز از پیش‌نمایش وصل نشده')
-                        : inspectorBridgeStatus.error?.includes('GitHub')
-                        ? 'ابتدا GitHub را وصل کنید'
-                        : 'برای رصد کامل فعال کنید'}
-                    </span>
-                    {inspectorBridgeStatus.error && !inspectorBridgeStatus.error.includes('GitHub') && (
+                    {/* PM-INS-0037: وضعیت از «کار می‌کند؟» (اتصالِ زندهٔ WS) خوانده می‌شود، نه فقط از ریپو. پیش‌نمایش از PM-INS-0022
+                        خودش Bridge را تزریق می‌کند؛ پس وقتی وصل است دکمهٔ نصب لازم نیست و پنهان می‌شود. اگر پس از ۲۵ ثانیه وصل نشد
+                        (یا بعداً قطع شد) دکمه خودکار برمی‌گردد؛ وضعیتِ ریپو هر ۲ دقیقه دوباره خوانده می‌شود. */}
+                    {(() => {
+                      const repoV = inspectorBridgeStatus.has_bridge ? `ریپو${inspectorBridgeStatus.version ? ` v${inspectorBridgeStatus.version}` : ''}` : 'تزریقِ پیش‌نمایش';
+                      const showAction = !bridgePeerConnected && (bridgeGraceOver || inspectorBridgeStatus.has_bridge || !!inspectorBridgeStatus.error?.includes('GitHub'));
+                      return (
+                        <>
+                          <span className={`text-[10px] mb-0.5 text-center max-w-[170px] ${bridgePeerConnected ? 'text-green-700' : showAction ? 'text-amber-700' : 'text-gray-500'}`}>
+                            {bridgePeerConnected
+                              ? `🌉 Bridge: ✅ فعال (${repoV}) — کلیک/تایپ به چت می‌رسد`
+                              : showAction
+                              ? (inspectorBridgeStatus.has_bridge ? '🌉 Bridge در ریپو هست ولی از پیش‌نمایش وصل نشده' : '🌉 Bridge وصل نشد — برای رصدِ کامل نصبش کنید')
+                              : '🌉 Bridge: ⏳ در انتظارِ اتصال از پیش‌نمایش…'}
+                          </span>
+                          {showAction && (
+                            <>
+                        <button
+                          onClick={() => {
+                            // اگر خطای عدم اتصال به GitHub داشت، دیالوگ باز شود
+                            if (inspectorBridgeStatus.error?.includes('GitHub متصل نیست')) {
+                              setShowGitHubPathDialog(true);
+                            } else {
+                              toggleBridgeScript();
+                            }
+                          }}
+                          disabled={inspectorBridgeStatus.checking || inspectorBridgeStatus.injecting}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                            inspectorBridgeStatus.has_bridge
+                              ? 'bg-green-500 text-white hover:bg-green-600'
+                              : inspectorBridgeStatus.error?.includes('GitHub')
+                              ? 'bg-yellow-500 text-white hover:bg-yellow-600'
+                              : 'bg-orange-500 text-white hover:bg-orange-600'
+                          } ${(inspectorBridgeStatus.checking || inspectorBridgeStatus.injecting) ? 'opacity-50 cursor-wait' : ''}`}
+                          title={inspectorBridgeStatus.has_bridge
+                            ? 'حذف اسکریپت رصد از پروژه'
+                            : inspectorBridgeStatus.error?.includes('GitHub')
+                            ? 'اتصال به GitHub'
+                            : 'فعال‌سازی رصد کلیک/تایپ داخل پروژه'}
+                        >
+                          {inspectorBridgeStatus.checking ? (
+                            '⏳ بررسی...'
+                          ) : inspectorBridgeStatus.injecting ? (
+                            '⏳ در حال اعمال...'
+                          ) : inspectorBridgeStatus.has_bridge ? (
+                            '🗑 حذفِ Bridge از ریپو…'
+                          ) : inspectorBridgeStatus.error?.includes('GitHub') ? (
+                            '⚠️ اتصال GitHub'
+                          ) : (
+                            '➕ نصبِ Bridge در ریپو…'
+                          )}
+                        </button>
+                              <span className="text-[10px] text-gray-500 mt-1 text-center max-w-[150px]">
+                                {inspectorBridgeStatus.has_bridge
+                                  ? 'نصب است؛ هنوز از پیش‌نمایش وصل نشده — «🔍 تشخیص» را بزنید'
+                                  : inspectorBridgeStatus.error?.includes('GitHub')
+                                  ? 'ابتدا GitHub را وصل کنید'
+                                  : 'یک commit در ریپوی پروژه می‌سازد — پیش از آن تأیید می‌گیرد'}
+                              </span>
+                            </>
+                          )}
+                          {!showAction && inspectorBridgeStatus.has_bridge && (
+                            <details className="mt-0.5 text-[10px] text-gray-500 text-center">
+                              <summary className="cursor-pointer select-none">⚙️ Bridge در ریپو</summary>
+                            <button
+                              onClick={() => {
+                                // اگر خطای عدم اتصال به GitHub داشت، دیالوگ باز شود
+                                if (inspectorBridgeStatus.error?.includes('GitHub متصل نیست')) {
+                                  setShowGitHubPathDialog(true);
+                                } else {
+                                  toggleBridgeScript();
+                                }
+                              }}
+                              disabled={inspectorBridgeStatus.checking || inspectorBridgeStatus.injecting}
+                              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                                inspectorBridgeStatus.has_bridge
+                                  ? 'bg-green-500 text-white hover:bg-green-600'
+                                  : inspectorBridgeStatus.error?.includes('GitHub')
+                                  ? 'bg-yellow-500 text-white hover:bg-yellow-600'
+                                  : 'bg-orange-500 text-white hover:bg-orange-600'
+                              } ${(inspectorBridgeStatus.checking || inspectorBridgeStatus.injecting) ? 'opacity-50 cursor-wait' : ''}`}
+                              title={inspectorBridgeStatus.has_bridge
+                                ? 'حذف اسکریپت رصد از پروژه'
+                                : inspectorBridgeStatus.error?.includes('GitHub')
+                                ? 'اتصال به GitHub'
+                                : 'فعال‌سازی رصد کلیک/تایپ داخل پروژه'}
+                            >
+                              {inspectorBridgeStatus.checking ? (
+                                '⏳ بررسی...'
+                              ) : inspectorBridgeStatus.injecting ? (
+                                '⏳ در حال اعمال...'
+                              ) : inspectorBridgeStatus.has_bridge ? (
+                                '🗑 حذفِ Bridge از ریپو…'
+                              ) : inspectorBridgeStatus.error?.includes('GitHub') ? (
+                                '⚠️ اتصال GitHub'
+                              ) : (
+                                '➕ نصبِ Bridge در ریپو…'
+                              )}
+                            </button>
+                            </details>
+                          )}
+                        </>
+                      );
+                    })()}
+                    {inspectorBridgeStatus.error && !inspectorBridgeStatus.error.includes('GitHub') && !bridgePeerConnected && inspectorBridgeStatus.error !== 'فایل bridge یافت نشد' && (
                       <span className="text-[10px] text-red-500 mt-0.5">{inspectorBridgeStatus.error}</span>
                     )}
                     {/* 🌐 وضعیت WebSocket Bridge */}
@@ -15018,13 +15093,16 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                         {bridgePeerConnected ? 'WS: متصل' : bridgeWsConnected ? 'WS: منتظر Bridge' : 'WS: در حال اتصال...'}
                       </div>
                     )}
-                    {/* PM-INS-0019: راهنمای کوتاه */}
-                    <details className="mt-1 max-w-[150px] text-[10px] text-gray-500">
+                    {/* PM-INS-0019 → PM-INS-0037: راهنمای کوتاه، هم‌خوان با رفتارِ امروز */}
+                    <details className="mt-1 max-w-[170px] text-[10px] text-gray-500">
                       <summary className="cursor-pointer select-none">❔ این دکمه‌ها چه می‌کنند؟</summary>
                       <ul className="mt-1 space-y-0.5 list-disc pr-3 leading-4">
-                        <li>«رصدِ لاگ» فقط در همین صفحه است؛ چیزی در ریپو عوض نمی‌شود.</li>
-                        <li>«نصب/حذف/آپدیتِ Bridge» یک commit در <b>ریپوی پروژه</b> می‌سازد — پیش از آن نامِ فایل را می‌پرسد.</li>
-                        <li>«WS: متصل» یعنی اسکریپتِ داخلِ پیش‌نمایش وصل است و کلیک/تایپ به چت می‌رسد.</li>
+                        <li>«🔐 ورودِ یک‌باره»: مرورگرِ زندهٔ سرور برای ورود به سایت‌های بی‌گوگل؛ ورود ذخیره می‌شود تا 📸 و عامل واردشده ببینند.</li>
+                        <li>«📥 از کرومِ من»: برای سایت‌هایی که با گوگل وارد می‌شوند — ورود را با یک بوک‌مارک از کرومِ خودتان می‌آورد (راهنمای ۴ گامی).</li>
+                        <li>«رصدِ لاگ» (پیش‌فرض روشن): کلیک/اسکرول در اسکرین را تحلیل و در چت گزارش می‌کند، و اگر در لاگِ بک‌اند خطای تازه بیاید کار را نگه می‌دارد و گزارش می‌دهد. فقط در همین صفحه؛ چیزی در ریپو عوض نمی‌شود. خاموش‌کردنش چیزی را خراب نمی‌کند.</li>
+                        <li>«🌉 Bridge»: اسکریپتی داخلِ پیش‌نمایش که کلیک/تایپ را به چت می‌رساند. پیش‌نمایش خودش تزریقش می‌کند؛ «WS: متصل» یعنی کار می‌کند. دکمهٔ نصب فقط وقتی پیدا می‌شود که وصل نشود.</li>
+                        <li>«نصب/حذف/آپدیتِ Bridge در ریپو» یک commit در <b>ریپوی پروژه</b> می‌سازد — پیش از آن تأیید می‌گیرد.</li>
+                        <li>«🔍 تشخیص»: از ریپو و از خودِ پیش‌نمایش می‌پرسد Bridge کجاست و چرا وصل هست/نیست.</li>
                       </ul>
                     </details>
                     {/* ⚠️ هشدار نسخه قدیمی */}
@@ -15073,7 +15151,8 @@ ${vdBaseContext}${vdBaseContext.length >= 500 ? '...' : ''}
                     {/* نمایش نتیجه Debug */}
                     {bridgeDebugInfo.data && (
                       <div className={`mt-1 p-2 rounded text-[10px] ${
-                        bridgeDebugInfo.data.deployed_has_bridge
+                        // PM-INS-0037: «تزریقِ پیش‌نمایش» حالتِ درست است، نه خطا — قرمز نشان داده نشود
+                        bridgeDebugInfo.data.deployed_has_bridge || bridgeDebugInfo.data.bridge_source === 'preview_injection' || bridgePeerConnected
                           ? 'bg-green-100 text-green-700'
                           : bridgeDebugInfo.data.bridge_injected
                           ? 'bg-yellow-100 text-yellow-700'
