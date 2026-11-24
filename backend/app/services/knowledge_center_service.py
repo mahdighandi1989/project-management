@@ -52,6 +52,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .oversight_service import STORAGE_DIR, now_iso
+from .knowledge_status import build_model_prompt, infer_resolution_status, parse_model_answer
+
+#: Persian labels for the resolution status (assistant context + reports).
+STATUS_LABELS_FA: Dict[str, str] = {
+    "solved": "حل‌شده", "partial": "نیمه‌حل (بخشی باز مانده)", "open": "باز / حل‌نشده",
+    "regressed": "برگشته (دوباره خراب شده)", "unknown": "نامشخص (شاهدی در متن نیست)",
+}
+#: Upper bound on cheap-model status checks in ONE sync, so a sync stays bounded.
+MAX_MODEL_STATUS_CHECKS_PER_SYNC = 60
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +269,12 @@ class KnowledgeEntry:
     resolution_status: str = "unknown"
     recurrence_count: int = 1
     user_confirmed: bool = False
+    # PM-INS-0039 — WHERE the status came from (frontmatter | resolution-section |
+    # text | model | ambiguous | none), the sentence that decided it, and the
+    # content hash it was decided for (so an unchanged file is not re-read).
+    status_source: str = ""
+    status_evidence: str = ""
+    status_checked_hash: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -585,6 +600,8 @@ class KnowledgeCenterService:
         added = 0
         updated = 0
         unchanged = 0
+        reclassified = 0  # entries whose resolution status changed in this run
+        self._model_status_checks = 0
         watched = [w for w in svc.watched if "/" in (w.repo_full_name or "")]
         per_project: List[Dict[str, Any]] = []
         _sync_progress(projects_total=len(watched), projects_done=0, files_done=0,
@@ -611,7 +628,13 @@ class KnowledgeCenterService:
                 existing = entries_by_key.get(key)
                 git_sha = item.get("sha") or ""
                 proj["files"] += 1
-                if existing and git_sha and existing.get("git_sha") == git_sha and existing.get("content_hash"):
+                # PM-INS-0039: an unchanged file is skipped only once its status has
+                # been decided from its text. This is also the one-time backfill —
+                # every entry indexed before the classifier existed is re-read ONCE.
+                status_done = bool(existing) and (
+                    existing.get("status_checked_hash") == existing.get("content_hash"))
+                if (existing and git_sha and existing.get("git_sha") == git_sha
+                        and existing.get("content_hash") and status_done):
                     existing["project_id"] = w.id
                     unchanged += 1
                     proj["unchanged"] += 1
@@ -620,6 +643,14 @@ class KnowledgeCenterService:
                 body = await self._gh_get_file_content(
                     owner, name, path, token,
                 ) or ""
+                if not body and existing:
+                    # «نتوانستم بخوانم» ≠ «فایل خالی است»: keep what we have, retry next cycle.
+                    existing["project_id"] = w.id
+                    unchanged += 1
+                    proj["unchanged"] += 1
+                    proj["unread"] = proj.get("unread", 0) + 1
+                    _sync_progress(files_done=_SYNC_STATE.get("files_done", 0) + 1, unchanged=unchanged)
+                    continue
                 meta, content = _parse_frontmatter(body)
                 size = len(body.encode("utf-8"))
                 ch = _hash(body)
@@ -637,11 +668,15 @@ class KnowledgeCenterService:
                 # Resolution fields — read from frontmatter (lower-cased
                 # for status, normalized booleans/ints) so the catalog
                 # can show badges + filter without re-parsing every file.
-                raw_status = str(meta.get("resolution_status") or "").lower()
-                if raw_status not in {
-                    "solved", "partial", "open", "regressed", "unknown",
-                }:
-                    raw_status = "unknown"
+                # PM-INS-0039: no status in the frontmatter ⇒ decide it from the
+                # text (solution section, Resolution block, explicit «still open»).
+                # «unknown» remains only when the file gives no evidence either way.
+                raw_status, status_source, status_evidence = infer_resolution_status(meta, content)
+                if status_source == "ambiguous":
+                    raw_status, status_source, status_evidence = await self._model_resolution(
+                        str(meta.get("title") or name_f), content, raw_status, status_evidence)
+                if (existing or {}).get("resolution_status", "unknown") != raw_status:
+                    reclassified += 1
                 raw_rec = meta.get("recurrence_count")
                 try:
                     rec_count = int(raw_rec) if raw_rec is not None else 1
@@ -679,6 +714,9 @@ class KnowledgeCenterService:
                     "resolution_status": raw_status,
                     "recurrence_count": rec_count,
                     "user_confirmed": user_confirmed,
+                    "status_source": status_source,
+                    "status_evidence": status_evidence,
+                    "status_checked_hash": ch,
                 }
                 if existing:
                     existing.update(entry_data)
@@ -701,10 +739,36 @@ class KnowledgeCenterService:
             "total": len(index.get("entries", [])),
             "projects": per_project,
             "at": now_iso(),
+            "reclassified": reclassified,
+            "resolutions": resolution_counts(index.get("entries", [])),
         }
         index["last_sync"] = {k: v for k, v in result.items() if k != "ok"}
         _save_index(index)
         return result
+
+    async def _model_resolution(
+        self, title: str, content: str, fallback: str, evidence: str,
+    ) -> Tuple[str, str, str]:
+        """PM-INS-0039 — a cheap model is asked ONLY when the text is ambiguous
+        (a solution AND an explicit «still open» signal). No model, a timeout or
+        an answer out of form ⇒ the rule's cautious ``partial`` stands."""
+        if getattr(self, "_model_status_checks", 0) >= MAX_MODEL_STATUS_CHECKS_PER_SYNC:
+            return fallback, "ambiguous", evidence
+        self._model_status_checks = getattr(self, "_model_status_checks", 0) + 1
+        try:
+            from ..api.routes.simple_projects import ai_generate_with_meta
+            model_ids = list(load_settings().get("processing_model_ids") or []) or None
+            answer, used = await asyncio.wait_for(
+                ai_generate_with_meta(build_model_prompt(title, content, evidence),
+                                      model_ids=model_ids, max_tokens=120),
+                timeout=45,
+            )
+            status, reason = parse_model_answer(answer or "")
+            if status:
+                return status, "model", f"مدل ({used or '؟'}): {reason or status} — پیش از آن: {evidence}"[:400]
+        except Exception as e:  # noqa: BLE001
+            logger.info(f"knowledge_center: model status check skipped: {str(e)[:120]}")
+        return fallback, "ambiguous", evidence
 
     @staticmethod
     def _title_from_filename(name: str) -> str:
@@ -1831,6 +1895,14 @@ user_confirmed: {str(user_confirmed).lower()}
 """
 
 
+def resolution_counts(entries: List[Dict[str, Any]]) -> Dict[str, int]:
+    out: Dict[str, int] = {}
+    for e in entries or []:
+        r = e.get("resolution_status") or "unknown"
+        out[r] = out.get(r, 0) + 1
+    return out
+
+
 # Singleton
 # ────────────────────────────────────────────────────────────────────────────
 # PM-INS-0028 — «🔄 سینک از repo» as a background job with visible progress.
@@ -2029,9 +2101,11 @@ async def experience_context(query: str, where: str, project: str = "", limit: i
             if len(body) > 3000:
                 body = body[:3000] + "\n…"
             parts.append(f"### {e.get('title')}\n(منبع: {e.get('project_full_name')}/{e.get('path')} — "
-                         f"تگ‌ها: {', '.join(e.get('tags') or [])})\n{body}")
-        block = ("# 📚 تجربه‌های مرتبط از «مرکز دانش» (درس‌های حل‌شده در پروژه‌های مالک)\n"
-                 "اگر به پرسش مربوط‌اند از آن‌ها استفاده کن و نامشان را ببر؛ اگر نه، نادیده بگیر.\n\n"
+                         f"تگ‌ها: {', '.join(e.get('tags') or [])} — "
+                         f"وضعیت: {STATUS_LABELS_FA.get(e.get('resolution_status') or 'unknown', 'نامشخص')})\n{body}")
+        block = ("# 📚 تجربه‌های مرتبط از «مرکز دانش» (درس‌های پروژه‌های مالک؛ وضعیتِ هر کدام نوشته شده)\n"
+                 "اگر به پرسش مربوط‌اند از آن‌ها استفاده کن و نامشان را ببر؛ اگر نه، نادیده بگیر. "
+                 "تجربه‌ای که «حل‌شده» نیست را راه‌حلِ قطعی معرفی نکن.\n\n"
                  + "\n\n".join(parts))
         record_usage([e["id"] for e in entries], where, project, query)
         return {"block": block, "line": used_line(entries), "entries": entries}

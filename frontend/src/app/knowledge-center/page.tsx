@@ -24,6 +24,8 @@ interface Entry {
   resolution_status?: string;
   recurrence_count?: number;
   user_confirmed?: boolean;
+  status_source?: string;
+  status_evidence?: string;
   usage_count?: number;
   last_used_at?: string;
   last_used_where?: string;
@@ -568,11 +570,13 @@ export default function KnowledgeCenterPage() {
                 </p>
                 <div className="flex flex-wrap gap-1 mb-2 items-center">
                   {entry.resolution_status && entry.resolution_status !== 'unknown' && (
-                    <ResolutionBadge
-                      status={entry.resolution_status}
-                      recurrence={entry.recurrence_count}
-                      confirmed={entry.user_confirmed}
-                    />
+                    <span data-testid="kc-status-badge" title={entry.status_evidence || undefined}>
+                      <ResolutionBadge
+                        status={entry.resolution_status}
+                        recurrence={entry.recurrence_count}
+                        confirmed={entry.user_confirmed}
+                      />
+                    </span>
                   )}
                   {(entry.tags || []).slice(0, 4).map((t) => (
                     <button
@@ -728,6 +732,12 @@ export default function KnowledgeCenterPage() {
                     recurrence={selectedEntry.recurrence_count}
                     confirmed={selectedEntry.user_confirmed}
                   />
+                </div>
+              )}
+              {selectedEntry.status_evidence && (
+                <div className="text-xs text-gray-400" data-testid="kc-status-evidence">
+                  <span className="text-gray-500">شاهدِ این وضعیت ({STATUS_SOURCE_FA[selectedEntry.status_source || ''] || 'متن'}):</span>{' '}
+                  {selectedEntry.status_evidence}
                 </div>
               )}
               {selectedEntry.merged_from && selectedEntry.merged_from.length > 0 && (
@@ -1135,6 +1145,16 @@ function UploadChatModal({ models, selectedModelIds: initialSelected, onClose, o
   );
 }
 
+
+// PM-INS-0039 — وضعیت از کجا آمده (سرور هنگامِ سینک از متنِ فایل تعیین می‌کند).
+const STATUS_SOURCE_FA: Record<string, string> = {
+  frontmatter: 'سرآیندِ فایل',
+  'resolution-section': 'بخشِ Resolution',
+  text: 'متنِ فایل',
+  model: 'مدل',
+  ambiguous: 'متن — دوپهلو',
+  none: 'بی‌شاهد',
+};
 
 function ResolutionBadge({
   status,
