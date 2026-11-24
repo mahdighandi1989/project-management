@@ -44,6 +44,8 @@ class CreateProjectRequest(BaseModel):
     selected_projects: Optional[List[Dict[str, Any]]] = None
     # (PM-INS-0025) پس از ساخت، پروژه اجرا (تست + مرورگر) و تا سبز شدن اصلاح شود
     selfcheck: bool = True
+    # (PM-INS-0040) پرامپتی که با شرحِ فرم هم‌موضوع نیست ساخته نمی‌شود (۴۰۹)، مگر کاربر پس از دیدنِ هشدار صریحاً بخواهد
+    topic_override: bool = False
 
 
 class IdeaToPromptRequest(BaseModel):
@@ -360,6 +362,7 @@ async def idea_to_prompt_preview(request: IdeaToPromptRequest):
             technologies=list(request.technologies or []),
             ai_generate=_gen,
             model_ids=request.model_ids,
+            user_idea=request.idea,  # (PM-INS-0040) خودسنجیِ هم‌موضوعی با متنِ خودِ کاربر، نه متنِ افزودهٔ مرجع/پیوست
         )
         # 🆕 (Reference Projects) — نتیجه را با لیست مراجع که در پرامپت
         # استفاده شد augment کن تا UI نشان بدهد و در create persist شود.
@@ -416,6 +419,21 @@ async def create_project(request: CreateProjectRequest):
 
     if not description.strip():
         raise HTTPException(status_code=400, detail="description یا structured_prompt لازم است")
+
+    # (PM-INS-0040) «کاربر چیزی می‌خواهد و پروژهٔ دیگری ساخته می‌شود» — اگر شرحِ فعلیِ فرم و پرامپتِ ساخت هم‌موضوع
+    # نیستند (پرامپتِ مانده از ورودیِ قبلی)، نساز و بگو چرا. مرزِ واقعی این‌جاست؛ فرم فقط هشدار را نشان می‌دهد.
+    if (structured and isinstance(structured, dict) and structured.get("full_prompt_text")
+            and request.description.strip() and not request.topic_override):
+        from ...services.creator_idea_to_prompt import topic_check
+        _tc = topic_check(request.description, description)
+        if _tc["status"] == "mismatch":
+            raise HTTPException(status_code=409, detail={
+                "error": "prompt_topic_mismatch",
+                "primary_error": "پرامپتِ ساخت با شرحِ پروژه در فرم هم‌موضوع نیست — پروژه ساخته نشد.",
+                "suggested_actions": ["«🔄 بازتولید» را بزنید تا پرامپت از شرحِ فعلی ساخته شود",
+                                      "یا پس از خواندنِ پرامپت، تیکِ «خودم خواندم؛ همین را بساز» را بزنید"],
+                "topic_check": _tc,
+            })
 
     # تشخیص خودکار نوع پروژه (اگر کاربر خواسته باشد)
     if request.auto_detect_type or project_type == "auto":

@@ -176,6 +176,98 @@ def _fallback_extract_from_text(text: str) -> Dict[str, Any]:
     return out
 
 
+
+# ---------------------------------------------------------------------------
+# (PM-INS-0040) خودسنجیِ هم‌موضوعی: پرامپتِ خروجی باید دربارهٔ همان چیزی باشد که کاربر نوشت.
+# مالک شرحِ «تبدیلِ تاریخِ شمسی» داد و پرامپتِ «ماشین‌حساب» گرفت — چنین پرامپتی نباید بی‌هشدار ساخته شود.
+# روش: کلیدواژه‌های متمایزِ ورودی (بدونِ واژه‌های عمومی) را در متنِ خروجی می‌جوییم؛ پوششِ کم = ناهم‌موضوع.
+# ---------------------------------------------------------------------------
+TOPIC_MIN_COVERAGE = 0.4
+TOPIC_MAX_KEYWORDS = 40
+
+_TOPIC_STOP = set("""
+و در به از که این آن را با برای تا هم هر یک یا اما اگر نه بر چه چی شود شد باشد است هست بود کند کنم کنید کنیم
+می نمی باید دارد داشته داشت های ها ای تر ترین هستند کرد کرده شده شوند بتواند بتوان توان خود هم‌چنین همچنین نیز
+فقط همه هیچ بدون روی زیر پس پیش وقتی چون مثل مثلا مثلاً یعنی دیگر چند خیلی کاملا کاملاً لطفا لطفاً من ما شما او
+پروژه برنامه اپ اپلیکیشن سایت وب صفحه فایل کد تست تستها ساده کاربر کاربران ساخت بساز بسازید میخواهم می‌خواهم
+قابلیت ویژگی امکان نمایش دکمه حالت استفاده نیاز لازم خروجی ورودی بخش مورد شامل نام جدید اصلی درست
+the a an and or of to in on for with without is are be as at by it this that from into via using use
+app application project page web website site file files code test tests simple user users build make create
+html css js javascript single feature features should must can will has have
+""".split())
+
+_TOPIC_SUFFIXES = ("هایی", "های", "ها", "ات", "ی")
+
+
+def _topic_norm(text: str) -> str:
+    t = (text or "").lower()
+    t = t.replace("ي", "ی").replace("ك", "ک").replace("ۀ", "ه").replace("ة", "ه")
+    t = re.sub(r"[ً-ٰٟـ]", "", t)          # اعراب و کشیده
+    return t.replace("‌", " ").replace("‍", " ")      # نیم‌فاصله ⇒ مرزِ واژه
+
+
+def _topic_tokens(text: str) -> List[str]:
+    return re.findall(r"[a-z]+|[ء-غف-يپچژکگی]+", _topic_norm(text))
+
+
+def _topic_stem(tok: str) -> str:
+    for suf in _TOPIC_SUFFIXES:
+        if tok.endswith(suf) and len(tok) - len(suf) >= 3:
+            return tok[: -len(suf)]
+    return tok
+
+
+def _is_latin(tok: str) -> bool:
+    return bool(tok) and "a" <= tok[0] <= "z"
+
+
+def topic_check(source: str, generated: str) -> Dict[str, Any]:
+    """آیا «generated» دربارهٔ همان موضوعِ «source» است؟
+
+    status:
+      - ``ok``        پوششِ کلیدواژه‌ها کافی است
+      - ``mismatch``  کلیدواژه‌های اصلیِ ورودی در خروجی نیست ⇒ هشدار و نساختن
+      - ``unchecked`` نشد سنجید (ورودیِ خیلی کوتاه، یا ورودیِ لاتین و خروجیِ فارسی) — «نسنجیدم» غیر از «سالم است»
+    """
+    keywords: List[str] = []
+    seen = set()
+    for tok in _topic_tokens(source):
+        if len(tok) < 3 or tok in _TOPIC_STOP:
+            continue
+        stem = _topic_stem(tok)
+        if stem in _TOPIC_STOP or stem in seen:
+            continue
+        seen.add(stem)
+        keywords.append(stem)
+        if len(keywords) >= TOPIC_MAX_KEYWORDS:
+            break
+    out: Dict[str, Any] = {"status": "unchecked", "ok": True, "coverage": None, "keywords_total": len(keywords),
+                           "found": [], "missing": [], "threshold": TOPIC_MIN_COVERAGE, "note": ""}
+    gen_tokens = _topic_tokens(generated)
+    if len(keywords) < 3:
+        out["note"] = "ورودی کلیدواژهٔ متمایزِ کافی برای سنجشِ هم‌موضوعی ندارد"
+        return out
+    if not gen_tokens:
+        out.update(status="mismatch", ok=False, coverage=0.0, missing=keywords[:12], note="خروجی خالی است")
+        return out
+    # زبانِ ورودی و خروجی فرق دارد (مثلاً ایدهٔ انگلیسی، پرامپتِ فارسی) ⇒ تطبیقِ واژه‌به‌واژه معنا ندارد
+    kw_latin = sum(1 for k in keywords if _is_latin(k)) / len(keywords)
+    gen_latin = sum(1 for g in gen_tokens if _is_latin(g)) / len(gen_tokens)
+    if (kw_latin > 0.7 and gen_latin < 0.3) or (kw_latin < 0.3 and gen_latin > 0.7):
+        out["note"] = "زبانِ ورودی و خروجی فرق دارد — هم‌موضوعی واژه‌به‌واژه سنجیده نشد"
+        return out
+    have = set(gen_tokens) | {_topic_stem(g) for g in gen_tokens}
+    found = [k for k in keywords if k in have]
+    missing = [k for k in keywords if k not in have]
+    coverage = round(len(found) / len(keywords), 3)
+    ok = coverage >= TOPIC_MIN_COVERAGE
+    out.update(status="ok" if ok else "mismatch", ok=ok, coverage=coverage, found=found[:20], missing=missing[:12])
+    if not ok:
+        out["note"] = (f"فقط {len(found)} از {len(keywords)} کلیدواژهٔ ورودی در پرامپت هست — "
+                       "پرامپت احتمالاً دربارهٔ موضوعِ دیگری است")
+    return out
+
+
 async def idea_to_strong_prompt_for_creator(
     *,
     idea: str,
@@ -184,6 +276,7 @@ async def idea_to_strong_prompt_for_creator(
     technologies: Optional[List[str]] = None,
     ai_generate: Callable[..., Awaitable[str]],
     model_ids: Optional[List[str]] = None,
+    user_idea: Optional[str] = None,
 ) -> Dict[str, Any]:
     """تبدیل idea خام کاربر به strong prompt آمادهٔ تولید پروژه.
 
@@ -194,6 +287,8 @@ async def idea_to_strong_prompt_for_creator(
         technologies: تکنولوژی‌های پیشنهادی کاربر (اختیاری)
         ai_generate: callable async که (prompt, model_ids=None) → str
         model_ids: لیست مدل‌ها به ترتیب اولویت برای fallback
+        user_idea: (PM-INS-0040) متنِ خودِ کاربر در فرم — بدونِ متنِ پیوست‌ها و پروژه‌های مرجع که به `idea`
+            افزوده شده؛ خودسنجیِ هم‌موضوعی با همین سنجیده و همین در `source_idea` برگردانده می‌شود
 
     Returns:
         dict با ۱۳ فیلد (طبق spec)
@@ -323,7 +418,25 @@ async def idea_to_strong_prompt_for_creator(
         new_project=True,
     )
 
+    # (PM-INS-0040) خودسنجی: بخش‌هایی که **مدل** نوشته (نه رونوشتِ عینِ ایده در «🧭 هدف») باید هم‌موضوعِ ورودی باشند
+    _src = (user_idea or "").strip()
+    if not _src or _src.startswith("[ایدهٔ متنی همراه نیست"):
+        _src = idea.strip()
+    _model_written = "\n".join(
+        [title, structured_desc, arch_summary]
+        + [str(x) for x in key_features] + [str(x) for x in user_stories] + [str(x) for x in non_func]
+        + [str(x) for x in file_structure]
+    )
+    topic = topic_check(_src, _model_written)
+    if topic["status"] == "mismatch":
+        logger.warning(
+            "idea_to_strong_prompt: topic mismatch — coverage=%s missing=%s", topic.get("coverage"), topic.get("missing"))
+        warnings = [f"⛔ پرامپت با شرحِ ورودی هم‌موضوع نیست: {topic['note']} (نیافته: {'، '.join(topic['missing'][:8])})"] + list(warnings)
+
     return {
+        "topic_check": topic,
+        "source_name": name.strip(),
+        "source_idea": (user_idea or idea).strip(),
         "title": title,
         "structured_description": structured_desc,
         "tech_stack": tech_stack,

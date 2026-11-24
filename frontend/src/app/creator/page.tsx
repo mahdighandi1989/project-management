@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import TaskFilePicker, { type UploadSessionState } from '@/components/TaskFilePicker';
@@ -330,15 +330,43 @@ export default function CreatorPage() {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string>('');
   const [editablePromptText, setEditablePromptText] = useState<string>('');
+  // (PM-INS-0040) «پرامپت فقط از ورودیِ فعلیِ فرم»: ورودی‌ای که این پرامپت واقعاً از آن ساخته شد نگه داشته و در
+  // فرم نشان داده می‌شود؛ اگر با فرمِ فعلی نخواند یا خودسنجیِ هم‌موضوعی رد کند، ساخت قفل می‌شود.
+  const [promptSource, setPromptSource] = useState<{ name: string; idea: string } | null>(null);
+  const [topicOverride, setTopicOverride] = useState(false);
+  const nameRef = useRef<HTMLInputElement | null>(null);
+  const descRef = useRef<HTMLTextAreaElement | null>(null);
+  // آنچه کاربر «می‌بیند» مرجع است: اگر کادر با ابزاری پر شده که رویدادِ React را نمی‌زند (پرکنندهٔ خودکار،
+  // افزونه، عاملِ مرورگر)، state کهنه می‌ماند و ورودیِ قبلی فرستاده می‌شد. این‌جا خودِ کادر خوانده و state هم‌گام می‌شود.
+  const readForm = () => {
+    const n = (nameRef.current?.value ?? name).trim();
+    const d = (descRef.current?.value ?? description).trim();
+    if (nameRef.current && nameRef.current.value !== name) setName(nameRef.current.value);
+    if (descRef.current && descRef.current.value !== description) setDescription(descRef.current.value);
+    return { name: n, idea: d };
+  };
+  const clearPrompt = () => {
+    setStructuredPrompt(null);
+    setEditablePromptText('');
+    setPromptSource(null);
+    setTopicOverride(false);
+    setPreviewError('');
+  };
+  const sourceStale = !!(structuredPrompt && promptSource
+    && (promptSource.name !== name.trim() || promptSource.idea !== description.trim()));
+  const topicMismatch = structuredPrompt?.topic_check?.status === 'mismatch';
+  const buildBlocked = sourceStale || (topicMismatch && !topicOverride);
 
   // 🆕 مرحلهٔ ۱: idea → strong prompt (preview)
-  const previewPromptFromIdea = async () => {
+  const previewPromptFromIdea = async (modelIdsArg?: unknown) => {
     setPreviewError('');
-    if (!name.trim()) {
+    const form = readForm();
+    const modelIds: string[] = Array.isArray(modelIdsArg) ? (modelIdsArg as string[]) : selectedModelIds;
+    if (!form.name) {
       showError('نام پروژه را وارد کنید');
       return;
     }
-    if (description.trim().length < 15) {
+    if (form.idea.length < 15) {
       showError('ایده/توضیح حداقل ۱۵ کاراکتر');
       return;
     }
@@ -347,11 +375,17 @@ export default function CreatorPage() {
       return;
     }
     // 🆕 enforce model selection
-    if (selectedModelIds.length === 0) {
+    if (modelIds.length === 0) {
       showError('حداقل یک مدل AI انتخاب کنید — بدون مدل امکان تولید پرامپت نیست');
       return;
     }
 
+    // (PM-INS-0040) پرامپتِ قبلی همین حالا کنار می‌رود — اگر تولیدِ تازه شکست بخورد، پرامپتِ کهنه نباید
+    // به‌جای آن روی صفحه بماند و ساخته شود.
+    setStructuredPrompt(null);
+    setEditablePromptText('');
+    setPromptSource(null);
+    setTopicOverride(false);
     setPreviewLoading(true);
     try {
       // 🆕 (Creator file upload) — session_id های آپلود‌شده‌ای که در وضعیت
@@ -374,11 +408,11 @@ export default function CreatorPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          idea: description.trim() || '[ایدهٔ متنی همراه نیست — درخواست داخل فایل‌های پیوست]',
-          name: name.trim(),
+          idea: form.idea || '[ایدهٔ متنی همراه نیست — درخواست داخل فایل‌های پیوست]',
+          name: form.name,
           project_type: autoDetectType ? 'auto' : projectType,
           technologies: technologies.split(',').map((t) => t.trim()).filter(Boolean),
-          model_ids: selectedModelIds,
+          model_ids: modelIds,
           upload_session_ids: validSessionIds.length ? validSessionIds : undefined,
           selected_projects: refPayload.length ? refPayload : undefined,
         }),
@@ -409,6 +443,11 @@ export default function CreatorPage() {
       }
       setStructuredPrompt(data);
       setEditablePromptText(data.full_prompt_text || '');
+      // ورودی‌ای که سرور می‌گوید از آن ساخت (نه آنچه ما فکر می‌کنیم فرستادیم) — هر ناهم‌خوانی دیده می‌شود
+      setPromptSource({
+        name: typeof data.source_name === 'string' ? data.source_name : form.name,
+        idea: typeof data.source_idea === 'string' ? data.source_idea : form.idea,
+      });
 
       // 🐛 (vision auto-revert fix) — اگر در این session مدل vision را
       // موقتاً فعال کرده بودیم (از طریق toggle UI)، حالا که extraction
@@ -439,13 +478,24 @@ export default function CreatorPage() {
     // rotate
     const rotated = [...selectedModelIds.slice(1), selectedModelIds[0]];
     setSelectedModelIds(rotated);
-    await previewPromptFromIdea();
+    await previewPromptFromIdea(rotated);
   };
 
   // مرحلهٔ ۲: confirm → ساخت پروژه با structured_prompt
   const createProject = async () => {
-    if (!name.trim()) {
+    const form = readForm();
+    if (!form.name) {
       showError('نام پروژه را وارد کنید');
+      return;
+    }
+    // (PM-INS-0040) پرامپتی که از ورودیِ دیگری ساخته شده یا هم‌موضوعِ شرح نیست، ساخته نمی‌شود
+    if (structuredPrompt && promptSource
+        && (promptSource.name !== form.name || promptSource.idea !== form.idea)) {
+      showError('نام یا شرحِ فرم با ورودیِ این پرامپت فرق دارد — اول «🔄 بازتولید» را بزنید تا پرامپت از ورودیِ فعلی ساخته شود.');
+      return;
+    }
+    if (structuredPrompt?.topic_check?.status === 'mismatch' && !topicOverride) {
+      showError('پرامپت با شرحِ پروژه هم‌موضوع نیست — بازتولید کنید، یا پس از خواندنِ پرامپت تیکِ «خودم خواندم؛ همین را بساز» را بزنید.');
       return;
     }
     // 🆕 اگر structured_prompt موجود نیست، اول preview بساز
@@ -476,8 +526,9 @@ export default function CreatorPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          name: name.trim(),
-          description: description.trim(),
+          name: form.name,
+          description: form.idea,
+          topic_override: topicOverride,
           project_type: projectType,
           technologies: technologies.split(',').map((t) => t.trim()).filter(Boolean),
           model_ids: selectedModelIds,
@@ -547,8 +598,7 @@ export default function CreatorPage() {
         setName('');
         setDescription('');
         setTechnologies('');
-        setStructuredPrompt(null);
-        setEditablePromptText('');
+        clearPrompt();
         loadProjects();
         setTimeout(() => {
           router.push(`/project/${data.project.id}`);
@@ -556,7 +606,11 @@ export default function CreatorPage() {
       } else {
         // 🆕 error reporting پربار
         const errObj = data.detail || data;
-        if (typeof errObj === 'object' && errObj.primary_error) {
+        if (typeof errObj === 'object' && errObj.error === 'prompt_topic_mismatch') {
+          // سرور هم همین را سنجید و نساخت — هشدار را روی خودِ پرامپت نشان بده
+          setStructuredPrompt((sp: any) => (sp ? { ...sp, topic_check: errObj.topic_check } : sp));
+          showError(`❌ ${errObj.primary_error}\n\nاقدامات: ${(errObj.suggested_actions || []).join(' | ')}`);
+        } else if (typeof errObj === 'object' && errObj.primary_error) {
           showError(
             `❌ ${errObj.primary_error}\n\nاقدامات: ${(errObj.suggested_actions || []).join(' | ')}`
           );
@@ -777,6 +831,8 @@ export default function CreatorPage() {
                 <input
                   type="text"
                   placeholder="مثال: فروشگاه آنلاین"
+                  ref={nameRef}
+                  data-testid="creator-name"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   maxLength={80}
@@ -795,6 +851,8 @@ export default function CreatorPage() {
                   </span>
                 </div>
                 <textarea
+                  ref={descRef}
+                  data-testid="creator-description"
                   placeholder="چه می‌خواهید بسازید؟ ویژگی‌ها و قابلیت‌ها را دقیق توضیح دهید..."
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
@@ -1074,15 +1132,80 @@ export default function CreatorPage() {
 
               {/* 🆕 preview prompt + dکمهٔ ساخت پروژه (مرحلهٔ ۲) */}
               {structuredPrompt && (
-                <div className="space-y-3 p-4 bg-purple-50 dark:bg-purple-900/20 border-2 border-purple-300 dark:border-purple-700 rounded-xl">
+                <div data-testid="creator-prompt-preview" className="space-y-3 p-4 bg-purple-50 dark:bg-purple-900/20 border-2 border-purple-300 dark:border-purple-700 rounded-xl">
                   <div className="flex items-center justify-between flex-wrap gap-2">
-                    <h3 className="font-bold text-lg dark:text-purple-200">
+                    <h3 className="font-bold text-lg text-purple-900 dark:text-purple-200">
                       🪄 پرامپت قوی تولید شد
                     </h3>
                     <span className="text-xs text-purple-700 dark:text-purple-300">
                       🤖 با مدل: <code>{structuredPrompt.model_used}</code>
                     </span>
                   </div>
+
+                  {/* (PM-INS-0040) ورودی‌ای که این پرامپت از آن ساخته شد — دیدنی و پاک‌کردنی */}
+                  {promptSource && (
+                    <div data-testid="creator-prompt-source" className="rounded-lg border border-purple-300 dark:border-purple-700 bg-white/70 dark:bg-black/20 p-3 text-xs text-gray-800 dark:text-gray-100">
+                      <div className="flex items-center justify-between gap-2 flex-wrap mb-1">
+                        <b>📥 این پرامپت فقط از همین ورودی ساخته شد:</b>
+                        <button
+                          type="button"
+                          onClick={clearPrompt}
+                          disabled={creating}
+                          className="px-2 py-1 rounded border border-red-300 text-red-700 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/30 disabled:opacity-50"
+                          title="این پرامپت و ورودیِ ثبت‌شده‌اش دور ریخته می‌شود؛ نام و شرحِ فرم دست نمی‌خورد"
+                        >
+                          🗑 پاک‌کردنِ این پرامپت
+                        </button>
+                      </div>
+                      <div><span className="opacity-70">نام:</span> <code dir="ltr">{promptSource.name}</code></div>
+                      <div className="mt-1 whitespace-pre-wrap break-words max-h-28 overflow-auto">
+                        <span className="opacity-70">شرح:</span> {promptSource.idea}
+                      </div>
+                    </div>
+                  )}
+
+                  {sourceStale && (
+                    <div data-testid="creator-source-stale" className="rounded-lg border-2 border-red-400 bg-red-50 dark:bg-red-900/30 p-3 text-sm text-red-800 dark:text-red-200">
+                      ⛔ <b>نام یا شرحِ فرم با ورودیِ این پرامپت فرق دارد.</b> این پرامپت از ورودیِ دیگری ساخته شده و
+                      ساخته نمی‌شود — «🔄 بازتولید» را بزنید تا از ورودیِ فعلی ساخته شود.
+                    </div>
+                  )}
+
+                  {topicMismatch && (
+                    <div data-testid="creator-topic-mismatch" className="rounded-lg border-2 border-red-400 bg-red-50 dark:bg-red-900/30 p-3 text-sm text-red-800 dark:text-red-200">
+                      ⛔ <b>خودسنجی: این پرامپت با شرحِ پروژه هم‌موضوع نیست.</b>{' '}
+                      {structuredPrompt.topic_check?.note}
+                      {(structuredPrompt.topic_check?.missing || []).length > 0 && (
+                        <div className="mt-1 text-xs">
+                          کلیدواژه‌های شرح که در پرامپت نیست: {(structuredPrompt.topic_check.missing as string[]).join('، ')}
+                        </div>
+                      )}
+                      <div className="mt-1 text-xs">پروژه ساخته نمی‌شود. «🔄 بازتولید» را بزنید.</div>
+                      <label className="mt-2 flex items-center gap-2 text-xs cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={topicOverride}
+                          onChange={(e) => setTopicOverride(e.target.checked)}
+                          className="w-4 h-4 accent-red-500"
+                        />
+                        پرامپت را خودم خواندم و درست است؛ همین را بساز.
+                      </label>
+                    </div>
+                  )}
+
+                  {structuredPrompt.topic_check?.status === 'ok' && !sourceStale && (
+                    <div data-testid="creator-topic-ok" className="text-xs text-emerald-700 dark:text-emerald-300">
+                      ✓ خودسنجی: پرامپت هم‌موضوعِ شرح است
+                      {typeof structuredPrompt.topic_check.coverage === 'number'
+                        ? ` (${Math.round(structuredPrompt.topic_check.coverage * 100)}٪ از ${structuredPrompt.topic_check.keywords_total} کلیدواژهٔ شرح در آن هست)`
+                        : ''}
+                    </div>
+                  )}
+                  {structuredPrompt.topic_check?.status === 'unchecked' && (
+                    <div className="text-xs text-amber-700 dark:text-amber-300">
+                      ◌ خودسنجیِ هم‌موضوعی انجام نشد: {structuredPrompt.topic_check.note} — پرامپت را خودتان بخوانید.
+                    </div>
+                  )}
 
                   {(structuredPrompt.warnings || []).length > 0 && (
                     <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-300 rounded p-2 text-xs">
@@ -1148,7 +1271,8 @@ export default function CreatorPage() {
                   <div className="flex gap-2 flex-wrap mt-2">
                     <button
                       onClick={createProject}
-                      disabled={creating}
+                      disabled={creating || buildBlocked}
+                      title={buildBlocked ? 'پرامپت با ورودیِ فعلیِ فرم نمی‌خواند — اول بازتولید کنید' : ''}
                       className="flex-1 py-3 bg-gradient-to-r from-blue-500 to-purple-500 text-white rounded-lg font-bold hover:from-blue-600 hover:to-purple-600 disabled:opacity-50"
                     >
                       {creating
@@ -1166,7 +1290,7 @@ export default function CreatorPage() {
                       {previewLoading ? '⏳' : '🔄 بازتولید'}
                     </button>
                     <button
-                      onClick={() => { setStructuredPrompt(null); setEditablePromptText(''); }}
+                      onClick={clearPrompt}
                       disabled={creating}
                       className="px-4 py-3 bg-gray-300 dark:bg-gray-700 dark:text-white rounded-lg hover:bg-gray-400 disabled:opacity-50"
                     >
