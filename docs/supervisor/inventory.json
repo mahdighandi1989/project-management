@@ -1,12 +1,12 @@
 {
- "generated_at": "2026-11-17T00:44:39+00:00",
- "commit": "104b9989c50e66736ec3ff07c083945e1cd594d4",
+ "generated_at": "2026-11-24T00:42:56+00:00",
+ "commit": "0f069d5dc71360336341214aac3bfee5925bed1e",
  "pages": [
   {
    "route": "/analysis",
    "label": "",
    "file": "frontend/src/app/analysis/page.tsx",
-   "lines": 1079,
+   "lines": 1080,
    "buttons": 7,
    "onclick": 10,
    "inputs": 2,
@@ -90,9 +90,9 @@
    "route": "/knowledge-center",
    "label": "مرکز دانش",
    "file": "frontend/src/app/knowledge-center/page.tsx",
-   "lines": 1051,
-   "buttons": 17,
-   "onclick": 24,
+   "lines": 1249,
+   "buttons": 22,
+   "onclick": 29,
    "inputs": 13,
    "forms": 0,
    "links": 0,
@@ -126,7 +126,7 @@
    "route": "/oversight",
    "label": "اتاق فرمان",
    "file": "frontend/src/app/oversight/page.tsx",
-   "lines": 11427,
+   "lines": 11434,
    "buttons": 122,
    "onclick": 128,
    "inputs": 81,
@@ -138,7 +138,7 @@
    "route": "/",
    "label": "خانه",
    "file": "frontend/src/app/page.tsx",
-   "lines": 231,
+   "lines": 243,
    "buttons": 1,
    "onclick": 1,
    "inputs": 0,
@@ -150,7 +150,7 @@
    "route": "/project/[id]",
    "label": "",
    "file": "frontend/src/app/project/[id]/page.tsx",
-   "lines": 1599,
+   "lines": 1609,
    "buttons": 21,
    "onclick": 27,
    "inputs": 2,
@@ -162,9 +162,9 @@
    "route": "/projects/[id]",
    "label": "",
    "file": "frontend/src/app/projects/[id]/page.tsx",
-   "lines": 18802,
-   "buttons": 209,
-   "onclick": 238,
+   "lines": 19145,
+   "buttons": 213,
+   "onclick": 242,
    "inputs": 95,
    "forms": 0,
    "links": 12,
@@ -260,13 +260,31 @@
   },
   {
    "file": "frontend/src/components/BrowserAgentPanel.tsx",
-   "lines": 258,
+   "lines": 268,
    "buttons": 11,
    "inputs": 7
   },
   {
+   "file": "frontend/src/components/CreatorSelfcheckPanel.tsx",
+   "lines": 307,
+   "buttons": 6,
+   "inputs": 0
+  },
+  {
+   "file": "frontend/src/components/DiskGauge.tsx",
+   "lines": 57,
+   "buttons": 0,
+   "inputs": 0
+  },
+  {
+   "file": "frontend/src/components/DiskPanel.tsx",
+   "lines": 209,
+   "buttons": 4,
+   "inputs": 2
+  },
+  {
    "file": "frontend/src/components/ExecutingPromptsPanel.tsx",
-   "lines": 350,
+   "lines": 382,
    "buttons": 4,
    "inputs": 0
   },
@@ -278,7 +296,7 @@
   },
   {
    "file": "frontend/src/components/ExtractionDefaultPicker.tsx",
-   "lines": 130,
+   "lines": 138,
    "buttons": 0,
    "inputs": 1
   },
@@ -302,15 +320,27 @@
   },
   {
    "file": "frontend/src/components/GlobalAnalysisProgress.tsx",
-   "lines": 165,
+   "lines": 183,
    "buttons": 0,
    "inputs": 0
   },
   {
+   "file": "frontend/src/components/InspectorGuide.tsx",
+   "lines": 69,
+   "buttons": 1,
+   "inputs": 0
+  },
+  {
+   "file": "frontend/src/components/InspectorLoginPanel.tsx",
+   "lines": 354,
+   "buttons": 16,
+   "inputs": 1
+  },
+  {
    "file": "frontend/src/components/InspectorRecordingPanel.tsx",
-   "lines": 1463,
+   "lines": 1493,
    "buttons": 10,
-   "inputs": 6
+   "inputs": 7
   },
   {
    "file": "frontend/src/components/Layout.tsx",
@@ -319,10 +349,22 @@
    "inputs": 0
   },
   {
+   "file": "frontend/src/components/LogDriveArchive.tsx",
+   "lines": 126,
+   "buttons": 2,
+   "inputs": 2
+  },
+  {
    "file": "frontend/src/components/NotificationSettingsPanel.tsx",
    "lines": 960,
    "buttons": 12,
    "inputs": 17
+  },
+  {
+   "file": "frontend/src/components/OversightSummary.tsx",
+   "lines": 206,
+   "buttons": 5,
+   "inputs": 2
   },
   {
    "file": "frontend/src/components/ProjectDiagramsPanel.tsx",
@@ -344,13 +386,13 @@
   },
   {
    "file": "frontend/src/components/PromptManager.tsx",
-   "lines": 888,
+   "lines": 889,
    "buttons": 14,
    "inputs": 10
   },
   {
    "file": "frontend/src/components/RenderLogsPanel.tsx",
-   "lines": 1862,
+   "lines": 1865,
    "buttons": 31,
    "inputs": 13
   },
@@ -404,7 +446,7 @@
   },
   {
    "file": "frontend/src/components/inspection/Panels.tsx",
-   "lines": 244,
+   "lines": 247,
    "buttons": 4,
    "inputs": 1
   },
@@ -422,19 +464,19 @@
   },
   {
    "file": "frontend/src/components/views/ModelsView.tsx",
-   "lines": 1077,
+   "lines": 1092,
    "buttons": 13,
    "inputs": 3
   },
   {
    "file": "frontend/src/components/views/ProjectsView.tsx",
-   "lines": 1015,
-   "buttons": 18,
+   "lines": 1039,
+   "buttons": 19,
    "inputs": 5
   },
   {
    "file": "frontend/src/components/views/SettingsView.tsx",
-   "lines": 775,
+   "lines": 786,
    "buttons": 13,
    "inputs": 13
   }
@@ -1599,6 +1641,18 @@
    ]
   },
   {
+   "path": "/api/knowledge-center/sync/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/knowledge-center/relevant",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
    "path": "/api/knowledge-center/bootstrap",
    "methods": [
     "POST"
@@ -1935,6 +1989,42 @@
    ]
   },
   {
+   "path": "/api/simple/projects/{project_id}/selfcheck",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/simple/projects/{project_id}/selfcheck/undo",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/simple/projects/{project_id}/selfcheck/screenshot",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/simple/projects/{project_id}/preview-url",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/simple/preview/{project_id}/{rest}",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/simple/projects/{project_id}/zip",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
    "path": "/api/github/check",
    "methods": [
     "POST"
@@ -2112,6 +2202,12 @@
   },
   {
    "path": "/api/projects/{project_id}/memory/fields/{field_id}/archive",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/projects/{project_id}/memory/review-stack",
    "methods": [
     "POST"
    ]
@@ -3034,6 +3130,36 @@
    ]
   },
   {
+   "path": "/api/render/log-archive/preview",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/log-archive/run",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/render/log-archive/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/log-archive/list",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/render/log-archive/search",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
    "path": "/api/render/archives",
    "methods": [
     "GET"
@@ -3495,6 +3621,12 @@
    "path": "/api/render/inspector/apply-action",
    "methods": [
     "POST"
+   ]
+  },
+  {
+   "path": "/api/render/inspector/bridge-survey",
+   "methods": [
+    "GET"
    ]
   },
   {
@@ -4321,6 +4453,67 @@
    ]
   },
   {
+   "path": "/api/inspector-agent/login/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/inspector-agent/login/start",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspector-agent/login/{sid}/frame",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/inspector-agent/login/{sid}/act",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspector-agent/login/{sid}/save",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspector-agent/login/{sid}/cancel",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspector-agent/login/forget",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspector-agent/login/saved",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/inspector-agent/login/import-ticket",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/inspector-agent/login/import",
+   "methods": [
+    "GET",
+    "POST"
+   ]
+  },
+  {
    "path": "/api/project-supervision/repos",
    "methods": [
     "GET"
@@ -4336,6 +4529,24 @@
    "path": "/api/project-supervision/board",
    "methods": [
     "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/summary",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/summary/cleanup-preview",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/summary/cleanup",
+   "methods": [
+    "POST"
    ]
   },
   {
@@ -5040,9 +5251,40 @@
    ]
   },
   {
+   "path": "/api/oversight/disk/cleanup-preview",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/disk/cleanup",
+   "methods": [
+    "POST"
+   ]
+  },
+  {
    "path": "/api/oversight/disk/janitor",
    "methods": [
     "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/disk/status",
+   "methods": [
+    "GET"
+   ]
+  },
+  {
+   "path": "/api/oversight/disk/vacuum",
+   "methods": [
+    "GET",
+    "POST"
+   ]
+  },
+  {
+   "path": "/api/oversight/disk/archives",
+   "methods": [
+    "GET"
    ]
   },
   {
@@ -5138,6 +5380,7 @@
   "content_sanitizer",
   "creator_engine",
   "creator_idea_to_prompt",
+  "creator_selfcheck",
   "db_service",
   "debate_service",
   "deep_analysis_service",
@@ -5175,9 +5418,13 @@
   "intelligent_field_creator",
   "journal_service",
   "knowledge_center_service",
+  "log_archive",
   "log_stream_service",
   "log_to_issues_service",
+  "manual_login",
+  "memory_stack_review",
   "model_capability_tester",
+  "model_identity",
   "model_profiler",
   "notification_service",
   "oauth_model_registry",
@@ -5192,6 +5439,7 @@
   "oversight_service",
   "oversight_settings",
   "oversight_strong_prompt",
+  "oversight_summary",
   "oversight_telegram_compose",
   "oversight_upload_session",
   "oversight_verifier",
@@ -5244,11 +5492,11 @@
  "totals": {
   "pages": 17,
   "menu_items": 9,
-  "page_buttons": 434,
-  "component_buttons": 212,
-  "inputs": 320,
-  "routes": 769,
-  "services": 105,
+  "page_buttons": 443,
+  "component_buttons": 247,
+  "inputs": 328,
+  "routes": 802,
+  "services": 111,
   "models": 13
  }
 }

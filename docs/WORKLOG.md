@@ -1805,3 +1805,18 @@
 - **[TODO]** آویزان‌شدنِ `TestUiProbeReal::test_click_opens_modal` وقتی Chromium بومی بالا می‌آید بررسی و رفع شود (جداسازیِ `browser_pool` بینِ حلقه‌های رویداد).
 
 > **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-23 · Chromium ِ واقعی (صفحهٔ محلی + خودِ سایت) + اجرای production (خواندنی) + pytest + next build
+
+## 2026-11-24 (۱) — دورِ کاملِ ناظر (اجرای ۱۲): برگهٔ ۳۱ ⇒ منتظرِ مالک؛ اسکنِ محلیِ ناظر دیگر «نرسیدم» را «خراب است» نمی‌گوید
+
+- **[OWNER]** روتینِ زمان‌بندی‌شدهٔ مالک (دورِ کامل، `docs/supervisor/PROMPT.md` v3) با مجوزِ دائمیِ پوش روی `main`.
+- **[FINDING]** کارتابل: تنها بدهی برگهٔ ۳۱ (`partial`: جدولِ پذیرشِ ۴ پروژه). روی production هیچ ورودِ ذخیره‌شده‌ای نیست (`GET /api/inspector-agent/login/saved` ⇒ خالی) ⇒ جدول فقط پس از یک بار «📥 از کرومِ من» ِ خودِ مالک پرشدنی است.
+- **[VERIFY]** همان کدِ بوک‌مارک (`frontend/src/lib/chromeImportBookmarklet.ts`) در Chromium ِ واقعی روی **خودِ** چهار سایت (Detective-1 و language با CSP + `COOP: same-origin-allow-popups`؛ quran و ALLIN1 بی‌CSP)، گیرنده = سرورِ محلیِ یک‌بارمصرف ⇒ هر چهار «✅ ورود منتقل شد». روی production چیزی نوشته نشد. سنجیده‌نشده: کلیکِ واقعی از نوارِ بوک‌مارکِ کرومِ مالک؛ اجرای بوک‌مارک زیرِ `script-src` ِ بی `unsafe-inline` ِ language.
+- **[DECISION]** برگهٔ ۳۱ `needs-owner` با سه گزینهٔ مشخص (📥 برای هر سایت / حسابِ آزمونیِ جدا / بستن با دامنهٔ بی‌ورود) — تکرارِ `partial` با همان توضیح خلافِ قاعدهٔ «کارِ نیمه‌کاره برمی‌گردد» بود و کارِ مانده فقط دستِ مالک است.
+- **[FINDING]** `scripts/supervisor/surface_scan.py` ِ محلی «۱۵ شکست» می‌داد در حالی که برنامه ۲۰۰ می‌داد: Playwright با پراکسی، loopback را هم از پراکسی می‌گذراند (`<-loopback>`) و `bypass: "localhost,127.0.0.1"` بی‌اثر می‌ماند ⇒ مرورگر صفحهٔ خطای پراکسی را می‌دید. برای همین هیچ دوری از دورِ ۱ اسکنِ محلی نداشت.
+- **[CHANGE]** `scripts/supervisor/browser.py`: `PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK=1` هنگامِ import (پیش از بالا آمدنِ درایورِ Playwright؛ `setdefault` تا مقدارِ صریحِ محیط حفظ شود). درس: `experiences/playwright-proxy-forces-loopback-through-proxy.md`. کدِ محصول دست نخورد.
+- **[VERIFY]** اسکنِ محلی پس از تغییر، بی هیچ متغیرِ دستی: ۱۵ صفحه، ۳۳ نما، ۰ شکست، ۰ خطای صفحه (پیش از تغییر: ۰ نما، ۱۵ شکست). production: ۱۶ صفحه، ۳۶ نما، ۰ شکست، ۰ خطای صفحه (`/projects/[id]` حالا نمونه دارد؛ فقط `/project/[id]` بی‌نمونه است). `pytest` ۹۸۳ قبول / ۷ skip؛ `npm run build` سبز؛ دروازهٔ مستندات سبز.
+- **[CHANGE]** ثبت‌های ناظر: `docs/supervisor/RUNLOG.md` (اجرای ۱۲)، `OPEN_ITEMS.md` (#۵ بسته: ورود با گوگل روشن است؛ #۶ دیسک ۸۰٫۴٪ ⇒ ۶۸٫۵٪، شدت «کم»)، `runs.jsonl`، `INVENTORY.md`/`inventory.json` (۱۷ صفحه، ۸۰۲ مسیر API، ۱۱۱ سرویس — بدونِ کاهش).
+- **[REVERT]** `git revert` ِ همین کامیت (فقط ابزارِ ناظر و مستندات؛ چیزی مهاجرت نمی‌خواهد).
+- **[TODO]** [OWNER] برگهٔ ۳۱: یکی از سه گزینه؛ برگهٔ ۱۲: یک بار «🎬 ضبط» را بزنید.
+
+> **امضا:** `Claude Code (Anthropic CLI)` · 2026-11-24 · Chromium ِ واقعی روی ۴ سایتِ واقعی + اسکنِ محلی ۱۵ صفحه/۳۳ نما + production (خواندنی) + pytest + next build

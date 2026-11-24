@@ -14,6 +14,11 @@ import os
 import subprocess
 from pathlib import Path
 
+# Playwright forces loopback THROUGH the proxy (`<-loopback>`) unless told otherwise, so the local scan (PROMPT §۲-ب)
+# got the proxy's error page for every http://localhost page and reported «15 failed». The Playwright driver reads
+# this when it starts, so it is set at import — before any `sync_playwright()`.
+os.environ.setdefault("PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK", "1")
+
 PROXY_CA = Path("/root/.ccr/agent-proxy-ca.crt")
 
 
