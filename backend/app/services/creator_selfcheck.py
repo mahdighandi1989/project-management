@@ -430,9 +430,16 @@ def run_tests(root: Path, timeout: int = 90) -> Dict[str, Any]:
     passing = sorted({n.strip() for n in re.findall(r"^\s*ok \d+ - (.+?)(?:\s+#\s.*)?$", out, re.M)
                       if not n.strip().endswith((".js", ".mjs", ".cjs"))})
     ok = cp.returncode == 0 and nums.get("tests", 1) > 0
+    # (PM-INS-0041) the failing cases are read from the WHOLE output: `output` keeps only the tail, and with 8 failures
+    # the tail held the 4 uninformative ones («NaN», «invalid date») while the 4 that named the cause were cut off
+    cases_failed = failed_cases(out)
     return {"ran": True, "ok": ok, "exit_code": cp.returncode, "command": "npm test → " + script,
             "tests": nums.get("tests"), "passed": nums.get("pass"), "failed": nums.get("fail"), "cases": cases,
             "passing_names": passing[:500],
+            "failing_names": [c["name"] for c in cases_failed][:200],
+            "failures": [describe_failure(c) for c in cases_failed[:20]],
+            "_cases": cases_failed[:40],
+            "likely_cause": likely_cause(cases_failed),
             "output": out[-4000:]}
 
 
@@ -698,40 +705,140 @@ async def plan_browser_steps(ai: AIGen, root: Path, description: str) -> List[Di
     return steps[:40]
 
 
-def failing_tests(out: str, limit: int = 15) -> List[str]:
-    """`not ok` blocks of the TAP output ⇒ «name — file:line — expected X, got Y / error» (what a weak model can act on;
-    the raw tail of 117 tests showed it only passing ones)."""
-    items: List[str] = []
+def _yaml_field(txt: str, key: str) -> Tuple[str, List[str]]:
+    """One field of a TAP diagnostic block ⇒ (value, keys). A scalar gives («5», []); an object written over several
+    lines (`expected:` + indented `year: 2024` …) gives («{year: 2024, month: 3}», [«year», «month»])."""
+    m = re.search(rf"^(\s*){key}:[ \t]*(.*)$", txt, re.M)
+    if not m:
+        return "", []
+    indent, val = len(m.group(1)), m.group(2).strip()
+    if val and val not in ("|-", "|", ">-", ">"):
+        return val.strip("'\""), []
+    pairs: List[str] = []
+    keys: List[str] = []
+    for ln in txt[m.end():].splitlines()[1:]:
+        if not ln.strip():
+            continue
+        if len(ln) - len(ln.lstrip()) <= indent:
+            break
+        if val:  # a block scalar («error: |-»): free text, not an object
+            pairs.append(ln.strip())
+            continue
+        mm = re.match(r"^\s*([\w$-]+):\s*(.*)$", ln)
+        if mm and len(ln) - len(ln.lstrip()) == indent + 2:
+            keys.append(mm.group(1))
+            pairs.append(f"{mm.group(1)}: {mm.group(2).strip()}")
+    if val:
+        return " ".join(pairs[:4]), []
+    return ("{" + ", ".join(pairs[:12]) + "}") if pairs else "", keys
+
+
+def failed_cases(out: str) -> List[Dict[str, Any]]:
+    """`not ok` blocks of the TAP output, structured: name, file:line, expected/actual (objects too), error."""
+    items: List[Dict[str, Any]] = []
     lines = (out or "").splitlines()
     for i, ln in enumerate(lines):
         m = re.match(r"^\s*not ok \d+ - (.+?)(?:\s+#\s.*)?$", ln)
         if not m or m.group(1).strip().endswith((".js", ".mjs", ".cjs")):
             continue
         block = []
-        for nxt in lines[i + 1:i + 40]:
-            if re.match(r"^\s*(not )?ok \d+ - ", nxt) or nxt.strip() == "...":
+        for nxt in lines[i + 1:i + 60]:
+            if re.match(r"^\s*(not )?ok \d+ - ", nxt) or nxt.strip() == "..." or re.match(r"^\s*stack:", nxt):
                 break
             block.append(nxt)
         txt = "\n".join(block)
-
-        def _g(key: str) -> str:
-            mm = re.search(rf"^\s*{key}:\s*(.+)$", txt, re.M)
-            return mm.group(1).strip().strip("'\"") if mm else ""
-        err = _g("error")
-        if err in ("|-", "|", ">-"):
-            mm = re.search(r"error:\s*\|-?\n((?:\s{4,}.*\n?){1,4})", txt)
-            err = " ".join(x.strip() for x in (mm.group(1).splitlines() if mm else []) if x.strip())
-        loc = _g("location").split("/")[-1]
-        exp, act = _g("expected"), _g("actual")
-        d = f"«{m.group(1).strip()}» ({loc})"
-        if exp or act:
-            d += f": انتظار {exp!s} بود، {act!s} آمد"
-        if err:
-            d += f" — {err[:160]}"
-        items.append(d)
-        if len(items) >= limit:
-            break
+        err, _ = _yaml_field(txt, "error")
+        loc, _ = _yaml_field(txt, "location")
+        exp, exp_keys = _yaml_field(txt, "expected")
+        act, act_keys = _yaml_field(txt, "actual")
+        items.append({"name": m.group(1).strip(), "loc": loc.split("/")[-1], "expected": exp, "actual": act,
+                      "error": err, "expected_keys": exp_keys, "actual_keys": act_keys})
     return items
+
+
+def _key_mismatch(c: Dict[str, Any]) -> Optional[Tuple[List[str], List[str]]]:
+    want, got = sorted(c.get("expected_keys") or []), sorted(c.get("actual_keys") or [])
+    if want and got and not (set(want) & set(got)):
+        return want, got
+    return None
+
+
+def describe_failure(c: Dict[str, Any]) -> str:
+    """«name (file:line): expected X, got Y — error» — what a weak model can act on."""
+    d = f"«{c['name']}» ({c.get('loc') or ''})"
+    if c.get("expected") or c.get("actual"):
+        d += f": انتظار {c.get('expected')!s} بود، {c.get('actual')!s} آمد"
+    km = _key_mismatch(c)
+    if km:
+        d += (f" — ⚠ نامِ فیلدها جور نیست: تست «{', '.join(km[0])}» می‌خواهد ولی کد «{', '.join(km[1])}» برمی‌گرداند "
+              "(ناسازگاریِ API بینِ تست و کد، نه خطای محاسبه)")
+    elif c.get("error"):
+        d += f" — {str(c['error'])[:160]}"
+    return d
+
+
+def failing_tests(out: str, limit: int = 15) -> List[str]:
+    """`not ok` blocks of the TAP output ⇒ «name — file:line — expected X, got Y / error» (what a weak model can act on;
+    the raw tail of 117 tests showed it only passing ones)."""
+    return [describe_failure(c) for c in failed_cases(out)[:limit]]
+
+
+_API_ERR = re.compile(r"does not provide an export named '([^']+)'|(\w[\w.$]*) is not a function|"
+                      r"(\w[\w$]*) is not defined|Cannot find module '([^']+)'")
+
+
+def likely_cause(cases: List[Dict[str, Any]], browser_ok: Optional[bool] = None) -> str:
+    """(PM-INS-0041) A deterministic guess at WHY tests fail, read from the failures themselves — given to the model as
+    evidence and to the owner when the loop does not converge. Empty when nothing can be said."""
+    if not cases:
+        return ""
+    page = "؛ صفحه با همین کد در مرورگر درست کار می‌کند، پس به‌احتمالِ زیاد **تست** غلط است" if browser_ok else ""
+    for c in cases:
+        km = _key_mismatch(c)
+        if km:
+            return (f"تست و کد سرِ شکلِ مقدارِ برگشتی توافق ندارند: تست فیلدهای «{', '.join(km[0])}» می‌خواهد ولی کد "
+                    f"«{', '.join(km[1])}» برمی‌گرداند (مثلاً در «{c['name']}»). ردشدن‌های دیگر با NaN/undefined یا خطای "
+                    f"«نامعتبر» به‌احتمالِ زیاد دنبالهٔ همین است{page}")
+    for c in cases:
+        m = _API_ERR.search(f"{c.get('error') or ''} {c.get('actual') or ''}")
+        if m:
+            what = next(g for g in m.groups() if g)
+            return (f"تست چیزی را صدا می‌زند/می‌خواهد که کد ندارد («{what}») — نامِ تابع یا مسیرِ ماژول بینِ تست و کد "
+                    f"جور نیست{page}")
+    if browser_ok:
+        return ("سناریوی مرورگر کامل قبول است ولی این تست‌ها نه — به‌احتمالِ زیاد انتظارِ تست‌ها با رفتارِ واقعیِ کد "
+                "(نامِ تابع، شکلِ خروجی، متنِ پیام) جور نیست")
+    return ""
+
+
+_EXPORT = re.compile(r"^export\s+(?:async\s+)?function\s*\*?\s*([\w$]+)\s*\(([^)]*)\)|"
+                     r"^export\s+(?:const|let|var|class)\s+([\w$]+)|^export\s*\{([^}]+)\}", re.M)
+
+
+def module_api(root: Path, limit: int = 60) -> List[str]:
+    """What the code REALLY exports (name + parameters), per file — so a test can be compared against it."""
+    out: List[str] = []
+    for p in _files(root, ".js", ".mjs"):
+        rel = _rel(root, p)
+        if ".test." in p.name or ".spec." in p.name or rel.startswith(("test/", "tests/", "__tests__/")):
+            continue
+        try:
+            src = p.read_text(encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            continue
+        names: List[str] = []
+        for fn, args, decl, group in _EXPORT.findall(src):
+            if fn:
+                names.append(f"{fn}({' '.join(args.split())})")
+            elif decl:
+                names.append(decl)
+            else:
+                names += [x.strip().split(" as ")[-1].strip() for x in group.split(",") if x.strip()]
+        if names:
+            out.append(f"{rel}: " + "، ".join(names[:30]))
+        if len(out) >= limit:
+            break
+    return out
 
 
 def summarize(report: Dict[str, Any]) -> List[str]:
@@ -740,7 +847,7 @@ def summarize(report: Dict[str, Any]) -> List[str]:
         lines.append(f"[{p['file']}] {p['problem']}")
     t = report.get("tests") or {}
     if t.get("ran") and not t.get("ok"):
-        fails = failing_tests(t.get("output") or "")
+        fails = t.get("failures") or failing_tests(t.get("output") or "")
         if fails:
             lines.append(f"[tests] npm test: {t.get('failed')} تست رد شد از {t.get('tests')}؛ ردشده‌ها:")
             lines += [f"[tests] ✗ {x}" for x in fails]
@@ -846,12 +953,78 @@ def _score(rep: Dict[str, Any], base_cases: int) -> Tuple:
             int(t.get("passed") or 0), -len(rep.get("problems") or []))
 
 
+def _failing(rep: Dict[str, Any]) -> set:
+    return set(((rep.get("tests") or {}).get("failing_names")) or [])
+
+
+def failed_cases_of(rep: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return list(((rep.get("tests") or {}).get("_cases")) or [])
+
+
+_ROOT = re.compile(r"^\W*ROOT\s*[:：]\s*\**\s*(test|code|both)\b\**\s*[—–:،,.-]*\s*(.*)$", re.I | re.M)
+
+
+def _parse_root(answer: str) -> str:
+    """«ROOT: test — reason» from the head of the model's answer ⇒ «تست — reason» (empty when it did not say)."""
+    head = (answer or "").split("=== FILE:")[0]
+    m = _ROOT.search(head)
+    if not m:
+        return ""
+    side = {"test": "تست غلط بود", "code": "کد غلط بود", "both": "هر دو (تست و کد)"}[m.group(1).lower()]
+    why = m.group(2).strip().strip("*").strip()
+    return f"{side}" + (f" — {why[:300]}" if why else "")
+
+
+def _diagnose_prompt(root: Path, rep: Dict[str, Any], stuck: List[str], steps: Optional[List[Dict[str, Any]]],
+                     description: str, rules: str) -> str:
+    """(PM-INS-0041) The second strategy: these tests failed twice in a row, so do not rewrite again — find the ROOT.
+    The model gets what the plain round lacks: only the stuck tests with their full expected/actual, what the code
+    really exports, whether the page works with this code, and a deterministic guess at the cause."""
+    cases = [c for c in failed_cases_of(rep) if c["name"] in set(stuck)]
+    b = rep.get("browser") or {}
+    page_ok = bool(b.get("ok")) if b.get("ran") else None
+    cause = likely_cause(cases or failed_cases_of(rep), page_ok)
+    others = [x for x in rep["problems"] if not x.startswith("[tests] ✗") and "تست رد شد از" not in x]
+    api = module_api(root)
+    return (
+        "این تست‌ها **دو دورِ پشتِ هم** رد شده‌اند و بازنویسیِ قبلی هیچ اثری نداشت. همان کار را تکرار نکن. "
+        "اول **ریشه** را پیدا کن و فقط بعد اصلاح کن:\n"
+        "- (test) خودِ تست غلط است: تابع/فیلدی را می‌خواهد که کد ندارد، شکلِ مقدارِ برگشتی را چیزِ دیگری فرض کرده، یا "
+        "انتظارش با خواستهٔ کاربر نمی‌خواند ⇒ **همان تست را با همان نام** اصلاح کن تا با API ِ واقعیِ کد جور شود "
+        "(چیزی که می‌سنجد را نگه دار؛ تست را حذف یا توخالی نکن).\n"
+        "- (code) کد غلط است: نتیجهٔ محاسبه با خواستهٔ کاربر نمی‌خواند ⇒ کد را درست کن.\n"
+        "تست‌هایی که الان قبول‌اند را دست نزن. نام/شکلِ خروجیِ تابع‌هایی که صفحه (HTML/app.js) از آن‌ها استفاده می‌کند "
+        "را عوض نکن مگر همهٔ استفاده‌کننده‌ها را هم با آن هماهنگ کنی.\n"
+        f"{rules}\n\n"
+        "## شواهد\n"
+        + (f"- مرورگر: سناریو {b.get('steps_passed', 0)}/{b.get('steps_total', 0)} قبول، {len(b.get('errors') or [])} "
+           "خطای صفحه" + (" ⇒ کد در خودِ صفحه **درست کار می‌کند**.\n" if page_ok else ".\n") if b.get("ran") else "")
+        + (f"- حدسِ ماشینی از روی خروجی: {cause}\n" if cause else "")
+        + "\n## تست‌های گیرکرده (خروجیِ کامل)\n"
+        + "\n".join(f"- {describe_failure(c)}" for c in cases[:20])
+        + ("\n\n## آنچه کد واقعاً export می‌کند\n" + "\n".join(f"- {x}" for x in api) if api else "")
+        + ("\n\n## ایرادهای دیگر (این‌ها را هم رفع کن)\n" + "\n".join(f"- {x}" for x in others[:15]) if others else "")
+        + ("\n\n## سناریوی مرورگر (باید همچنان درست کار کند)\n" + json.dumps(steps, ensure_ascii=False) if steps else "")
+        + f"\n\n## هدفِ برنامه\n{description[:1500]}\n\n## همهٔ فایل‌ها\n{project_snapshot(root)}\n\n"
+        "## قالبِ خروجی (فقط همین)\nخطِ اول دقیقاً یکی از این‌ها + یک جمله دلیل:\n"
+        "ROOT: test — …\nROOT: code — …\nROOT: both — …\n"
+        "سپس هر فایلِ تغییر‌کرده یک بلوک:\n=== FILE: مسیر ===\nمحتوای کاملِ فایل\n=== END FILE ===\n"
+    )
+
+
 async def fix_loop(root: Path, *, ai: AIGen, description: str, constraints: Dict[str, Any], static_web: bool,
                    max_rounds: int = 3, shot_dir: Optional[Path] = None,
                    on_write: Optional[Callable[[str, str], None]] = None,
-                   steps: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+                   steps: Optional[List[Dict[str, Any]]] = None,
+                   prev_failing: Optional[List[str]] = None) -> Dict[str, Any]:
     """Deterministic fixes → plan the browser scenario → run → repair the SCENARIO where it points at nothing →
-    (model fixes the app → run)×N → keep the best round (a fix never leaves the project worse than it found it)."""
+    (model fixes the app → run)×N → keep the best round (a fix never leaves the project worse than it found it).
+
+    (PM-INS-0041) A test that is still failing after a round that tried to fix it is «stuck»: the next round does not
+    repeat the same request — it asks for the ROOT first (is the test wrong, or the code?) with the evidence the plain
+    round lacks. If that changes nothing either, the loop stops and says so (`not_converged`) instead of burning rounds.
+    `prev_failing` = what was still failing at the end of the previous «اجرا و اصلاح», so a second press of the button
+    starts with the other strategy."""
     rounds: List[Dict[str, Any]] = []
     auto = deterministic_fixes(root, static_web=static_web)
     if not steps:
@@ -879,10 +1052,19 @@ async def fix_loop(root: Path, *, ai: AIGen, description: str, constraints: Dict
     # every round is kept (projects are small) and the best one is picked at the end against the FINAL baseline
     history: List[Tuple[int, Dict[str, str], Dict[str, Any]]] = [(0, _snapshot(root), rep)]
     rules = structure_prompt_rules(constraints, static_web)
+    fail_hist: List[set] = ([set(prev_failing)] if prev_failing else []) + [_failing(rep)]
+    diagnosed: set = set()  # tests the root-cause round has already been tried on
+    gave_up: Optional[List[str]] = None
+    last_diagnosis = ""
     for n in range(1, max_rounds + 1):
         if rep["green"] or not rep["problems"]:  # nothing the APP has to fix (only «blocked» / scenario issues)
             break
-        prompt = (
+        stuck = sorted(fail_hist[-1] & fail_hist[-2]) if len(fail_hist) >= 2 else []
+        if stuck and set(stuck) <= diagnosed:  # the other strategy was tried on exactly these and they did not move
+            gave_up = stuck
+            break
+        diag_prompt = _diagnose_prompt(root, rep, stuck, steps, description, rules) if stuck else ""
+        prompt = diag_prompt or (
             "این پروژه را اجرا کردیم و این ایرادها پیدا شد. فایل‌هایی را که باید عوض شوند **کامل** بازنویسی کن تا همهٔ "
             "ایرادها رفع شوند (تست‌ها سبز، صفحه بی‌خطا، سناریوی مرورگر درست). منطقِ درست را خراب نکن؛ id/class/data-* ِ "
             "موجود را عوض نکن. تست‌ها را حذف یا ضعیف نکن — کد را درست کن؛ تست را فقط وقتی عوض کن که خودش با خواستهٔ "
@@ -896,10 +1078,15 @@ async def fix_loop(root: Path, *, ai: AIGen, description: str, constraints: Dict
             "## قالبِ خروجی (فقط همین، هر فایلِ تغییر‌کرده یک بلوک):\n=== FILE: مسیر ===\nمحتوای کاملِ فایل\n=== END FILE ===\n"
         )
         try:
-            changed = parse_file_blocks(await ai(prompt))
+            answer = await ai(prompt)
+            changed = parse_file_blocks(answer)
         except Exception as e:  # noqa: BLE001
             rounds.append({"round": n, "error": f"{type(e).__name__}: {str(e)[:200]}"})
             break
+        diagnosis = _parse_root(answer) if stuck else ""
+        if stuck:
+            diagnosed |= set(stuck)
+            last_diagnosis = diagnosis or last_diagnosis
         written = []
         for path, body in changed.items():
             if (constraints.get("no_backend") or static_web) and _BACKEND_FILE.search(path):
@@ -928,7 +1115,10 @@ async def fix_loop(root: Path, *, ai: AIGen, description: str, constraints: Dict
             rep["green"] = False
         elif base_cases and now_cases < base_cases:
             rep["tests_removed_failing"] = base_cases - now_cases
+        fail_hist.append(_failing(rep))
         rounds.append({"round": n, "rewritten": written, "auto_fixes": auto, "green": rep["green"], "blocked": rep["blocked"],
+                       "strategy": "root_cause" if stuck else "fix", "stuck": stuck[:20] if stuck else None,
+                       "diagnosis": diagnosis or None,
                        "tests_removed_failing": rep.get("tests_removed_failing"),
                        "problems": rep["problems"][:30], "tests": _brief_tests(rep), "browser": _brief_browser(rep)})
         history.append((n, _snapshot(root), rep))
@@ -960,10 +1150,23 @@ async def fix_loop(root: Path, *, ai: AIGen, description: str, constraints: Dict
         and not rep.get("blocked")
     verdict = "green" if rep["green"] else ("works_tests_rewritten" if (works and only_lost) else "not_green")
     lost_n = len(base_passing - set(t_fin.get("passing_names") or [])) if base_passing else 0
+    # (PM-INS-0041) say it out loud when the rounds changed nothing: which tests, and the likely reason
+    not_converged: Optional[Dict[str, Any]] = None
+    fix_rounds = [r for r in rounds if r.get("round") and not r.get("error")]
+    if verdict == "not_green" and rep["problems"] and (fix_rounds or gave_up):
+        still = sorted(_failing(rep) & (fail_hist[0] if fail_hist else set())) or sorted(_failing(rep))
+        cause = likely_cause(failed_cases_of(rep), bool(b_fin.get("ok")) if b_fin.get("ran") else None)
+        not_converged = {
+            "tests": still[:20], "fix_rounds": len(fix_rounds), "stopped_early": bool(gave_up),
+            "model_diagnosis": last_diagnosis or None,
+            "likely_cause": cause or ("از روی خروجی علتِ روشنی پیدا نشد — کد و تست/سناریو باید کنارِ هم دیده شوند "
+                                      "(مدلِ قوی‌تر، یا اصلاحِ دستی)"),
+        }
     return {"green": rep["green"], "verdict": verdict, "base_passing": len(base_passing), "lost_passing": lost_n,
+            "not_converged": not_converged,
             "rounds": rounds, "steps": steps, "restored_round": restored, "final": {
         "static": rep["static"], "tests": {k: v for k, v in (rep.get("tests") or {}).items()
-                                           if k not in ("output", "passing_names")},
+                                           if k not in ("output", "passing_names", "_cases")},
         "tests_removed_failing": rep.get("tests_removed_failing"),
         "tests_output": ((rep.get("tests") or {}).get("output") or "")[-3000:],
         "browser": {k: v for k, v in (rep.get("browser") or {}).items() if k != "body_text"},

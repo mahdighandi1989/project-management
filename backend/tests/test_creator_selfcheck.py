@@ -374,3 +374,104 @@ def test_a_test_that_passed_in_a_later_round_may_not_be_dropped(tmp_path):
     assert not res["rounds"][2]["green"]
     assert any("پیش‌تر قبول بود" in p and "«7-2»" in p for p in res["rounds"][2]["problems"])
     assert not res["green"]
+
+
+# ---------------------------------------------------------------- PM-INS-0041: «اجرا و اصلاح تا سبز» that did not converge
+# The coordinator's project, reduced: the code returns {gy, gm, gd}, the tests were written against {year, month, day}.
+# The page works; `npm test` fails the same tests round after round.
+DATE_JS = """export function toG(y, m, d) { return { gy: y + 621, gm: m, gd: d }; }
+export const NAMES = ['a'];
+"""
+DATE_TEST = """import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { toG } from '../js/date.js';
+test('shape', () => assert.deepEqual(toG(1403, 1, 1), { year: 2024, month: 1, day: 1 }));
+test('downstream', () => { const g = toG(1403, 1, 1); assert.equal(Date.UTC(g.year, g.month - 1, g.day) > 0, true); });
+test('fine', () => assert.equal(toG(1403, 1, 1).gy, 2024));
+"""
+DATE_TEST_FIXED = DATE_TEST.replace("{ year: 2024, month: 1, day: 1 }", "{ gy: 2024, gm: 1, gd: 1 }") \
+    .replace("Date.UTC(g.year, g.month - 1, g.day)", "Date.UTC(g.gy, g.gm - 1, g.gd)")
+
+
+def _date_project(root: Path) -> Path:
+    for d in ("js", "tests"):
+        (root / d).mkdir(parents=True, exist_ok=True)
+    (root / "js/date.js").write_text(DATE_JS)
+    (root / "tests/date.test.js").write_text(DATE_TEST)
+    (root / "package.json").write_text(json.dumps({"name": "d", "type": "module", "scripts": {"test": "node --test"}}))
+    return root
+
+
+@pytest.mark.skipif(not SC.node_bin(), reason="node not installed")
+def test_failures_are_read_from_the_whole_output_and_name_an_api_mismatch(tmp_path):
+    """The model used to get the last 4000 characters of the output: of 8 failures only the 4 uninformative ones."""
+    root = _date_project(tmp_path / "d")
+    pad = "".join(f"test('pad {i}', () => assert.equal({i}, -1, '{'x' * 300}'));\n" for i in range(12))
+    (root / "tests/date.test.js").write_text(DATE_TEST + pad)  # the telling failure is now far above the tail
+    r = SC.run_tests(root)
+    assert "shape" not in r["output"] and r["failing_names"][:2] == ["shape", "downstream"]
+    first = r["failures"][0]
+    assert "«shape»" in first and "{year: 2024, month: 1, day: 1}" in first and "{gy: 2024, gm: 1, gd: 1}" in first
+    assert "نامِ فیلدها جور نیست" in first and "day, month, year" in first and "gd, gm, gy" in first
+    assert "شکلِ مقدارِ برگشتی" in r["likely_cause"]
+    assert SC.module_api(root) == ["js/date.js: toG(y, m, d)، NAMES"]
+
+
+@pytest.mark.skipif(not SC.node_bin(), reason="node not installed")
+def test_stuck_tests_switch_the_strategy_to_root_cause(tmp_path):
+    root = _date_project(tmp_path / "d")
+    prompts = []
+
+    async def model(prompt: str) -> str:
+        prompts.append(prompt)
+        if "ROOT:" not in prompt:  # the plain round: rewrites something, the same tests keep failing
+            return "=== FILE: README.md ===\n# try\n=== END FILE ==="
+        return ("ROOT: test — تست فیلدهای year/month/day می‌خواهد ولی کد gy/gm/gd برمی‌گرداند\n"
+                "=== FILE: tests/date.test.js ===\n" + DATE_TEST_FIXED + "=== END FILE ===")
+
+    res = asyncio.run(SC.fix_loop(root, ai=model, description="x", constraints={}, static_web=False, max_rounds=3))
+    assert [r.get("strategy") for r in res["rounds"]] == [None, "fix", "root_cause"]
+    assert res["rounds"][2]["stuck"] == ["downstream", "shape"]
+    assert res["rounds"][2]["diagnosis"].startswith("تست غلط بود — ")
+    assert res["green"] and res["not_converged"] is None and res["final"]["tests"]["passed"] == 3
+    diag = prompts[1]
+    assert "دو دورِ پشتِ هم" in diag and "js/date.js: toG(y, m, d)" in diag and "حدسِ ماشینی" in diag
+    assert "«fine»" not in diag.split("## همهٔ فایل‌ها")[0]  # only the stuck tests are argued about
+
+
+@pytest.mark.skipif(not SC.node_bin(), reason="node not installed")
+def test_a_loop_that_cannot_converge_stops_and_says_why(tmp_path):
+    root = _date_project(tmp_path / "d")
+    calls = {"n": 0}
+
+    async def useless(prompt: str) -> str:
+        calls["n"] += 1
+        return f"=== FILE: README.md ===\n# {calls['n']}\n=== END FILE ==="
+
+    res = asyncio.run(SC.fix_loop(root, ai=useless, description="x", constraints={}, static_web=False, max_rounds=5))
+    assert calls["n"] == 2  # one plain round, one root-cause round — not five identical ones
+    nc = res["not_converged"]
+    assert not res["green"] and nc["stopped_early"] and nc["tests"] == ["downstream", "shape"]
+    assert "year" in nc["likely_cause"] and "gy" in nc["likely_cause"]
+
+
+@pytest.mark.skipif(not SC.node_bin(), reason="node not installed")
+def test_pressing_the_button_again_starts_with_the_other_strategy(tmp_path, monkeypatch):
+    from app.services import simple_creator as SCR
+    monkeypatch.setenv("DATABASE_DIR", str(tmp_path / "db"))
+    creator = SCR.SimpleProjectCreator(workspace=str(tmp_path / "ws"))
+    root = _date_project(Path(creator.workspace) / "proj_x")
+    project = SCR.Project(id="proj_x", name="d", description="x", project_type="node")
+    seen = []
+
+    async def model(prompt: str) -> str:
+        seen.append("root" if "ROOT:" in prompt else "fix")
+        return f"=== FILE: README.md ===\n# {len(seen)}\n=== END FILE ==="
+
+    first = asyncio.run(creator.run_selfcheck(project, model, max_rounds=1))
+    assert seen == ["fix"] and first["final"]["tests"]["failing_names"] == ["shape", "downstream"]
+    assert "_cases" not in first["final"]["tests"] and first["not_converged"]["tests"]
+    asyncio.run(creator.run_selfcheck(project, model, max_rounds=3))
+    assert seen == ["fix", "root"]  # the second press does not repeat the plain round, and stops after one try
+    assert project.selfcheck["not_converged"]["stopped_early"] is True
+    assert (root / "tests/date.test.js").read_text() == DATE_TEST

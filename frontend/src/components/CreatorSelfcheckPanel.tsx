@@ -21,6 +21,9 @@ type Round = {
   problems?: string[];
   blocked?: string[];
   error?: string;
+  strategy?: 'fix' | 'root_cause';
+  stuck?: string[] | null;
+  diagnosis?: string | null;
   tests?: { ran?: boolean; ok?: boolean; tests?: number; passed?: number; failed?: number; reason?: string };
   browser?: { ran?: boolean; ok?: boolean; errors?: number; failed_requests?: number; steps?: string; reason?: string };
 };
@@ -30,6 +33,8 @@ export type Selfcheck = {
   skipped?: string;
   error?: string;
   at?: string;
+  not_converged?: { tests?: string[]; fix_rounds?: number; stopped_early?: boolean; model_diagnosis?: string | null;
+    likely_cause?: string } | null;
   rounds?: Round[];
   steps?: Array<Record<string, string>>;
   final?: {
@@ -170,6 +175,9 @@ export default function CreatorSelfcheckPanel({
         : (sc as any).verdict === 'works_tests_rewritten'
           ? { cls: 'bg-yellow-500/15 border-yellow-500/40 text-yellow-100',
               txt: `🟡 کار می‌کند — همهٔ تست‌های فعلی و سناریوی مرورگر قبول؛ ولی مدل ${(sc as any).lost_passing ?? '?'} تا از ${(sc as any).base_passing ?? '?'} تستی را که قبول بود حذف/بازنویسی کرد (نمی‌شود فهمید تستِ غلط بود یا ضعیف شد — نگاه کنید)` }
+        : sc.not_converged
+          ? { cls: 'bg-red-500/15 border-red-500/40 text-red-100',
+              txt: `🛑 همگرا نشد — پس از ${sc.not_converged.fix_rounds ?? 0} دورِ اصلاح همان ایرادها ماند${sc.not_converged.stopped_early ? ' (حلقه زودتر ایستاد تا همان کار را تکرار نکند)' : ''}` }
         : { cls: 'bg-amber-500/15 border-amber-500/40 text-amber-100', txt: '⚠️ هنوز ایراد دارد — جزئیات پایین' };
 
   return (
@@ -208,6 +216,15 @@ export default function CreatorSelfcheckPanel({
         <div className="font-bold">{status.txt}</div>
         {sc?.error && <div className="text-xs mt-1">خطا: {sc.error}</div>}
         {(sc as any)?.note && <div className="text-xs mt-1">{(sc as any).note}</div>}
+        {sc?.not_converged && !sc.green && (
+          <div className="text-xs mt-1 space-y-0.5" data-testid="selfcheck-not-converged">
+            <div>🔎 علتِ احتمالی: {sc.not_converged.likely_cause}</div>
+            {sc.not_converged.model_diagnosis && <div>🤖 تشخیصِ مدل در دورِ ریشه‌یابی: {sc.not_converged.model_diagnosis}</div>}
+            {sc.not_converged.tests && sc.not_converged.tests.length > 0 && (
+              <div>📌 تست‌های گیرکرده ({sc.not_converged.tests.length}): {sc.not_converged.tests.map((x) => `«${x}»`).join('، ')}</div>
+            )}
+          </div>
+        )}
         {(sc as any)?.restored_round !== undefined && (sc as any)?.restored_round !== null && (
           <div className="text-xs mt-1">↩ دورهای بعدی بدتر کردند؛ بهترین نسخه (دورِ {(sc as any).restored_round}) نگه داشته شد.</div>
         )}
@@ -285,6 +302,9 @@ export default function CreatorSelfcheckPanel({
               {sc.rounds.map((r) => (
                 <div key={r.round} className="rounded-lg bg-black/20 p-2">
                   <div className="font-bold">{r.round === 0 ? 'اجرای اول' : `دورِ اصلاحِ ${r.round}`} — {r.green ? '✅ سبز' : '⚠️'}</div>
+                  {r.strategy === 'root_cause' && (
+                    <div>🔎 تغییرِ راهبرد: {r.stuck?.length ?? 0} تست دو دور پشتِ هم رد شد ⇒ ریشه‌یابی (تست غلط است یا کد؟){r.diagnosis ? ` — تشخیص: ${r.diagnosis}` : ''}</div>
+                  )}
                   {r.auto_fixes && r.auto_fixes.length > 0 && <div>🔩 اصلاحِ خودکار: {r.auto_fixes.join(' · ')}</div>}
                   {r.rewritten && r.rewritten.length > 0 && <div>✍️ بازنویسیِ مدل: {r.rewritten.join('، ')}</div>}
                   {r.tests && <div>📦 تست: {r.tests.ran ? `${r.tests.passed ?? 0}/${r.tests.tests ?? 0}` : (r.tests.reason || '—')}</div>}

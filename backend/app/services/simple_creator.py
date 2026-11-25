@@ -617,7 +617,8 @@ class SimpleProjectCreator:
             res = await SC.fix_loop(root, ai=ai_generate, description=project.description, constraints=cons,
                                     static_web=static_web, max_rounds=max_rounds,
                                     shot_dir=self.selfcheck_dir(project.id), on_write=_on_write,
-                                    steps=None if replan else ((project.selfcheck or {}).get("steps") or None))
+                                    steps=None if replan else ((project.selfcheck or {}).get("steps") or None),
+                                    prev_failing=self._prev_failing(project))
         except Exception as e:  # noqa: BLE001
             logger.exception("selfcheck failed")
             res = {"green": False, "error": f"{type(e).__name__}: {str(e)[:300]}"}
@@ -634,6 +635,16 @@ class SimpleProjectCreator:
         project.selfcheck = res
         await self._save_project_meta(project)
         return res
+
+    @staticmethod
+    def _prev_failing(project: "Project") -> List[str]:
+        """(PM-INS-0041) Tests still failing at the end of the previous «اجرا و اصلاح» (only if it really tried to fix):
+        the next run starts with the root-cause strategy on them instead of repeating the same rounds."""
+        sc = project.selfcheck or {}
+        tried = [r for r in (sc.get("rounds") or []) if r.get("round") and not r.get("error")]
+        if not tried:
+            return []
+        return list((((sc.get("final") or {}).get("tests") or {}).get("failing_names")) or [])
 
     def _backup_files(self, project_id: str, snap: Dict[str, str], keep: int = 5) -> None:
         d = self.selfcheck_dir(project_id)
