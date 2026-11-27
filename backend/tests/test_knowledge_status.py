@@ -233,6 +233,108 @@ def test_ambiguous_text_asks_the_model_and_falls_back_to_partial(kc):
     assert "cheap-model" in e["p.md"]["status_evidence"]
 
 
+# ── supervisor run 13: the leftovers of PM-INS-0039 (24 «unknown», false «partial») ──
+
+NESTED = """# وضعیتی که نمی‌تواند دروغ بگوید
+
+## 🎯 چالش / Challenge
+وضعیتِ «پاسخ داده شد» با «حل شد» یکی گرفته می‌شد.
+
+## 💡 راه‌حل / Solution — سه نقص
+
+### ۱. وضعیت از نتیجه جدا شد
+رنگِ کارت فقط می‌گوید نوبتِ کیست؛ نتیجه نشانِ جداست و بی‌مدرک پذیرفته نمی‌شود.
+
+### ۲. ادعای موفقیت بها دارد
+«درست شد» بدونِ تصویرِ بعد در API رد می‌شود و برگه به صفِ بدهی برمی‌گردد.
+
+## ⚠️ Pitfalls
+هیچ.
+"""
+
+RULE_ONLY = """## Problem
+A late response for an old filter overwrote the list the user was looking at.
+
+## Rule
+Tag every request with the filter it was sent for and drop a response whose tag is no longer the current one.
+"""
+
+HEADLESS = ("یک فرم مقدارِ پیش‌فرض را از منبعی جدا از هم‌خانواده‌هایش می‌خواند و کاربر دو عددِ متفاوت می‌دید. "
+            "قاعده: هر فرمِ یک خانواده همان منبعی را بخواند که بقیه می‌خوانند، و اگر منبع نبود خطا بدهد نه مقدارِ ساختگی. " * 2)
+
+
+def test_solution_written_under_sub_headings_counts_as_the_solution():
+    status, source, evidence = infer_resolution_status({}, NESTED)
+    assert (status, source) == ("solved", "text") and "راه حل" in evidence
+
+
+def test_title_level_heading_does_not_swallow_the_whole_file():
+    text = "# The fix that was never found\n\n## Notes\n" + "We looked at many things for a long time. " * 5
+    assert infer_resolution_status({}, text)[0] == "unknown"
+
+
+def test_rule_heading_is_a_reusable_lesson():
+    status, source, evidence = infer_resolution_status({}, RULE_ONLY)
+    assert (status, source) == ("solved", "text") and "rule" in evidence
+
+
+@pytest.mark.parametrize("sentence", [
+    "Each field is answered or still open. A reply fills what it fills.",
+    "One «still broken» verdict (a throttled run) is reported as a warning.",
+    'Treat a same-bar tie, or "still open", as a needs-review warning.',
+    "It was hidden from a child, but the direct view still opened it before the change.",
+])
+def test_a_quoted_or_enumerated_state_is_not_an_open_signal(sentence):
+    status, source, _ = infer_resolution_status({}, SOLVED + "\n## Notes\n" + sentence + "\n")
+    assert (status, source) == ("solved", "text")
+
+
+def test_a_tool_name_quoted_in_a_heading_is_not_an_open_signal():
+    text = SOLVED + "\n## Update — ابزارهای «تکمیلِ ناتمام‌ها» و «بازنویسی لحن»\nهر دو ابزار از همان مسیرِ مرور می‌گذرند.\n"
+    assert infer_resolution_status({}, text)[:2] == ("solved", "text")
+
+
+def test_a_real_open_sentence_still_makes_it_partial():
+    text = SOLVED + "\n## Notes\nA third question is still open: what to do with old rows.\n"
+    assert infer_resolution_status({}, text)[:2] == ("partial", "ambiguous")
+
+
+def test_text_without_any_shape_is_given_to_the_model_and_the_reason_is_kept(kc):
+    files = {"h.md": ("s1", _fm(HEADLESS)), "none.md": ("s2", _fm(NO_EVIDENCE))}
+    _res, e, _ = _run_sync(kc, files)  # model unavailable
+    assert (e["h.md"]["resolution_status"], e["h.md"]["status_source"]) == ("unknown", "none")
+    assert "مدل پاسخ نداد" in e["h.md"]["status_evidence"] and "no model configured" in e["h.md"]["status_evidence"]
+    assert "مدل" not in e["none.md"]["status_evidence"]  # too short to be worth a call
+
+    kc.INDEX_FILE.unlink()
+    asked = []
+
+    async def model(prompt, model_ids=None, max_tokens=0):
+        asked.append(prompt)
+        return "STATUS: solved — قاعدهٔ نهایی نوشته شده است", "cheap-model"
+
+    _res, e, _ = _run_sync(kc, files, model=model)
+    assert len(asked) == 1
+    assert (e["h.md"]["resolution_status"], e["h.md"]["status_source"]) == ("solved", "model")
+    assert e["none.md"]["resolution_status"] == "unknown"
+
+
+def test_a_rule_change_rereads_every_entry_once(kc):
+    """An entry stamped by the previous rules (plain content hash) is judged again."""
+    body = _fm(NESTED)
+    old = {"id": "keep", "project_id": "w1", "project_full_name": "owner/alpha", "path": "experiences/n.md",
+           "title": "T", "content_hash": kc._hash(body), "git_sha": "s1", "resolution_status": "unknown",
+           "status_source": "none", "status_checked_hash": kc._hash(body), "updated_at": "2026-01-02T00:00:00Z"}
+    kc.INDEX_FILE.write_text(json.dumps({"entries": [old]}), encoding="utf-8")
+    files = {"n.md": ("s1", body)}
+    res1, e1, fetched1 = _run_sync(kc, files)
+    assert fetched1 == ["experiences/n.md"] and res1["reclassified"] == 1
+    assert e1["n.md"]["resolution_status"] == "solved" and e1["n.md"]["id"] == "keep"
+    assert e1["n.md"]["updated_at"] == "2026-01-02T00:00:00Z"
+    _res2, _e2, fetched2 = _run_sync(kc, files)
+    assert fetched2 == []
+
+
 def test_assistant_context_states_each_experience_status(kc):
     kc.INDEX_FILE.write_text(json.dumps({"entries": [{
         "id": "px1", "project_full_name": "owner/alpha", "path": "experiences/x.md",

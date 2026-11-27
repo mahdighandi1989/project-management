@@ -1,6 +1,6 @@
 {
- "generated_at": "2026-11-24T00:42:56+00:00",
- "commit": "0f069d5dc71360336341214aac3bfee5925bed1e",
+ "generated_at": "2026-11-27T00:40:45+00:00",
+ "commit": "7bceb835d336726dcdf71ba3f5ce22a0ab871f1d",
  "pages": [
   {
    "route": "/analysis",
@@ -30,10 +30,10 @@
    "route": "/creator",
    "label": "موتور خالق",
    "file": "frontend/src/app/creator/page.tsx",
-   "lines": 1345,
-   "buttons": 18,
-   "onclick": 20,
-   "inputs": 11,
+   "lines": 1469,
+   "buttons": 19,
+   "onclick": 21,
+   "inputs": 12,
    "forms": 0,
    "links": 4,
    "tabs": 0
@@ -90,7 +90,7 @@
    "route": "/knowledge-center",
    "label": "مرکز دانش",
    "file": "frontend/src/app/knowledge-center/page.tsx",
-   "lines": 1249,
+   "lines": 1269,
    "buttons": 22,
    "onclick": 29,
    "inputs": 13,
@@ -266,7 +266,7 @@
   },
   {
    "file": "frontend/src/components/CreatorSelfcheckPanel.tsx",
-   "lines": 307,
+   "lines": 327,
    "buttons": 6,
    "inputs": 0
   },
@@ -5418,6 +5418,7 @@
   "intelligent_field_creator",
   "journal_service",
   "knowledge_center_service",
+  "knowledge_status",
   "log_archive",
   "log_stream_service",
   "log_to_issues_service",
@@ -5492,11 +5493,11 @@
  "totals": {
   "pages": 17,
   "menu_items": 9,
-  "page_buttons": 443,
+  "page_buttons": 444,
   "component_buttons": 247,
-  "inputs": 328,
+  "inputs": 329,
   "routes": 802,
-  "services": 111,
+  "services": 112,
   "models": 13
  }
 }

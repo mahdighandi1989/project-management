@@ -24,8 +24,20 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Tuple
 
+#: Bump when the rules below change: ``status_stamp`` then no longer matches what
+#: an entry was stamped with, so the next sync re-reads every file ONCE.
+RULES_VERSION = 2
 VALID = ("solved", "partial", "open", "regressed", "unknown")
 DECIDED = ("solved", "partial", "open", "regressed")
+
+#: A text-less file is not worth a model call; below this it stays «unknown».
+MIN_MODEL_TEXT_CHARS = 300
+
+
+def status_stamp(content_hash: str) -> str:
+    """What ``status_checked_hash`` holds once a file was judged by THESE rules."""
+    return f"{content_hash}@r{RULES_VERSION}" if content_hash else ""
+
 
 _ZW = "‌‍‎‏"
 _KASRA = "ِ"
@@ -51,7 +63,7 @@ _SOLUTION_H = re.compile(
 # A heading that turns the fix into a reusable rule — written only once it worked.
 _APPLY_H = re.compile(
     r"چطور در جای دیگر|چگونه در جای دیگر|اعمال کنیم|قاعده|درس|"
-    r"how to apply|applies when|lesson|takeaway|rule of thumb|checklist"
+    r"how to apply|applies when|lesson|takeaway|rule of thumb|checklist|^(the )?rules?$"
 )
 # A heading that lists what is still owed.
 _OPEN_H = re.compile(
@@ -61,9 +73,16 @@ _OPEN_H = re.compile(
 # A sentence that says, in so many words, that the problem is not closed.
 _OPEN_TEXT = re.compile(
     r"هنوز حل نشده|هنوز رفع نشده|هنوز باز است|مشکل پابرجاست|ریشه (هنوز )?پیدا نشد|علت (هنوز )?(روشن|معلوم|مشخص) نیست|"
-    r"not yet (fixed|solved|resolved)|still (unresolved|unsolved|open|failing|broken)|"
+    r"not yet (fixed|solved|resolved)|(?<!\bor )still (unresolved|unsolved|open|failing|broken)\b|"
     r"remains (open|unresolved|unfixed)|root cause (is )?(still )?unknown|work in progress|no fix yet"
 )
+# A quoted phrase names a state, a verdict or a tool («still open», «تکمیلِ ناتمام‌ها») —
+# it is not the author saying that THIS problem is unfinished.
+_QUOTED = re.compile(r"«[^»\n]{0,80}»|\"[^\"\n]{0,80}\"|“[^”\n]{0,80}”|`[^`\n]{0,80}`")
+
+
+def _unquoted(text: str) -> str:
+    return _QUOTED.sub(" ", text)
 _STATUS_LINE = re.compile(
     r"(?:^|\n)[ \t>*\-]*\**(?:resolution[_ ]status|status|وضعیت)\**[ \t]*[:：][ \t]*[`\"'*]*"
     r"(solved|partial|open|regressed)\b"
@@ -75,19 +94,24 @@ MIN_SOLUTION_CHARS = 80
 def _sections(content: str) -> List[Tuple[str, str]]:
     """``[(normalised heading, body without code fences)]`` — text before the
     first heading comes back under an empty heading."""
-    out: List[Tuple[str, List[str]]] = [("", [])]
+    return [(h, body) for _lv, h, body in _levelled_sections(content)]
+
+
+def _levelled_sections(content: str) -> List[Tuple[int, str, str]]:
+    """``_sections`` plus the heading level (0 for the text before any heading)."""
+    out: List[Tuple[int, str, List[str]]] = [(0, "", [])]
     in_fence = False
     for line in (content or "").splitlines():
         if line.lstrip().startswith("```"):
             in_fence = not in_fence
-            out[-1][1].append(line)
+            out[-1][2].append(line)
             continue
         m = None if in_fence else _HEADING.match(line)
         if m:
-            out.append((_norm(m.group(2)), []))
+            out.append((len(m.group(1)), _norm(m.group(2)), []))
         else:
-            out[-1][1].append(line)
-    return [(h, _FENCE.sub(" ", "\n".join(body))) for h, body in out]
+            out[-1][2].append(line)
+    return [(lv, h, _FENCE.sub(" ", "\n".join(body))) for lv, h, body in out]
 
 
 def _quote(text: str, match: "re.Match[str]") -> str:
@@ -101,7 +125,8 @@ def infer_resolution_status(meta: Dict[str, Any], content: str) -> Tuple[str, st
     if raw in DECIDED:
         return raw, "frontmatter", "نویسنده در سرآیندِ فایل نوشته است"
 
-    sections = _sections(content)
+    levelled = _levelled_sections(content)
+    sections = [(h, body) for _lv, h, body in levelled]
 
     # 1) An explicit «Resolution» block wins over anything we could guess.
     for heading, body in sections:
@@ -117,19 +142,27 @@ def infer_resolution_status(meta: Dict[str, Any], content: str) -> Tuple[str, st
     solution_heading = ""
     apply_heading = ""
     open_signals: List[str] = []
-    for heading, body in sections:
+    for idx, (level, heading, body) in enumerate(levelled):
         nbody = _norm(body)
-        if heading and _OPEN_H.search(heading) and nbody.strip():
+        if heading and _OPEN_H.search(_unquoted(heading)) and nbody.strip():
             open_signals.append(f"سرفصلِ «{heading[:60]}»")
         elif heading and _SOLUTION_H.search(heading):
             size = len(re.sub(r"\s+", "", body))
+            # A solution written under «###» sub-headings is still the solution:
+            # count everything nested below this heading (not below the file title).
+            if level >= 2:
+                for sub_level, _h, sub_body in levelled[idx + 1:]:
+                    if sub_level <= level:
+                        break
+                    size += len(re.sub(r"\s+", "", sub_body))
             if size > solution_chars:
                 solution_chars, solution_heading = size, heading
         elif heading and _APPLY_H.search(heading) and len(nbody.strip()) >= MIN_SOLUTION_CHARS:
             apply_heading = apply_heading or heading
-        hit = _OPEN_TEXT.search(nbody)
+        plain = _unquoted(nbody)
+        hit = _OPEN_TEXT.search(plain)
         if hit and len(open_signals) < 3:
-            open_signals.append(f"«{_quote(nbody, hit)}»")
+            open_signals.append(f"«{_quote(plain, hit)}»")
 
     has_solution = solution_chars >= MIN_SOLUTION_CHARS
     if has_solution and open_signals:
@@ -149,7 +182,8 @@ def infer_resolution_status(meta: Dict[str, Any], content: str) -> Tuple[str, st
 
 
 def build_model_prompt(title: str, content: str, evidence: str) -> str:
-    """The question for a cheap model — asked ONLY for ``ambiguous`` files."""
+    """The question for a cheap model — asked for ``ambiguous`` files, and for
+    files with real text in which the rules found no evidence at all."""
     return (
         "این متنِ یک «تجربهٔ مهندسی» است. فقط بر اساسِ شواهدِ خودِ متن بگو وضعیتِ مسئله چیست.\n"
         "solved = راه‌حلِ نهایی اعمال شده و کار می‌کند (اشاره به تلاش‌های شکست‌خوردهٔ قبلی، آن را ناتمام نمی‌کند).\n"

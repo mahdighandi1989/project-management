@@ -52,7 +52,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .oversight_service import STORAGE_DIR, now_iso
-from .knowledge_status import build_model_prompt, infer_resolution_status, parse_model_answer
+from .knowledge_status import (
+    MIN_MODEL_TEXT_CHARS, build_model_prompt, infer_resolution_status, parse_model_answer, status_stamp,
+)
 
 #: Persian labels for the resolution status (assistant context + reports).
 STATUS_LABELS_FA: Dict[str, str] = {
@@ -631,8 +633,9 @@ class KnowledgeCenterService:
                 # PM-INS-0039: an unchanged file is skipped only once its status has
                 # been decided from its text. This is also the one-time backfill —
                 # every entry indexed before the classifier existed is re-read ONCE.
-                status_done = bool(existing) and (
-                    existing.get("status_checked_hash") == existing.get("content_hash"))
+                # The stamp carries the rules' version, so a rule change re-reads once too.
+                status_done = bool(existing) and bool(existing.get("content_hash")) and (
+                    existing.get("status_checked_hash") == status_stamp(existing.get("content_hash")))
                 if (existing and git_sha and existing.get("git_sha") == git_sha
                         and existing.get("content_hash") and status_done):
                     existing["project_id"] = w.id
@@ -672,9 +675,13 @@ class KnowledgeCenterService:
                 # text (solution section, Resolution block, explicit «still open»).
                 # «unknown» remains only when the file gives no evidence either way.
                 raw_status, status_source, status_evidence = infer_resolution_status(meta, content)
-                if status_source == "ambiguous":
+                # The model is asked when the text pulls both ways, and when a file has
+                # real text but no shape the rules recognise (no headings, «Problem/Rule»).
+                if status_source == "ambiguous" or (
+                        status_source == "none" and len(content.strip()) >= MIN_MODEL_TEXT_CHARS):
                     raw_status, status_source, status_evidence = await self._model_resolution(
-                        str(meta.get("title") or name_f), content, raw_status, status_evidence)
+                        str(meta.get("title") or name_f), content, raw_status, status_evidence,
+                        source=status_source)
                 if (existing or {}).get("resolution_status", "unknown") != raw_status:
                     reclassified += 1
                 raw_rec = meta.get("recurrence_count")
@@ -716,7 +723,7 @@ class KnowledgeCenterService:
                     "user_confirmed": user_confirmed,
                     "status_source": status_source,
                     "status_evidence": status_evidence,
-                    "status_checked_hash": ch,
+                    "status_checked_hash": status_stamp(ch),
                 }
                 if existing:
                     existing.update(entry_data)
@@ -747,13 +754,16 @@ class KnowledgeCenterService:
         return result
 
     async def _model_resolution(
-        self, title: str, content: str, fallback: str, evidence: str,
+        self, title: str, content: str, fallback: str, evidence: str, source: str = "ambiguous",
     ) -> Tuple[str, str, str]:
-        """PM-INS-0039 — a cheap model is asked ONLY when the text is ambiguous
-        (a solution AND an explicit «still open» signal). No model, a timeout or
-        an answer out of form ⇒ the rule's cautious ``partial`` stands."""
+        """PM-INS-0039 — a cheap model is asked when the text is ambiguous (a
+        solution AND an explicit «still open» signal) or has real text in a shape
+        the rules do not recognise. No model, a timeout or an answer out of form
+        ⇒ the rule's own verdict stands (``partial`` / ``unknown``) and the
+        evidence line says why the model did not decide."""
         if getattr(self, "_model_status_checks", 0) >= MAX_MODEL_STATUS_CHECKS_PER_SYNC:
-            return fallback, "ambiguous", evidence
+            return fallback, source, f"{evidence} — از مدل پرسیده نشد (سقفِ {MAX_MODEL_STATUS_CHECKS_PER_SYNC} پرسش در هر سینک)"[:400]
+        why = "پاسخِ مدل قالبِ «STATUS: …» نداشت"
         self._model_status_checks = getattr(self, "_model_status_checks", 0) + 1
         try:
             from ..api.routes.simple_projects import ai_generate_with_meta
@@ -768,7 +778,9 @@ class KnowledgeCenterService:
                 return status, "model", f"مدل ({used or '؟'}): {reason or status} — پیش از آن: {evidence}"[:400]
         except Exception as e:  # noqa: BLE001
             logger.info(f"knowledge_center: model status check skipped: {str(e)[:120]}")
-        return fallback, "ambiguous", evidence
+            why = f"مدل پاسخ نداد ({type(e).__name__}: {str(e)[:80]})" if str(e) else f"مدل پاسخ نداد ({type(e).__name__})"
+        # The owner must be able to see WHY a label is only the rule's guess.
+        return fallback, source, f"{evidence} — {why}"[:400]
 
     @staticmethod
     def _title_from_filename(name: str) -> str:

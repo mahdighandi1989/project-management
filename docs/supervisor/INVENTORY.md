@@ -4,16 +4,16 @@
 > هر صفحه/دکمه/endpointی که بعداً اضافه شود، خودکار این‌جا ظاهر می‌شود؛ مختصاتِ دقیقِ
 > عنصرهای هر صفحه در برنامه است: «نظارت و سرکشی › نقشهٔ سامانه».
 
-تولید: 2026-11-24T00:42:56+00:00 · کامیت `0f069d5dc7`
+تولید: 2026-11-27T00:40:45+00:00 · کامیت `7bceb835d3`
 
 | سنجه | تعداد |
 |---|---|
 | صفحه‌ها | 17 |
 | آیتم‌های منو | 9 |
-| دکمه‌ها در صفحه‌ها / در کامپوننت‌ها | 443 / 247 |
-| ورودی‌ها | 328 |
+| دکمه‌ها در صفحه‌ها / در کامپوننت‌ها | 444 / 247 |
+| ورودی‌ها | 329 |
 | مسیرهای API | 802 |
-| سرویس‌ها | 111 |
+| سرویس‌ها | 112 |
 | مدل‌ها | 13 |
 
 ## منوی کناری
@@ -36,12 +36,12 @@
 |---|---|---|---|---|---|
 | `/analysis` | `frontend/src/app/analysis/page.tsx` | 1080 | 7 | 2 | 5 |
 | `/archive` | `frontend/src/app/archive/page.tsx` | 900 | 12 | 4 | 0 |
-| `/creator` | `frontend/src/app/creator/page.tsx` | 1345 | 18 | 11 | 0 |
+| `/creator` | `frontend/src/app/creator/page.tsx` | 1469 | 19 | 12 | 0 |
 | `/debate` | `frontend/src/app/debate/page.tsx` | 695 | 7 | 1 | 0 |
 | `/diagrams` | `frontend/src/app/diagrams/page.tsx` | 18 | 0 | 0 | 0 |
 | `/handbook` | `frontend/src/app/handbook/page.tsx` | 372 | 7 | 3 | 0 |
 | `/inspection` | `frontend/src/app/inspection/page.tsx` | 109 | 3 | 0 | 1 |
-| `/knowledge-center` | `frontend/src/app/knowledge-center/page.tsx` | 1249 | 22 | 13 | 0 |
+| `/knowledge-center` | `frontend/src/app/knowledge-center/page.tsx` | 1269 | 22 | 13 | 0 |
 | `/model-profiles` | `frontend/src/app/model-profiles/page.tsx` | 814 | 6 | 2 | 3 |
 | `/models` | `frontend/src/app/models/page.tsx` | 18 | 0 | 0 | 0 |
 | `/oversight` | `frontend/src/app/oversight/page.tsx` | 11434 | 122 | 81 | 0 |
