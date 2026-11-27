@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Tuple
 
 #: Bump when the rules below change: ``status_stamp`` then no longer matches what
 #: an entry was stamped with, so the next sync re-reads every file ONCE.
-RULES_VERSION = 2
+RULES_VERSION = 3
 VALID = ("solved", "partial", "open", "regressed", "unknown")
 DECIDED = ("solved", "partial", "open", "regressed")
 
@@ -200,9 +200,16 @@ def build_model_prompt(title: str, content: str, evidence: str) -> str:
 _MODEL_ANSWER = re.compile(r"status\**\s*[:：]\s*[`\"'* ]*(solved|partial|open|regressed)\b[`\"'*]*\s*[—\-:،,]*\s*(.*)", re.I)
 
 
+# The same verdict without the «STATUS:» label: the answer OPENS with the status word.
+_MODEL_BARE = re.compile(r"^[\s`\"'*#>\-]*(solved|partial|open|regressed)\b[`\"'*]*\s*[—\-:،,.]*\s*(.*)", re.I | re.S)
+
+
 def parse_model_answer(answer: str) -> Tuple[str, str]:
-    """``(status, reason)`` or ``("", "")`` when the model did not answer in form."""
-    m = _MODEL_ANSWER.search(answer or "")
+    """``(status, reason)`` or ``("", "")`` when the model did not answer in form.
+
+    Accepted: «STATUS: solved — …» anywhere, or an answer whose FIRST word is the
+    status. A status word buried in prose («this is not solved») is not a verdict."""
+    m = _MODEL_ANSWER.search(answer or "") or _MODEL_BARE.match(answer or "")
     if not m:
         return "", ""
     return m.group(1).lower(), re.sub(r"\s+", " ", m.group(2)).strip()[:200]

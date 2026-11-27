@@ -319,6 +319,33 @@ def test_text_without_any_shape_is_given_to_the_model_and_the_reason_is_kept(kc)
     assert e["none.md"]["resolution_status"] == "unknown"
 
 
+def test_model_answer_out_of_form_is_quoted_in_the_evidence(kc):
+    files = {"h.md": ("s1", _fm(HEADLESS))}
+
+    async def chatty(prompt, model_ids=None, max_tokens=0):
+        assert max_tokens >= 400  # room for a model that thinks before the one-line answer
+        return "Let me think about whether this is solved or not", "cheap-model"
+
+    _res, e, _ = _run_sync(kc, files, model=chatty)
+    assert e["h.md"]["resolution_status"] == "unknown"
+    assert "Let me think" in e["h.md"]["status_evidence"] and "cheap-model" in e["h.md"]["status_evidence"]
+
+    kc.INDEX_FILE.unlink()
+
+    async def empty(prompt, model_ids=None, max_tokens=0):
+        return "", "cheap-model"
+
+    _res, e, _ = _run_sync(kc, files, model=empty)
+    assert "پاسخِ خالی" in e["h.md"]["status_evidence"]
+
+
+def test_model_answer_may_open_with_the_bare_status_word():
+    assert parse_model_answer("**solved** — the rule is written and applied")[0] == "solved"
+    assert parse_model_answer("partial: one part is still owed") == ("partial", "one part is still owed")
+    assert parse_model_answer("This is not solved yet") == ("", "")
+    assert parse_model_answer("I think it is open") == ("", "")
+
+
 def test_a_rule_change_rereads_every_entry_once(kc):
     """An entry stamped by the previous rules (plain content hash) is judged again."""
     body = _fm(NESTED)

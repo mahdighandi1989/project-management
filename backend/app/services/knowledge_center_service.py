@@ -63,6 +63,9 @@ STATUS_LABELS_FA: Dict[str, str] = {
 }
 #: Upper bound on cheap-model status checks in ONE sync, so a sync stays bounded.
 MAX_MODEL_STATUS_CHECKS_PER_SYNC = 60
+#: 120 was too tight: a model that thinks before answering spent it all and the
+#: one-line «STATUS: …» never arrived (11 of 22 answers out of form, 2026-11-27).
+MODEL_STATUS_MAX_TOKENS = 600
 
 logger = logging.getLogger(__name__)
 
@@ -770,10 +773,14 @@ class KnowledgeCenterService:
             model_ids = list(load_settings().get("processing_model_ids") or []) or None
             answer, used = await asyncio.wait_for(
                 ai_generate_with_meta(build_model_prompt(title, content, evidence),
-                                      model_ids=model_ids, max_tokens=120),
+                                      model_ids=model_ids, max_tokens=MODEL_STATUS_MAX_TOKENS),
                 timeout=45,
             )
             status, reason = parse_model_answer(answer or "")
+            # Out of form: keep what the model DID say, so the cause is visible on the card.
+            said = re.sub(r"\s+", " ", answer or "").strip()
+            why = (f"پاسخِ مدل ({used or '؟'}) قالبِ «STATUS: …» نداشت: «{said[:90]}»" if said
+                   else f"مدل ({used or '؟'}) پاسخِ خالی داد")
             if status:
                 return status, "model", f"مدل ({used or '؟'}): {reason or status} — پیش از آن: {evidence}"[:400]
         except Exception as e:  # noqa: BLE001
